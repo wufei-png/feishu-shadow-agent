@@ -207,6 +207,36 @@ class LarkCliClient:
             argv.append("--dry-run")
         return argv
 
+    def build_messages_mget(
+        self,
+        *,
+        as_identity: str,
+        message_ids: Sequence[str],
+        dry_run: bool = False,
+        no_reactions: bool = True,
+    ) -> list[str]:
+        _validate_identity(as_identity)
+        ids = [message_id for message_id in message_ids if message_id]
+        if not ids:
+            raise ValueError("message_ids are required")
+        if len(ids) > 50:
+            raise ValueError("messages-mget supports at most 50 message IDs")
+        argv = [
+            self.path,
+            "im",
+            "+messages-mget",
+            "--as",
+            as_identity,
+            "--json",
+            "--message-ids",
+            ",".join(ids),
+        ]
+        if no_reactions:
+            argv.append("--no-reactions")
+        if dry_run:
+            argv.append("--dry-run")
+        return argv
+
     def build_resources_download(
         self,
         *,
@@ -268,6 +298,40 @@ class LarkCliClient:
                 dry_run=dry_run,
             )
         )
+
+    def reply_message(
+        self,
+        *,
+        as_identity: str,
+        message_id: str,
+        text: str,
+        idempotency_key: str,
+        dry_run: bool = True,
+    ) -> LarkCliResult:
+        return self.run_json(
+            self.build_messages_reply(
+                as_identity=as_identity,
+                message_id=message_id,
+                text=text,
+                idempotency_key=idempotency_key,
+                dry_run=dry_run,
+            )
+        )
+
+    def get_messages(
+        self,
+        *,
+        as_identity: str,
+        message_ids: list[str],
+    ) -> MessagePage:
+        result = self.run_json(
+            self.build_messages_mget(
+                as_identity=as_identity,
+                message_ids=message_ids,
+                no_reactions=True,
+            )
+        )
+        return _message_page_from_result(result)
 
     def search_messages(
         self,
@@ -389,7 +453,7 @@ class LarkCliClient:
             if result.json_data is not None:
                 return result
             try:
-                json_data: Any = json.loads(result.stdout or "{}")
+                json_data: Any = json.loads(_json_stdout(result.stdout) or "{}")
             except json.JSONDecodeError as exc:
                 return LarkCliResult(
                     argv=result.argv,
@@ -466,6 +530,13 @@ def _validate_safe_relative_output(value: str) -> None:
 def _extend_option(argv: list[str], option: str, value: str | None) -> None:
     if value is not None:
         argv.extend([option, value])
+
+
+def _json_stdout(stdout: str) -> str:
+    text = stdout.strip()
+    if text.startswith("=== Dry Run ==="):
+        text = text.removeprefix("=== Dry Run ===").strip()
+    return text
 
 
 def _message_page_from_result(result: LarkCliResult) -> MessagePage:

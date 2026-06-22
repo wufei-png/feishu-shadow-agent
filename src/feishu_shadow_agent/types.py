@@ -129,6 +129,22 @@ class TaskRecord:
 
 
 @dataclass(frozen=True)
+class ActionRecord:
+    id: int
+    idempotency_key: str
+    task_id: int | None
+    approval_id: int | None
+    kind: str
+    status: str
+    target_message_id: str | None
+    dry_run: bool
+    payload: dict[str, Any]
+    result: dict[str, Any]
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
 class TaskCandidate:
     task: TaskRecord
     matched_by: str

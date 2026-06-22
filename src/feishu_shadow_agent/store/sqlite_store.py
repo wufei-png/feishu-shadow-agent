@@ -7,7 +7,15 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Iterable
 
-from ..types import HealthCheckResult, NormalizedMessage, ResourceRef, RouteDecision, TaskRecord, utc_now_iso
+from ..types import (
+    ActionRecord,
+    HealthCheckResult,
+    NormalizedMessage,
+    ResourceRef,
+    RouteDecision,
+    TaskRecord,
+    utc_now_iso,
+)
 
 
 class SQLiteStore:
@@ -740,6 +748,206 @@ class SQLiteStore:
             ).fetchone()
         return int(row["count"])
 
+    def list_dispatchable_actions(self, *, limit: int = 50) -> list[ActionRecord]:
+        self.migrate()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM actions
+                WHERE status = 'pending'
+                  AND kind IN ('send_reply', 'owner_notification')
+                ORDER BY created_at, id
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [_action_from_row(row) for row in rows]
+
+    def get_action(self, action_id: int) -> ActionRecord | None:
+        self.migrate()
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+        return None if row is None else _action_from_row(row)
+
+    def claim_action_for_dispatch(self, action_id: int) -> ActionRecord | None:
+        self.migrate()
+        now = utc_now_iso()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE actions
+                SET status = ?, updated_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                ("sending", now, action_id, "pending"),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+        return None if row is None else _action_from_row(row)
+
+    def record_action_preview(self, action_id: int, result: dict[str, Any]) -> None:
+        self.migrate()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE actions
+                SET result_json = ?, updated_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (json.dumps(result, ensure_ascii=False, default=str), utc_now_iso(), action_id),
+            )
+
+    def finish_action(
+        self,
+        action_id: int,
+        *,
+        status: str,
+        result: dict[str, Any],
+    ) -> None:
+        self.migrate()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE actions
+                SET status = ?, result_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    json.dumps(result, ensure_ascii=False, default=str),
+                    utc_now_iso(),
+                    action_id,
+                ),
+            )
+
+    def status_snapshot(self, *, stale_after_seconds: int = 900) -> dict[str, Any]:
+        self.migrate()
+        with self.connect() as conn:
+            last_run = conn.execute(
+                "SELECT * FROM runs ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+            pending_approvals = conn.execute(
+                """
+                SELECT a.short_id, a.task_id, t.short_id AS task_short_id, a.kind, a.preview, a.created_at
+                FROM approvals a
+                LEFT JOIN tasks t ON t.id = a.task_id
+                WHERE a.status = 'pending'
+                ORDER BY a.created_at DESC, a.id DESC
+                LIMIT 20
+                """
+            ).fetchall()
+            failed_commands = conn.execute(
+                """
+                SELECT message_id, command, status, result_json, updated_at
+                FROM approval_commands
+                WHERE status != 'applied' AND status != 'duplicate'
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 20
+                """
+            ).fetchall()
+            active_tasks = conn.execute(
+                """
+                SELECT id, short_id, status, chat_id, task_label, updated_at, watch_until
+                FROM tasks
+                WHERE status IN ('watching', 'waiting_approval')
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 20
+                """
+            ).fetchall()
+            pending_actions = conn.execute(
+                """
+                SELECT id, kind, status, task_id, target_message_id, updated_at, result_json
+                FROM actions
+                WHERE status IN ('pending', 'sending')
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 20
+                """
+            ).fetchall()
+            failed_actions = conn.execute(
+                """
+                SELECT id, kind, status, task_id, target_message_id, updated_at, result_json
+                FROM actions
+                WHERE status = 'failed'
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 20
+                """
+            ).fetchall()
+            recent_health = conn.execute(
+                """
+                SELECT check_name, severity, status, message, checked_at
+                FROM health_checks
+                WHERE status != 'ok'
+                ORDER BY checked_at DESC, id DESC
+                LIMIT 20
+                """
+            ).fetchall()
+            stale_sending = conn.execute(
+                """
+                SELECT id, kind, status, task_id, target_message_id, updated_at
+                FROM actions
+                WHERE status = 'sending'
+                  AND datetime(updated_at) <= datetime('now', ?)
+                ORDER BY updated_at, id
+                LIMIT 20
+                """,
+                (f"-{stale_after_seconds} seconds",),
+            ).fetchall()
+        return {
+            "last_run": _row_dict(last_run),
+            "pending_approvals": [_row_dict(row) for row in pending_approvals],
+            "failed_approval_commands": [_json_row_dict(row, "result_json") for row in failed_commands],
+            "active_tasks": [_row_dict(row) for row in active_tasks],
+            "pending_actions": [_json_row_dict(row, "result_json") for row in pending_actions],
+            "stale_sending_actions": [_row_dict(row) for row in stale_sending],
+            "recent_failed_actions": [_json_row_dict(row, "result_json") for row in failed_actions],
+            "recent_health_warnings": [_row_dict(row) for row in recent_health],
+        }
+
+    def replay_summary(self, message_id: str) -> dict[str, Any] | None:
+        self.migrate()
+        with self.connect() as conn:
+            message = conn.execute(
+                """
+                SELECT message_id, chat_id, chat_type, sender_id, sender_role, sent_at, text
+                FROM messages
+                WHERE message_id = ?
+                """,
+                (message_id,),
+            ).fetchone()
+            if message is None:
+                return None
+            audits = conn.execute(
+                """
+                SELECT route, route_reason, candidates_count, shortcut_hit, router_called, matched_by,
+                       target_task_id, created_at
+                FROM routing_audits
+                WHERE message_id = ?
+                ORDER BY created_at, id
+                """,
+                (message_id,),
+            ).fetchall()
+            task_ids = self.find_task_ids_for_message(message_id)
+            actions = conn.execute(
+                """
+                SELECT id, kind, status, task_id, target_message_id, payload_json, result_json, updated_at
+                FROM actions
+                WHERE target_message_id = ?
+                   OR task_id IN (
+                        SELECT task_id FROM task_messages WHERE message_id = ?
+                   )
+                ORDER BY created_at, id
+                """,
+                (message_id, message_id),
+            ).fetchall()
+        return {
+            "message": _row_dict(message),
+            "routing_audits": [_row_dict(row) for row in audits],
+            "task_ids": task_ids,
+            "actions": [_json_row_dict(row, "payload_json", "result_json") for row in actions],
+        }
+
     def list_task_message_ids(self, task_id: int) -> list[str]:
         self.migrate()
         with self.connect() as conn:
@@ -1093,8 +1301,8 @@ class SQLiteStore:
             ).fetchone()
             if task is None:
                 raise ValueError(f"task not found: {target_id}")
-            reply_text = (final_reply or "").strip()
-            if not reply_text:
+            reply_text = final_reply or ""
+            if not reply_text.strip():
                 raise ValueError("/send requires final reply text")
             pending = self._list_pending_send_reply_approvals_locked(conn, task_id=int(task["id"]))
             if len(pending) > 1:
@@ -1615,6 +1823,55 @@ def _task_from_row(row: sqlite3.Row) -> TaskRecord:
         watch_until=row["watch_until"],
         hermes_session_id=row["hermes_session_id"],
     )
+
+
+def _action_from_row(row: sqlite3.Row) -> ActionRecord:
+    return ActionRecord(
+        id=int(row["id"]),
+        idempotency_key=row["idempotency_key"],
+        task_id=None if row["task_id"] is None else int(row["task_id"]),
+        approval_id=None if row["approval_id"] is None else int(row["approval_id"]),
+        kind=row["kind"],
+        status=row["status"],
+        target_message_id=row["target_message_id"],
+        dry_run=bool(row["dry_run"]),
+        payload=_loads_json_object(row["payload_json"]),
+        result=_loads_json_object(row["result_json"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _row_dict(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        return dict(row)
+    return {key: row[key] for key in row.keys()}
+
+
+def _json_row_dict(row: sqlite3.Row | dict[str, Any], *columns: str) -> dict[str, Any]:
+    data = _row_dict(row) or {}
+    for column in columns:
+        if column in data:
+            data[column] = _loads_json(data[column])
+    return data
+
+
+def _loads_json(value: Any) -> Any:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def _loads_json_object(value: Any) -> dict[str, Any]:
+    loaded = _loads_json(value)
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def _watch_keys_for_message(message: NormalizedMessage) -> set[str]:

@@ -86,6 +86,42 @@ def test_build_messages_send_defaults_to_dry_run_and_can_send_test() -> None:
     assert "--dry-run" not in send_argv
 
 
+def test_build_messages_mget_uses_comma_separated_ids_and_limit() -> None:
+    client = LarkCliClient(path="lark-cli")
+
+    argv = client.build_messages_mget(as_identity="user", message_ids=["om_1", "om_2"])
+
+    assert argv == [
+        "lark-cli",
+        "im",
+        "+messages-mget",
+        "--as",
+        "user",
+        "--json",
+        "--message-ids",
+        "om_1,om_2",
+        "--no-reactions",
+    ]
+    with pytest.raises(ValueError, match="at most 50"):
+        client.build_messages_mget(as_identity="user", message_ids=[f"om_{i}" for i in range(51)])
+
+
+def test_run_json_strips_lark_cli_dry_run_banner() -> None:
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        return LarkCliResult(
+            argv=argv,
+            exit_code=0,
+            stdout='=== Dry Run ===\n{"api": [{"method": "POST"}]}',
+        )
+
+    client = LarkCliClient(path="lark-cli", runner=runner)
+
+    result = client.run_json(["lark-cli", "im", "+messages-reply", "--dry-run", "--json"])
+
+    assert result.ok
+    assert result.json_data == {"api": [{"method": "POST"}]}
+
+
 def test_resource_output_must_be_safe_relative_path() -> None:
     client = LarkCliClient(path="lark-cli")
 

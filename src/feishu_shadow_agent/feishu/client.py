@@ -22,6 +22,25 @@ class FeishuClient(Protocol):
     ) -> LarkCliResult:
         ...
 
+    def reply_message(
+        self,
+        *,
+        as_identity: str,
+        message_id: str,
+        text: str,
+        idempotency_key: str,
+        dry_run: bool = True,
+    ) -> LarkCliResult:
+        ...
+
+    def get_messages(
+        self,
+        *,
+        as_identity: str,
+        message_ids: list[str],
+    ) -> MessagePage:
+        ...
+
     def search_messages(
         self,
         *,

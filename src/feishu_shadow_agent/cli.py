@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Sequence
 
@@ -10,6 +12,7 @@ import yaml
 
 from .config import ConfigError, ConfigService, LoadedConfig
 from .daemon import Daemon
+from .dispatcher import Dispatcher
 from .feishu.lark_cli import LarkCliClient
 from .health import HealthSuite, has_critical_failure, summarize_results
 from .hermes import HermesCliClient
@@ -59,20 +62,32 @@ def build_parser() -> argparse.ArgumentParser:
     config_show.add_argument("--redacted", action="store_true", help="redact secret-like fields")
     config_show.set_defaults(handler=_handle_config_show)
 
-    status = subparsers.add_parser("status", help="reserved for P4")
-    status.set_defaults(handler=_handle_not_implemented)
-    replay = subparsers.add_parser("replay", help="reserved for P4")
-    replay.set_defaults(handler=_handle_not_implemented)
-    approve = subparsers.add_parser("approve", help="reserved for P4")
+    status = subparsers.add_parser("status", help="show daemon and queue status")
+    _add_config_arg(status)
+    status.set_defaults(handler=_handle_status)
+
+    replay = subparsers.add_parser("replay", help="explain local state and preview dispatch")
+    _add_config_arg(replay)
+    replay.add_argument("--message-id", required=True)
+    replay.add_argument("--dry-run", action="store_true", required=True)
+    replay.set_defaults(handler=_handle_replay)
+
+    approve = subparsers.add_parser("approve", help="approve a pending approval")
+    _add_config_arg(approve)
     approve.add_argument("approval_id")
-    approve.set_defaults(handler=_handle_not_implemented)
-    reject = subparsers.add_parser("reject", help="reserved for P4")
+    approve.set_defaults(handler=_handle_approve)
+
+    reject = subparsers.add_parser("reject", help="reject a pending approval")
+    _add_config_arg(reject)
     reject.add_argument("approval_id")
-    reject.set_defaults(handler=_handle_not_implemented)
-    send = subparsers.add_parser("send", help="reserved for P4")
+    reject.set_defaults(handler=_handle_reject)
+
+    send = subparsers.add_parser("send", help="send a final reply for a task")
+    _add_config_arg(send)
+    send.add_argument("--stdin", action="store_true", dest="read_stdin", help="read final reply from stdin")
     send.add_argument("task_id")
-    send.add_argument("text")
-    send.set_defaults(handler=_handle_not_implemented)
+    send.add_argument("text", nargs=argparse.REMAINDER)
+    send.set_defaults(handler=_handle_send)
 
     return parser
 
@@ -142,9 +157,89 @@ def _handle_config_show(args: argparse.Namespace) -> int:
     return 0
 
 
-def _handle_not_implemented(args: argparse.Namespace) -> int:
-    print(f"{args.command} is not implemented in P1", file=sys.stderr)
-    return 2
+def _handle_status(args: argparse.Namespace) -> int:
+    _, store, _ = _load_runtime(args.config)
+    print(yaml.safe_dump(store.status_snapshot(), allow_unicode=True, sort_keys=False), end="")
+    return 0
+
+
+def _handle_approve(args: argparse.Namespace) -> int:
+    return _handle_local_approval_command(args.config, verb="approve", target_id=args.approval_id)
+
+
+def _handle_reject(args: argparse.Namespace) -> int:
+    return _handle_local_approval_command(args.config, verb="reject", target_id=args.approval_id)
+
+
+def _handle_send(args: argparse.Namespace) -> int:
+    final_reply = sys.stdin.read() if args.read_stdin else " ".join(args.text).strip()
+    if not final_reply.strip():
+        print("send requires final reply text", file=sys.stderr)
+        return 2
+    return _handle_local_approval_command(
+        args.config,
+        verb="send",
+        target_id=args.task_id,
+        final_reply=final_reply,
+    )
+
+
+def _handle_local_approval_command(
+    config_path: str | None,
+    *,
+    verb: str,
+    target_id: str,
+    final_reply: str | None = None,
+) -> int:
+    _, store, _ = _load_runtime(config_path)
+    command = f"/{verb} {target_id}" if final_reply is None else f"/{verb} {target_id} {final_reply}"
+    result = store.apply_approval_command(
+        message_id=new_run_id(f"local_{verb}"),
+        command=command,
+        verb=verb,
+        target_id=target_id,
+        final_reply=final_reply,
+    )
+    print(yaml.safe_dump(result, allow_unicode=True, sort_keys=False), end="")
+    return 0 if result.get("status") == "applied" else 2
+
+
+def _handle_replay(args: argparse.Namespace) -> int:
+    loaded, store, logger = _load_runtime(args.config)
+    summary = store.replay_summary(args.message_id)
+    if summary is None:
+        print(f"message not found: {args.message_id}", file=sys.stderr)
+        return 2
+    client = LarkCliClient(
+        path=loaded.config.lark_cli.path,
+        timeout_seconds=loaded.config.lark_cli.timeout_seconds,
+        cwd=loaded.base_dir,
+    )
+    with tempfile.TemporaryDirectory(prefix="feishu-shadow-agent-replay-") as tmp:
+        temp_db = Path(tmp) / "agent.sqlite3"
+        if store.path.exists():
+            shutil.copy2(store.path, temp_db)
+        temp_store = SQLiteStore(temp_db)
+        temp_store.migrate()
+        dispatcher = Dispatcher(
+            store=temp_store,
+            feishu_client=client,
+            config=loaded.config,
+            logger=JSONLLogger(Path(tmp) / "replay.jsonl"),
+        )
+        dispatch = dispatcher.dispatch(
+            run_id=new_run_id("replay"),
+            allow_send_reply_actual=False,
+            allow_owner_notification_actual=False,
+        )
+    output = {
+        "message_id": args.message_id,
+        "state": summary,
+        "dispatch_preview": dispatch.__dict__,
+        "mutated_real_db": False,
+    }
+    print(yaml.safe_dump(output, allow_unicode=True, sort_keys=False), end="")
+    return 0
 
 
 def _load_runtime(config_path: str | None) -> tuple[LoadedConfig, SQLiteStore, JSONLLogger]:

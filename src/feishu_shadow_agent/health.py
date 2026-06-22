@@ -155,6 +155,21 @@ class HealthSuite:
         self.store.record_health_results(run_id=self.run_id, results=results)
         return results
 
+    def run_runtime_critical(self) -> list[HealthCheckResult]:
+        results: list[HealthCheckResult] = [
+            self._check_config_schema(),
+            self._check_sqlite_writable(),
+            self._check_lark_cli_version(),
+        ]
+        auth_result = self._check_auth_status()
+        results.append(auth_result)
+        auth_json = auth_result.details.get("auth_json") if auth_result.details else None
+        results.append(self._check_user_scopes(auth_json))
+        results.append(self._check_bot_available(auth_json))
+        results.append(self._check_owner_config())
+        self.store.record_health_results(run_id=self.run_id, results=results)
+        return results
+
     def _check_config_schema(self) -> HealthCheckResult:
         return HealthCheckResult(
             "config_schema",

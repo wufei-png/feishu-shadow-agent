@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import AppConfig
+from .dispatcher import Dispatcher
 from .feishu.client import FeishuClient
 from .health import HealthSuite, has_critical_failure, summarize_results
 from .ingestion import IngestionService, StageResult
@@ -30,6 +31,7 @@ class Daemon:
         send_owner_notifications: bool = False,
         run_metadata: dict[str, Any] | None = None,
         config_base_dir: str | Path | None = None,
+        runtime_health_interval_seconds: int | None = None,
         sleep_func: Callable[[float], None] = time.sleep,
     ):
         self.store = store
@@ -43,6 +45,9 @@ class Daemon:
         self.send_owner_notifications = send_owner_notifications
         self.run_metadata = run_metadata or {}
         self.config_base_dir = None if config_base_dir is None else Path(config_base_dir)
+        self.runtime_health_interval_seconds = runtime_health_interval_seconds
+        self._last_runtime_health_at: float | None = None
+        self._runtime_health_ok = True
         self.sleep_func = sleep_func
 
     def run_startup_health(self) -> tuple[bool, list[HealthCheckResult]]:
@@ -61,6 +66,14 @@ class Daemon:
         if self.app_config is None or self.feishu_client is None:
             self.run_one_noop_tick(run_id=run_id)
             return [StageResult("noop", ok=True)]
+        if not self._runtime_health_ok_for_tick(run_id=run_id):
+            self.logger.emit(
+                "error",
+                "daemon_runtime_health_failed",
+                run_id=run_id,
+                data={"actual_sends_blocked": True},
+            )
+            return [StageResult("runtime_health", ok=False, error="runtime critical health failed")]
         service = IngestionService(
             store=self.store,
             feishu_client=self.feishu_client,
@@ -74,14 +87,13 @@ class Daemon:
             service.ingest_group_at_me,
             service.ingest_p2p,
             service.run_active_watch,
-            self._dispatch_placeholder,
         ]
         results: list[StageResult] = []
         for stage in stages:
             try:
                 result = stage(run_id=run_id)
             except Exception as exc:
-                result = StageResult(getattr(stage, "__name__", "stage"), ok=False, error=str(exc))
+                result = StageResult(_stage_name(stage), ok=False, error=str(exc))
                 self.logger.emit(
                     "error",
                     "daemon_stage_failed",
@@ -100,17 +112,34 @@ class Daemon:
                     },
                 )
             results.append(result)
-        return results
-
-    def _dispatch_placeholder(self, *, run_id: str) -> StageResult:
-        pending_actions = self.store.count_pending_actions()
+        approval_failed = any(result.name == "approval_inbox" and not result.ok for result in results)
+        dispatcher = Dispatcher(
+            store=self.store,
+            feishu_client=self.feishu_client,
+            config=self.app_config,
+            logger=self.logger,
+        )
+        dispatch = dispatcher.dispatch(
+            run_id=run_id,
+            allow_send_reply_actual=not self.dry_run and not approval_failed,
+            allow_owner_notification_actual=not self.dry_run or self.send_owner_notifications,
+        )
         self.logger.emit(
             "info",
-            "dispatch_placeholder",
+            "daemon_stage_completed",
             run_id=run_id,
-            data={"pending_actions": pending_actions, "dry_run": self.dry_run},
+            data={
+                "stage": "dispatch",
+                "processed": dispatch.processed,
+                "sent": dispatch.sent,
+                "previewed": dispatch.previewed,
+                "failed": dispatch.failed,
+                "approval_inbox_failed": approval_failed,
+                "send_owner_notifications": self.send_owner_notifications,
+            },
         )
-        return StageResult("dispatch", ok=True, processed=pending_actions)
+        results.append(StageResult("dispatch", ok=True, processed=dispatch.processed))
+        return results
 
     def run_forever(self) -> int:
         run_id = self.health_suite.run_id or new_run_id("run")
@@ -130,3 +159,39 @@ class Daemon:
             self.logger.emit("info", "daemon_interrupted", run_id=run_id)
             self.store.record_run_finish(run_id=run_id, status="interrupted")
             return 0
+
+    def _runtime_health_ok_for_tick(self, *, run_id: str) -> bool:
+        interval = self.runtime_health_interval_seconds
+        if interval is None and self.app_config is not None:
+            interval = self.app_config.health.interval_seconds
+        interval = interval or 0
+        now = time.monotonic()
+        if self._last_runtime_health_at is not None and now - self._last_runtime_health_at < interval:
+            return self._runtime_health_ok
+        if hasattr(self.health_suite, "run_runtime_critical"):
+            results = self.health_suite.run_runtime_critical()
+        else:  # pragma: no cover - compatibility for narrow tests
+            results = self.health_suite.run(send_test=False)
+        self._last_runtime_health_at = now
+        self._runtime_health_ok = not has_critical_failure(results)
+        if not self._runtime_health_ok:
+            self.logger.emit(
+                "error",
+                "runtime_critical_health_failed",
+                run_id=run_id,
+                data=summarize_results(results),
+            )
+        return self._runtime_health_ok
+
+
+def _stage_name(stage: Callable[..., StageResult]) -> str:
+    name = getattr(stage, "__name__", "stage")
+    if name == "run_approval_inbox":
+        return "approval_inbox"
+    if name == "ingest_group_at_me":
+        return "group_at_me"
+    if name == "ingest_p2p":
+        return "p2p"
+    if name == "run_active_watch":
+        return "active_watch"
+    return name
