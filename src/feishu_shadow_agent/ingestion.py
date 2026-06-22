@@ -11,6 +11,7 @@ from typing import Any, Callable
 from .config import AppConfig, ChatPolicyConfig
 from .feishu.client import FeishuClient
 from .jsonl import JSONLLogger
+from .processing import ApprovalService, TaskProcessingService
 from .routing import MessageRouter, RoutingResult
 from .store.sqlite_store import SQLiteStore
 from .types import MessagePage, NormalizedMessage, ResourceRef, utc_now_iso
@@ -43,6 +44,17 @@ class MessageNormalizer:
         sender_id = (
             _first_string(raw, "sender_id", "senderId", "open_id", "openId")
             or _first_string(sender, "sender_id", "senderId", "open_id", "openId", "id")
+        )
+        sender_name = (
+            _first_string(raw, "sender_name", "senderName", "user_name", "userName", "name")
+            or _first_string(sender, "sender_name", "senderName", "user_name", "userName", "name")
+            or _first_string(
+                sender.get("profile") if isinstance(sender.get("profile"), dict) else {},
+                "name",
+                "display_name",
+                "displayName",
+            )
+            or sender_id
         )
         sender_type = (
             _first_string(raw, "sender_type", "senderType")
@@ -87,6 +99,7 @@ class MessageNormalizer:
             chat_id=chat_id,
             chat_type=chat_type,  # type: ignore[arg-type]
             sender_id=sender_id,
+            sender_name=sender_name,
             sender_type=sender_type,
             sender_role=self._sender_role(sender_id=sender_id, sender_type=sender_type, raw=raw),
             sent_at=sent_at,
@@ -213,6 +226,8 @@ class IngestionService:
         config: AppConfig,
         logger: JSONLLogger,
         router: MessageRouter | None = None,
+        task_processor: TaskProcessingService | None = None,
+        approval_service: ApprovalService | None = None,
         clock: Callable[[], str] = utc_now_iso,
         config_base_dir: str | Path | None = None,
     ):
@@ -222,6 +237,8 @@ class IngestionService:
         self.logger = logger
         self.normalizer = MessageNormalizer(owner_open_id=config.owner.open_id)
         self.router = router or MessageRouter(store=store)
+        self.task_processor = task_processor
+        self.approval_service = approval_service or (task_processor.approvals if task_processor is not None else None)
         self.resources = ResourceProcessor(
             store=store,
             feishu_client=feishu_client,
@@ -239,6 +256,29 @@ class IngestionService:
             data={"checkpoint": "approval_inbox", "checkpoint_written": False},
         )
         return StageResult("approval_inbox", ok=True)
+
+    def run_approval_inbox(self, *, run_id: str) -> StageResult:
+        if self.approval_service is None:
+            return self.run_approval_inbox_placeholder(run_id=run_id)
+        bot_open_id = _bot_open_id_from_auth(self.feishu_client.auth_status(verify=True).json_data)
+        if not bot_open_id:
+            raise RuntimeError("bot open_id is missing from lark-cli auth status")
+        start, end = self._window("approval_inbox")
+        raws = self._drain(lambda token: self.feishu_client.list_p2p_messages(
+            user_id=bot_open_id,
+            start=start,
+            end=end,
+            page_token=token,
+            page_size=PAGE_SIZE,
+        ))
+        self._process_raw_batch(
+            raws,
+            source="approval_inbox",
+            default_chat_type="p2p",
+            run_id=run_id,
+        )
+        self.store.set_checkpoint("approval_inbox", {"last_success_at": end})
+        return StageResult("approval_inbox", ok=True, processed=len(raws))
 
     def ingest_group_at_me(self, *, run_id: str) -> StageResult:
         return self._run_search_stage(
@@ -364,13 +404,23 @@ class IngestionService:
             data={"message_id": message.message_id, "source": source, "inserted": inserted},
         )
         if source == "approval_inbox":
+            if inserted and self.approval_service is not None and message.sender_role == "owner_message":
+                result = self.approval_service.apply_command(message=message)
+                self.logger.emit(
+                    "info",
+                    "approval_command_processed",
+                    run_id=run_id,
+                    data={"message_id": message.message_id, "result": result},
+                )
             return None
+        now = self.clock()
+        watch_until = _plus_minutes(now, WATCH_EXTEND_MINUTES)
         result = self.router.route(
             message,
             source=source,
             inserted=inserted,
-            now=self.clock(),
-            watch_until=_plus_minutes(self.clock(), WATCH_EXTEND_MINUTES),
+            now=now,
+            watch_until=watch_until,
         )
         if _should_process_resources(
             store=self.store,
@@ -379,6 +429,29 @@ class IngestionService:
             result=result,
         ):
             self.resources.process(message, run_id=run_id)
+        if self.task_processor is not None:
+            processing = self.task_processor.process(
+                message=message,
+                routing=result,
+                source=source,
+                now=now,
+                watch_until=watch_until,
+                run_id=run_id,
+            )
+            if processing is not None:
+                self.logger.emit(
+                    "info",
+                    "task_processing_completed",
+                    run_id=run_id,
+                    data={
+                        "message_id": message.message_id,
+                        "status": processing.status,
+                        "task_id": processing.task_id,
+                        "action_id": processing.action_id,
+                        "approval_id": processing.approval_id,
+                        "reason": processing.reason,
+                    },
+                )
         return result
 
     def _window(self, checkpoint_key: str) -> tuple[str, str]:
@@ -538,6 +611,18 @@ def _thread_id(raw: dict[str, Any]) -> str | None:
     if isinstance(value, dict):
         return _first_string(value, "id", "thread_id", "threadId")
     return str(value) if value else None
+
+
+def _bot_open_id_from_auth(auth_json: Any) -> str | None:
+    if not isinstance(auth_json, dict):
+        return None
+    identities = auth_json.get("identities")
+    if not isinstance(identities, dict):
+        return None
+    bot = identities.get("bot")
+    if not isinstance(bot, dict):
+        return None
+    return _first_string(bot, "openId", "open_id", "openID", "id")
 
 
 def _first_string(source: dict[str, Any], *keys: str) -> str | None:

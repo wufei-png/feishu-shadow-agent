@@ -46,6 +46,17 @@ class FeishuClient(Protocol):
     ) -> MessagePage:
         ...
 
+    def list_p2p_messages(
+        self,
+        *,
+        user_id: str,
+        start: str | None,
+        end: str | None,
+        page_token: str | None = None,
+        page_size: int = 50,
+    ) -> MessagePage:
+        ...
+
     def list_thread_messages(
         self,
         *,

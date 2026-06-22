@@ -12,8 +12,10 @@ from .config import ConfigError, ConfigService, LoadedConfig
 from .daemon import Daemon
 from .feishu.lark_cli import LarkCliClient
 from .health import HealthSuite, has_critical_failure, summarize_results
+from .hermes import HermesCliClient
 from .jsonl import JSONLLogger
 from .paths import resolve_relative_path
+from .processing import TaskProcessingService
 from .store.sqlite_store import SQLiteStore
 from .types import new_run_id
 
@@ -109,6 +111,13 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         cwd=loaded.base_dir,
     )
     suite = HealthSuite(loaded_config=loaded, store=store, feishu_client=client, run_id=run_id)
+    hermes_client = HermesCliClient(config=loaded.config.hermes, cwd=loaded.base_dir)
+    task_processor = TaskProcessingService(
+        store=store,
+        config=loaded.config,
+        hermes_client=hermes_client,
+        logger=logger,
+    )
     daemon = Daemon(
         store=store,
         logger=logger,
@@ -117,6 +126,7 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         app_config=loaded.config,
         feishu_client=client,
+        task_processor=task_processor,
         send_owner_notifications=args.send_owner_notifications,
         run_metadata=_git_info(Path.cwd()),
         config_base_dir=loaded.base_dir,

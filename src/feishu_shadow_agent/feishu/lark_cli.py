@@ -315,6 +315,28 @@ class LarkCliClient:
         )
         return _message_page_from_result(result)
 
+    def list_p2p_messages(
+        self,
+        *,
+        user_id: str,
+        start: str | None,
+        end: str | None,
+        page_token: str | None = None,
+        page_size: int = 50,
+    ) -> MessagePage:
+        result = self.run_json(
+            self.build_chat_messages_list(
+                as_identity="user",
+                user_id=user_id,
+                start=start,
+                end=end,
+                order="asc",
+                page_token=page_token,
+                page_size=page_size,
+            )
+        )
+        return _message_page_from_result(result)
+
     def list_thread_messages(
         self,
         *,

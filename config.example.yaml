@@ -23,9 +23,18 @@ lark_cli:
   timeout_seconds: 30
 
 hermes:
-  health_url: https://example.invalid/health
+  mode: cli
+  path: null
+  source: feishu-shadow-agent
+  toolsets: safe
+  router_max_turns: 4
+  session_max_turns: 8
+  model: null
+  provider: null
+  timeout_seconds: 60
+  # HTTP mode compatibility. Used only when mode: http.
+  health_url: null
   api_key_env: HERMES_API_KEY
-  timeout_seconds: 10
 
 reply_policy:
   p2p_auto_reply: true

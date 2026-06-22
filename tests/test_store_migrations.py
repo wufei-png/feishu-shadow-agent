@@ -22,6 +22,8 @@ EXPECTED_TABLES = {
     "chat_policies",
     "config_suggestions",
     "routing_audits",
+    "hermes_audits",
+    "approval_commands",
 }
 
 
@@ -99,3 +101,37 @@ def test_p2_migration_adds_routing_columns(tmp_path: Path) -> None:
 
     assert {"thread_id", "reply_to_message_id", "sender_role", "direct_mention", "at_all", "text"} <= message_columns
     assert {"chat_type", "thread_id", "watch_until", "last_user_message", "last_agent_reply"} <= task_columns
+    assert "sender_name" in message_columns
+
+
+def test_p3_migration_clears_legacy_fake_hermes_session_and_send_reply_guard(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.migrate()
+
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO tasks(short_id, status, chat_id, root_message_id, task_label, hermes_session_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("t_legacy", "watching", "oc_1", "om_1", "label", "feishu-task-t_legacy", "now", "now"),
+        )
+        task_id = conn.execute("SELECT id FROM tasks WHERE short_id = ?", ("t_legacy",)).fetchone()["id"]
+    store.migrate()
+
+    assert store.get_initialized_hermes_session_id(task_id) is None
+    first = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_1",
+        payload={"text": "one", "source": "auto_reply"},
+    )
+    second = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_1",
+        payload={"text": "two", "source": "auto_reply"},
+    )
+    owner_action = store.create_owner_notification_action(task_id=task_id, payload={"text": "notify"})
+
+    assert first is not None
+    assert second is None
+    assert owner_action is not None

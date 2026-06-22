@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
+import time
 import urllib.error
 import urllib.request
 from typing import Callable
@@ -9,7 +11,7 @@ from typing import Callable
 from .config import LoadedConfig
 from .feishu.client import FeishuClient
 from .store.sqlite_store import SQLiteStore
-from .types import HealthCheckResult, LarkCliResult, new_run_id
+from .types import HealthCheckResult, HermesCliResult, LarkCliResult, new_run_id
 
 REQUIRED_USER_SCOPES = {
     "search:message",
@@ -22,7 +24,7 @@ REQUIRED_USER_SCOPES = {
     "im:message",
 }
 
-HermesChecker = Callable[[LoadedConfig], HealthCheckResult]
+HermesChecker = Callable[[LoadedConfig], HealthCheckResult | list[HealthCheckResult]]
 
 
 class HermesHttpChecker:
@@ -75,6 +77,47 @@ class HermesHttpChecker:
         )
 
 
+class HermesCliChecker:
+    def __call__(self, loaded: LoadedConfig) -> list[HealthCheckResult]:
+        hermes = loaded.config.hermes
+        path = hermes.path or "hermes"
+        version = _run_hermes_command([path, "--version"], timeout_seconds=hermes.timeout_seconds)
+        version_result = _hermes_command_result(
+            "hermes_cli_version",
+            version,
+            "Hermes CLI version detected",
+            "Hermes CLI version check failed",
+            severity="critical",
+        )
+        if version_result.is_critical_failure:
+            return [version_result]
+        status = _run_hermes_command([path, "status"], timeout_seconds=hermes.timeout_seconds)
+        status_result = _hermes_command_result(
+            "hermes_cli_status",
+            status,
+            "Hermes CLI status command succeeded",
+            "Hermes CLI status command failed",
+            severity="warning",
+        )
+        return [version_result, status_result]
+
+
+class HermesHealthChecker:
+    def __init__(
+        self,
+        *,
+        cli_checker: HermesChecker | None = None,
+        http_checker: HermesChecker | None = None,
+    ):
+        self.cli_checker = cli_checker or HermesCliChecker()
+        self.http_checker = http_checker or HermesHttpChecker()
+
+    def __call__(self, loaded: LoadedConfig) -> list[HealthCheckResult]:
+        checker = self.http_checker if loaded.config.hermes.mode == "http" else self.cli_checker
+        result = checker(loaded)
+        return result if isinstance(result, list) else [result]
+
+
 class HealthSuite:
     def __init__(
         self,
@@ -88,7 +131,7 @@ class HealthSuite:
         self.loaded_config = loaded_config
         self.store = store
         self.feishu_client = feishu_client
-        self.hermes_checker = hermes_checker or HermesHttpChecker()
+        self.hermes_checker = hermes_checker or HermesHealthChecker()
         self.run_id = run_id
 
     def run(self, *, send_test: bool = False) -> list[HealthCheckResult]:
@@ -104,7 +147,11 @@ class HealthSuite:
         results.append(self._check_bot_available(auth_json))
         results.append(self._check_owner_config())
         results.append(self._check_owner_notification(send_test=send_test))
-        results.append(self.hermes_checker(self.loaded_config))
+        hermes_results = self.hermes_checker(self.loaded_config)
+        if isinstance(hermes_results, list):
+            results.extend(hermes_results)
+        else:
+            results.append(hermes_results)
         self.store.record_health_results(run_id=self.run_id, results=results)
         return results
 
@@ -216,20 +263,21 @@ class HealthSuite:
             maybe_bot = auth_json.get("identities", {}).get("bot", {})
             if isinstance(maybe_bot, dict):
                 bot = maybe_bot
-        if bot.get("available") is True or bot.get("status") == "ready":
+        bot_open_id = bot.get("openId") or bot.get("open_id") or bot.get("id")
+        if (bot.get("available") is True or bot.get("status") == "ready") and bot_open_id:
             return HealthCheckResult(
                 "bot_identity",
                 "critical",
                 "ok",
                 "bot identity is available",
-                {"status": bot.get("status")},
+                {"status": bot.get("status"), "open_id": bot_open_id},
             )
         return HealthCheckResult(
             "bot_identity",
             "critical",
             "failed",
             "bot identity is not available",
-            {"status": bot.get("status"), "message": bot.get("message")},
+            {"status": bot.get("status"), "message": bot.get("message"), "open_id": bot_open_id},
         )
 
     def _check_owner_config(self) -> HealthCheckResult:
@@ -292,6 +340,81 @@ def _command_failed(
             "stderr": result.stderr,
             "error": result.error,
             "timed_out": result.timed_out,
+        },
+    )
+
+
+def _run_hermes_command(argv: list[str], *, timeout_seconds: int) -> HermesCliResult:
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return HermesCliResult(
+            argv=argv,
+            exit_code=None,
+            stdout=exc.stdout or "",
+            stderr=exc.stderr or "",
+            error=f"command timed out after {timeout_seconds}s",
+            timed_out=True,
+            latency_ms=int((time.monotonic() - started) * 1000),
+        )
+    except OSError as exc:
+        return HermesCliResult(
+            argv=argv,
+            exit_code=None,
+            error=str(exc),
+            latency_ms=int((time.monotonic() - started) * 1000),
+        )
+    return HermesCliResult(
+        argv=argv,
+        exit_code=completed.returncode,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        error=None if completed.returncode == 0 else (completed.stderr.strip() or completed.stdout.strip()),
+        latency_ms=int((time.monotonic() - started) * 1000),
+    )
+
+
+def _hermes_command_result(
+    name: str,
+    result: HermesCliResult,
+    ok_message: str,
+    failed_message: str,
+    *,
+    severity: str,
+) -> HealthCheckResult:
+    if not result.ok:
+        return HealthCheckResult(
+            name,
+            severity,  # type: ignore[arg-type]
+            "failed",
+            failed_message,
+            {
+                "argv": result.argv,
+                "exit_code": result.exit_code,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "error": result.error,
+                "timed_out": result.timed_out,
+                "latency_ms": result.latency_ms,
+            },
+        )
+    return HealthCheckResult(
+        name,
+        severity,  # type: ignore[arg-type]
+        "ok",
+        ok_message,
+        {
+            "argv": result.argv,
+            "stdout": result.stdout.strip(),
+            "stderr": result.stderr.strip(),
+            "latency_ms": result.latency_ms,
         },
     )
 

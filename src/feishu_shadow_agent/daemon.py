@@ -10,6 +10,7 @@ from .feishu.client import FeishuClient
 from .health import HealthSuite, has_critical_failure, summarize_results
 from .ingestion import IngestionService, StageResult
 from .jsonl import JSONLLogger
+from .processing import TaskProcessingService
 from .store.sqlite_store import SQLiteStore
 from .types import HealthCheckResult, new_run_id
 
@@ -25,6 +26,7 @@ class Daemon:
         dry_run: bool,
         app_config: AppConfig | None = None,
         feishu_client: FeishuClient | None = None,
+        task_processor: TaskProcessingService | None = None,
         send_owner_notifications: bool = False,
         run_metadata: dict[str, Any] | None = None,
         config_base_dir: str | Path | None = None,
@@ -37,6 +39,7 @@ class Daemon:
         self.dry_run = dry_run
         self.app_config = app_config
         self.feishu_client = feishu_client
+        self.task_processor = task_processor
         self.send_owner_notifications = send_owner_notifications
         self.run_metadata = run_metadata or {}
         self.config_base_dir = None if config_base_dir is None else Path(config_base_dir)
@@ -63,10 +66,11 @@ class Daemon:
             feishu_client=self.feishu_client,
             config=self.app_config,
             logger=self.logger,
+            task_processor=self.task_processor,
             config_base_dir=self.config_base_dir,
         )
         stages = [
-            service.run_approval_inbox_placeholder,
+            service.run_approval_inbox,
             service.ingest_group_at_me,
             service.ingest_p2p,
             service.run_active_watch,

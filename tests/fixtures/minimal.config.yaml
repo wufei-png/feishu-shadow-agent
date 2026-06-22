@@ -23,9 +23,17 @@ lark_cli:
   timeout_seconds: 5
 
 hermes:
-  health_url: https://hermes.local/health
-  api_key_env: HERMES_API_KEY
+  mode: cli
+  path: hermes
+  source: feishu-shadow-agent
+  toolsets: safe
+  router_max_turns: 4
+  session_max_turns: 8
+  model: null
+  provider: null
   timeout_seconds: 1
+  health_url: null
+  api_key_env: HERMES_API_KEY
 
 reply_policy:
   p2p_auto_reply: true

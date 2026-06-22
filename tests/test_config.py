@@ -18,6 +18,8 @@ def test_load_minimal_config() -> None:
     assert loaded.config.storage.resource_dir == "data/resources"
     assert loaded.config.tool_permissions.profile == "guarded_write"
     assert loaded.config.chats["oc_test"].auto_reply is True
+    assert loaded.config.hermes.mode == "cli"
+    assert loaded.config.hermes.toolsets == "safe"
 
 
 def test_missing_owner_fails(tmp_path: Path) -> None:
@@ -87,3 +89,19 @@ def test_redacted_config_does_not_leak_env_secret(monkeypatch: pytest.MonkeyPatc
     assert redacted["hermes"]["api_key_env"] == "HERMES_API_KEY"
     assert "super-secret-value" not in str(redacted)
     assert os.environ["HERMES_API_KEY"] == "super-secret-value"
+
+
+def test_http_hermes_mode_requires_health_url(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+hermes:
+  mode: http
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="health_url"):
+        ConfigService().load(config_path)

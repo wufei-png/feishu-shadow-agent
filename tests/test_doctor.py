@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 
 from feishu_shadow_agent.config import ConfigService, LoadedConfig
-from feishu_shadow_agent.health import REQUIRED_USER_SCOPES, HealthSuite
+from feishu_shadow_agent.health import HermesCliChecker, REQUIRED_USER_SCOPES, HealthSuite
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import HealthCheckResult, LarkCliResult
 
@@ -26,7 +27,11 @@ class FakeFeishuClient:
             json_data={
                 "identities": {
                     "user": {"scope": " ".join(sorted(self.scopes))},
-                    "bot": {"available": self.bot_available, "status": "ready" if self.bot_available else "missing"},
+                    "bot": {
+                        "available": self.bot_available,
+                        "status": "ready" if self.bot_available else "missing",
+                        "openId": "ou_bot" if self.bot_available else None,
+                    },
                 }
             },
         )
@@ -142,3 +147,26 @@ def test_hermes_unreachable_is_critical_failure(tmp_path: Path) -> None:
     results = suite.run(send_test=False)
 
     assert "hermes_reachable" in {result.name for result in results if result.is_critical_failure}
+
+
+def test_hermes_cli_checker_version_critical_and_status_warning(
+    monkeypatch,
+) -> None:
+    loaded = ConfigService().load(FIXTURE)
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        if argv[1] == "--version":
+            return subprocess.CompletedProcess(argv, 0, stdout="Hermes Agent v0.16.0\n", stderr="")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="not logged in")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    results = HermesCliChecker()(loaded)
+
+    assert [result.name for result in results] == ["hermes_cli_version", "hermes_cli_status"]
+    assert results[0].status == "ok"
+    assert results[1].severity == "warning"
+    assert results[1].status == "failed"
+    assert calls == [["hermes", "--version"], ["hermes", "status"]]

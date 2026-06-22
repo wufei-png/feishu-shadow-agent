@@ -44,6 +44,27 @@ def test_build_chat_messages_list_uses_order_flag() -> None:
     assert "--no-reactions" in argv
 
 
+def test_list_p2p_messages_uses_user_identity_and_user_id() -> None:
+    seen: list[list[str]] = []
+
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        seen.append(argv)
+        return LarkCliResult(argv=argv, exit_code=0, json_data={"data": {"items": []}})
+
+    client = LarkCliClient(path="lark-cli", runner=runner)
+
+    page = client.list_p2p_messages(
+        user_id="ou_bot",
+        start="2026-06-22T00:00:00+08:00",
+        end="2026-06-22T01:00:00+08:00",
+    )
+
+    assert page.items == []
+    assert seen[0][:5] == ["lark-cli", "im", "+chat-messages-list", "--as", "user"]
+    assert "--user-id" in seen[0]
+    assert "ou_bot" in seen[0]
+
+
 def test_build_messages_send_defaults_to_dry_run_and_can_send_test() -> None:
     client = LarkCliClient(path="lark-cli")
 

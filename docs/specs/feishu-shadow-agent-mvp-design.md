@@ -13,7 +13,7 @@
 - Python 长驻 `daemon/watch`。
 - SQLite 存消息、任务、审批、动作、资源、checkpoint、运行日志。
 - `lark-cli subprocess` 作为飞书主接入。
-- Hermes 非交互 chat API 作为 AI 处理引擎。
+- Hermes CLI 非交互 `chat -q -Q` 作为 AI 处理引擎。
 - 群聊 `@我` 和 P2P 私聊两条拉取入口。
 - 命中消息的图片/文件资源下载。
 - 通用 active task tracking。
@@ -111,7 +111,7 @@ critical:
   auth status --verify
   required user scopes
   required bot basics
-  Hermes API reachable
+  Hermes CLI version/status reachable
 
 warning:
   owner notification dry-run
@@ -417,7 +417,7 @@ safe_write 示例：
 
 ## 11. Hermes 集成
 
-Python daemon 直接调用 Hermes 非交互 chat API。不要用 user 身份私聊飞书 bot 来启动 Hermes。
+Python daemon 直接调用 Hermes CLI 非交互 `chat -q -Q`。不要用 user 身份私聊飞书 bot 来启动 Hermes。
 
 职责拆分：
 
@@ -425,7 +425,7 @@ Python daemon 直接调用 Hermes 非交互 chat API。不要用 user 身份私�
 Python daemon:
   编排器 / 状态机 / 审计 / 飞书收发
 
-Hermes non-interactive chat:
+Hermes CLI non-interactive chat:
   每个任务的 AI 处理会话
 
 Feishu bot DM:
@@ -441,10 +441,12 @@ TaskRouter:
 
 Task Session:
   一任务一会话。
-  hermes_session_id = feishu-task-<task_id>
+  新 task 初始 `hermes_session_id = NULL`。
+  首次 Task Session 成功后保存 Hermes stderr 返回的真实 `session_id`。
+  后续 follow-up 使用 `hermes chat --resume <hermes_session_id>`。
 ```
 
-同一飞书 thread 后续消息可以挂到同一个 task session。
+已有 `feishu-task-*` 旧值视为未初始化，迁移后清空。同一飞书 thread 后续消息可以挂到同一个 task session。
 
 Hermes 输出必须是严格 JSON，由 Python schema 校验。校验失败降级 owner 审批。
 
@@ -1023,7 +1025,7 @@ python -m feishu_shadow_agent doctor --send-test
 - owner open_id 已配置。
 - approval inbox 可发送 dry-run。
 - 数据库可写。
-- Hermes API 可达。
+- Hermes CLI `--version` critical check 和 `status` warning check。
 - 配置 YAML schema。
 
 ### daemon

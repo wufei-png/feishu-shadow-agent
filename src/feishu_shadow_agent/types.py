@@ -58,6 +58,23 @@ class LarkCliResult:
 
 
 @dataclass(frozen=True)
+class HermesCliResult:
+    argv: list[str]
+    exit_code: int | None
+    stdout: str = ""
+    stderr: str = ""
+    json_data: Any | None = None
+    session_id: str | None = None
+    error: str | None = None
+    timed_out: bool = False
+    latency_ms: int | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.exit_code == 0 and self.error is None and not self.timed_out
+
+
+@dataclass(frozen=True)
 class MessagePage:
     items: list[dict[str, Any]]
     next_page_token: str | None = None
@@ -79,6 +96,7 @@ class NormalizedMessage:
     chat_id: str | None
     chat_type: ChatType | None
     sender_id: str | None
+    sender_name: str | None
     sender_type: str | None
     sender_role: SenderRole
     sent_at: str | None
@@ -107,6 +125,7 @@ class TaskRecord:
     root_message_id: str | None
     task_label: str | None
     watch_until: str | None
+    hermes_session_id: str | None = None
 
 
 @dataclass(frozen=True)

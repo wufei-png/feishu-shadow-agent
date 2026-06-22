@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, field_validator, model_validator
 
 CONFIG_ENV_VAR = "FEISHU_SHADOW_AGENT_CONFIG"
 
@@ -58,9 +58,17 @@ class LarkCliConfig(StrictModel):
 
 
 class HermesConfig(StrictModel):
+    mode: Literal["cli", "http"] = "cli"
+    path: str | None = None
+    source: str = "feishu-shadow-agent"
+    toolsets: str = "safe"
+    router_max_turns: int = Field(default=4, gt=0)
+    session_max_turns: int = Field(default=8, gt=0)
+    model: str | None = None
+    provider: str | None = None
+    timeout_seconds: int = Field(default=60, gt=0)
     health_url: str | None = None
-    api_key_env: str = "HERMES_API_KEY"
-    timeout_seconds: int = Field(default=10, gt=0)
+    api_key_env: str | None = "HERMES_API_KEY"
 
     @field_validator("health_url")
     @classmethod
@@ -70,6 +78,19 @@ class HermesConfig(StrictModel):
         if not value.startswith(("http://", "https://")):
             raise ValueError("hermes.health_url must start with http:// or https://")
         return value
+
+    @field_validator("source", "toolsets")
+    @classmethod
+    def validate_non_empty_string(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("value must not be empty")
+        return value
+
+    @model_validator(mode="after")
+    def validate_http_mode(self) -> "HermesConfig":
+        if self.mode == "http" and not self.health_url:
+            raise ValueError("hermes.health_url is required when hermes.mode is http")
+        return self
 
 
 RiskLevel = Literal["low", "medium", "high"]

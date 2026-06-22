@@ -175,6 +175,7 @@ class SQLiteStore:
                 "reply_to_message_id": message.reply_to_message_id,
                 "direct_mention": message.direct_mention,
                 "at_all": message.at_all,
+                "sender_name": message.sender_name,
             },
             ensure_ascii=False,
             default=str,
@@ -187,8 +188,8 @@ class SQLiteStore:
                     INSERT INTO messages(
                       message_id, chat_id, chat_type, sender_id, sender_type, sent_at,
                       normalized_json, raw_json, inserted_at, thread_id, reply_to_message_id,
-                      sender_role, direct_mention, at_all, text
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      sender_role, direct_mention, at_all, text, sender_name
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         message.message_id,
@@ -206,6 +207,7 @@ class SQLiteStore:
                         int(message.direct_mention),
                         int(message.at_all),
                         message.text,
+                        message.sender_name,
                     ),
                 )
                 return True
@@ -214,7 +216,7 @@ class SQLiteStore:
                 UPDATE messages
                 SET chat_id = ?, chat_type = ?, sender_id = ?, sender_type = ?, sent_at = ?,
                     normalized_json = ?, raw_json = ?, thread_id = ?, reply_to_message_id = ?,
-                    sender_role = ?, direct_mention = ?, at_all = ?, text = ?
+                    sender_role = ?, direct_mention = ?, at_all = ?, text = ?, sender_name = ?
                 WHERE message_id = ?
                 """,
                 (
@@ -231,6 +233,7 @@ class SQLiteStore:
                     int(message.direct_mention),
                     int(message.at_all),
                     message.text,
+                    message.sender_name,
                     message.message_id,
                 ),
             )
@@ -243,6 +246,20 @@ class SQLiteStore:
                 "SELECT * FROM messages WHERE message_id = ?",
                 (message_id,),
             ).fetchone()
+
+    def get_messages_by_ids(self, message_ids: Iterable[str]) -> list[sqlite3.Row]:
+        self.migrate()
+        ids = list(dict.fromkeys(message_ids))
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM messages WHERE message_id IN ({placeholders}) ORDER BY sent_at, message_id",
+                ids,
+            ).fetchall()
+        by_id = {row["message_id"]: row for row in rows}
+        return [by_id[message_id] for message_id in ids if message_id in by_id]
 
     def message_has_routing_audit(self, message_id: str) -> bool:
         self.migrate()
@@ -401,6 +418,15 @@ class SQLiteStore:
         self.migrate()
         with self.connect() as conn:
             return self._get_task_by_id(conn, task_id)
+
+    def get_task_by_short_id(self, short_id: str) -> TaskRecord | None:
+        self.migrate()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM tasks WHERE short_id = ?",
+                (short_id,),
+            ).fetchone()
+        return None if row is None else _task_from_row(row)
 
     def get_active_tasks_for_chat(self, chat_id: str, *, now: str) -> list[TaskRecord]:
         self.migrate()
@@ -701,6 +727,449 @@ class SQLiteStore:
             ).fetchone()
         return int(row["count"])
 
+    def list_task_message_ids(self, task_id: int) -> list[str]:
+        self.migrate()
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT message_id FROM task_messages WHERE task_id = ? ORDER BY created_at, message_id",
+                (task_id,),
+            ).fetchall()
+        return [row["message_id"] for row in rows]
+
+    def list_resources_for_messages(self, message_ids: Iterable[str]) -> list[sqlite3.Row]:
+        self.migrate()
+        ids = list(dict.fromkeys(message_ids))
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self.connect() as conn:
+            return conn.execute(
+                f"""
+                SELECT *
+                FROM resources
+                WHERE message_id IN ({placeholders})
+                ORDER BY message_id, id
+                """,
+                ids,
+            ).fetchall()
+
+    def get_initialized_hermes_session_id(self, task_id: int) -> str | None:
+        self.migrate()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT hermes_session_id FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        session_id = row["hermes_session_id"]
+        if not session_id or str(session_id).startswith("feishu-task-"):
+            return None
+        return str(session_id)
+
+    def set_task_hermes_session_id(self, task_id: int, session_id: str) -> None:
+        self.migrate()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE tasks
+                SET hermes_session_id = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (session_id, utc_now_iso(), task_id),
+            )
+
+    def update_task_after_hermes(
+        self,
+        *,
+        task_id: int,
+        task_label: str | None = None,
+        status: str | None = None,
+        watch_until: str | None = None,
+    ) -> None:
+        self.migrate()
+        assignments = ["updated_at = ?"]
+        params: list[Any] = [utc_now_iso()]
+        if task_label is not None:
+            assignments.append("task_label = ?")
+            params.append(_truncate(task_label, limit=100))
+        if status is not None:
+            assignments.append("status = ?")
+            params.append(status)
+            if status not in {"watching", "waiting_approval"}:
+                assignments.append("closed_at = ?")
+                params.append(utc_now_iso())
+        if watch_until is not None:
+            assignments.append("watch_until = ?")
+            params.append(watch_until)
+        params.append(task_id)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE tasks SET {', '.join(assignments)} WHERE id = ?",
+                params,
+            )
+
+    def record_hermes_audit(
+        self,
+        *,
+        request_type: str,
+        task_id: int | None,
+        hermes_session_id: str | None,
+        input_message_ids: Iterable[str],
+        input_resource_ids: Iterable[str],
+        response: dict[str, Any] | None = None,
+        error: str | None = None,
+        latency_ms: int | None = None,
+        prompt: dict[str, Any] | None = None,
+    ) -> None:
+        self.migrate()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO hermes_audits(
+                  request_type, task_id, hermes_session_id, input_message_ids_json,
+                  input_resource_ids_json, response_json, error, latency_ms, prompt_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    request_type,
+                    task_id,
+                    hermes_session_id,
+                    json.dumps(list(input_message_ids), ensure_ascii=False, default=str),
+                    json.dumps(list(input_resource_ids), ensure_ascii=False, default=str),
+                    None if response is None else json.dumps(response, ensure_ascii=False, default=str),
+                    error,
+                    latency_ms,
+                    None if prompt is None else json.dumps(prompt, ensure_ascii=False, default=str),
+                    utc_now_iso(),
+                ),
+            )
+
+    def create_send_reply_action(
+        self,
+        *,
+        task_id: int,
+        target_message_id: str,
+        payload: dict[str, Any],
+        approval_id: int | None = None,
+    ) -> int | None:
+        self.migrate()
+        now = utc_now_iso()
+        idempotency_key = _action_idempotency_key(task_id, target_message_id, payload)
+        with self.connect() as conn:
+            try:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO actions(
+                      idempotency_key, task_id, approval_id, kind, status, target_message_id,
+                      dry_run, payload_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        idempotency_key,
+                        task_id,
+                        approval_id,
+                        "send_reply",
+                        "pending",
+                        target_message_id,
+                        1,
+                        json.dumps(payload, ensure_ascii=False, default=str),
+                        now,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                return None
+        return int(cursor.lastrowid)
+
+    def create_owner_notification_action(
+        self,
+        *,
+        task_id: int | None,
+        payload: dict[str, Any],
+    ) -> int:
+        self.migrate()
+        now = utc_now_iso()
+        seed = json.dumps({"task_id": task_id, "payload": payload}, ensure_ascii=False, sort_keys=True, default=str)
+        idempotency_key = f"owner-{sha256(seed.encode('utf-8')).hexdigest()[:16]}"
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO actions(
+                  idempotency_key, task_id, kind, status, dry_run, payload_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    idempotency_key,
+                    task_id,
+                    "owner_notification",
+                    "pending",
+                    1,
+                    json.dumps(payload, ensure_ascii=False, default=str),
+                    now,
+                    now,
+                ),
+            )
+            if cursor.lastrowid:
+                return int(cursor.lastrowid)
+            row = conn.execute(
+                "SELECT id FROM actions WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+        return int(row["id"])
+
+    def create_send_reply_approval(
+        self,
+        *,
+        task_id: int,
+        preview: str,
+        payload: dict[str, Any],
+        notify_payload: dict[str, Any] | None = None,
+    ) -> int:
+        self.migrate()
+        now = utc_now_iso()
+        with self.connect() as conn:
+            short_id = self._unique_short_id_in_table(conn, "approvals", "a", f"{task_id}:{preview}:{now}")
+            cursor = conn.execute(
+                """
+                INSERT INTO approvals(short_id, task_id, kind, status, payload_json, preview, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    short_id,
+                    task_id,
+                    "send_reply",
+                    "pending",
+                    json.dumps(payload, ensure_ascii=False, default=str),
+                    preview,
+                    now,
+                ),
+            )
+            approval_id = int(cursor.lastrowid)
+            conn.execute(
+                """
+                UPDATE tasks
+                SET status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                ("waiting_approval", now, task_id),
+            )
+        if notify_payload is not None:
+            self.create_owner_notification_action(task_id=task_id, payload=notify_payload | {"approval_id": short_id})
+        return approval_id
+
+    def apply_approval_command(
+        self,
+        *,
+        message_id: str,
+        command: str,
+        verb: str,
+        target_id: str,
+        final_reply: str | None = None,
+    ) -> dict[str, Any]:
+        self.migrate()
+        now = utc_now_iso()
+        with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT status, result_json FROM approval_commands WHERE message_id = ?",
+                (message_id,),
+            ).fetchone()
+            if existing is not None:
+                return {"status": "duplicate", "result": json.loads(existing["result_json"] or "{}")}
+
+            conn.execute("SAVEPOINT approval_command")
+            try:
+                result = self._apply_approval_command_locked(
+                    conn,
+                    verb=verb,
+                    target_id=target_id,
+                    final_reply=final_reply,
+                    now=now,
+                )
+            except Exception as exc:
+                conn.execute("ROLLBACK TO SAVEPOINT approval_command")
+                conn.execute("RELEASE SAVEPOINT approval_command")
+                result = {"error": str(exc)}
+                status = "failed"
+            else:
+                conn.execute("RELEASE SAVEPOINT approval_command")
+                status = "applied"
+            conn.execute(
+                """
+                INSERT INTO approval_commands(message_id, command, status, result_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message_id,
+                    command,
+                    status,
+                    json.dumps(result, ensure_ascii=False, default=str),
+                    now,
+                    now,
+                ),
+            )
+        return {"status": status, "result": result}
+
+    def _apply_approval_command_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        verb: str,
+        target_id: str,
+        final_reply: str | None,
+        now: str,
+    ) -> dict[str, Any]:
+        if verb in {"approve", "reject"}:
+            approval = self._resolve_pending_approval_locked(conn, target_id)
+            if approval is None:
+                raise ValueError(f"pending approval not found or ambiguous: {target_id}")
+            resolved_status = "approved" if verb == "approve" else "rejected"
+            conn.execute(
+                """
+                UPDATE approvals
+                SET status = ?, resolved_at = ?
+                WHERE id = ?
+                """,
+                (resolved_status, now, approval["id"]),
+            )
+            if verb == "reject":
+                conn.execute(
+                    """
+                    UPDATE tasks
+                    SET status = ?, updated_at = ?, closed_at = ?
+                    WHERE id = ?
+                    """,
+                    ("closed", now, now, approval["task_id"]),
+                )
+                return {"approval_id": approval["short_id"], "task_id": approval["task_id"], "action_id": None}
+            payload = json.loads(approval["payload_json"] or "{}")
+            target_message_id = payload.get("reply_target_message_id") or payload.get("target_message_id")
+            if not isinstance(target_message_id, str) or not target_message_id:
+                raise ValueError("approval payload is missing reply_target_message_id")
+            action_id = self._create_send_reply_action_locked(
+                conn,
+                task_id=int(approval["task_id"]),
+                target_message_id=target_message_id,
+                payload=payload | {"approved_by": "owner"},
+                approval_id=int(approval["id"]),
+                now=now,
+            )
+            return {"approval_id": approval["short_id"], "task_id": approval["task_id"], "action_id": action_id}
+
+        if verb == "send":
+            if not target_id.startswith("t_"):
+                raise ValueError("/send requires a task id")
+            task = conn.execute(
+                "SELECT * FROM tasks WHERE short_id = ?",
+                (target_id,),
+            ).fetchone()
+            if task is None:
+                raise ValueError(f"task not found: {target_id}")
+            reply_text = (final_reply or "").strip()
+            if not reply_text:
+                raise ValueError("/send requires final reply text")
+            pending = conn.execute(
+                """
+                SELECT * FROM approvals
+                WHERE task_id = ? AND kind = 'send_reply' AND status = 'pending'
+                ORDER BY created_at DESC, id DESC
+                """,
+                (task["id"],),
+            ).fetchall()
+            if len(pending) != 1:
+                raise ValueError(f"/send requires exactly one pending approval for {target_id}")
+            payload = json.loads(pending[0]["payload_json"] or "{}")
+            target_message_id = payload.get("reply_target_message_id") or payload.get("target_message_id")
+            conn.execute(
+                "UPDATE approvals SET status = ?, resolved_at = ? WHERE id = ?",
+                ("approved", now, pending[0]["id"]),
+            )
+            approval_id = int(pending[0]["id"])
+            approval_short_id = pending[0]["short_id"]
+            if not isinstance(target_message_id, str) or not target_message_id:
+                raise ValueError("task does not have a reply target")
+            payload = {
+                "reply_target_message_id": target_message_id,
+                "text": reply_text,
+                "identity": "user",
+                "source": "owner_send",
+            }
+            action_id = self._create_send_reply_action_locked(
+                conn,
+                task_id=int(task["id"]),
+                target_message_id=target_message_id,
+                payload=payload,
+                approval_id=approval_id,
+                now=now,
+            )
+            return {"approval_id": approval_short_id, "task_id": task["id"], "action_id": action_id}
+
+        raise ValueError(f"unsupported command: {verb}")
+
+    def _resolve_pending_approval_locked(
+        self,
+        conn: sqlite3.Connection,
+        target_id: str,
+    ) -> sqlite3.Row | None:
+        if target_id.startswith("a_"):
+            return conn.execute(
+                """
+                SELECT * FROM approvals
+                WHERE short_id = ? AND status = 'pending'
+                """,
+                (target_id,),
+            ).fetchone()
+        if target_id.startswith("t_"):
+            rows = conn.execute(
+                """
+                SELECT a.*
+                FROM approvals a
+                JOIN tasks t ON t.id = a.task_id
+                WHERE t.short_id = ? AND a.status = 'pending'
+                ORDER BY a.created_at DESC, a.id DESC
+                """,
+                (target_id,),
+            ).fetchall()
+            if len(rows) == 1:
+                return rows[0]
+        return None
+
+    def _create_send_reply_action_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        task_id: int,
+        target_message_id: str,
+        payload: dict[str, Any],
+        approval_id: int | None,
+        now: str,
+    ) -> int | None:
+        idempotency_key = _action_idempotency_key(task_id, target_message_id, payload)
+        try:
+            cursor = conn.execute(
+                """
+                INSERT INTO actions(
+                  idempotency_key, task_id, approval_id, kind, status, target_message_id,
+                  dry_run, payload_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    idempotency_key,
+                    task_id,
+                    approval_id,
+                    "send_reply",
+                    "pending",
+                    target_message_id,
+                    1,
+                    json.dumps(payload, ensure_ascii=False, default=str),
+                    now,
+                    now,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            return None
+        return int(cursor.lastrowid)
+
     def insert_action_for_test(
         self,
         *,
@@ -778,7 +1247,7 @@ class SQLiteStore:
                 message.chat_id,
                 message.message_id,
                 label,
-                f"feishu-task-{short_id}",
+                None,
                 now,
                 now,
                 message.chat_type,
@@ -893,9 +1362,20 @@ class SQLiteStore:
         )
 
     def _unique_short_id(self, conn: sqlite3.Connection, prefix: str, seed: str) -> str:
+        return self._unique_short_id_in_table(conn, "tasks", prefix, seed)
+
+    def _unique_short_id_in_table(
+        self,
+        conn: sqlite3.Connection,
+        table: str,
+        prefix: str,
+        seed: str,
+    ) -> str:
+        if table not in {"tasks", "approvals"}:
+            raise ValueError("unsupported short id table")
         base = f"{prefix}_{sha256(seed.encode('utf-8')).hexdigest()[:8]}"
         existing = conn.execute(
-            "SELECT short_id FROM tasks WHERE short_id = ?",
+            f"SELECT short_id FROM {table} WHERE short_id = ?",
             (base,),
         ).fetchone()
         if existing is None:
@@ -903,12 +1383,12 @@ class SQLiteStore:
         for suffix in range(2, 100):
             candidate = f"{base}_{suffix}"
             existing = conn.execute(
-                "SELECT short_id FROM tasks WHERE short_id = ?",
+                f"SELECT short_id FROM {table} WHERE short_id = ?",
                 (candidate,),
             ).fetchone()
             if existing is None:
                 return candidate
-        raise RuntimeError("could not allocate task short id")
+        raise RuntimeError(f"could not allocate {prefix} short id")
 
     def _add_task_message(
         self,
@@ -953,6 +1433,7 @@ def _task_from_row(row: sqlite3.Row) -> TaskRecord:
         root_message_id=row["root_message_id"],
         task_label=row["task_label"],
         watch_until=row["watch_until"],
+        hermes_session_id=row["hermes_session_id"],
     )
 
 
@@ -981,6 +1462,21 @@ def _truncate(text: str, limit: int = 100) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return f"{cleaned[:limit - 3]}..."
+
+
+def _action_idempotency_key(task_id: int, target_message_id: str, payload: dict[str, Any]) -> str:
+    seed = json.dumps(
+        {
+            "task_id": task_id,
+            "target_message_id": target_message_id,
+            "text": payload.get("text") or payload.get("composed_text") or "",
+            "source": payload.get("source") or "",
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    return f"reply-{sha256(seed.encode('utf-8')).hexdigest()[:16]}"
 
 
 def _closed_recall_text_patterns(text: str) -> list[str]:
