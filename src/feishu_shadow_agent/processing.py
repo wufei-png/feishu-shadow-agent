@@ -240,6 +240,9 @@ class TaskProcessingService:
         historical = []
         if reason == "closed_recall_router_placeholder":
             historical = self.store.get_related_closed_tasks(message, since=_minus_days(now, 7))
+        allowed_target_short_ids = {candidate.task.short_id for candidate in active_candidates} | {
+            task.short_id for task in historical
+        }
         prompt = _router_prompt(message=message, active=active_candidates, historical=historical)
         result = self.hermes.task_router(prompt)
         self.store.record_hermes_audit(
@@ -323,16 +326,18 @@ class TaskProcessingService:
                 ),
             )
             return None
+        if output.target_task_id not in allowed_target_short_ids:
+            self._handle_invalid_router_target(
+                message=message,
+                target_task_id=output.target_task_id,
+                candidates_count=candidates_count,
+            )
+            return None
         target = self._resolve_router_target(output.target_task_id)
         if target is None:
-            self.approvals.notify_owner(
-                task=None,
-                reason="task_router_invalid_target",
-                payload={"message_id": message.message_id, "target": output.target_task_id},
-            )
-            self._audit_router_ambiguity(
+            self._handle_invalid_router_target(
                 message=message,
-                reason="task_router_invalid_target",
+                target_task_id=output.target_task_id,
                 candidates_count=candidates_count,
             )
             return None
@@ -540,6 +545,24 @@ class TaskProcessingService:
         if not target_task_id:
             return None
         return self.store.get_task_by_short_id(target_task_id)
+
+    def _handle_invalid_router_target(
+        self,
+        *,
+        message: NormalizedMessage,
+        target_task_id: str | None,
+        candidates_count: int,
+    ) -> None:
+        self.approvals.notify_owner(
+            task=None,
+            reason="task_router_invalid_target",
+            payload={"message_id": message.message_id, "target": target_task_id},
+        )
+        self._audit_router_ambiguity(
+            message=message,
+            reason="task_router_invalid_target",
+            candidates_count=candidates_count,
+        )
 
     def _audit_router_ambiguity(
         self,

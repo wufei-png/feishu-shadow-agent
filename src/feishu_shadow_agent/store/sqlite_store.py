@@ -951,7 +951,11 @@ class SQLiteStore:
                 self._create_owner_notification_action_locked(
                     conn,
                     task_id=task_id,
-                    payload=notify_payload | {"approval_id": short_id},
+                    payload=_approval_notification_payload(
+                        notify_payload,
+                        approval_short_id=short_id,
+                        approval_payload=payload,
+                    ),
                     now=now,
                 )
         return approval_id
@@ -1651,6 +1655,29 @@ def _action_idempotency_key(task_id: int, target_message_id: str, payload: dict[
         default=str,
     )
     return f"reply-{sha256(seed.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _approval_notification_payload(
+    notify_payload: dict[str, Any],
+    *,
+    approval_short_id: str,
+    approval_payload: dict[str, Any],
+) -> dict[str, Any]:
+    payload = dict(notify_payload)
+    task_short_id = payload.get("task_id")
+    if isinstance(task_short_id, str) and task_short_id:
+        commands = []
+        if approval_payload.get("approvable") is not False:
+            commands.append(f"/approve {approval_short_id}")
+        commands.extend(
+            [
+                f"/send {task_short_id} <final reply>",
+                f"/reject {approval_short_id}",
+            ]
+        )
+        payload["commands"] = commands
+    payload["approval_id"] = approval_short_id
+    return payload
 
 
 def _closed_recall_text_patterns(text: str) -> list[str]:

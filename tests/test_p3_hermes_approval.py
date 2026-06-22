@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from feishu_shadow_agent.config import AppConfig, ChatPolicyConfig, OwnerConfig, ReplyPolicyConfig
 from feishu_shadow_agent.ingestion import IngestionService
 from feishu_shadow_agent.jsonl import JSONLLogger
@@ -180,13 +182,22 @@ def test_group_auto_reply_disabled_downgrades_to_approval(tmp_path: Path) -> Non
 
     with store.connect() as conn:
         approval = conn.execute("SELECT short_id, status, preview, payload_json FROM approvals").fetchone()
-        notification = conn.execute("SELECT kind, status FROM actions WHERE kind = 'owner_notification'").fetchone()
+        notification = conn.execute(
+            "SELECT kind, status, payload_json FROM actions WHERE kind = 'owner_notification'"
+        ).fetchone()
         send_count = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
     payload = json.loads(approval["payload_json"])
+    notify_payload = json.loads(notification["payload_json"])
     assert approval["status"] == "pending"
     assert approval["preview"] == "reply text"
     assert payload["text"] == '<at user_id="ou_ext">Ext</at> reply text'
     assert notification["status"] == "pending"
+    assert notify_payload["approval_id"] == approval["short_id"]
+    assert notify_payload["commands"] == [
+        f"/approve {approval['short_id']}",
+        f"/send {notify_payload['task_id']} <final reply>",
+        f"/reject {approval['short_id']}",
+    ]
     assert send_count == 0
 
     result = store.apply_approval_command(
@@ -226,6 +237,11 @@ def test_forbidden_hermes_mentions_downgrade_to_approval(tmp_path: Path) -> None
     notify_payload = json.loads(notification["payload_json"])
     assert payload["approvable"] is False
     assert payload["text"] == ""
+    assert notify_payload["approval_id"] == approval["short_id"]
+    assert notify_payload["commands"] == [
+        f"/send {notify_payload['task_id']} <final reply>",
+        f"/reject {approval['short_id']}",
+    ]
     assert all(not command.startswith("/approve") for command in notify_payload["commands"])
 
     result = store.apply_approval_command(
@@ -517,6 +533,124 @@ def test_task_router_invalid_target_records_ambiguous_audit_and_notification(tmp
     assert route["route_reason"] == "task_router_invalid_target"
     assert route["router_called"] == 1
     assert "task_router_invalid_target" in notification["payload_json"]
+
+
+@pytest.mark.parametrize("route", ["attach_task", "reopen_task", "close_task"])
+def test_task_router_existing_non_candidate_target_is_invalid(tmp_path: Path, route: str) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
+    hermes.session_outputs.append(_session_output(_session_id="sid_stray", reply_target_message_id="om_2"))
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)})
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    service.process_raw_message(
+        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    stray = service.normalizer.normalize(
+        _message("om_stray", chat_id="oc_other", sender_id="ou_stray", sender_name="Stray"),
+        default_chat_type="group",
+    )
+    store.upsert_message(stray)
+    stray_task = store.create_task_for_message(
+        stray,
+        watch_until="2026-06-22T12:10:00+08:00",
+        task_label="stray task",
+    )
+    hermes.router_outputs.append(
+        {
+            "route": route,
+            "target_task_id": stray_task.short_id,
+            "confidence": 0.9,
+            "reason": "wrong existing target",
+            "updated_watch_keys": [],
+        }
+    )
+
+    service.process_raw_message(
+        _message("om_2", sender_id="ou_b", sender_name="Bob", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        route_row = conn.execute(
+            "SELECT route, route_reason, router_called FROM routing_audits WHERE message_id = ? ORDER BY id DESC LIMIT 1",
+            ("om_2",),
+        ).fetchone()
+        stray_status = conn.execute("SELECT status FROM tasks WHERE id = ?", (stray_task.id,)).fetchone()["status"]
+        stray_link_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM task_messages WHERE task_id = ? AND message_id = ?",
+            (stray_task.id, "om_2"),
+        ).fetchone()["c"]
+        notification = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'owner_notification' AND payload_json LIKE ?",
+            ("%task_router_invalid_target%",),
+        ).fetchone()
+    assert route_row["route"] == "ambiguous"
+    assert route_row["route_reason"] == "task_router_invalid_target"
+    assert route_row["router_called"] == 1
+    assert stray_status == "watching"
+    assert stray_link_count == 0
+    assert notification is not None
+
+
+def test_task_router_can_reopen_historical_closed_recall_candidate(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(_session_id="sid_1", reply_target_message_id="om_1"))
+    hermes.session_outputs.append(_session_output(_session_id="sid_1", reply_target_message_id="om_2"))
+    store, service, _ = _service(tmp_path, hermes=hermes)
+
+    created = service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    store.close_task_for_owner_takeover(created.task.id)
+
+    hermes.router_outputs.append(
+        {
+            "route": "reopen_task",
+            "target_task_id": created.task.short_id,
+            "confidence": 0.9,
+            "reason": "historical follow-up",
+            "updated_watch_keys": ["user:ou_a"],
+        }
+    )
+
+    service.process_raw_message(
+        _message("om_2", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        route_row = conn.execute(
+            "SELECT route, route_reason, target_task_id, router_called FROM routing_audits WHERE message_id = ? ORDER BY id DESC LIMIT 1",
+            ("om_2",),
+        ).fetchone()
+        task = conn.execute("SELECT status FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
+        task_message = conn.execute(
+            "SELECT role FROM task_messages WHERE task_id = ? AND message_id = ?",
+            (created.task.id, "om_2"),
+        ).fetchone()
+        invalid_notification = conn.execute(
+            "SELECT id FROM actions WHERE kind = 'owner_notification' AND payload_json LIKE ?",
+            ("%task_router_invalid_target%",),
+        ).fetchone()
+    assert route_row["route"] == "reopen_task"
+    assert route_row["route_reason"] == "historical follow-up"
+    assert route_row["target_task_id"] == created.task.id
+    assert route_row["router_called"] == 1
+    assert task["status"] == "watching"
+    assert task_message["role"] == "follow_up"
+    assert invalid_notification is None
 
 
 def test_task_router_failure_records_ambiguous_audit(tmp_path: Path) -> None:
