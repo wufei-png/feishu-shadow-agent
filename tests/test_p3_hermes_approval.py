@@ -681,10 +681,56 @@ def test_approval_inbox_approves_pending_request_and_advances_checkpoint(tmp_pat
         approval = conn.execute("SELECT status FROM approvals WHERE short_id = ?", (approval_short_id,)).fetchone()
         command = conn.execute("SELECT status FROM approval_commands WHERE message_id = ?", ("om_cmd",)).fetchone()
         action = conn.execute("SELECT kind, status, target_message_id FROM actions WHERE kind = 'send_reply'").fetchone()
+        task = conn.execute("SELECT status, closed_at FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
     assert approval["status"] == "approved"
     assert command["status"] == "applied"
     assert action["status"] == "pending"
     assert action["target_message_id"] == "om_root"
+    assert task["status"] == "watching"
+    assert task["closed_at"] is None
+
+
+def test_approve_task_shortcut_single_pending_sets_task_watching(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config()
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    approval_service = ApprovalService(store=store, config=cfg)
+    created = service.process_raw_message(
+        _message("om_root", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    approval_service.request_send_reply(
+        task=created.task,
+        reply_target_message_id="om_root",
+        proposed_reply="manual reply",
+        reason="test",
+    )
+
+    result = store.apply_approval_command(
+        message_id="om_approve_task_shortcut",
+        command=f"/approve {created.task.short_id}",
+        verb="approve",
+        target_id=created.task.short_id,
+    )
+
+    assert result["status"] == "applied"
+    with store.connect() as conn:
+        approval = conn.execute("SELECT status FROM approvals").fetchone()
+        action = conn.execute("SELECT status FROM actions WHERE kind = 'send_reply'").fetchone()
+        task = conn.execute("SELECT status, closed_at FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
+    assert approval["status"] == "approved"
+    assert action["status"] == "pending"
+    assert task["status"] == "watching"
+    assert task["closed_at"] is None
 
 
 def test_failed_approval_command_rolls_back_state_changes(tmp_path: Path) -> None:
@@ -999,12 +1045,14 @@ def test_send_command_without_pending_approval_uses_task_root_message(tmp_path: 
     with store.connect() as conn:
         approval = conn.execute("SELECT status, payload_json FROM approvals").fetchone()
         action = conn.execute("SELECT status, target_message_id, payload_json FROM actions WHERE kind = 'send_reply'").fetchone()
+        task = conn.execute("SELECT status FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
     approval_payload = json.loads(approval["payload_json"])
     action_payload = json.loads(action["payload_json"])
     assert approval["status"] == "approved"
     assert approval_payload["source"] == "owner_send"
     assert action["target_message_id"] == "om_root"
     assert action_payload["text"] == "final root reply"
+    assert task["status"] == "watching"
 
 
 def test_send_command_creates_action_for_single_pending_approval(tmp_path: Path) -> None:
@@ -1044,11 +1092,13 @@ def test_send_command_creates_action_for_single_pending_approval(tmp_path: Path)
     with store.connect() as conn:
         approval = conn.execute("SELECT status FROM approvals").fetchone()
         action = conn.execute("SELECT status, payload_json FROM actions WHERE kind = 'send_reply'").fetchone()
+        task = conn.execute("SELECT status FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
     payload = json.loads(action["payload_json"])
     assert approval["status"] == "approved"
     assert action["status"] == "pending"
     assert payload["text"] == "final reply"
     assert payload["source"] == "owner_send"
+    assert task["status"] == "watching"
 
 
 def test_concrete_approve_conflict_does_not_consume_approval(tmp_path: Path) -> None:
@@ -1163,6 +1213,56 @@ def test_send_command_active_action_conflict_rolls_back_temporary_approval(tmp_p
     assert approval_count == 0
     assert send_actions == 1
     assert command["status"] == "failed"
+
+
+def test_send_command_active_action_conflict_keeps_waiting_approval_status(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config()
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    approval_service = ApprovalService(store=store, config=cfg)
+    created = service.process_raw_message(
+        _message("om_root", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    approval_service.request_send_reply(
+        task=created.task,
+        reply_target_message_id="om_root",
+        proposed_reply="first",
+        reason="test",
+    )
+    existing_action_id = store.create_send_reply_action(
+        task_id=created.task.id,
+        target_message_id="om_root",
+        payload={"reply_target_message_id": "om_root", "text": "existing", "identity": "user"},
+    )
+    assert existing_action_id is not None
+
+    result = store.apply_approval_command(
+        message_id="om_send_conflict_pending",
+        command=f"/send {created.task.short_id} final reply",
+        verb="send",
+        target_id=created.task.short_id,
+        final_reply="final reply",
+    )
+
+    assert result["status"] == "failed"
+    assert "active send action already exists" in result["result"]["error"]
+    with store.connect() as conn:
+        approval = conn.execute("SELECT status FROM approvals").fetchone()
+        task = conn.execute("SELECT status FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
+        send_actions = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
+    assert approval["status"] == "pending"
+    assert task["status"] == "waiting_approval"
+    assert send_actions == 1
 
 
 def test_send_command_preserves_owner_final_reply_format(tmp_path: Path) -> None:

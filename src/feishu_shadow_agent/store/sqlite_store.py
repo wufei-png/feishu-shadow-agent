@@ -1075,6 +1075,7 @@ class SQLiteStore:
             )
             if action_id is None:
                 raise ValueError("active send action already exists for this task and reply target")
+            self._mark_task_watching_after_send_locked(conn, task_id=int(approval["task_id"]), now=now)
             return {"approval_id": approval["short_id"], "task_id": approval["task_id"], "action_id": action_id}
 
         if verb == "send":
@@ -1163,9 +1164,26 @@ class SQLiteStore:
             )
             if action_id is None:
                 raise ValueError("active send action already exists for this task and reply target")
+            self._mark_task_watching_after_send_locked(conn, task_id=int(task["id"]), now=now)
             return {"approval_id": approval_short_id, "task_id": task["id"], "action_id": action_id}
 
         raise ValueError(f"unsupported command: {verb}")
+
+    def _mark_task_watching_after_send_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        task_id: int,
+        now: str,
+    ) -> None:
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("watching", now, task_id),
+        )
 
     def _list_pending_approvals_locked(
         self,
