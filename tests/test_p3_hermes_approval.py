@@ -785,6 +785,22 @@ def test_send_composer_mentions_reply_target_sender_once() -> None:
     assert reply.had_forbidden_mentions is False
 
 
+def test_send_composer_removes_complete_hermes_at_span_before_target_mention() -> None:
+    composer = SendComposer(owner_open_id="ou_owner")
+    reply = composer.compose(
+        proposed_reply='<at user_id="ou_x">Alice</at> hi',
+        reply_target={"sender_id": "ou_target", "sender_name": "Target", "sender_role": "external_user_message"},
+        chat_type="group",
+    )
+
+    assert reply.text == '<at user_id="ou_target">Target</at> hi'
+    assert reply.had_forbidden_mentions is True
+    assert "Alice</at>" not in reply.text
+    assert "ou_x" not in reply.text
+    assert reply.text.count("<at") == 1
+    assert reply.text.count("</at>") == 1
+
+
 def test_send_composer_escapes_malicious_sender_name() -> None:
     composer = SendComposer(owner_open_id="ou_owner")
     reply = composer.compose(
@@ -864,6 +880,30 @@ def test_approval_inbox_approves_pending_request_and_advances_checkpoint(tmp_pat
     assert action["target_message_id"] == "om_root"
     assert task["status"] == "watching"
     assert task["closed_at"] is None
+
+
+def test_approval_inbox_fetch_failure_does_not_advance_checkpoint(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config()
+    fake = FakeFeishu()
+    logger = JSONLLogger(tmp_path / "agent.jsonl")
+    approval_service = ApprovalService(store=store, config=cfg)
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=cfg,
+        logger=logger,
+        approval_service=approval_service,
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    store.set_checkpoint("approval_inbox", {"last_success_at": "2026-06-22T10:00:00+08:00"})
+    fake.pages[None] = RuntimeError("p2p fetch failed")
+
+    with pytest.raises(RuntimeError, match="p2p fetch failed"):
+        service.run_approval_inbox(run_id="run_1")
+
+    assert fake.calls == ["p2p:ou_bot:None"]
+    assert store.get_checkpoint("approval_inbox") == {"last_success_at": "2026-06-22T10:00:00+08:00"}
 
 
 def test_approval_inbox_processes_existing_owner_command_message(tmp_path: Path) -> None:

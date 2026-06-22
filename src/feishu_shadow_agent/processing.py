@@ -17,7 +17,8 @@ from .store.sqlite_store import SQLiteStore
 from .types import NormalizedMessage, RouteDecision, TaskRecord
 
 WATCH_EXTEND_MINUTES = 120
-FORBIDDEN_MENTION_RE = re.compile(r"<at\b[^>]*>|@所有人|@_all|@all", re.IGNORECASE)
+HERMES_AT_SPAN_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE | re.DOTALL)
+FORBIDDEN_MENTION_RE = re.compile(r"<at\b[^>]*>|</at>|@所有人|@_all|@all", re.IGNORECASE)
 WATCH_KEY_RE = re.compile(r"^(?:user|msg|thread):[^\s:]+$")
 
 
@@ -78,8 +79,9 @@ class SendComposer:
         reply_target: Any,
         chat_type: str | None,
     ) -> ComposedReply:
-        had_forbidden = bool(FORBIDDEN_MENTION_RE.search(proposed_reply))
-        cleaned = FORBIDDEN_MENTION_RE.sub("", proposed_reply)
+        had_forbidden = bool(HERMES_AT_SPAN_RE.search(proposed_reply) or FORBIDDEN_MENTION_RE.search(proposed_reply))
+        cleaned = HERMES_AT_SPAN_RE.sub("", proposed_reply)
+        cleaned = FORBIDDEN_MENTION_RE.sub("", cleaned)
         cleaned = " ".join(cleaned.split())
         if chat_type == "group" and reply_target is not None:
             sender_id = reply_target["sender_id"]
