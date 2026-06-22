@@ -95,10 +95,10 @@ class MessageNormalizer:
 
     def _sender_role(self, *, sender_id: str | None, sender_type: str | None, raw: dict[str, Any]) -> str:
         lowered_type = (sender_type or "").lower()
-        if lowered_type == "bot":
-            return "bot_message"
         if raw.get("sent_by_agent") is True or raw.get("agent_message") is True:
             return "agent_message"
+        if lowered_type in {"bot", "app"}:
+            return "bot_message"
         if sender_id == self.owner_open_id:
             return "owner_message"
         return "external_user_message"
@@ -135,6 +135,7 @@ class ResourceProcessor:
                 continue
             output = _resource_output(resource)
             try:
+                Path(output).parent.mkdir(parents=True, exist_ok=True)
                 result = self.feishu_client.download_resource(
                     message_id=resource.message_id,
                     file_key=resource.file_key,
@@ -156,11 +157,26 @@ class ResourceProcessor:
                 )
                 continue
             if result.ok:
+                sha256_hex = _sha256_if_exists(output)
+                if sha256_hex is None:
+                    self.store.upsert_resource(
+                        resource,
+                        download_status="missing_file",
+                        path=output,
+                        raw={"result": result.json_data, "error": "download output file missing"},
+                    )
+                    self.logger.emit(
+                        "warning",
+                        "resource_download_missing_file",
+                        run_id=run_id,
+                        data={"message_id": resource.message_id, "file_key": resource.file_key, "path": output},
+                    )
+                    continue
                 self.store.upsert_resource(
                     resource,
                     download_status="downloaded",
                     path=output,
-                    sha256_hex=_sha256_if_exists(output),
+                    sha256_hex=sha256_hex,
                     raw={"result": result.json_data},
                 )
             else:
@@ -242,11 +258,13 @@ class IngestionService:
                 continue
             if thread_id:
                 key = f"active_watch.thread.{thread_id}"
+                start, end = self._window(key)
                 raws = self._drain(lambda token: self.feishu_client.list_thread_messages(
                     thread_id=thread_id,
                     page_token=token,
                     page_size=PAGE_SIZE,
                 ))
+                raws = _filter_raws_in_window(raws, start=start, end=end)
             else:
                 key = f"active_watch.chat.{chat_id}"
                 start, end = self._window(key)
@@ -263,7 +281,7 @@ class IngestionService:
                 default_chat_type=target["chat_type"],
                 run_id=run_id,
             )
-            self.store.set_checkpoint(key, {"last_success_at": now})
+            self.store.set_checkpoint(key, {"last_success_at": end})
         return StageResult("active_watch", ok=True, processed=processed)
 
     def _run_search_stage(
@@ -332,15 +350,16 @@ class IngestionService:
         )
         if source == "approval_inbox":
             return None
-        if inserted and not message.is_self_message and message.sender_role != "owner_message" and not message.at_all:
-            self.resources.process(message, run_id=run_id)
-        return self.router.route(
+        result = self.router.route(
             message,
             source=source,
             inserted=inserted,
             now=self.clock(),
             watch_until=_plus_minutes(self.clock(), WATCH_EXTEND_MINUTES),
         )
+        if _should_process_resources(inserted=inserted, message=message, result=result):
+            self.resources.process(message, run_id=run_id)
+        return result
 
     def _window(self, checkpoint_key: str) -> tuple[str, str]:
         end = self.clock()
@@ -458,6 +477,33 @@ def _raw_sort_key(raw: dict[str, Any]) -> tuple[str, str]:
     )
 
 
+def _filter_raws_in_window(raws: list[dict[str, Any]], *, start: str, end: str) -> list[dict[str, Any]]:
+    start_dt = _parse_dt_or_none(start)
+    end_dt = _parse_dt_or_none(end)
+    if start_dt is None or end_dt is None:
+        return raws
+    filtered: list[dict[str, Any]] = []
+    for raw in raws:
+        sent_at = _first_string(raw, "create_time", "created_at", "sent_at", "timestamp")
+        sent_dt = _parse_dt_or_none(sent_at) if sent_at is not None else None
+        if sent_dt is None or start_dt <= sent_dt <= end_dt:
+            filtered.append(raw)
+    return filtered
+
+
+def _should_process_resources(
+    *,
+    inserted: bool,
+    message: NormalizedMessage,
+    result: RoutingResult,
+) -> bool:
+    if not inserted or not message.resources:
+        return False
+    if message.is_self_message or message.sender_role == "owner_message" or message.at_all:
+        return False
+    return result.decision.route in {"new_task", "attach_task", "reopen_task", "ambiguous"}
+
+
 def _minus_seconds(value: str, seconds: int) -> str:
     return (_parse_dt(value) - timedelta(seconds=seconds)).astimezone().isoformat(timespec="seconds")
 
@@ -471,6 +517,13 @@ def _parse_dt(value: str) -> datetime:
         return datetime.fromisoformat(value)
     except ValueError:
         return datetime.now().astimezone()
+
+
+def _parse_dt_or_none(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value).astimezone()
+    except ValueError:
+        return None
 
 
 def _resource_output(resource: ResourceRef) -> str:

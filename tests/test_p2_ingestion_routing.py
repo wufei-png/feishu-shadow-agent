@@ -25,6 +25,7 @@ class FakeFeishuClient:
         self.thread_pages: dict[tuple[str, str | None], MessagePage | Exception] = {}
         self.downloads: list[dict[str, str]] = []
         self.calls: list[str] = []
+        self.write_download_files = True
 
     def version(self) -> LarkCliResult:
         return LarkCliResult(["lark-cli", "--version"], 0, stdout="lark-cli version 1.0.56")
@@ -103,6 +104,10 @@ class FakeFeishuClient:
                 "output": output,
             }
         )
+        if self.write_download_files:
+            path = Path(output)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"resource")
         return LarkCliResult(["lark-cli", "im", "+messages-resources-download"], 0, json_data={})
 
 
@@ -164,6 +169,10 @@ def test_normalizer_marks_mentions_sender_roles_and_resources() -> None:
         _message("om_4", sender_id="cli_bot", sender_type="bot"),
         default_chat_type="group",
     )
+    app_bot = normalizer.normalize(
+        _message("om_5", sender_id="cli_app", sender_type="app"),
+        default_chat_type="group",
+    )
 
     assert direct.direct_mention is True
     assert direct.resources[0].file_key == "img_1"
@@ -171,6 +180,7 @@ def test_normalizer_marks_mentions_sender_roles_and_resources() -> None:
     assert at_all.direct_mention is False
     assert owner.sender_role == "owner_message"
     assert bot.sender_role == "bot_message"
+    assert app_bot.sender_role == "bot_message"
 
 
 def test_group_ingest_drains_pages_sorts_dedupes_and_advances_checkpoint(tmp_path: Path) -> None:
@@ -372,6 +382,117 @@ def test_resource_status_downloaded_and_bot_not_joined(tmp_path: Path, monkeypat
             for row in conn.execute("SELECT file_key, download_status FROM resources")
         }
     assert statuses == {"img_1": "downloaded", "img_2": "bot_not_joined"}
+
+
+def test_resource_download_success_without_file_records_missing_file(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake = FakeFeishuClient()
+    fake.write_download_files = False
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(chats={"oc_1": ChatPolicyConfig(bot_joined=True)}),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+
+    service.process_raw_message(
+        _message("om_missing_file", mentions=[{"open_id": "ou_owner"}], image_key="img_missing"),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        resource = conn.execute(
+            "SELECT download_status, path FROM resources WHERE file_key = ?",
+            ("img_missing",),
+        ).fetchone()
+    assert resource["download_status"] == "missing_file"
+    assert Path(resource["path"]).parent.exists()
+
+
+def test_active_watch_ignores_unmatched_resource_message_without_download(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake = FakeFeishuClient()
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(chats={"oc_1": ChatPolicyConfig(bot_joined=True)}),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    service.process_raw_message(
+        _message("om_root", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    ignored = service.process_raw_message(
+        _message("om_unmatched", sender_id="ou_other", image_key="img_unmatched"),
+        source="active_watch",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert ignored is not None and ignored.decision.route == "ignore"
+    assert fake.downloads == []
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM resources").fetchone()["c"] == 0
+
+
+def test_thread_active_watch_filters_by_checkpoint_window(tmp_path: Path) -> None:
+    fake = FakeFeishuClient()
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(daemon=DaemonConfig(overlap_seconds=120)),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:20:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message(
+            "om_thread_root",
+            thread_id="omt_1",
+            mentions=[{"open_id": "ou_owner"}],
+            create_time="2026-06-22T10:00:00+08:00",
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    store.set_checkpoint("active_watch.thread.omt_1", {"last_success_at": "2026-06-22T10:10:00+08:00"})
+    fake.thread_pages[("omt_1", None)] = MessagePage(
+        [
+            _message(
+                "om_old_thread",
+                thread_id="omt_1",
+                create_time="2026-06-22T10:07:59+08:00",
+            ),
+            _message(
+                "om_new_thread",
+                thread_id="omt_1",
+                create_time="2026-06-22T10:11:00+08:00",
+            ),
+        ]
+    )
+
+    result = service.run_active_watch(run_id="run_1")
+
+    assert result.processed == 1
+    assert store.get_checkpoint("active_watch.thread.omt_1") == {
+        "last_success_at": "2026-06-22T10:20:00+08:00"
+    }
+    assert store.get_message("om_old_thread") is None
+    assert store.get_message("om_new_thread") is not None
 
 
 def test_daemon_tick_runs_p2_stages_in_order(tmp_path: Path) -> None:
