@@ -1,0 +1,164 @@
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+from typing import Sequence
+
+import yaml
+
+from .config import ConfigError, ConfigService, LoadedConfig
+from .daemon import Daemon
+from .feishu.lark_cli import LarkCliClient
+from .health import HealthSuite, has_critical_failure, summarize_results
+from .jsonl import JSONLLogger
+from .paths import resolve_relative_path
+from .store.sqlite_store import SQLiteStore
+from .types import new_run_id
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not hasattr(args, "handler"):
+        parser.print_help()
+        return 0
+    try:
+        return args.handler(args)
+    except ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="feishu_shadow_agent")
+    subparsers = parser.add_subparsers(dest="command")
+
+    doctor = subparsers.add_parser("doctor", help="run health checks")
+    _add_config_arg(doctor)
+    doctor.add_argument("--send-test", action="store_true", help="send a real test DM to owner")
+    doctor.set_defaults(handler=_handle_doctor)
+
+    daemon = subparsers.add_parser("daemon", help="run the no-op daemon skeleton")
+    _add_config_arg(daemon)
+    daemon.add_argument("--dry-run", action="store_true", help="do not perform write operations")
+    daemon.add_argument(
+        "--send-owner-notifications",
+        action="store_true",
+        help="reserved for later phases; no effect in P1 no-op daemon",
+    )
+    daemon.set_defaults(handler=_handle_daemon)
+
+    config = subparsers.add_parser("config", help="configuration helpers")
+    config_subparsers = config.add_subparsers(dest="config_command")
+    config_show = config_subparsers.add_parser("show", help="print config")
+    _add_config_arg(config_show)
+    config_show.add_argument("--redacted", action="store_true", help="redact secret-like fields")
+    config_show.set_defaults(handler=_handle_config_show)
+
+    status = subparsers.add_parser("status", help="reserved for P4")
+    status.set_defaults(handler=_handle_not_implemented)
+    replay = subparsers.add_parser("replay", help="reserved for P4")
+    replay.set_defaults(handler=_handle_not_implemented)
+    approve = subparsers.add_parser("approve", help="reserved for P4")
+    approve.add_argument("approval_id")
+    approve.set_defaults(handler=_handle_not_implemented)
+    reject = subparsers.add_parser("reject", help="reserved for P4")
+    reject.add_argument("approval_id")
+    reject.set_defaults(handler=_handle_not_implemented)
+    send = subparsers.add_parser("send", help="reserved for P4")
+    send.add_argument("task_id")
+    send.add_argument("text")
+    send.set_defaults(handler=_handle_not_implemented)
+
+    return parser
+
+
+def _add_config_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--config", help="path to config.yaml")
+
+
+def _handle_doctor(args: argparse.Namespace) -> int:
+    loaded, store, logger = _load_runtime(args.config)
+    run_id = new_run_id("doctor")
+    store.record_run_start(run_id=run_id, dry_run=not args.send_test, **_git_info(Path.cwd()))
+    client = LarkCliClient(
+        path=loaded.config.lark_cli.path,
+        timeout_seconds=loaded.config.lark_cli.timeout_seconds,
+    )
+    suite = HealthSuite(loaded_config=loaded, store=store, feishu_client=client, run_id=run_id)
+    results = suite.run(send_test=args.send_test)
+    summary = summarize_results(results)
+    status = "health_failed" if has_critical_failure(results) else "ok"
+    store.record_run_finish(run_id=run_id, status=status, health_summary=summary)
+    for result in results:
+        marker = "OK" if result.status == "ok" else result.status.upper()
+        print(f"[{marker}] {result.name}: {result.message}")
+    logger.emit("info", "doctor_completed", run_id=run_id, data=summary)
+    return 2 if has_critical_failure(results) else 0
+
+
+def _handle_daemon(args: argparse.Namespace) -> int:
+    loaded, store, logger = _load_runtime(args.config)
+    run_id = new_run_id("run")
+    client = LarkCliClient(
+        path=loaded.config.lark_cli.path,
+        timeout_seconds=loaded.config.lark_cli.timeout_seconds,
+    )
+    suite = HealthSuite(loaded_config=loaded, store=store, feishu_client=client, run_id=run_id)
+    daemon = Daemon(
+        store=store,
+        logger=logger,
+        health_suite=suite,
+        tick_interval_seconds=loaded.config.daemon.tick_interval_seconds,
+        dry_run=args.dry_run,
+        run_metadata=_git_info(Path.cwd()),
+    )
+    return daemon.run_forever()
+
+
+def _handle_config_show(args: argparse.Namespace) -> int:
+    service = ConfigService()
+    loaded = service.load(args.config)
+    data = service.redacted_dict(loaded.config) if args.redacted else loaded.config.model_dump(mode="json")
+    print(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), end="")
+    return 0
+
+
+def _handle_not_implemented(args: argparse.Namespace) -> int:
+    print(f"{args.command} is not implemented in P1", file=sys.stderr)
+    return 2
+
+
+def _load_runtime(config_path: str | None) -> tuple[LoadedConfig, SQLiteStore, JSONLLogger]:
+    loaded = ConfigService().load(config_path)
+    sqlite_path = resolve_relative_path(loaded.config.storage.sqlite_path, loaded.base_dir)
+    jsonl_path = resolve_relative_path(loaded.config.logging.jsonl_path, loaded.base_dir)
+    return loaded, SQLiteStore(sqlite_path), JSONLLogger(jsonl_path)
+
+
+def _git_info(cwd: Path) -> dict[str, object]:
+    commit = _git_output(["git", "rev-parse", "--short", "HEAD"], cwd)
+    dirty_output = _git_output(["git", "status", "--porcelain"], cwd)
+    return {
+        "git_commit": commit,
+        "git_dirty": bool(dirty_output),
+    }
+
+
+def _git_output(argv: list[str], cwd: Path) -> str | None:
+    try:
+        completed = subprocess.run(
+            argv,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip()

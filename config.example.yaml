@@ -1,0 +1,49 @@
+owner:
+  open_id: ou_owner
+  name: 张三
+
+daemon:
+  tick_interval_seconds: 60
+  overlap_seconds: 120
+
+health:
+  interval_seconds: 300
+  retry_interval_seconds: 60
+  timeout_seconds: 10
+
+storage:
+  sqlite_path: data/agent.sqlite3
+
+logging:
+  jsonl_path: logs/agent.jsonl
+
+lark_cli:
+  path: null
+  timeout_seconds: 30
+
+hermes:
+  health_url: https://example.invalid/health
+  api_key_env: HERMES_API_KEY
+  timeout_seconds: 10
+
+reply_policy:
+  p2p_auto_reply: true
+  default_group_auto_reply: false
+  risk_level_max: low
+  confidence_threshold: 0.85
+
+chats:
+  oc_xxx:
+    name: 示例产品群
+    auto_reply: true
+    bot_joined: true
+
+tool_permissions:
+  profile: guarded_write
+
+retention:
+  raw_message_days: 30
+  resource_days: 30
+
+debug:
+  save_full_hermes_io: false
