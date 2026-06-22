@@ -1018,6 +1018,22 @@ class SQLiteStore:
         now: str,
     ) -> dict[str, Any]:
         if verb in {"approve", "reject"}:
+            if target_id.startswith("t_"):
+                task = conn.execute(
+                    "SELECT * FROM tasks WHERE short_id = ?",
+                    (target_id,),
+                ).fetchone()
+                if task is not None:
+                    pending = self._list_pending_approvals_locked(conn, task_id=int(task["id"]))
+                    if len(pending) > 1:
+                        return self._create_approval_command_conflict_notification_locked(
+                            conn,
+                            task_id=int(task["id"]),
+                            task_short_id=target_id,
+                            verb=verb,
+                            pending=pending,
+                            now=now,
+                        )
             approval = self._resolve_pending_approval_locked(conn, target_id)
             if approval is None:
                 raise ValueError(f"pending approval not found or ambiguous: {target_id}")
@@ -1071,34 +1087,16 @@ class SQLiteStore:
             reply_text = (final_reply or "").strip()
             if not reply_text:
                 raise ValueError("/send requires final reply text")
-            pending = conn.execute(
-                """
-                SELECT * FROM approvals
-                WHERE task_id = ? AND kind = 'send_reply' AND status = 'pending'
-                ORDER BY created_at DESC, id DESC
-                """,
-                (task["id"],),
-            ).fetchall()
+            pending = self._list_pending_send_reply_approvals_locked(conn, task_id=int(task["id"]))
             if len(pending) > 1:
-                pending_short_ids = [row["short_id"] for row in pending]
-                action_id = self._create_owner_notification_action_locked(
+                return self._create_approval_command_conflict_notification_locked(
                     conn,
                     task_id=int(task["id"]),
-                    payload={
-                        "type": "approval_command_conflict",
-                        "task_id": target_id,
-                        "reason": "multiple_pending_approvals",
-                        "pending_approval_ids": pending_short_ids,
-                        "message": f"Multiple pending approvals exist for {target_id}; use a concrete a_ approval id.",
-                    },
+                    task_short_id=target_id,
+                    verb=verb,
+                    pending=pending,
                     now=now,
                 )
-                return {
-                    "_status": "failed",
-                    "error": f"/send requires a concrete approval id for {target_id}",
-                    "notification_action_id": action_id,
-                    "pending_approval_ids": pending_short_ids,
-                }
             target_message_id: Any
             approval_id: int
             approval_short_id: str
@@ -1164,6 +1162,66 @@ class SQLiteStore:
             return {"approval_id": approval_short_id, "task_id": task["id"], "action_id": action_id}
 
         raise ValueError(f"unsupported command: {verb}")
+
+    def _list_pending_approvals_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        task_id: int,
+    ) -> list[sqlite3.Row]:
+        return conn.execute(
+            """
+            SELECT * FROM approvals
+            WHERE task_id = ? AND status = 'pending'
+            ORDER BY created_at DESC, id DESC
+            """,
+            (task_id,),
+        ).fetchall()
+
+    def _list_pending_send_reply_approvals_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        task_id: int,
+    ) -> list[sqlite3.Row]:
+        return conn.execute(
+            """
+            SELECT * FROM approvals
+            WHERE task_id = ? AND kind = 'send_reply' AND status = 'pending'
+            ORDER BY created_at DESC, id DESC
+            """,
+            (task_id,),
+        ).fetchall()
+
+    def _create_approval_command_conflict_notification_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        task_id: int,
+        task_short_id: str,
+        verb: str,
+        pending: list[sqlite3.Row],
+        now: str,
+    ) -> dict[str, Any]:
+        pending_short_ids = [row["short_id"] for row in pending]
+        action_id = self._create_owner_notification_action_locked(
+            conn,
+            task_id=task_id,
+            payload={
+                "type": "approval_command_conflict",
+                "task_id": task_short_id,
+                "reason": "multiple_pending_approvals",
+                "pending_approval_ids": pending_short_ids,
+                "message": f"Multiple pending approvals exist for {task_short_id}; use a concrete a_ approval id.",
+            },
+            now=now,
+        )
+        return {
+            "_status": "failed",
+            "error": f"/{verb} requires a concrete approval id for {task_short_id}",
+            "notification_action_id": action_id,
+            "pending_approval_ids": pending_short_ids,
+        }
 
     def _resolve_pending_approval_locked(
         self,

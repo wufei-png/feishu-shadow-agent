@@ -308,6 +308,30 @@ def test_resource_dependent_bot_not_joined_creates_owner_notification(tmp_path: 
     assert approvals == 0
 
 
+def test_resource_required_without_resource_records_downgrades_to_approval(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1", requires_resources=True))
+    store, service, _ = _service(tmp_path, hermes=hermes)
+
+    service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        approval = conn.execute("SELECT status, payload_json FROM approvals").fetchone()
+        notification = conn.execute("SELECT kind, status FROM actions WHERE kind = 'owner_notification'").fetchone()
+        send_count = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
+    payload = json.loads(approval["payload_json"])
+    assert approval["status"] == "pending"
+    assert payload["reason"] == "resource_missing"
+    assert notification["kind"] == "owner_notification"
+    assert notification["status"] == "pending"
+    assert send_count == 0
+
+
 def test_task_router_placeholder_can_create_new_task(tmp_path: Path) -> None:
     hermes = FakeHermes()
     hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
@@ -714,6 +738,157 @@ def test_approval_creation_rolls_back_when_owner_notification_fails(tmp_path: Pa
         task = conn.execute("SELECT status FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
     assert approval_count == 0
     assert task["status"] == "watching"
+
+
+def _task_with_two_pending_approvals(tmp_path: Path) -> tuple[SQLiteStore, str]:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config()
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    approval_service = ApprovalService(store=store, config=cfg)
+    created = service.process_raw_message(
+        _message("om_root", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    approval_service.request_send_reply(
+        task=created.task,
+        reply_target_message_id="om_root",
+        proposed_reply="first",
+        reason="test",
+    )
+    approval_service.request_send_reply(
+        task=created.task,
+        reply_target_message_id="om_root",
+        proposed_reply="second",
+        reason="test",
+    )
+    return store, created.task.short_id
+
+
+def test_approve_task_shortcut_multiple_pending_approvals_creates_owner_notification(tmp_path: Path) -> None:
+    store, task_short_id = _task_with_two_pending_approvals(tmp_path)
+
+    result = store.apply_approval_command(
+        message_id="om_approve_conflict",
+        command=f"/approve {task_short_id}",
+        verb="approve",
+        target_id=task_short_id,
+    )
+
+    assert result["status"] == "failed"
+    assert result["result"]["pending_approval_ids"]
+    with store.connect() as conn:
+        pending = conn.execute("SELECT COUNT(*) AS c FROM approvals WHERE status = 'pending'").fetchone()["c"]
+        send_actions = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
+        command = conn.execute(
+            "SELECT status FROM approval_commands WHERE message_id = ?",
+            ("om_approve_conflict",),
+        ).fetchone()
+        notification = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'owner_notification' AND payload_json LIKE ?",
+            ("%multiple_pending_approvals%",),
+        ).fetchone()
+    payload = json.loads(notification["payload_json"])
+    assert pending == 2
+    assert send_actions == 0
+    assert command["status"] == "failed"
+    assert payload["reason"] == "multiple_pending_approvals"
+    assert payload["task_id"] == task_short_id
+    assert len(payload["pending_approval_ids"]) == 2
+    assert "concrete a_" in payload["message"]
+
+
+def test_reject_task_shortcut_multiple_pending_approvals_creates_owner_notification(tmp_path: Path) -> None:
+    store, task_short_id = _task_with_two_pending_approvals(tmp_path)
+
+    result = store.apply_approval_command(
+        message_id="om_reject_conflict",
+        command=f"/reject {task_short_id}",
+        verb="reject",
+        target_id=task_short_id,
+    )
+
+    assert result["status"] == "failed"
+    assert result["result"]["pending_approval_ids"]
+    with store.connect() as conn:
+        pending = conn.execute("SELECT COUNT(*) AS c FROM approvals WHERE status = 'pending'").fetchone()["c"]
+        task = conn.execute("SELECT status FROM tasks WHERE short_id = ?", (task_short_id,)).fetchone()
+        command = conn.execute(
+            "SELECT status FROM approval_commands WHERE message_id = ?",
+            ("om_reject_conflict",),
+        ).fetchone()
+        notification = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'owner_notification' AND payload_json LIKE ?",
+            ("%multiple_pending_approvals%",),
+        ).fetchone()
+    payload = json.loads(notification["payload_json"])
+    assert pending == 2
+    assert task["status"] == "waiting_approval"
+    assert command["status"] == "failed"
+    assert payload["reason"] == "multiple_pending_approvals"
+    assert payload["task_id"] == task_short_id
+    assert len(payload["pending_approval_ids"]) == 2
+    assert "concrete a_" in payload["message"]
+
+
+def test_approve_task_shortcut_mixed_pending_approval_kinds_creates_owner_notification(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config()
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    approval_service = ApprovalService(store=store, config=cfg)
+    created = service.process_raw_message(
+        _message("om_root", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    approval_service.request_send_reply(
+        task=created.task,
+        reply_target_message_id="om_root",
+        proposed_reply="first",
+        reason="test",
+    )
+    store.insert_approval_for_test(short_id="a_tool", task_id=created.task.id, kind="tool_action")
+
+    result = store.apply_approval_command(
+        message_id="om_mixed_approve_conflict",
+        command=f"/approve {created.task.short_id}",
+        verb="approve",
+        target_id=created.task.short_id,
+    )
+
+    assert result["status"] == "failed"
+    with store.connect() as conn:
+        approvals = conn.execute(
+            "SELECT short_id, kind, status FROM approvals WHERE task_id = ? ORDER BY short_id",
+            (created.task.id,),
+        ).fetchall()
+        send_actions = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
+        notification = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'owner_notification' AND payload_json LIKE ?",
+            ("%multiple_pending_approvals%",),
+        ).fetchone()
+    payload = json.loads(notification["payload_json"])
+    assert send_actions == 0
+    assert {row["kind"] for row in approvals} == {"send_reply", "tool_action"}
+    assert all(row["status"] == "pending" for row in approvals)
+    assert "a_tool" in payload["pending_approval_ids"]
+    assert len(payload["pending_approval_ids"]) == 2
 
 
 def test_send_command_multiple_pending_approvals_creates_owner_notification(tmp_path: Path) -> None:

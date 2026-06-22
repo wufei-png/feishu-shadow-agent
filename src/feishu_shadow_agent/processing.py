@@ -666,13 +666,15 @@ def _resource_gate_reason(resources: list[Any], *, requires_resources: bool) -> 
     if not requires_resources:
         return None
     statuses = {row["download_status"] for row in resources}
+    if not statuses:
+        return "resource_missing"
     if statuses <= {"downloaded"}:
         return None
     if statuses & {"bot_not_joined", "bot_invisible"}:
         return "resource_needs_bot"
     if statuses & {"failed", "missing_file"}:
         return "resource_unavailable"
-    return "resource_unavailable" if statuses else "resource_missing"
+    return "resource_unavailable"
 
 
 def _plus_minutes(value: str, minutes: int) -> str:
