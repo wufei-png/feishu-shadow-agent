@@ -11,13 +11,13 @@ flowchart LR
   subgraph Feishu["Feishu"]
     GroupMsg["群聊 @ owner 消息"]
     P2PMsg["P2P 私聊消息"]
-    OwnerCmd["owner 与 bot 私聊命令"]
+    OwnerDM["owner 与 bot 私聊"]
     ReplyTarget["原消息 reply target"]
   end
 
   subgraph LarkCli["lark-cli"]
     UserRead["--as user 读取/搜索/回复"]
-    BotOps["--as bot 通知/群回复/资源下载"]
+    BotOps["--as bot 通知/审批/群回复/资源下载"]
   end
 
   subgraph Agent["Python daemon"]
@@ -25,6 +25,7 @@ flowchart LR
     Ingest["ingest + normalize"]
     Store["SQLite Store"]
     HumanTakeover["loop guard / human_taken_over"]
+    CancelPending["cancel pending send/approval + close task"]
     Match["CandidateCollector / TaskMatcher"]
     Router["Hermes TaskRouter"]
     TaskSession["Hermes Task Session"]
@@ -37,7 +38,7 @@ flowchart LR
 
   GroupMsg --> UserRead
   P2PMsg --> UserRead
-  OwnerCmd --> BotOps
+  OwnerDM -->|owner 命令| BotOps
   UserRead --> Ingest
   BotOps --> Ingest
   Health --> Store
@@ -45,7 +46,8 @@ flowchart LR
   Ingest --> HumanTakeover
   Store --> HumanTakeover
   HumanTakeover -->|未接管| Match
-  HumanTakeover -->|接管| Dispatcher
+  HumanTakeover -->|接管| CancelPending
+  CancelPending --> Store
   Store --> Match
   Match -->|确定归属| TaskSession
   Match -->|归属不确定| Router
@@ -58,9 +60,11 @@ flowchart LR
   Dispatcher -->|对外回复| UserRead
   Dispatcher -->|bot 群回复/owner 通知| BotOps
   UserRead --> ReplyTarget
-  BotOps --> ReplyTarget
+  BotOps -->|bot 群回复| ReplyTarget
+  BotOps -->|owner 通知/审批私聊| OwnerDM
   Store --> Logs
   HumanTakeover --> Logs
+  CancelPending --> Logs
   TaskSession --> Logs
   Dispatcher --> Logs
 ```
@@ -81,13 +85,12 @@ flowchart TD
   Pause --> Recheck["按 retry_interval 重检"]
   Recheck --> RuntimeHealth
 
-  RuntimeHealth -->|是| ApprovalInbox["1. approval inbox"]
-  ApprovalInbox --> GroupIngest["2. group_at_me ingest<br/>分页 drain + 时间升序处理"]
-  GroupIngest --> P2PIngest["3. p2p ingest<br/>分页 drain + 时间升序处理"]
-  P2PIngest --> ActiveWatch["4. active task watch<br/>按 chat/thread 合并拉取"]
+  RuntimeHealth -->|是| ApprovalInbox["1. approval inbox<br/>成功后推进 approval_inbox checkpoint"]
+  ApprovalInbox --> GroupIngest["2. group_at_me ingest<br/>分页 drain + 时间升序处理<br/>成功后推进 ingest.group_at_me checkpoint"]
+  GroupIngest --> P2PIngest["3. p2p ingest<br/>分页 drain + 时间升序处理<br/>成功后推进 ingest.p2p checkpoint"]
+  P2PIngest --> ActiveWatch["4. active task watch<br/>按 chat/thread 合并拉取<br/>成功后推进 active_watch.* checkpoint"]
   ActiveWatch --> Dispatch["5. pending actions dispatch<br/>send 互斥"]
-  Dispatch --> Checkpoints["仅成功后推进对应 checkpoint"]
-  Checkpoints --> Sleep["sleep tick_interval"]
+  Dispatch --> Sleep["sleep tick_interval"]
   Sleep --> Loop
 ```
 
