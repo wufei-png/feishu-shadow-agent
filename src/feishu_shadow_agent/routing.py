@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from .store.sqlite_store import SQLiteStore
 from .types import NormalizedMessage, RouteDecision, TaskCandidate, TaskRecord
@@ -102,7 +103,10 @@ class MessageRouter:
             )
 
         if not candidates and source in TRIGGER_SOURCES and message.chat_id:
-            historical = self.store.get_recent_closed_tasks(message.chat_id)
+            historical = self.store.get_related_closed_tasks(
+                message,
+                since=_minus_days(now, 7),
+            )
             if historical:
                 return self._audit(
                     message,
@@ -228,3 +232,11 @@ def _is_active(task: TaskRecord, *, now: str) -> bool:
     return task.status in {"watching", "waiting_approval"} and (
         task.watch_until is None or task.watch_until > now
     )
+
+
+def _minus_days(value: str, days: int) -> str:
+    try:
+        base = datetime.fromisoformat(value)
+    except ValueError:
+        base = datetime.now().astimezone()
+    return (base - timedelta(days=days)).astimezone().isoformat(timespec="seconds")

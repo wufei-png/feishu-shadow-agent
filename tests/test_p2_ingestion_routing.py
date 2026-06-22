@@ -343,6 +343,94 @@ def test_closed_recall_records_router_placeholder(tmp_path: Path) -> None:
         assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 1
 
 
+def test_unrelated_closed_task_does_not_block_new_group_task(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    old_task = service.process_raw_message(
+        _message(
+            "om_old",
+            chat_id="oc_1",
+            sender_id="ou_a",
+            text="分类服务启动失败",
+            mentions=[{"open_id": "ou_owner"}],
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    assert old_task is not None and old_task.task is not None
+    store.close_task_for_owner_takeover(old_task.task.id)
+
+    new_task = service.process_raw_message(
+        _message(
+            "om_new",
+            chat_id="oc_1",
+            sender_id="ou_b",
+            text="新的报表权限问题",
+            mentions=[{"open_id": "ou_owner"}],
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert new_task is not None
+    assert new_task.decision.route == "new_task"
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 2
+
+
+def test_reply_to_closed_task_enters_recall_placeholder(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    old_task = service.process_raw_message(
+        _message(
+            "om_old",
+            chat_id="oc_1",
+            sender_id="ou_a",
+            text="分类服务启动失败",
+            mentions=[{"open_id": "ou_owner"}],
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    assert old_task is not None and old_task.task is not None
+    store.close_task_for_owner_takeover(old_task.task.id)
+
+    recalled = service.process_raw_message(
+        _message(
+            "om_reply",
+            chat_id="oc_1",
+            sender_id="ou_b",
+            text="我这边也是这个问题",
+            mentions=[{"open_id": "ou_owner"}],
+            reply_to="om_old",
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert recalled is not None
+    assert recalled.decision.route == "ambiguous"
+    assert recalled.decision.reason == "closed_recall_router_placeholder"
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 1
+
+
 def test_resource_status_downloaded_and_bot_not_joined(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     fake = FakeFeishuClient()

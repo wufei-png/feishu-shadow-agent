@@ -445,6 +445,89 @@ class SQLiteStore:
             ).fetchall()
         return [_task_from_row(row) for row in rows]
 
+    def get_related_closed_tasks(
+        self,
+        message: NormalizedMessage,
+        *,
+        since: str,
+        limit: int = 20,
+    ) -> list[TaskRecord]:
+        if not message.chat_id:
+            return []
+        conditions: list[str] = []
+        params: list[Any] = [message.chat_id, since]
+        if message.sender_id:
+            conditions.append(
+                """
+                EXISTS (
+                  SELECT 1 FROM task_watch_keys wk
+                  WHERE wk.task_id = t.id AND wk.key = ?
+                )
+                """
+            )
+            params.append(f"user:{message.sender_id}")
+        if message.thread_id:
+            conditions.append("t.thread_id = ?")
+            params.append(message.thread_id)
+            conditions.append(
+                """
+                EXISTS (
+                  SELECT 1 FROM task_watch_keys wk
+                  WHERE wk.task_id = t.id AND wk.key = ?
+                )
+                """
+            )
+            params.append(f"thread:{message.thread_id}")
+        if message.reply_to_message_id:
+            conditions.append(
+                """
+                EXISTS (
+                  SELECT 1 FROM task_messages tm
+                  WHERE tm.task_id = t.id AND tm.message_id = ?
+                )
+                """
+            )
+            params.append(message.reply_to_message_id)
+            conditions.append(
+                """
+                EXISTS (
+                  SELECT 1 FROM task_watch_keys wk
+                  WHERE wk.task_id = t.id AND wk.key = ?
+                )
+                """
+            )
+            params.append(f"msg:{message.reply_to_message_id}")
+        for pattern in _closed_recall_text_patterns(message.text):
+            conditions.append(
+                """
+                (
+                  lower(coalesce(t.task_label, '')) LIKE ?
+                  OR lower(coalesce(t.last_user_message, '')) LIKE ?
+                  OR lower(coalesce(t.last_agent_reply, '')) LIKE ?
+                )
+                """
+            )
+            params.extend([pattern, pattern, pattern])
+        if not conditions:
+            return []
+        where_related = " OR ".join(f"({condition})" for condition in conditions)
+        params.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM tasks t
+                WHERE t.chat_id = ?
+                  AND t.status NOT IN ('watching', 'waiting_approval')
+                  AND datetime(t.updated_at) >= datetime(?)
+                  AND ({where_related})
+                ORDER BY t.updated_at DESC, t.id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [_task_from_row(row) for row in rows]
+
     def find_task_ids_for_message(self, message_id: str) -> list[int]:
         self.migrate()
         with self.connect() as conn:
@@ -629,3 +712,26 @@ def _truncate(text: str, limit: int = 100) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return f"{cleaned[:limit - 3]}..."
+
+
+def _closed_recall_text_patterns(text: str) -> list[str]:
+    tokens: list[str] = []
+    current: list[str] = []
+    for char in text.lower():
+        if char.isalnum():
+            current.append(char)
+        else:
+            if current:
+                tokens.append("".join(current))
+                current = []
+    if current:
+        tokens.append("".join(current))
+
+    patterns: list[str] = []
+    for token in tokens:
+        if len(token) < 2:
+            continue
+        patterns.append(f"%{token[:24]}%")
+        if len(patterns) >= 5:
+            break
+    return patterns
