@@ -17,6 +17,7 @@ from .types import NormalizedMessage, RouteDecision, TaskRecord
 
 WATCH_EXTEND_MINUTES = 120
 FORBIDDEN_MENTION_RE = re.compile(r"<at\b[^>]*>|@所有人|@_all|@all", re.IGNORECASE)
+WATCH_KEY_RE = re.compile(r"^(?:user|msg|thread):[^\s:]+$")
 
 
 class StrictModel(BaseModel):
@@ -100,24 +101,31 @@ class ApprovalService:
         reply_target_message_id: str,
         proposed_reply: str,
         reason: str,
+        final_reply: str | None = None,
+        approvable: bool = True,
     ) -> int:
+        reply_text = proposed_reply if final_reply is None else final_reply
+        payload_text = reply_text if approvable else ""
+        commands = [
+            f"/send {task.short_id} <final reply>",
+            f"/reject {task.short_id}",
+        ]
+        if approvable:
+            commands.insert(0, f"/approve {task.short_id}")
         payload = {
             "reply_target_message_id": reply_target_message_id,
-            "text": proposed_reply,
+            "text": payload_text,
             "identity": "user",
             "source": "approval_request",
             "reason": reason,
+            "approvable": approvable,
         }
         notify = {
             "type": "approval_required",
             "task_id": task.short_id,
             "reason": reason,
             "preview": proposed_reply,
-            "commands": [
-                f"/approve {task.short_id}",
-                f"/send {task.short_id} <final reply>",
-                f"/reject {task.short_id}",
-            ],
+            "commands": commands,
         }
         return self.store.create_send_reply_approval(
             task_id=task.id,
@@ -264,6 +272,19 @@ class TaskProcessingService:
                 payload={"message_id": message.message_id, "error": str(exc)},
             )
             return None
+        invalid_watch_keys = _invalid_watch_keys(output.updated_watch_keys)
+        if invalid_watch_keys:
+            self._audit_router_ambiguity(
+                message=message,
+                reason="task_router_invalid_watch_keys",
+                candidates_count=candidates_count,
+            )
+            self.approvals.notify_owner(
+                task=None,
+                reason="task_router_invalid_watch_keys",
+                payload={"message_id": message.message_id, "invalid_watch_keys": invalid_watch_keys},
+            )
+            return None
         if output.confidence < 0.6 or output.route == "ambiguous":
             self.store.record_routing_audit(
                 message_id=message.message_id,
@@ -277,7 +298,15 @@ class TaskProcessingService:
             self.approvals.notify_owner(task=None, reason="task_router_ambiguous", payload={"message_id": message.message_id})
             return None
         if output.route == "new_task":
-            task, decision = self.store.create_task_for_message_and_audit(message, watch_until=watch_until)
+            task, decision = self.store.create_task_for_message_and_audit(
+                message,
+                watch_until=watch_until,
+                reason=output.reason or "task_router_new",
+                candidates_count=candidates_count,
+                router_called=True,
+                matched_by="task_router",
+            )
+            self.store.add_task_watch_keys(task.id, output.updated_watch_keys)
             return RoutingResult(decision=decision, task=task)
         if output.route == "ignore":
             self.store.record_routing_audit(
@@ -305,6 +334,7 @@ class TaskProcessingService:
             return None
         if output.route in {"attach_task", "reopen_task"}:
             self.store.attach_message_to_task(target.id, message, watch_until=watch_until)
+            self.store.add_task_watch_keys(target.id, output.updated_watch_keys)
             decision = RouteDecision(
                 output.route,
                 target_task_id=target.id,
@@ -346,8 +376,6 @@ class TaskProcessingService:
         resources = self.store.list_resources_for_messages(message_ids)
         prompt = _task_session_prompt(task=task, messages=self.store.get_messages_by_ids(message_ids), resources=resources)
         result = self.hermes.task_session(prompt, session_id=session_id)
-        if result.session_id and result.session_id != session_id:
-            self.store.set_task_hermes_session_id(task.id, result.session_id)
         self.store.record_hermes_audit(
             request_type="task_session",
             task_id=task.id,
@@ -365,6 +393,7 @@ class TaskProcessingService:
                 reply_target_message_id=message.message_id,
                 proposed_reply="",
                 reason="hermes_task_session_failed",
+                approvable=False,
             )
             return ProcessingResult("approval_created", task.id, approval_id=approval_id, reason="hermes_failed")
         try:
@@ -375,18 +404,29 @@ class TaskProcessingService:
                 reply_target_message_id=message.message_id,
                 proposed_reply="",
                 reason=f"hermes_schema_failed: {exc.errors()[0]['msg']}",
+                approvable=False,
             )
             return ProcessingResult("approval_created", task.id, approval_id=approval_id, reason="schema_failed")
+        if result.session_id and result.session_id != session_id:
+            self.store.set_task_hermes_session_id(task.id, result.session_id)
 
         target_ids = {message.message_id}
         if task.root_message_id:
             target_ids.add(task.root_message_id)
         if output.reply_target_message_id and output.reply_target_message_id not in target_ids:
+            fallback_target = self.store.get_message(message.message_id)
+            composed = self.composer.compose(
+                proposed_reply=output.proposed_reply,
+                reply_target=fallback_target,
+                chat_type=task.chat_type or message.chat_type,
+            )
             approval_id = self.approvals.request_send_reply(
                 task=task,
                 reply_target_message_id=message.message_id,
                 proposed_reply=output.proposed_reply,
+                final_reply=composed.text,
                 reason="invalid_reply_target_message_id",
+                approvable=_can_directly_approve(output.proposed_reply, composed),
             )
             return ProcessingResult("approval_created", task.id, approval_id=approval_id, reason="invalid_reply_target")
 
@@ -422,7 +462,9 @@ class TaskProcessingService:
                 task=task,
                 reply_target_message_id=reply_target_id,
                 proposed_reply=output.proposed_reply,
+                final_reply=composed.text,
                 reason=gate["reason"],
+                approvable=_can_directly_approve(output.proposed_reply, composed),
             )
             return ProcessingResult("approval_created", task.id, approval_id=approval_id, reason=gate["reason"])
         payload = {
@@ -471,11 +513,15 @@ class TaskProcessingService:
         if chat_type == "group":
             if not message.direct_mention:
                 return {"allow": False, "reason": "group_not_direct_mention", "identity": "user"}
-            if not policy.auto_reply and not self.config.reply_policy.default_group_auto_reply:
+            chat_configured = bool((task.chat_id or message.chat_id) in self.config.chats)
+            group_auto_reply = policy.auto_reply if chat_configured else self.config.reply_policy.default_group_auto_reply
+            if not group_auto_reply:
                 return {"allow": False, "reason": "group_auto_reply_disabled", "identity": "user"}
-            if policy.reply_identity == "bot" or (policy.reply_identity == "bot_preferred" and policy.bot_joined):
+            if policy.reply_identity in {"bot", "bot_preferred"} and policy.bot_joined:
                 return {"allow": True, "reason": "ok", "identity": "bot"}
-            if policy.allow_user_fallback:
+            if policy.reply_identity == "user":
+                return {"allow": True, "reason": "ok", "identity": "user"}
+            if policy.reply_identity == "bot_preferred" and policy.allow_user_fallback:
                 return {"allow": True, "reason": "ok", "identity": "user"}
             return {"allow": False, "reason": "bot_not_joined", "identity": "bot"}
         return {"allow": False, "reason": "unknown_chat_type", "identity": "user"}
@@ -606,6 +652,14 @@ def _resource_card(row: Any) -> dict[str, Any]:
 
 def _risk_rank(value: str) -> int:
     return {"low": 0, "medium": 1, "high": 2}.get(value, 2)
+
+
+def _can_directly_approve(proposed_reply: str, composed: ComposedReply) -> bool:
+    return bool(proposed_reply.strip()) and bool(composed.text.strip()) and not composed.had_forbidden_mentions
+
+
+def _invalid_watch_keys(keys: list[str]) -> list[str]:
+    return [key for key in keys if not isinstance(key, str) or WATCH_KEY_RE.fullmatch(key) is None]
 
 
 def _resource_gate_reason(resources: list[Any], *, requires_resources: bool) -> str | None:

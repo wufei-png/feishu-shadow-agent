@@ -333,6 +333,10 @@ class SQLiteStore:
         message: NormalizedMessage,
         *,
         watch_until: str,
+        reason: str = "new_trigger",
+        candidates_count: int = 0,
+        router_called: bool = False,
+        matched_by: str = "new_trigger",
     ) -> tuple[TaskRecord, RouteDecision]:
         self.migrate()
         now = utc_now_iso()
@@ -349,10 +353,11 @@ class SQLiteStore:
                 "new_task",
                 target_task_id=task.id,
                 target_task_short_id=task.short_id,
-                reason="new_trigger",
-                candidates_count=0,
+                reason=reason,
+                candidates_count=candidates_count,
                 shortcut_hit=False,
-                matched_by="new_trigger",
+                router_called=router_called,
+                matched_by=matched_by,
             )
             self._record_routing_audit(conn, message_id=message.message_id, decision=decision)
         return task, decision
@@ -686,6 +691,14 @@ class SQLiteStore:
         with self.connect() as conn:
             self._record_routing_audit(conn, message_id=message_id, decision=decision)
 
+    def add_task_watch_keys(self, task_id: int, keys: Iterable[str]) -> None:
+        self.migrate()
+        unique_keys = sorted(set(keys))
+        if not unique_keys:
+            return
+        with self.connect() as conn:
+            self._add_watch_keys(conn, task_id, unique_keys, utc_now_iso())
+
     def has_resource_eligible_routing_audit(self, message_id: str) -> bool:
         self.migrate()
         with self.connect() as conn:
@@ -934,8 +947,13 @@ class SQLiteStore:
                 """,
                 ("waiting_approval", now, task_id),
             )
-        if notify_payload is not None:
-            self.create_owner_notification_action(task_id=task_id, payload=notify_payload | {"approval_id": short_id})
+            if notify_payload is not None:
+                self._create_owner_notification_action_locked(
+                    conn,
+                    task_id=task_id,
+                    payload=notify_payload | {"approval_id": short_id},
+                    now=now,
+                )
         return approval_id
 
     def apply_approval_command(
@@ -1023,9 +1041,14 @@ class SQLiteStore:
                 )
                 return {"approval_id": approval["short_id"], "task_id": approval["task_id"], "action_id": None}
             payload = json.loads(approval["payload_json"] or "{}")
+            if payload.get("approvable") is False:
+                raise ValueError("approval requires /send final reply")
             target_message_id = payload.get("reply_target_message_id") or payload.get("target_message_id")
             if not isinstance(target_message_id, str) or not target_message_id:
                 raise ValueError("approval payload is missing reply_target_message_id")
+            text = payload.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("approval payload is missing text; use /send")
             action_id = self._create_send_reply_action_locked(
                 conn,
                 task_id=int(approval["task_id"]),
