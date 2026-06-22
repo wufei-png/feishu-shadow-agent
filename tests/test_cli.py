@@ -4,10 +4,12 @@ import io
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 from feishu_shadow_agent.cli import main
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
+from feishu_shadow_agent.types import LarkCliResult
 
 
 def _write_config(tmp_path: Path) -> Path:
@@ -44,6 +46,27 @@ def _insert_task(store: SQLiteStore, short_id: str, root_message_id: str) -> int
     return int(cursor.lastrowid)
 
 
+def _insert_message(store: SQLiteStore, message_id: str) -> None:
+    store.migrate()
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO messages(message_id, chat_id, chat_type, sender_id, sent_at, text, raw_json, inserted_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                message_id,
+                "oc_1",
+                "p2p",
+                "ou_a",
+                "2026-06-22T10:00:00+08:00",
+                "hello",
+                json.dumps({"message_id": message_id}),
+                "now",
+            ),
+        )
+
+
 def test_send_preserves_multiword_text_and_local_command_id_is_unique(tmp_path: Path) -> None:
     config = _write_config(tmp_path)
     store = _store(tmp_path)
@@ -78,6 +101,16 @@ def test_send_can_read_exact_text_from_stdin(tmp_path: Path, monkeypatch) -> Non
     assert payload["text"] == "line 1\n    line 2\n"
 
 
+def test_daemon_send_owner_notifications_help_describes_dry_run_send(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["daemon", "--help"])
+
+    assert exc.value.code == 0
+    output = " ".join(capsys.readouterr().out.split())
+    assert "actually send and consume owner_notification" in output
+    assert "external replies stay pending" in output
+
+
 def test_status_includes_failed_approval_commands(tmp_path: Path, capsys) -> None:
     config = _write_config(tmp_path)
     assert main(["reject", "--config", str(config), "a_missing"]) == 2
@@ -93,24 +126,7 @@ def test_status_includes_failed_approval_commands(tmp_path: Path, capsys) -> Non
 def test_replay_explains_current_state_without_real_db_mutation(tmp_path: Path, capsys) -> None:
     config = _write_config(tmp_path)
     store = _store(tmp_path)
-    store.migrate()
-    with store.connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO messages(message_id, chat_id, chat_type, sender_id, sent_at, text, raw_json, inserted_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "om_1",
-                "oc_1",
-                "p2p",
-                "ou_a",
-                "2026-06-22T10:00:00+08:00",
-                "hello",
-                json.dumps({"message_id": "om_1"}),
-                "now",
-            ),
-        )
+    _insert_message(store, "om_1")
 
     assert main(["replay", "--config", str(config), "--message-id", "om_1", "--dry-run"]) == 0
 
@@ -120,3 +136,48 @@ def test_replay_explains_current_state_without_real_db_mutation(tmp_path: Path, 
     with store.connect() as conn:
         action_count = conn.execute("SELECT COUNT(*) AS c FROM actions").fetchone()["c"]
     assert action_count == 0
+
+
+def test_replay_previews_only_related_pending_actions(tmp_path: Path, capsys, monkeypatch) -> None:
+    config = _write_config(tmp_path)
+    store = _store(tmp_path)
+    _insert_message(store, "om_1")
+    related_task_id = _insert_task(store, "t_related", "om_1")
+    unrelated_task_id = _insert_task(store, "t_unrelated", "om_other")
+    related_action_id = store.create_send_reply_action(
+        task_id=related_task_id,
+        target_message_id="om_1",
+        payload={"reply_target_message_id": "om_1", "text": "related", "identity": "user"},
+    )
+    unrelated_action_id = store.create_send_reply_action(
+        task_id=unrelated_task_id,
+        target_message_id="om_other",
+        payload={"reply_target_message_id": "om_other", "text": "unrelated", "identity": "user"},
+    )
+    assert related_action_id is not None and unrelated_action_id is not None
+    calls = []
+
+    class FakeReplayClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def reply_message(self, **kwargs):
+            calls.append(kwargs)
+            return LarkCliResult(["dry"], 0, json_data={"api": [{"message_id": kwargs["message_id"]}]})
+
+    monkeypatch.setattr("feishu_shadow_agent.cli.LarkCliClient", FakeReplayClient)
+
+    assert main(["replay", "--config", str(config), "--message-id", "om_1", "--dry-run"]) == 0
+
+    output = yaml.safe_load(capsys.readouterr().out)
+    previews = output["dispatch_preview"]["actions"]
+    assert output["dispatch_preview"]["processed"] == 1
+    assert [preview["action_id"] for preview in previews] == [related_action_id]
+    assert previews[0]["result"]["dry_run"]["json"]["api"][0]["message_id"] == "om_1"
+    assert [call["message_id"] for call in calls] == ["om_1"]
+    with store.connect() as conn:
+        rows = conn.execute("SELECT id, result_json FROM actions ORDER BY id").fetchall()
+    assert [(row["id"], row["result_json"]) for row in rows] == [
+        (related_action_id, None),
+        (unrelated_action_id, None),
+    ]

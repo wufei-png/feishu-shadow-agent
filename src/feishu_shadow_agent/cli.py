@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     daemon.add_argument(
         "--send-owner-notifications",
         action="store_true",
-        help="reserved for later phases; no effect in P1 no-op daemon",
+        help="with --dry-run, actually send and consume owner_notification actions; external replies stay pending",
     )
     daemon.set_defaults(handler=_handle_daemon)
 
@@ -205,16 +205,22 @@ def _handle_local_approval_command(
 
 
 def _handle_replay(args: argparse.Namespace) -> int:
-    loaded, store, logger = _load_runtime(args.config)
+    loaded, store, _ = _load_runtime(args.config)
     summary = store.replay_summary(args.message_id)
     if summary is None:
         print(f"message not found: {args.message_id}", file=sys.stderr)
         return 2
+    related_pending_action_ids = [
+        action["id"]
+        for action in summary["actions"]
+        if action.get("status") == "pending" and action.get("kind") in {"send_reply", "owner_notification"}
+    ]
     client = LarkCliClient(
         path=loaded.config.lark_cli.path,
         timeout_seconds=loaded.config.lark_cli.timeout_seconds,
         cwd=loaded.base_dir,
     )
+    previews = []
     with tempfile.TemporaryDirectory(prefix="feishu-shadow-agent-replay-") as tmp:
         temp_db = Path(tmp) / "agent.sqlite3"
         if store.path.exists():
@@ -227,15 +233,18 @@ def _handle_replay(args: argparse.Namespace) -> int:
             config=loaded.config,
             logger=JSONLLogger(Path(tmp) / "replay.jsonl"),
         )
-        dispatch = dispatcher.dispatch(
-            run_id=new_run_id("replay"),
-            allow_send_reply_actual=False,
-            allow_owner_notification_actual=False,
-        )
+        run_id = new_run_id("replay")
+        for action_id in related_pending_action_ids:
+            preview = dispatcher.preview_action(action_id, run_id=run_id)
+            if preview is not None:
+                previews.append(preview)
     output = {
         "message_id": args.message_id,
         "state": summary,
-        "dispatch_preview": dispatch.__dict__,
+        "dispatch_preview": {
+            "processed": len(previews),
+            "actions": previews,
+        },
         "mutated_real_db": False,
     }
     print(yaml.safe_dump(output, allow_unicode=True, sort_keys=False), end="")

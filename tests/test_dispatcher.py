@@ -18,9 +18,15 @@ class FakeFeishu:
         self.reply_calls: list[dict[str, Any]] = []
         self.owner_calls: list[dict[str, Any]] = []
         self.mget_calls: list[dict[str, Any]] = []
+        self.raise_reply_dry_run = False
+        self.raise_reply_send = False
 
     def reply_message(self, **kwargs: Any) -> LarkCliResult:
         self.reply_calls.append(kwargs)
+        if kwargs.get("dry_run") and self.raise_reply_dry_run:
+            raise RuntimeError("dry-run exploded")
+        if not kwargs.get("dry_run") and self.raise_reply_send:
+            raise RuntimeError("send exploded")
         if self.reply_results:
             return self.reply_results.pop(0)
         return LarkCliResult(["lark-cli", "im", "+messages-reply"], 0, json_data={})
@@ -120,6 +126,57 @@ def test_actual_dispatch_dry_run_failure_marks_failed_without_send(tmp_path: Pat
     assert len(fake.reply_calls) == 1
 
 
+def test_actual_dispatch_dry_run_exception_marks_failed_without_stuck_sending(tmp_path: Path) -> None:
+    store, dispatcher, fake = _dispatcher(tmp_path)
+    task_id = _insert_task(store)
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={"reply_target_message_id": "om_target", "text": "hello", "identity": "user"},
+    )
+    assert action_id is not None
+    fake.raise_reply_dry_run = True
+
+    summary = dispatcher.dispatch(
+        run_id="run_1",
+        allow_send_reply_actual=True,
+        allow_owner_notification_actual=False,
+    )
+
+    action = store.get_action(action_id)
+    assert summary.failed == 1
+    assert action is not None
+    assert action.status == "failed"
+    assert action.result["error_stage"] == "dry_run"
+    assert action.result["dry_run"]["error"] == "dry-run exploded"
+
+
+def test_actual_dispatch_send_exception_marks_failed_without_stuck_sending(tmp_path: Path) -> None:
+    store, dispatcher, fake = _dispatcher(tmp_path)
+    task_id = _insert_task(store)
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={"reply_target_message_id": "om_target", "text": "hello", "identity": "user"},
+    )
+    assert action_id is not None
+    fake.reply_results.append(LarkCliResult(["dry"], 0, json_data={"api": []}))
+    fake.raise_reply_send = True
+
+    summary = dispatcher.dispatch(
+        run_id="run_1",
+        allow_send_reply_actual=True,
+        allow_owner_notification_actual=False,
+    )
+
+    action = store.get_action(action_id)
+    assert summary.failed == 1
+    assert action is not None
+    assert action.status == "failed"
+    assert action.result["error_stage"] == "send"
+    assert action.result["send"]["error"] == "send exploded"
+
+
 def test_actual_dispatch_records_sent_id_and_associates_readback(tmp_path: Path) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
@@ -179,6 +236,39 @@ def test_actual_dispatch_records_sent_id_and_associates_readback(tmp_path: Path)
     assert task_message["role"] == "agent_reply"
     assert [call["dry_run"] for call in fake.reply_calls] == [True, False]
     assert fake.mget_calls == [{"as_identity": "bot", "message_ids": ["om_sent"]}]
+
+
+def test_readback_exception_after_send_marks_sent_with_warning(tmp_path: Path) -> None:
+    store, dispatcher, fake = _dispatcher(tmp_path)
+    task_id = _insert_task(store)
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={"reply_target_message_id": "om_target", "text": "hello", "identity": "user"},
+    )
+    assert action_id is not None
+    fake.reply_results.extend(
+        [
+            LarkCliResult(["dry"], 0, json_data={"api": []}),
+            LarkCliResult(["send"], 0, json_data={"data": {"message_id": "om_sent"}}),
+        ]
+    )
+    fake.readback_pages.append(MessagePage([{"content": {"text": "missing id"}}]))
+
+    summary = dispatcher.dispatch(
+        run_id="run_1",
+        allow_send_reply_actual=True,
+        allow_owner_notification_actual=False,
+    )
+
+    action = store.get_action(action_id)
+    assert summary.sent == 1
+    assert action is not None
+    assert action.status == "sent"
+    assert action.result["sent_message_id"] == "om_sent"
+    assert "readback_exception" in action.result["warnings"]
+    assert action.result["readback"]["message_id"] == "om_sent"
+    assert action.result["readback"]["exception_type"] == "ValueError"
 
 
 def test_actual_send_without_readback_still_marks_sent_with_warning(tmp_path: Path) -> None:

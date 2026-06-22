@@ -46,6 +46,7 @@ class Dispatcher:
         run_id: str,
         allow_send_reply_actual: bool,
         allow_owner_notification_actual: bool,
+        blocked_send_reply_reason: str | None = None,
         limit: int = 50,
     ) -> DispatchSummary:
         summary = DispatchSummary()
@@ -77,26 +78,70 @@ class Dispatcher:
                 summary = _bump(summary, processed=1, sent=1 if sent else 0, failed=0 if sent else 1)
                 continue
 
-            result = self._execute_preview(action)
-            self.store.record_action_preview(action.id, result)
-            self.logger.emit(
-                "info",
-                "dispatch_action_previewed",
+            self.preview_action_record(
+                action,
                 run_id=run_id,
-                data={"action_id": action.id, "kind": action.kind, "error_stage": result.get("error_stage")},
+                blocked_actual_reason=blocked_send_reply_reason if action.kind == "send_reply" else None,
             )
             summary = _bump(summary, processed=1, previewed=1)
         return summary
 
+    def preview_action(self, action_id: int, *, run_id: str) -> dict[str, Any] | None:
+        action = self.store.get_action(action_id)
+        if action is None or action.status != "pending" or action.kind not in {"send_reply", "owner_notification"}:
+            return None
+        return self.preview_action_record(action, run_id=run_id)
+
+    def preview_action_record(
+        self,
+        action: ActionRecord,
+        *,
+        run_id: str,
+        blocked_actual_reason: str | None = None,
+    ) -> dict[str, Any]:
+        result = self._execute_preview(action)
+        if blocked_actual_reason:
+            result["blocked_actual_reason"] = blocked_actual_reason
+            result["warnings"].append(f"actual_send_blocked_{blocked_actual_reason}")
+        self.store.record_action_preview(action.id, result)
+        self.logger.emit(
+            "info",
+            "dispatch_action_previewed",
+            run_id=run_id,
+            data={
+                "action_id": action.id,
+                "kind": action.kind,
+                "error_stage": result.get("error_stage"),
+                "blocked_actual_reason": blocked_actual_reason,
+            },
+        )
+        return {
+            "action_id": action.id,
+            "kind": action.kind,
+            "task_id": action.task_id,
+            "target_message_id": action.target_message_id,
+            "result": result,
+        }
+
     def _execute_actual(self, action: ActionRecord, *, run_id: str) -> tuple[dict[str, Any], bool]:
         result = _empty_result()
-        dry_run = self._dry_run(action)
+        try:
+            dry_run = self._dry_run(action)
+        except Exception as exc:
+            result["dry_run"] = _exception_command_result(action, "dry_run", exc)
+            result["error_stage"] = "dry_run"
+            return result, False
         result["dry_run"] = _command_result(dry_run)
         if not dry_run.ok:
             result["error_stage"] = "dry_run"
             return result, False
 
-        send = self._send(action)
+        try:
+            send = self._send(action)
+        except Exception as exc:
+            result["send"] = _exception_command_result(action, "send", exc)
+            result["error_stage"] = "send"
+            return result, False
         result["send"] = _command_result(send)
         if not send.ok:
             result["error_stage"] = "send"
@@ -108,14 +153,24 @@ class Dispatcher:
             result["warnings"].append("sent_message_id_missing")
         else:
             result["sent_message_id"] = sent_message_id
-        readback = self._readback(action, sent_message_id=sent_message_id, run_id=run_id)
-        result["readback"] = readback["result"]
-        result["warnings"].extend(readback["warnings"])
+        try:
+            readback = self._readback(action, sent_message_id=sent_message_id, run_id=run_id)
+        except Exception as exc:
+            result["readback"] = _exception_readback_result(sent_message_id, exc)
+            result["warnings"].append("readback_exception")
+        else:
+            result["readback"] = readback["result"]
+            result["warnings"].extend(readback["warnings"])
         return result, True
 
     def _execute_preview(self, action: ActionRecord) -> dict[str, Any]:
         result = _empty_result()
-        dry_run = self._dry_run(action)
+        try:
+            dry_run = self._dry_run(action)
+        except Exception as exc:
+            result["dry_run"] = _exception_command_result(action, "dry_run", exc)
+            result["error_stage"] = "dry_run"
+            return result
         result["dry_run"] = _command_result(dry_run)
         if not dry_run.ok:
             result["error_stage"] = "dry_run"
@@ -228,6 +283,29 @@ def _command_result(result: LarkCliResult) -> dict[str, Any]:
         "stderr": result.stderr,
         "error": result.error,
         "timed_out": result.timed_out,
+    }
+
+
+def _exception_command_result(action: ActionRecord, stage: str, exc: Exception) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "argv": ["dispatch", action.kind, str(action.id), stage],
+        "exit_code": None,
+        "json": None,
+        "stdout": "",
+        "stderr": "",
+        "error": str(exc),
+        "exception_type": type(exc).__name__,
+        "timed_out": False,
+    }
+
+
+def _exception_readback_result(sent_message_id: str | None, exc: Exception) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "message_id": sent_message_id,
+        "error": str(exc),
+        "exception_type": type(exc).__name__,
     }
 
 

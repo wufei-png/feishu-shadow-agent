@@ -271,10 +271,12 @@ def test_approval_inbox_failure_blocks_send_reply_but_allows_owner_notification(
     assert [call["dry_run"] for call in fake.reply_calls] == [True]
     assert [call["dry_run"] for call in fake.owner_calls] == [True, False]
     with store.connect() as conn:
-        send = conn.execute("SELECT status FROM actions WHERE id = ?", (send_action,)).fetchone()
-        owner = conn.execute("SELECT status FROM actions WHERE id = ?", (owner_action,)).fetchone()
+        send = conn.execute("SELECT status, result_json FROM actions WHERE id = ?", (send_action,)).fetchone()
+        owner = conn.execute("SELECT status, result_json FROM actions WHERE id = ?", (owner_action,)).fetchone()
     assert send["status"] == "pending"
     assert owner["status"] == "sent"
+    assert "approval_inbox_failed" in send["result_json"]
+    assert "approval_inbox_failed" not in (owner["result_json"] or "")
 
 
 def test_fake_feishu_hermes_tick_runs_ordered_ingest_watch_and_dispatch(tmp_path: Path) -> None:

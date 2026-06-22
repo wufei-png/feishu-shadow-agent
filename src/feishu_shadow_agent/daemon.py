@@ -123,6 +123,7 @@ class Daemon:
             run_id=run_id,
             allow_send_reply_actual=not self.dry_run and not approval_failed,
             allow_owner_notification_actual=not self.dry_run or self.send_owner_notifications,
+            blocked_send_reply_reason="approval_inbox_failed" if approval_failed and not self.dry_run else None,
         )
         self.logger.emit(
             "info",
