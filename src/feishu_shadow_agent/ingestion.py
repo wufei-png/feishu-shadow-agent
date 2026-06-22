@@ -19,6 +19,7 @@ PAGE_SIZE = 50
 WATCH_EXTEND_MINUTES = 120
 IMAGE_KEY_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])(img_[A-Za-z0-9_-]+)(?![A-Za-z0-9_-])")
 FILE_KEY_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])(file_[A-Za-z0-9_-]+)(?![A-Za-z0-9_-])")
+AT_USER_ID_PATTERN = re.compile(r"<at\s+[^>]*user_id=[\"']([^\"']+)[\"'][^>]*>", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -57,11 +58,14 @@ class MessageNormalizer:
             chat_type = None
         sent_at = _first_string(raw, "create_time", "created_at", "sent_at", "timestamp")
         thread_id = _thread_id(raw)
-        reply_to = raw.get("reply_to") if isinstance(raw.get("reply_to"), dict) else {}
+        reply_to_value = raw.get("reply_to") or raw.get("replyTo")
+        reply_to = reply_to_value if isinstance(reply_to_value, dict) else {}
         reply_to_message_id = _first_string(
             raw,
             "reply_to_message_id",
             "replyToMessageId",
+            "reply_to",
+            "replyTo",
             "parent_id",
             "parentId",
             "root_id",
@@ -456,11 +460,13 @@ def _mentions(raw: dict[str, Any], content: dict[str, Any]) -> list[str]:
         if isinstance(source, list):
             for item in source:
                 if isinstance(item, str):
-                    mentions.append(item)
+                    _append_unique(mentions, item)
                 elif isinstance(item, dict):
                     value = _first_string(item, "open_id", "openId", "user_id", "userId", "id")
                     if value:
-                        mentions.append(value)
+                        _append_unique(mentions, value)
+    for user_id in AT_USER_ID_PATTERN.findall(_message_text(raw, content)):
+        _append_unique(mentions, user_id)
     return mentions
 
 
@@ -468,7 +474,18 @@ def _is_at_all(raw: dict[str, Any], text: str, mentions: list[str]) -> bool:
     if raw.get("at_all") is True or raw.get("atAll") is True:
         return True
     lowered = {mention.lower() for mention in mentions}
-    return bool(lowered & {"all", "@all", "all_user", "all_users"}) or "@all" in text.lower() or "@所有人" in text
+    lowered_text = text.lower()
+    return (
+        bool(lowered & {"all", "@all", "@_all", "all_user", "all_users"})
+        or "@all" in lowered_text
+        or "@_all" in lowered_text
+        or "@所有人" in text
+    )
+
+
+def _append_unique(values: list[str], value: str) -> None:
+    if value not in values:
+        values.append(value)
 
 
 def _resources(message_id: str, raw: dict[str, Any], content: dict[str, Any]) -> list[ResourceRef]:

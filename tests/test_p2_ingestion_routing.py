@@ -161,6 +161,32 @@ def test_normalizer_marks_mentions_sender_roles_and_resources() -> None:
         _message("om_2", text="@所有人 hello", mentions=[{"id": "all"}]),
         default_chat_type="group",
     )
+    html_direct = normalizer.normalize(
+        {
+            "message_id": "om_html_direct",
+            "chat_id": "oc_1",
+            "chat_type": "group",
+            "sender": {"id": "ou_ext", "sender_type": "user"},
+            "create_time": "2026-06-22 10:00",
+            "content": '<at user_id="ou_owner">Owner</at> hello',
+        },
+        default_chat_type="group",
+    )
+    html_at_all = normalizer.normalize(
+        {
+            "message_id": "om_html_all",
+            "chat_id": "oc_1",
+            "chat_type": "group",
+            "sender": {"id": "ou_ext", "sender_type": "user"},
+            "create_time": "2026-06-22 10:00",
+            "content": '<at user_id="all"></at> hello',
+        },
+        default_chat_type="group",
+    )
+    rendered_at_all = normalizer.normalize(
+        _message("om_rendered_all", text="@_all hello"),
+        default_chat_type="group",
+    )
     owner = normalizer.normalize(
         _message("om_3", sender_id="ou_owner"),
         default_chat_type="group",
@@ -182,6 +208,12 @@ def test_normalizer_marks_mentions_sender_roles_and_resources() -> None:
     assert direct.resources[0].file_key == "img_1"
     assert at_all.at_all is True
     assert at_all.direct_mention is False
+    assert html_direct.direct_mention is True
+    assert html_direct.mentions == ["ou_owner"]
+    assert html_at_all.at_all is True
+    assert html_at_all.direct_mention is False
+    assert rendered_at_all.at_all is True
+    assert rendered_at_all.direct_mention is False
     assert owner.sender_role == "owner_message"
     assert bot.sender_role == "bot_message"
     assert app_bot.sender_role == "bot_message"
@@ -283,6 +315,43 @@ def test_p2p_shortcut_attaches_to_single_active_task(tmp_path: Path) -> None:
         assert conn.execute("SELECT COUNT(*) AS c FROM task_messages").fetchone()["c"] == 2
 
 
+def test_top_level_reply_to_string_uses_reply_shortcut(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_root", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    reply = _message("om_reply", sender_id="ou_other")
+    reply["reply_to"] = "om_root"
+
+    attached = service.process_raw_message(
+        reply,
+        source="active_watch",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert attached is not None
+    assert attached.decision.route == "attach_task"
+    assert attached.decision.matched_by == "reply_to_msg"
+    with store.connect() as conn:
+        row = conn.execute(
+            "SELECT reply_to_message_id FROM messages WHERE message_id = ?",
+            ("om_reply",),
+        ).fetchone()
+    assert row["reply_to_message_id"] == "om_root"
+
+
 def test_owner_takeover_closes_task_and_cancels_pending_work(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     service = IngestionService(
@@ -317,6 +386,39 @@ def test_owner_takeover_closes_task_and_cancels_pending_work(tmp_path: Path) -> 
     assert task["status"] == "human_taken_over"
     assert action["status"] == "cancelled"
     assert approval["status"] == "expired"
+
+
+def test_owner_takeover_accepts_top_level_reply_to_string(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_root", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    owner_reply = _message("om_owner_reply", sender_id="ou_owner")
+    owner_reply["reply_to"] = "om_root"
+
+    takeover = service.process_raw_message(
+        owner_reply,
+        source="active_watch",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert takeover is not None
+    assert takeover.decision.route == "human_taken_over"
+    with store.connect() as conn:
+        task = conn.execute("SELECT status FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
+    assert task["status"] == "human_taken_over"
 
 
 def test_sent_user_identity_agent_message_is_self_message(tmp_path: Path) -> None:
@@ -589,6 +691,36 @@ def test_active_watch_ignores_unmatched_resource_message_without_download(
     assert fake.downloads == []
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) AS c FROM resources").fetchone()["c"] == 0
+
+
+def test_active_watch_suppresses_real_rendered_at_all_from_watched_sender(tmp_path: Path) -> None:
+    fake = FakeFeishuClient()
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_root", sender_id="ou_a", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+
+    at_all = service.process_raw_message(
+        _message("om_all", sender_id="ou_a", text="@_all please check"),
+        source="active_watch",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert at_all is not None
+    assert at_all.decision.route == "ignore"
+    assert at_all.decision.reason == "at_all_suppressed"
 
 
 def test_group_active_watch_only_processes_watch_key_followups(tmp_path: Path) -> None:
