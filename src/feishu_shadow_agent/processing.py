@@ -141,25 +141,29 @@ class ApprovalService:
         return self.store.create_owner_notification_action(task_id=None if task is None else task.id, payload=data)
 
     def apply_command(self, *, message: NormalizedMessage) -> dict[str, Any] | None:
-        command = " ".join(message.text.strip().split())
+        command = message.text.strip()
         if not command.startswith("/"):
             return None
-        parts = command.split(" ", 2)
-        verb = parts[0][1:]
-        if verb in {"approve", "reject"} and len(parts) >= 2:
+        match = re.match(r"^/(\S+)(?:\s+(\S+))?(?:\s+([\s\S]*))?$", command)
+        if match is None:
+            return None
+        verb = match.group(1)
+        target_id = match.group(2)
+        final_reply = match.group(3)
+        if verb in {"approve", "reject"} and target_id:
             return self.store.apply_approval_command(
                 message_id=message.message_id,
                 command=command,
                 verb=verb,
-                target_id=parts[1],
+                target_id=target_id,
             )
-        if verb == "send" and len(parts) >= 3:
+        if verb == "send" and target_id and final_reply is not None:
             return self.store.apply_approval_command(
                 message_id=message.message_id,
                 command=command,
                 verb=verb,
-                target_id=parts[1],
-                final_reply=parts[2],
+                target_id=target_id,
+                final_reply=final_reply,
             )
         return self.store.apply_approval_command(
             message_id=message.message_id,
@@ -514,8 +518,9 @@ class TaskProcessingService:
             if not message.direct_mention:
                 return {"allow": False, "reason": "group_not_direct_mention", "identity": "user"}
             chat_configured = bool((task.chat_id or message.chat_id) in self.config.chats)
-            group_auto_reply = policy.auto_reply if chat_configured else self.config.reply_policy.default_group_auto_reply
-            if not group_auto_reply:
+            if not chat_configured:
+                return {"allow": False, "reason": "unknown_group_auto_reply_disabled", "identity": "user"}
+            if not policy.auto_reply:
                 return {"allow": False, "reason": "group_auto_reply_disabled", "identity": "user"}
             if policy.reply_identity in {"bot", "bot_preferred"} and policy.bot_joined:
                 return {"allow": True, "reason": "ok", "identity": "bot"}

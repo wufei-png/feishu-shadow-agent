@@ -9,7 +9,7 @@ from feishu_shadow_agent.ingestion import IngestionService
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.processing import ApprovalService, SendComposer, TaskProcessingService
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
-from feishu_shadow_agent.types import HermesCliResult, LarkCliResult, MessagePage
+from feishu_shadow_agent.types import HermesCliResult, LarkCliResult, MessagePage, NormalizedMessage
 
 
 class FakeHermes:
@@ -261,6 +261,31 @@ def test_explicit_group_auto_reply_false_overrides_global_default(tmp_path: Path
         send_count = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
     payload = json.loads(approval["payload_json"])
     assert payload["reason"] == "group_auto_reply_disabled"
+    assert send_count == 0
+
+
+def test_unknown_group_does_not_auto_reply_even_when_global_default_enabled(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
+    cfg = _config(reply_policy=ReplyPolicyConfig(default_group_auto_reply=True))
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    service.process_raw_message(
+        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        approval = conn.execute("SELECT status, payload_json FROM approvals").fetchone()
+        notification = conn.execute("SELECT kind, status FROM actions WHERE kind = 'owner_notification'").fetchone()
+        send_count = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
+    payload = json.loads(approval["payload_json"])
+    assert approval["status"] == "pending"
+    assert payload["reason"] == "unknown_group_auto_reply_disabled"
+    assert notification["kind"] == "owner_notification"
+    assert notification["status"] == "pending"
     assert send_count == 0
 
 
@@ -1024,3 +1049,168 @@ def test_send_command_creates_action_for_single_pending_approval(tmp_path: Path)
     assert action["status"] == "pending"
     assert payload["text"] == "final reply"
     assert payload["source"] == "owner_send"
+
+
+def test_concrete_approve_conflict_does_not_consume_approval(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config()
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    approval_service = ApprovalService(store=store, config=cfg)
+    created = service.process_raw_message(
+        _message("om_root", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    approval_service.request_send_reply(
+        task=created.task,
+        reply_target_message_id="om_root",
+        proposed_reply="first",
+        reason="test",
+    )
+    approval_service.request_send_reply(
+        task=created.task,
+        reply_target_message_id="om_root",
+        proposed_reply="second",
+        reason="test",
+    )
+    with store.connect() as conn:
+        approval_ids = [
+            row["short_id"]
+            for row in conn.execute("SELECT short_id FROM approvals ORDER BY id").fetchall()
+        ]
+
+    first = store.apply_approval_command(
+        message_id="om_approve_first",
+        command=f"/approve {approval_ids[0]}",
+        verb="approve",
+        target_id=approval_ids[0],
+    )
+    second = store.apply_approval_command(
+        message_id="om_approve_second",
+        command=f"/approve {approval_ids[1]}",
+        verb="approve",
+        target_id=approval_ids[1],
+    )
+
+    assert first["status"] == "applied"
+    assert second["status"] == "failed"
+    assert "active send action already exists" in second["result"]["error"]
+    with store.connect() as conn:
+        approvals = {
+            row["short_id"]: row["status"]
+            for row in conn.execute("SELECT short_id, status FROM approvals ORDER BY id").fetchall()
+        }
+        send_actions = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
+        command = conn.execute(
+            "SELECT status FROM approval_commands WHERE message_id = ?",
+            ("om_approve_second",),
+        ).fetchone()
+    assert approvals[approval_ids[0]] == "approved"
+    assert approvals[approval_ids[1]] == "pending"
+    assert send_actions == 1
+    assert command["status"] == "failed"
+
+
+def test_send_command_active_action_conflict_rolls_back_temporary_approval(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config()
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_root", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    existing_action_id = store.create_send_reply_action(
+        task_id=created.task.id,
+        target_message_id="om_root",
+        payload={"reply_target_message_id": "om_root", "text": "existing", "identity": "user"},
+    )
+    assert existing_action_id is not None
+
+    result = store.apply_approval_command(
+        message_id="om_send_conflict_active",
+        command=f"/send {created.task.short_id} final reply",
+        verb="send",
+        target_id=created.task.short_id,
+        final_reply="final reply",
+    )
+
+    assert result["status"] == "failed"
+    assert "active send action already exists" in result["result"]["error"]
+    with store.connect() as conn:
+        approval_count = conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()["c"]
+        send_actions = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
+        command = conn.execute(
+            "SELECT status FROM approval_commands WHERE message_id = ?",
+            ("om_send_conflict_active",),
+        ).fetchone()
+    assert approval_count == 0
+    assert send_actions == 1
+    assert command["status"] == "failed"
+
+
+def test_send_command_preserves_owner_final_reply_format(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config()
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_root", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    final_reply = "line 1\n    indented  line\nline 3 with  double  spaces"
+    command = f"/send {created.task.short_id} {final_reply}"
+    approval_service = ApprovalService(store=store, config=cfg)
+    message = NormalizedMessage(
+        message_id="om_multiline_send",
+        chat_id="ou_bot_chat",
+        chat_type="p2p",
+        sender_id="ou_owner",
+        sender_name="Owner",
+        sender_type="user",
+        sender_role="owner_message",
+        sent_at="2026-06-22T10:11:00+08:00",
+        thread_id=None,
+        reply_to_message_id=None,
+        text=command,
+        direct_mention=False,
+        at_all=False,
+    )
+
+    result = approval_service.apply_command(message=message)
+
+    assert result is not None
+    assert result["status"] == "applied"
+    with store.connect() as conn:
+        approval = conn.execute("SELECT payload_json FROM approvals").fetchone()
+        action = conn.execute("SELECT payload_json FROM actions WHERE kind = 'send_reply'").fetchone()
+        stored_command = conn.execute("SELECT command FROM approval_commands").fetchone()
+    approval_payload = json.loads(approval["payload_json"])
+    action_payload = json.loads(action["payload_json"])
+    assert approval_payload["text"] == final_reply
+    assert action_payload["text"] == final_reply
+    assert stored_command["command"] == command

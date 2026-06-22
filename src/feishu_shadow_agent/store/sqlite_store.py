@@ -1073,6 +1073,8 @@ class SQLiteStore:
                 approval_id=int(approval["id"]),
                 now=now,
             )
+            if action_id is None:
+                raise ValueError("active send action already exists for this task and reply target")
             return {"approval_id": approval["short_id"], "task_id": approval["task_id"], "action_id": action_id}
 
         if verb == "send":
@@ -1159,6 +1161,8 @@ class SQLiteStore:
                 approval_id=approval_id,
                 now=now,
             )
+            if action_id is None:
+                raise ValueError("active send action already exists for this task and reply target")
             return {"approval_id": approval_short_id, "task_id": task["id"], "action_id": action_id}
 
         raise ValueError(f"unsupported command: {verb}")
