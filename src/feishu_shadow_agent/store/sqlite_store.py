@@ -1582,12 +1582,33 @@ class SQLiteStore:
                 now,
             ),
         )
-        if cursor.lastrowid:
+        if cursor.rowcount == 1:
             return int(cursor.lastrowid)
         row = conn.execute(
-            "SELECT id FROM actions WHERE idempotency_key = ?",
+            "SELECT id, status FROM actions WHERE idempotency_key = ? AND kind = 'owner_notification'",
             (idempotency_key,),
         ).fetchone()
+        if row is None:
+            raise RuntimeError("owner notification action was not inserted and no existing action was found")
+        if row["status"] == "failed":
+            conn.execute(
+                """
+                UPDATE actions
+                SET status = ?,
+                    dry_run = ?,
+                    payload_json = ?,
+                    result_json = NULL,
+                    updated_at = ?
+                WHERE id = ? AND status = 'failed'
+                """,
+                (
+                    "pending",
+                    1,
+                    json.dumps(payload, ensure_ascii=False, default=str),
+                    now,
+                    row["id"],
+                ),
+            )
         return int(row["id"])
 
     def insert_action_for_test(

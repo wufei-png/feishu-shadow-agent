@@ -148,3 +148,49 @@ def test_p3_migration_clears_legacy_fake_hermes_session_and_send_reply_guard(tmp
     assert retried_action is not None
     assert retried_action.status == "pending"
     assert retried_action.result == {}
+
+
+def test_owner_notification_failed_action_is_reused_but_active_and_sent_are_not_duplicated(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    payload = {"type": "notify", "message": "same"}
+
+    active_action = store.create_owner_notification_action(task_id=None, payload=payload)
+    duplicate_pending = store.create_owner_notification_action(task_id=None, payload=payload)
+    assert duplicate_pending == active_action
+    assert store.claim_action_for_dispatch(active_action) is not None
+
+    duplicate_sending = store.create_owner_notification_action(task_id=None, payload=payload)
+    assert duplicate_sending == active_action
+    sending_action = store.get_action(active_action)
+    assert sending_action is not None
+    assert sending_action.status == "sending"
+
+    store.finish_action(active_action, status="sent", result={"sent_message_id": "om_owner"})
+    duplicate_sent = store.create_owner_notification_action(task_id=None, payload=payload)
+    assert duplicate_sent == active_action
+    sent_action = store.get_action(active_action)
+    assert sent_action is not None
+    assert sent_action.status == "sent"
+    assert sent_action.result == {"sent_message_id": "om_owner"}
+
+    retry_payload = {"type": "notify", "message": "retry"}
+    failed_action = store.create_owner_notification_action(task_id=None, payload=retry_payload)
+    store.finish_action(failed_action, status="failed", result={"error_stage": "send"})
+
+    retried = store.create_owner_notification_action(task_id=None, payload=retry_payload)
+
+    assert retried == failed_action
+    retried_action = store.get_action(failed_action)
+    assert retried_action is not None
+    assert retried_action.status == "pending"
+    assert retried_action.result == {}
+    with store.connect() as conn:
+        owner_actions = conn.execute(
+            "SELECT id, status FROM actions WHERE kind = 'owner_notification' ORDER BY id"
+        ).fetchall()
+    assert [(row["id"], row["status"]) for row in owner_actions] == [
+        (active_action, "sent"),
+        (failed_action, "pending"),
+    ]

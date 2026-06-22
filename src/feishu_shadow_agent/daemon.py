@@ -94,6 +94,19 @@ class Daemon:
                 result = stage(run_id=run_id)
             except Exception as exc:
                 result = StageResult(_stage_name(stage), ok=False, error=str(exc))
+                if result.name == "approval_inbox":
+                    self.store.record_health_results(
+                        run_id=run_id,
+                        results=[
+                            HealthCheckResult(
+                                "approval_inbox",
+                                "warning",
+                                "failed",
+                                f"approval_inbox failed: {result.error}",
+                                {"stage": result.name, "error": result.error},
+                            )
+                        ],
+                    )
                 self.logger.emit(
                     "error",
                     "daemon_stage_failed",

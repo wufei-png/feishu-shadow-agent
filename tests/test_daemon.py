@@ -3,6 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import yaml
+
+from feishu_shadow_agent.cli import main
 from feishu_shadow_agent.config import AppConfig, ChatPolicyConfig, OwnerConfig
 from feishu_shadow_agent.daemon import Daemon
 from feishu_shadow_agent.jsonl import JSONLLogger
@@ -381,6 +384,65 @@ def test_approval_inbox_failure_blocks_send_reply_but_allows_owner_notification(
     assert owner["status"] == "sent"
     assert "approval_inbox_failed" in send["result_json"]
     assert "approval_inbox_failed" not in (owner["result_json"] or "")
+
+
+def test_approval_inbox_failure_without_pending_send_reply_is_visible_in_status(
+    tmp_path: Path,
+    capsys: Any,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+storage:
+  sqlite_path: agent.sqlite3
+logging:
+  jsonl_path: agent.jsonl
+""".lstrip(),
+        encoding="utf-8",
+    )
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    logger = JSONLLogger(tmp_path / "agent.jsonl")
+    suite = FakeHealthSuite([HealthCheckResult("config_schema", "critical", "ok", "ok")])
+    fake = FakeFeishu()
+    fake.fail_approval_inbox = True
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    processor = TaskProcessingService(
+        store=store,
+        config=config,
+        hermes_client=FakeHermes(),
+        logger=logger,
+    )
+    daemon = Daemon(
+        store=store,
+        logger=logger,
+        health_suite=suite,  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=False,
+        app_config=config,
+        feishu_client=fake,  # type: ignore[arg-type]
+        task_processor=processor,
+        runtime_health_interval_seconds=0,
+    )
+
+    daemon.run_one_tick(run_id="run_1")
+
+    snapshot = store.status_snapshot()
+    warnings = snapshot["recent_health_warnings"]
+    assert warnings[0]["check_name"] == "approval_inbox"
+    assert warnings[0]["severity"] == "warning"
+    assert warnings[0]["status"] == "failed"
+    assert "approval inbox failed" in warnings[0]["message"]
+    with store.connect() as conn:
+        send_reply_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM actions WHERE kind = 'send_reply'"
+        ).fetchone()["count"]
+    assert send_reply_count == 0
+
+    assert main(["status", "--config", str(config_path)]) == 0
+    output = yaml.safe_load(capsys.readouterr().out)
+    assert output["recent_health_warnings"][0]["check_name"] == "approval_inbox"
 
 
 def test_fake_feishu_hermes_tick_runs_ordered_ingest_watch_and_dispatch(tmp_path: Path) -> None:
