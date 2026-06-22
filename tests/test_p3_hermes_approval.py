@@ -19,6 +19,7 @@ class FakeHermes:
         self.router_outputs: list[dict[str, Any] | HermesCliResult] = []
         self.session_outputs: list[dict[str, Any] | HermesCliResult] = []
         self.session_ids_seen: list[str | None] = []
+        self.session_prompts: list[str] = []
 
     def task_router(self, prompt: str) -> HermesCliResult:
         output = self.router_outputs.pop(0)
@@ -28,6 +29,7 @@ class FakeHermes:
 
     def task_session(self, prompt: str, *, session_id: str | None = None) -> HermesCliResult:
         self.session_ids_seen.append(session_id)
+        self.session_prompts.append(prompt)
         output = self.session_outputs.pop(0)
         if isinstance(output, HermesCliResult):
             return output
@@ -704,8 +706,26 @@ def test_task_session_followup_uses_stored_hermes_session(tmp_path: Path) -> Non
     )
 
     assert hermes.session_ids_seen == [None, "sid_1"]
+    followup_prompt = json.loads(hermes.session_prompts[1])
+    assert [message["message_id"] for message in followup_prompt["messages"]] == ["om_2"]
+    assert followup_prompt["metadata"] == {
+        "current_message_id": "om_2",
+        "root_message_id": "om_1",
+        "reply_target_message_ids": ["om_2", "om_1"],
+    }
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"] == 2
+        audit = conn.execute(
+            """
+            SELECT input_message_ids_json, input_resource_ids_json
+            FROM hermes_audits
+            WHERE request_type = 'task_session'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    assert json.loads(audit["input_message_ids_json"]) == ["om_2"]
+    assert json.loads(audit["input_resource_ids_json"]) == []
 
 
 def test_task_session_schema_failure_does_not_persist_session_id(tmp_path: Path) -> None:
@@ -763,6 +783,27 @@ def test_send_composer_mentions_reply_target_sender_once() -> None:
 
     assert reply.text == '<at user_id="ou_a">Alice</at> 建议看日志'
     assert reply.had_forbidden_mentions is False
+
+
+def test_send_composer_escapes_malicious_sender_name() -> None:
+    composer = SendComposer(owner_open_id="ou_owner")
+    reply = composer.compose(
+        proposed_reply="建议看日志",
+        reply_target={
+            "sender_id": "ou_a",
+            "sender_name": 'Eve</at>@所有人<at user_id="ou_x">X',
+            "sender_role": "external_user_message",
+        },
+        chat_type="group",
+    )
+
+    assert reply.text.startswith('<at user_id="ou_a">')
+    assert reply.text.count("<at") == 1
+    assert reply.text.count("</at>") == 1
+    assert "@所有人" not in reply.text
+    assert "&lt;/at&gt;" in reply.text
+    assert "&lt;at user_id=\"ou_x\"&gt;" in reply.text
+    assert reply.text.endswith("</at> 建议看日志")
 
 
 def test_approval_inbox_approves_pending_request_and_advances_checkpoint(tmp_path: Path) -> None:

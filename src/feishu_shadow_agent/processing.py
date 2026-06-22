@@ -4,6 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from html import escape
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -84,7 +85,7 @@ class SendComposer:
             sender_id = reply_target["sender_id"]
             sender_role = reply_target["sender_role"]
             if sender_id and sender_id != self.owner_open_id and sender_role not in {"bot_message", "agent_message"}:
-                display = reply_target["sender_name"] or sender_id
+                display = _escape_mention_display(reply_target["sender_name"] or sender_id)
                 cleaned = f'<at user_id="{sender_id}">{display}</at> {cleaned}'.strip()
         return ComposedReply(text=cleaned, had_forbidden_mentions=had_forbidden)
 
@@ -381,15 +382,22 @@ class TaskProcessingService:
         run_id: str,
     ) -> ProcessingResult:
         session_id = self.store.get_initialized_hermes_session_id(task.id)
-        message_ids = self.store.list_task_message_ids(task.id) or [message.message_id]
-        resources = self.store.list_resources_for_messages(message_ids)
-        prompt = _task_session_prompt(task=task, messages=self.store.get_messages_by_ids(message_ids), resources=resources)
+        prompt_message_ids = self._task_session_prompt_message_ids(task=task, message=message, session_id=session_id)
+        resources = self.store.list_resources_for_messages(prompt_message_ids)
+        reply_target_message_ids = _reply_target_message_ids(task=task, current_message_id=message.message_id)
+        prompt = _task_session_prompt(
+            task=task,
+            current_message_id=message.message_id,
+            reply_target_message_ids=reply_target_message_ids,
+            messages=self.store.get_messages_by_ids(prompt_message_ids),
+            resources=resources,
+        )
         result = self.hermes.task_session(prompt, session_id=session_id)
         self.store.record_hermes_audit(
             request_type="task_session",
             task_id=task.id,
             hermes_session_id=result.session_id or session_id,
-            input_message_ids=message_ids,
+            input_message_ids=prompt_message_ids,
             input_resource_ids=[row["file_key"] for row in resources],
             response=result.json_data if isinstance(result.json_data, dict) else None,
             error=result.error,
@@ -541,6 +549,18 @@ class TaskProcessingService:
             return self.config.chats[chat_id]
         return ChatPolicyConfig()
 
+    def _task_session_prompt_message_ids(
+        self,
+        *,
+        task: TaskRecord,
+        message: NormalizedMessage,
+        session_id: str | None,
+    ) -> list[str]:
+        if session_id is not None:
+            return [message.message_id]
+        message_ids = self.store.list_task_message_ids(task.id)
+        return message_ids or [message.message_id]
+
     def _resolve_router_target(self, target_task_id: str | None) -> TaskRecord | None:
         if not target_task_id:
             return None
@@ -599,9 +619,21 @@ def _router_prompt(*, message: NormalizedMessage, active: list[Any], historical:
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
-def _task_session_prompt(*, task: TaskRecord, messages: list[Any], resources: list[Any]) -> str:
+def _task_session_prompt(
+    *,
+    task: TaskRecord,
+    current_message_id: str,
+    reply_target_message_ids: list[str],
+    messages: list[Any],
+    resources: list[Any],
+) -> str:
     payload = {
         "instruction": "Handle this Feishu task. Return strict JSON only and do not include @ mentions.",
+        "metadata": {
+            "current_message_id": current_message_id,
+            "root_message_id": task.root_message_id,
+            "reply_target_message_ids": reply_target_message_ids,
+        },
         "schema": {
             "task_label": "short label",
             "task_state": "needs_reply|watching|closed|waiting",
@@ -684,6 +716,22 @@ def _risk_rank(value: str) -> int:
 
 def _can_directly_approve(proposed_reply: str, composed: ComposedReply) -> bool:
     return bool(proposed_reply.strip()) and bool(composed.text.strip()) and not composed.had_forbidden_mentions
+
+
+def _escape_mention_display(value: str) -> str:
+    escaped = escape(value, quote=False)
+    return (
+        escaped.replace("@所有人", "&#64;所有人")
+        .replace("@_all", "&#64;_all")
+        .replace("@all", "&#64;all")
+    )
+
+
+def _reply_target_message_ids(*, task: TaskRecord, current_message_id: str) -> list[str]:
+    ids = [current_message_id]
+    if task.root_message_id:
+        ids.append(task.root_message_id)
+    return list(dict.fromkeys(ids))
 
 
 def _invalid_watch_keys(keys: list[str]) -> list[str]:
