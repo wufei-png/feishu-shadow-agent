@@ -537,6 +537,36 @@ class SQLiteStore:
             ).fetchall()
         return [int(row["task_id"]) for row in rows]
 
+    def find_task_for_sent_action_message(self, message_id: str) -> TaskRecord | None:
+        self.migrate()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT t.*, a.result_json
+                FROM actions a
+                JOIN tasks t ON t.id = a.task_id
+                WHERE a.kind = ? AND a.result_json IS NOT NULL
+                  AND a.result_json LIKE ?
+                ORDER BY a.updated_at DESC, a.id DESC
+                """,
+                ("send_reply", f"%{message_id}%"),
+            ).fetchall()
+        matches: dict[int, TaskRecord] = {}
+        for row in rows:
+            if _action_result_refs_message(row["result_json"], message_id):
+                task = _task_from_row(row)
+                matches[task.id] = task
+        if len(matches) == 1:
+            return next(iter(matches.values()))
+        return None
+
+    def record_agent_message_for_task(self, task_id: int, message: NormalizedMessage) -> None:
+        self.migrate()
+        now = utc_now_iso()
+        with self.connect() as conn:
+            self._add_task_message(conn, task_id, message.message_id, "agent_reply", now)
+            self._add_watch_keys(conn, task_id, _agent_reply_watch_keys_for_message(message), now)
+
     def list_active_watch_targets(self, *, now: str) -> list[dict[str, str | None]]:
         self.migrate()
         with self.connect() as conn:
@@ -599,16 +629,26 @@ class SQLiteStore:
         task_id: int,
         kind: str = "send_reply",
         status: str = "pending",
+        result: dict[str, Any] | None = None,
     ) -> None:
         self.migrate()
         now = utc_now_iso()
         with self.connect() as conn:
             conn.execute(
                 """
-                INSERT INTO actions(idempotency_key, task_id, kind, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO actions(
+                  idempotency_key, task_id, kind, status, result_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (idempotency_key, task_id, kind, status, now, now),
+                (
+                    idempotency_key,
+                    task_id,
+                    kind,
+                    status,
+                    None if result is None else json.dumps(result, ensure_ascii=False, default=str),
+                    now,
+                    now,
+                ),
             )
 
     def insert_approval_for_test(
@@ -703,6 +743,13 @@ def _watch_keys_for_message(message: NormalizedMessage) -> set[str]:
     return keys
 
 
+def _agent_reply_watch_keys_for_message(message: NormalizedMessage) -> set[str]:
+    keys: set[str] = {f"msg:{message.message_id}"}
+    if message.thread_id:
+        keys.add(f"thread:{message.thread_id}")
+    return keys
+
+
 def _clean_label(text: str) -> str:
     return _truncate(" ".join(text.split()) or "未命名任务", limit=100)
 
@@ -735,3 +782,31 @@ def _closed_recall_text_patterns(text: str) -> list[str]:
         if len(patterns) >= 5:
             break
     return patterns
+
+
+def _action_result_refs_message(result_json: str | None, message_id: str) -> bool:
+    if not result_json:
+        return False
+    try:
+        result = json.loads(result_json)
+    except json.JSONDecodeError:
+        return False
+    if _message_ref_matches(result, {"sent_message_id", "sentMessageId"}, message_id):
+        return True
+    if isinstance(result, dict) and isinstance(result.get("data"), dict):
+        return _message_ref_matches(result["data"], {"message_id", "messageId"}, message_id)
+    return False
+
+
+def _message_ref_matches(value: Any, keys: set[str], message_id: str) -> bool:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in keys and child == message_id:
+                return True
+            if _message_ref_matches(child, keys, message_id):
+                return True
+    elif isinstance(value, list):
+        for child in value:
+            if _message_ref_matches(child, keys, message_id):
+                return True
+    return False

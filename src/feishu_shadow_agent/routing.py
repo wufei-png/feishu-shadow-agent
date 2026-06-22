@@ -72,6 +72,21 @@ class MessageRouter:
         if not inserted:
             return self._audit(message, RouteDecision("ignore", reason="duplicate_message"))
 
+        sent_action_task = self.store.find_task_for_sent_action_message(message.message_id)
+        if sent_action_task is not None:
+            self.store.record_agent_message_for_task(sent_action_task.id, message)
+            return self._audit(
+                message,
+                RouteDecision(
+                    "ignore",
+                    target_task_id=sent_action_task.id,
+                    target_task_short_id=sent_action_task.short_id,
+                    reason="self_message",
+                    matched_by="sent_action",
+                ),
+                sent_action_task,
+            )
+
         if message.is_self_message:
             return self._audit(message, RouteDecision("ignore", reason="self_message"))
 

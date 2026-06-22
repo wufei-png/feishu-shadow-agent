@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
@@ -16,6 +17,8 @@ from .types import MessagePage, NormalizedMessage, ResourceRef, utc_now_iso
 
 PAGE_SIZE = 50
 WATCH_EXTEND_MINUTES = 120
+IMAGE_KEY_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])(img_[A-Za-z0-9_-]+)(?![A-Za-z0-9_-])")
+FILE_KEY_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])(file_[A-Za-z0-9_-]+)(?![A-Za-z0-9_-])")
 
 
 @dataclass(frozen=True)
@@ -220,13 +223,11 @@ class IngestionService:
         self.clock = clock
 
     def run_approval_inbox_placeholder(self, *, run_id: str) -> StageResult:
-        now = self.clock()
-        self.store.set_checkpoint("approval_inbox", {"last_success_at": now, "placeholder": True})
         self.logger.emit(
             "info",
             "approval_inbox_placeholder",
             run_id=run_id,
-            data={"checkpoint": "approval_inbox"},
+            data={"checkpoint": "approval_inbox", "checkpoint_written": False},
         )
         return StageResult("approval_inbox", ok=True)
 
@@ -473,14 +474,24 @@ def _is_at_all(raw: dict[str, Any], text: str, mentions: list[str]) -> bool:
 def _resources(message_id: str, raw: dict[str, Any], content: dict[str, Any]) -> list[ResourceRef]:
     resources: dict[tuple[str, str], ResourceRef] = {}
     for node in _walk([raw, content]):
-        if not isinstance(node, dict):
-            continue
-        image_key = _first_string(node, "image_key", "imageKey")
-        if image_key:
-            resources[("image", image_key)] = ResourceRef(message_id, image_key, "image", node)
-        file_key = _first_string(node, "file_key", "fileKey")
-        if file_key:
-            resources[("file", file_key)] = ResourceRef(message_id, file_key, "file", node)
+        if isinstance(node, dict):
+            image_key = _first_string(node, "image_key", "imageKey")
+            if image_key:
+                resources[("image", image_key)] = ResourceRef(message_id, image_key, "image", node)
+            file_key = _first_string(node, "file_key", "fileKey")
+            if file_key:
+                resources[("file", file_key)] = ResourceRef(message_id, file_key, "file", node)
+        elif isinstance(node, str):
+            for image_key in IMAGE_KEY_PATTERN.findall(node):
+                resources.setdefault(
+                    ("image", image_key),
+                    ResourceRef(message_id, image_key, "image", {"source": "text", "file_key": image_key}),
+                )
+            for file_key in FILE_KEY_PATTERN.findall(node):
+                resources.setdefault(
+                    ("file", file_key),
+                    ResourceRef(message_id, file_key, "file", {"source": "text", "file_key": file_key}),
+                )
     return list(resources.values())
 
 

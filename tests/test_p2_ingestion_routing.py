@@ -173,6 +173,10 @@ def test_normalizer_marks_mentions_sender_roles_and_resources() -> None:
         _message("om_5", sender_id="cli_app", sender_type="app"),
         default_chat_type="group",
     )
+    markdown_resources = normalizer.normalize(
+        _message("om_6", text="![Image](img_v3_0212t_abc-123)\n[file](file_v2_xyz-456)"),
+        default_chat_type="group",
+    )
 
     assert direct.direct_mention is True
     assert direct.resources[0].file_key == "img_1"
@@ -181,6 +185,10 @@ def test_normalizer_marks_mentions_sender_roles_and_resources() -> None:
     assert owner.sender_role == "owner_message"
     assert bot.sender_role == "bot_message"
     assert app_bot.sender_role == "bot_message"
+    assert {(resource.resource_type, resource.file_key) for resource in markdown_resources.resources} == {
+        ("image", "img_v3_0212t_abc-123"),
+        ("file", "file_v2_xyz-456"),
+    }
 
 
 def test_group_ingest_drains_pages_sorts_dedupes_and_advances_checkpoint(tmp_path: Path) -> None:
@@ -309,6 +317,54 @@ def test_owner_takeover_closes_task_and_cancels_pending_work(tmp_path: Path) -> 
     assert task["status"] == "human_taken_over"
     assert action["status"] == "cancelled"
     assert approval["status"] == "expired"
+
+
+def test_sent_user_identity_agent_message_is_self_message(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_root", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    store.insert_action_for_test(
+        idempotency_key="reply_sent",
+        task_id=created.task.id,
+        status="sent",
+        result={"sent_message_id": "om_agent_reply"},
+    )
+
+    agent_reply = service.process_raw_message(
+        _message(
+            "om_agent_reply",
+            sender_id="ou_owner",
+            reply_to="om_root",
+            text="agent reply sent as user",
+        ),
+        source="active_watch",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert agent_reply is not None
+    assert agent_reply.decision.route == "ignore"
+    assert agent_reply.decision.reason == "self_message"
+    with store.connect() as conn:
+        task = conn.execute("SELECT status FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
+        task_message = conn.execute(
+            "SELECT role FROM task_messages WHERE task_id = ? AND message_id = ?",
+            (created.task.id, "om_agent_reply"),
+        ).fetchone()
+    assert task["status"] == "watching"
+    assert task_message["role"] == "agent_reply"
 
 
 def test_closed_recall_records_router_placeholder(tmp_path: Path) -> None:
@@ -699,3 +755,20 @@ def test_daemon_tick_runs_p2_stages_in_order(tmp_path: Path) -> None:
         "dispatch",
     ]
     assert fake.calls == ["search:group:True:None", "search:p2p:False:None"]
+
+
+def test_approval_inbox_placeholder_does_not_write_checkpoint(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+
+    result = service.run_approval_inbox_placeholder(run_id="run_1")
+
+    assert result.name == "approval_inbox"
+    assert result.ok is True
+    assert store.get_checkpoint("approval_inbox") is None

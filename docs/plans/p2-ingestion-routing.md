@@ -7,6 +7,8 @@
 - P2 owns ingestion, normalization, resource status, checkpointing, task ownership, `watch_keys`,
   deterministic routing shortcuts, and owner takeover.
 - P2 does not call Hermes, parse approval commands, compose replies, notify owner, or send external messages.
+- The approval inbox placeholder only logs stage execution; it does not write the real
+  `approval_inbox` checkpoint until P3 implements owner command fetch and ingest.
 
 ## Implementation Notes
 

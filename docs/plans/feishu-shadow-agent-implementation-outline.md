@@ -62,7 +62,8 @@
 交付：
 
 - 实现真实 `daemon` tick skeleton，按 approval inbox、group ingest、p2p ingest、active watch、dispatch 顺序编排；dispatch 阶段只保留 no-op/占位。
-- 实现 approval inbox 拉取/checkpoint 占位，暂不解析 `/approve|/reject|/send` 状态流转。
+- 实现 approval inbox placeholder 日志；P2 不推进真实 `approval_inbox` checkpoint，
+  等 P3 真正拉取/入库 owner 命令后再写 checkpoint。
 - 实现 group `@me`、P2P 和 active task watch 的拉取入口。
 - 实现 message normalize、sender role、`direct_mention`/`at_all`、self-loop guard。
 - 实现资源 metadata 提取、bot resource download 尝试和 `resources.download_status` 记录；是否阻断回复、是否通知 owner 放到 P3 gate 判断。
