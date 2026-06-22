@@ -45,9 +45,13 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--send-test", action="store_true", help="send a real test DM to owner")
     doctor.set_defaults(handler=_handle_doctor)
 
-    daemon = subparsers.add_parser("daemon", help="run the no-op daemon skeleton")
+    daemon = subparsers.add_parser("daemon", help="run the daemon", description="run the daemon")
     _add_config_arg(daemon)
-    daemon.add_argument("--dry-run", action="store_true", help="do not perform write operations")
+    daemon.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="do not send external replies; record local state and dispatch previews",
+    )
     daemon.add_argument(
         "--send-owner-notifications",
         action="store_true",

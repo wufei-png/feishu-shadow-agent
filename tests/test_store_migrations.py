@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -148,6 +149,66 @@ def test_p3_migration_clears_legacy_fake_hermes_session_and_send_reply_guard(tmp
     assert retried_action is not None
     assert retried_action.status == "pending"
     assert retried_action.result == {}
+
+
+def test_send_reply_retry_does_not_revive_failed_action_when_same_text_was_sent(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.migrate()
+
+    with store.connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO tasks(short_id, status, chat_id, root_message_id, task_label, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("t_sent", "watching", "oc_1", "om_1", "label", "now", "now"),
+        )
+        task_id = int(cursor.lastrowid)
+        conn.execute(
+            """
+            INSERT INTO actions(
+              idempotency_key, task_id, kind, status, target_message_id, payload_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "reply-failed-cross-source",
+                task_id,
+                "send_reply",
+                "failed",
+                "om_1",
+                json.dumps({"text": "one", "source": "auto_reply"}),
+                "now",
+                "now",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO actions(
+              idempotency_key, task_id, kind, status, target_message_id, payload_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "reply-sent-cross-source",
+                task_id,
+                "send_reply",
+                "sent",
+                "om_1",
+                json.dumps({"text": "one", "source": "owner_send"}),
+                "now",
+                "now",
+            ),
+        )
+
+    retried = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_1",
+        payload={"text": "one", "source": "approval_request"},
+    )
+
+    assert retried is None
+    with store.connect() as conn:
+        rows = conn.execute("SELECT status FROM actions ORDER BY id").fetchall()
+    assert [row["status"] for row in rows] == ["failed", "sent"]
 
 
 def test_owner_notification_failed_action_is_reused_but_active_and_sent_are_not_duplicated(

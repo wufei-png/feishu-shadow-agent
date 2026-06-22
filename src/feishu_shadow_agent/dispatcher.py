@@ -50,7 +50,15 @@ class Dispatcher:
         limit: int = 50,
     ) -> DispatchSummary:
         summary = DispatchSummary()
-        for action in self.store.list_dispatchable_actions(limit=limit):
+        actions = self.store.list_dispatchable_actions(limit=limit)
+        if allow_owner_notification_actual:
+            seen_action_ids = {action.id for action in actions}
+            actions.extend(
+                action
+                for action in self.store.list_dispatchable_actions(limit=limit, kind="owner_notification")
+                if action.id not in seen_action_ids
+            )
+        for action in actions:
             actual_allowed = (
                 allow_send_reply_actual
                 if action.kind == "send_reply"

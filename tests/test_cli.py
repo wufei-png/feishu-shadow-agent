@@ -107,6 +107,10 @@ def test_daemon_send_owner_notifications_help_describes_dry_run_send(capsys) -> 
 
     assert exc.value.code == 0
     output = " ".join(capsys.readouterr().out.split())
+    assert "run the daemon" in output
+    assert "no-op daemon skeleton" not in output
+    assert "do not send external replies" in output
+    assert "record local state and dispatch previews" in output
     assert "actually send and consume owner_notification" in output
     assert "external replies stay pending" in output
 

@@ -1657,6 +1657,66 @@ def test_send_command_reuses_failed_action_for_same_final_reply(tmp_path: Path) 
     assert approval["status"] == "approved"
 
 
+def test_send_command_reuses_failed_auto_reply_action_and_idempotency_key(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config()
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_root", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    action_id = store.create_send_reply_action(
+        task_id=created.task.id,
+        target_message_id="om_root",
+        payload={
+            "reply_target_message_id": "om_root",
+            "text": "same reply",
+            "identity": "user",
+            "source": "auto_reply",
+        },
+    )
+    assert action_id is not None
+    with store.connect() as conn:
+        before = conn.execute("SELECT idempotency_key FROM actions WHERE id = ?", (action_id,)).fetchone()
+    original_key = before["idempotency_key"]
+    store.finish_action(action_id, status="failed", result={"error_stage": "send"})
+
+    result = store.apply_approval_command(
+        message_id="om_retry_failed_auto_reply",
+        command=f"/send {created.task.short_id} same reply",
+        verb="send",
+        target_id=created.task.short_id,
+        final_reply="same reply",
+    )
+
+    assert result["status"] == "applied"
+    assert result["result"]["action_id"] == action_id
+    with store.connect() as conn:
+        actions = conn.execute(
+            "SELECT id, idempotency_key, status, approval_id, payload_json, result_json FROM actions WHERE kind = 'send_reply'"
+        ).fetchall()
+        approval = conn.execute("SELECT status FROM approvals WHERE id = ?", (actions[0]["approval_id"],)).fetchone()
+    assert len(actions) == 1
+    action = actions[0]
+    payload = json.loads(action["payload_json"])
+    assert action["id"] == action_id
+    assert action["idempotency_key"] == original_key
+    assert action["status"] == "pending"
+    assert action["result_json"] is None
+    assert payload["text"] == "same reply"
+    assert payload["source"] == "owner_send"
+    assert approval["status"] == "approved"
+
+
 def test_send_command_sending_action_conflict_rolls_back_temporary_approval(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     cfg = _config()

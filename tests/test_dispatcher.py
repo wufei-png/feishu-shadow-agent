@@ -342,3 +342,61 @@ def test_owner_notification_can_be_sent_independently(tmp_path: Path) -> None:
     assert action.status == "sent"
     assert action.result["sent_message_id"] == "om_owner_sent"
     assert [call["dry_run"] for call in fake.owner_calls] == [True, False]
+
+
+def test_owner_notification_actual_has_budget_beyond_blocked_send_reply_previews(tmp_path: Path) -> None:
+    store, dispatcher, fake = _dispatcher(tmp_path)
+    task_id = _insert_task(store)
+    for index in range(50):
+        action_id = store.create_send_reply_action(
+            task_id=task_id,
+            target_message_id=f"om_target_{index}",
+            payload={
+                "reply_target_message_id": f"om_target_{index}",
+                "text": f"reply {index}",
+                "identity": "user",
+                "source": "auto_reply",
+            },
+        )
+        assert action_id is not None
+    owner_action_id = store.create_owner_notification_action(
+        task_id=task_id,
+        payload={"type": "approval_required", "task_id": "t_1", "commands": ["/approve a_1"]},
+    )
+    fake.owner_results.extend(
+        [
+            LarkCliResult(["dry"], 0, json_data={"api": []}),
+            LarkCliResult(["send"], 0, json_data={"data": {"message_id": "om_owner_sent"}}),
+        ]
+    )
+    fake.readback_pages.append(
+        MessagePage(
+            [
+                {
+                    "message_id": "om_owner_sent",
+                    "chat_id": "oc_owner",
+                    "chat_type": "p2p",
+                    "sender_id": "ou_bot",
+                    "sender_type": "bot",
+                    "create_time": "2026-06-22T10:00:00+08:00",
+                    "content": {"text": "notify"},
+                }
+            ]
+        )
+    )
+
+    summary = dispatcher.dispatch(
+        run_id="run_1",
+        allow_send_reply_actual=False,
+        allow_owner_notification_actual=True,
+        blocked_send_reply_reason="approval_inbox_failed",
+    )
+
+    owner_action = store.get_action(owner_action_id)
+    assert summary.processed == 51
+    assert summary.previewed == 50
+    assert summary.sent == 1
+    assert owner_action is not None
+    assert owner_action.status == "sent"
+    assert [call["dry_run"] for call in fake.reply_calls] == [True] * 50
+    assert [call["dry_run"] for call in fake.owner_calls] == [True, False]

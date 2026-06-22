@@ -748,20 +748,33 @@ class SQLiteStore:
             ).fetchone()
         return int(row["count"])
 
-    def list_dispatchable_actions(self, *, limit: int = 50) -> list[ActionRecord]:
+    def list_dispatchable_actions(self, *, limit: int = 50, kind: str | None = None) -> list[ActionRecord]:
         self.migrate()
         with self.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT *
-                FROM actions
-                WHERE status = 'pending'
-                  AND kind IN ('send_reply', 'owner_notification')
-                ORDER BY created_at, id
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+            if kind is None:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM actions
+                    WHERE status = 'pending'
+                      AND kind IN ('send_reply', 'owner_notification')
+                    ORDER BY created_at, id
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM actions
+                    WHERE status = 'pending'
+                      AND kind = ?
+                    ORDER BY created_at, id
+                    LIMIT ?
+                    """,
+                    (kind, limit),
+                ).fetchall()
         return [_action_from_row(row) for row in rows]
 
     def get_action(self, action_id: int) -> ActionRecord | None:
@@ -1480,6 +1493,38 @@ class SQLiteStore:
         approval_id: int | None,
         now: str,
     ) -> int | None:
+        if _has_sent_send_reply_action_for_payload(
+            conn,
+            task_id=task_id,
+            target_message_id=target_message_id,
+            payload=payload,
+        ):
+            return None
+        failed = _find_failed_send_reply_action_for_payload(
+            conn,
+            task_id=task_id,
+            target_message_id=target_message_id,
+            payload=payload,
+        )
+        if failed is not None:
+            if _has_active_send_reply_action(
+                conn,
+                task_id=task_id,
+                target_message_id=target_message_id,
+                exclude_action_id=int(failed["id"]),
+            ):
+                return None
+            _revive_failed_send_reply_action(
+                conn,
+                action_id=int(failed["id"]),
+                task_id=task_id,
+                target_message_id=target_message_id,
+                payload=payload,
+                approval_id=approval_id,
+                now=now,
+            )
+            return int(failed["id"])
+
         idempotency_key = _action_idempotency_key(task_id, target_message_id, payload)
         try:
             cursor = conn.execute(
@@ -1513,44 +1558,21 @@ class SQLiteStore:
             ).fetchone()
             if row is None or row["status"] != "failed":
                 return None
-            active = conn.execute(
-                """
-                SELECT id
-                FROM actions
-                WHERE task_id = ?
-                  AND target_message_id = ?
-                  AND kind = 'send_reply'
-                  AND status IN ('pending', 'sending')
-                  AND id != ?
-                LIMIT 1
-                """,
-                (task_id, target_message_id, row["id"]),
-            ).fetchone()
-            if active is not None:
+            if _has_active_send_reply_action(
+                conn,
+                task_id=task_id,
+                target_message_id=target_message_id,
+                exclude_action_id=int(row["id"]),
+            ):
                 return None
-            conn.execute(
-                """
-                UPDATE actions
-                SET task_id = ?,
-                    approval_id = ?,
-                    status = ?,
-                    target_message_id = ?,
-                    dry_run = ?,
-                    payload_json = ?,
-                    result_json = NULL,
-                    updated_at = ?
-                WHERE id = ? AND status = 'failed'
-                """,
-                (
-                    task_id,
-                    approval_id,
-                    "pending",
-                    target_message_id,
-                    1,
-                    json.dumps(payload, ensure_ascii=False, default=str),
-                    now,
-                    row["id"],
-                ),
+            _revive_failed_send_reply_action(
+                conn,
+                action_id=int(row["id"]),
+                task_id=task_id,
+                target_message_id=target_message_id,
+                payload=payload,
+                approval_id=approval_id,
+                now=now,
             )
             return int(row["id"])
         return int(cursor.lastrowid)
@@ -1967,6 +1989,122 @@ def _action_idempotency_key(task_id: int, target_message_id: str, payload: dict[
         default=str,
     )
     return f"reply-{sha256(seed.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _find_failed_send_reply_action_for_payload(
+    conn: sqlite3.Connection,
+    *,
+    task_id: int,
+    target_message_id: str,
+    payload: dict[str, Any],
+) -> sqlite3.Row | None:
+    text = _payload_send_text(payload)
+    if not text:
+        return None
+    rows = conn.execute(
+        """
+        SELECT id, payload_json
+        FROM actions
+        WHERE task_id = ?
+          AND target_message_id = ?
+          AND kind = 'send_reply'
+          AND status = 'failed'
+        ORDER BY updated_at DESC, id DESC
+        """,
+        (task_id, target_message_id),
+    ).fetchall()
+    for row in rows:
+        if _payload_send_text(_loads_json_object(row["payload_json"])) == text:
+            return row
+    return None
+
+
+def _has_sent_send_reply_action_for_payload(
+    conn: sqlite3.Connection,
+    *,
+    task_id: int,
+    target_message_id: str,
+    payload: dict[str, Any],
+) -> bool:
+    text = _payload_send_text(payload)
+    if not text:
+        return False
+    rows = conn.execute(
+        """
+        SELECT payload_json
+        FROM actions
+        WHERE task_id = ?
+          AND target_message_id = ?
+          AND kind = 'send_reply'
+          AND status = 'sent'
+        """,
+        (task_id, target_message_id),
+    ).fetchall()
+    return any(_payload_send_text(_loads_json_object(row["payload_json"])) == text for row in rows)
+
+
+def _has_active_send_reply_action(
+    conn: sqlite3.Connection,
+    *,
+    task_id: int,
+    target_message_id: str,
+    exclude_action_id: int,
+) -> bool:
+    row = conn.execute(
+        """
+        SELECT id
+        FROM actions
+        WHERE task_id = ?
+          AND target_message_id = ?
+          AND kind = 'send_reply'
+          AND status IN ('pending', 'sending')
+          AND id != ?
+        LIMIT 1
+        """,
+        (task_id, target_message_id, exclude_action_id),
+    ).fetchone()
+    return row is not None
+
+
+def _revive_failed_send_reply_action(
+    conn: sqlite3.Connection,
+    *,
+    action_id: int,
+    task_id: int,
+    target_message_id: str,
+    payload: dict[str, Any],
+    approval_id: int | None,
+    now: str,
+) -> None:
+    conn.execute(
+        """
+        UPDATE actions
+        SET task_id = ?,
+            approval_id = ?,
+            status = ?,
+            target_message_id = ?,
+            dry_run = ?,
+            payload_json = ?,
+            result_json = NULL,
+            updated_at = ?
+        WHERE id = ? AND status = 'failed'
+        """,
+        (
+            task_id,
+            approval_id,
+            "pending",
+            target_message_id,
+            1,
+            json.dumps(payload, ensure_ascii=False, default=str),
+            now,
+            action_id,
+        ),
+    )
+
+
+def _payload_send_text(payload: dict[str, Any]) -> str:
+    value = payload.get("text") or payload.get("composed_text") or ""
+    return value if isinstance(value, str) else ""
 
 
 def _approval_notification_payload(
