@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from feishu_shadow_agent.config import AppConfig, ChatPolicyConfig, DaemonConfig, OwnerConfig
 from feishu_shadow_agent.daemon import Daemon
 from feishu_shadow_agent.ingestion import IngestionService, MessageNormalizer
@@ -122,6 +124,30 @@ class FailingOnceRouter:
             self.failed = True
             raise RuntimeError("route failed after message insert")
         return self.inner.route(*args, **kwargs)
+
+
+class FailingAuditStore(SQLiteStore):
+    def __init__(self, path: Path):
+        super().__init__(path)
+        self.fail_next_audit = True
+
+    def _record_routing_audit(self, *args: Any, **kwargs: Any) -> None:
+        if self.fail_next_audit:
+            self.fail_next_audit = False
+            raise RuntimeError("audit failed after route mutation")
+        return super()._record_routing_audit(*args, **kwargs)
+
+
+class FailingResourceStore(SQLiteStore):
+    def __init__(self, path: Path):
+        super().__init__(path)
+        self.fail_next_resource = True
+
+    def upsert_resource(self, *args: Any, **kwargs: Any) -> None:
+        if self.fail_next_resource:
+            self.fail_next_resource = False
+            raise RuntimeError("resource store failed")
+        return super().upsert_resource(*args, **kwargs)
 
 
 def _config(**kwargs: Any) -> AppConfig:
@@ -334,6 +360,80 @@ def test_existing_message_without_route_audit_is_routed_on_retry(tmp_path: Path)
             ("om_retry",),
         ).fetchone()
     assert audit["route"] == "new_task"
+
+
+def test_route_audit_failure_rolls_back_task_mutation(tmp_path: Path) -> None:
+    store = FailingAuditStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    raw = _message("om_audit_retry", chat_type="p2p", sender_id="ou_a")
+
+    with pytest.raises(RuntimeError, match="audit failed"):
+        service.process_raw_message(raw, source="p2p", default_chat_type="p2p", run_id="run_1")
+
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"] == 1
+        assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 0
+        assert conn.execute("SELECT COUNT(*) AS c FROM routing_audits").fetchone()["c"] == 0
+
+    retried = service.process_raw_message(raw, source="p2p", default_chat_type="p2p", run_id="run_1")
+
+    assert retried is not None
+    assert retried.decision.route == "new_task"
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 1
+        audit = conn.execute(
+            "SELECT route FROM routing_audits WHERE message_id = ?",
+            ("om_audit_retry",),
+        ).fetchone()
+    assert audit["route"] == "new_task"
+
+
+def test_resource_store_failure_is_retried_for_duplicate_message(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    store = FailingResourceStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(chats={"oc_1": ChatPolicyConfig(bot_joined=True)}),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    raw = _message("om_resource_retry", mentions=[{"open_id": "ou_owner"}], image_key="img_retry")
+
+    with pytest.raises(RuntimeError, match="resource store failed"):
+        service.process_raw_message(raw, source="group_at_me", default_chat_type="group", run_id="run_1")
+
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM routing_audits").fetchone()["c"] == 1
+        assert conn.execute("SELECT COUNT(*) AS c FROM resources").fetchone()["c"] == 0
+    assert len(fake.downloads) == 1
+
+    retried = service.process_raw_message(
+        raw,
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert retried is not None
+    assert retried.decision.reason == "duplicate_message"
+    assert len(fake.downloads) == 2
+    with store.connect() as conn:
+        resource = conn.execute(
+            "SELECT download_status FROM resources WHERE file_key = ?",
+            ("img_retry",),
+        ).fetchone()
+    assert resource["download_status"] == "downloaded"
 
 
 def test_p2p_shortcut_attaches_to_single_active_task(tmp_path: Path) -> None:

@@ -301,87 +301,106 @@ class SQLiteStore:
     ) -> TaskRecord:
         self.migrate()
         now = utc_now_iso()
-        short_id = self._unique_short_id("t", message.message_id)
-        label = task_label or _clean_label(message.text)
         with self.connect() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO tasks(
-                  short_id, status, chat_id, root_message_id, task_label, hermes_session_id,
-                  created_at, updated_at, chat_type, thread_id, watch_until, last_user_message
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    short_id,
-                    "watching",
-                    message.chat_id,
-                    message.message_id,
-                    label,
-                    f"feishu-task-{short_id}",
-                    now,
-                    now,
-                    message.chat_type,
-                    message.thread_id,
-                    watch_until,
-                    _truncate(message.text),
-                ),
+            task_id = self._create_task_for_message(
+                conn,
+                message,
+                watch_until=watch_until,
+                task_label=task_label,
+                now=now,
             )
-            task_id = int(cursor.lastrowid)
-            self._add_task_message(conn, task_id, message.message_id, "root", now)
-            self._add_watch_keys(conn, task_id, _watch_keys_for_message(message), now)
         return self.get_task_by_id(task_id)
+
+    def create_task_for_message_and_audit(
+        self,
+        message: NormalizedMessage,
+        *,
+        watch_until: str,
+    ) -> tuple[TaskRecord, RouteDecision]:
+        self.migrate()
+        now = utc_now_iso()
+        with self.connect() as conn:
+            task_id = self._create_task_for_message(
+                conn,
+                message,
+                watch_until=watch_until,
+                task_label=None,
+                now=now,
+            )
+            task = self._get_task_by_id(conn, task_id)
+            decision = RouteDecision(
+                "new_task",
+                target_task_id=task.id,
+                target_task_short_id=task.short_id,
+                reason="new_trigger",
+                candidates_count=0,
+                shortcut_hit=False,
+                matched_by="new_trigger",
+            )
+            self._record_routing_audit(conn, message_id=message.message_id, decision=decision)
+        return task, decision
 
     def attach_message_to_task(self, task_id: int, message: NormalizedMessage, *, watch_until: str) -> None:
         self.migrate()
         now = utc_now_iso()
         with self.connect() as conn:
-            self._add_task_message(conn, task_id, message.message_id, "follow_up", now)
-            self._add_watch_keys(conn, task_id, _watch_keys_for_message(message), now)
-            conn.execute(
-                """
-                UPDATE tasks
-                SET updated_at = ?, watch_until = ?, last_user_message = ?
-                WHERE id = ?
-                """,
-                (now, watch_until, _truncate(message.text), task_id),
-            )
+            self._attach_message_to_task(conn, task_id, message, watch_until=watch_until, now=now)
+
+    def attach_message_to_task_and_audit(
+        self,
+        task: TaskRecord,
+        message: NormalizedMessage,
+        *,
+        watch_until: str,
+        candidates_count: int,
+        matched_by: str,
+    ) -> RouteDecision:
+        self.migrate()
+        now = utc_now_iso()
+        decision = RouteDecision(
+            "attach_task",
+            target_task_id=task.id,
+            target_task_short_id=task.short_id,
+            reason="deterministic_shortcut",
+            candidates_count=candidates_count,
+            shortcut_hit=True,
+            matched_by=matched_by,
+        )
+        with self.connect() as conn:
+            self._attach_message_to_task(conn, task.id, message, watch_until=watch_until, now=now)
+            self._record_routing_audit(conn, message_id=message.message_id, decision=decision)
+        return decision
 
     def close_task_for_owner_takeover(self, task_id: int) -> None:
         self.migrate()
         now = utc_now_iso()
         with self.connect() as conn:
-            conn.execute(
-                """
-                UPDATE tasks
-                SET status = ?, updated_at = ?, closed_at = ?
-                WHERE id = ?
-                """,
-                ("human_taken_over", now, now, task_id),
-            )
-            conn.execute(
-                """
-                UPDATE actions
-                SET status = ?, updated_at = ?
-                WHERE task_id = ? AND kind = ? AND status IN ('pending', 'sending')
-                """,
-                ("cancelled", now, task_id, "send_reply"),
-            )
-            conn.execute(
-                """
-                UPDATE approvals
-                SET status = ?, resolved_at = ?
-                WHERE task_id = ? AND kind = ? AND status = 'pending'
-                """,
-                ("expired", now, task_id, "send_reply"),
-            )
+            self._close_task_for_owner_takeover(conn, task_id, now=now)
+
+    def close_task_for_owner_takeover_and_audit(
+        self,
+        task: TaskRecord,
+        message: NormalizedMessage,
+    ) -> RouteDecision:
+        self.migrate()
+        now = utc_now_iso()
+        decision = RouteDecision(
+            "human_taken_over",
+            target_task_id=task.id,
+            target_task_short_id=task.short_id,
+            reason="owner_message_related_to_active_task",
+            candidates_count=1,
+            matched_by="owner_takeover",
+        )
+        with self.connect() as conn:
+            self._close_task_for_owner_takeover(conn, task.id, now=now)
+            self._record_routing_audit(conn, message_id=message.message_id, decision=decision)
+        return decision
 
     def get_task_by_id(self, task_id: int) -> TaskRecord:
         self.migrate()
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        if row is None:
-            raise KeyError(f"task not found: {task_id}")
-        return _task_from_row(row)
+            return self._get_task_by_id(conn, task_id)
 
     def get_active_tasks_for_chat(self, chat_id: str, *, now: str) -> list[TaskRecord]:
         self.migrate()
@@ -579,16 +598,34 @@ class SQLiteStore:
         self.migrate()
         now = utc_now_iso()
         with self.connect() as conn:
-            self._add_task_message(conn, task_id, message.message_id, "agent_reply", now)
-            self._add_watch_keys(conn, task_id, _agent_reply_watch_keys_for_message(message), now)
-            conn.execute(
-                """
-                UPDATE tasks
-                SET updated_at = ?, watch_until = ?, last_agent_reply = ?
-                WHERE id = ?
-                """,
-                (now, watch_until, _truncate(message.text), task_id),
+            self._record_agent_message_for_task(conn, task_id, message, watch_until=watch_until, now=now)
+
+    def record_agent_message_for_task_and_audit(
+        self,
+        task: TaskRecord,
+        message: NormalizedMessage,
+        *,
+        watch_until: str,
+    ) -> RouteDecision:
+        self.migrate()
+        now = utc_now_iso()
+        decision = RouteDecision(
+            "ignore",
+            target_task_id=task.id,
+            target_task_short_id=task.short_id,
+            reason="self_message",
+            matched_by="sent_action",
+        )
+        with self.connect() as conn:
+            self._record_agent_message_for_task(
+                conn,
+                task.id,
+                message,
+                watch_until=watch_until,
+                now=now,
             )
+            self._record_routing_audit(conn, message_id=message.message_id, decision=decision)
+        return decision
 
     def list_active_watch_targets(self, *, now: str) -> list[dict[str, str | None]]:
         self.migrate()
@@ -616,26 +653,40 @@ class SQLiteStore:
     def record_routing_audit(self, *, message_id: str, decision: RouteDecision) -> None:
         self.migrate()
         with self.connect() as conn:
-            conn.execute(
+            self._record_routing_audit(conn, message_id=message_id, decision=decision)
+
+    def has_resource_eligible_routing_audit(self, message_id: str) -> bool:
+        self.migrate()
+        with self.connect() as conn:
+            row = conn.execute(
                 """
-                INSERT INTO routing_audits(
-                  message_id, task_id, route, route_reason, candidates_count, shortcut_hit,
-                  router_called, matched_by, target_task_id, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                SELECT 1 FROM routing_audits
+                WHERE message_id = ?
+                  AND route IN ('new_task', 'attach_task', 'reopen_task', 'ambiguous')
+                LIMIT 1
                 """,
-                (
-                    message_id,
-                    decision.target_task_id,
-                    decision.route,
-                    decision.reason,
-                    decision.candidates_count,
-                    int(decision.shortcut_hit),
-                    int(decision.router_called),
-                    decision.matched_by,
-                    decision.target_task_id,
-                    utc_now_iso(),
-                ),
-            )
+                (message_id,),
+            ).fetchone()
+        return row is not None
+
+    def has_missing_resources(self, resources: Iterable[ResourceRef]) -> bool:
+        self.migrate()
+        refs = list(resources)
+        if not refs:
+            return False
+        with self.connect() as conn:
+            for resource in refs:
+                row = conn.execute(
+                    """
+                    SELECT 1 FROM resources
+                    WHERE message_id = ? AND file_key = ? AND resource_type = ?
+                    LIMIT 1
+                    """,
+                    (resource.message_id, resource.file_key, resource.resource_type),
+                ).fetchone()
+                if row is None:
+                    return True
+        return False
 
     def count_pending_actions(self) -> int:
         self.migrate()
@@ -692,23 +743,166 @@ class SQLiteStore:
                 (short_id, task_id, kind, status, utc_now_iso()),
             )
 
-    def _unique_short_id(self, prefix: str, seed: str) -> str:
+    def _get_task_by_id(self, conn: sqlite3.Connection, task_id: int) -> TaskRecord:
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"task not found: {task_id}")
+        return _task_from_row(row)
+
+    def _create_task_for_message(
+        self,
+        conn: sqlite3.Connection,
+        message: NormalizedMessage,
+        *,
+        watch_until: str,
+        task_label: str | None,
+        now: str,
+    ) -> int:
+        short_id = self._unique_short_id(conn, "t", message.message_id)
+        label = task_label or _clean_label(message.text)
+        cursor = conn.execute(
+            """
+            INSERT INTO tasks(
+              short_id, status, chat_id, root_message_id, task_label, hermes_session_id,
+              created_at, updated_at, chat_type, thread_id, watch_until, last_user_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                short_id,
+                "watching",
+                message.chat_id,
+                message.message_id,
+                label,
+                f"feishu-task-{short_id}",
+                now,
+                now,
+                message.chat_type,
+                message.thread_id,
+                watch_until,
+                _truncate(message.text),
+            ),
+        )
+        task_id = int(cursor.lastrowid)
+        self._add_task_message(conn, task_id, message.message_id, "root", now)
+        self._add_watch_keys(conn, task_id, _watch_keys_for_message(message), now)
+        return task_id
+
+    def _attach_message_to_task(
+        self,
+        conn: sqlite3.Connection,
+        task_id: int,
+        message: NormalizedMessage,
+        *,
+        watch_until: str,
+        now: str,
+    ) -> None:
+        self._add_task_message(conn, task_id, message.message_id, "follow_up", now)
+        self._add_watch_keys(conn, task_id, _watch_keys_for_message(message), now)
+        conn.execute(
+            """
+            UPDATE tasks
+            SET updated_at = ?, watch_until = ?, last_user_message = ?
+            WHERE id = ?
+            """,
+            (now, watch_until, _truncate(message.text), task_id),
+        )
+
+    def _close_task_for_owner_takeover(
+        self,
+        conn: sqlite3.Connection,
+        task_id: int,
+        *,
+        now: str,
+    ) -> None:
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = ?, updated_at = ?, closed_at = ?
+            WHERE id = ?
+            """,
+            ("human_taken_over", now, now, task_id),
+        )
+        conn.execute(
+            """
+            UPDATE actions
+            SET status = ?, updated_at = ?
+            WHERE task_id = ? AND kind = ? AND status IN ('pending', 'sending')
+            """,
+            ("cancelled", now, task_id, "send_reply"),
+        )
+        conn.execute(
+            """
+            UPDATE approvals
+            SET status = ?, resolved_at = ?
+            WHERE task_id = ? AND kind = ? AND status = 'pending'
+            """,
+            ("expired", now, task_id, "send_reply"),
+        )
+
+    def _record_agent_message_for_task(
+        self,
+        conn: sqlite3.Connection,
+        task_id: int,
+        message: NormalizedMessage,
+        *,
+        watch_until: str,
+        now: str,
+    ) -> None:
+        self._add_task_message(conn, task_id, message.message_id, "agent_reply", now)
+        self._add_watch_keys(conn, task_id, _agent_reply_watch_keys_for_message(message), now)
+        conn.execute(
+            """
+            UPDATE tasks
+            SET updated_at = ?, watch_until = ?, last_agent_reply = ?
+            WHERE id = ?
+            """,
+            (now, watch_until, _truncate(message.text), task_id),
+        )
+
+    def _record_routing_audit(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        message_id: str,
+        decision: RouteDecision,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO routing_audits(
+              message_id, task_id, route, route_reason, candidates_count, shortcut_hit,
+              router_called, matched_by, target_task_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                message_id,
+                decision.target_task_id,
+                decision.route,
+                decision.reason,
+                decision.candidates_count,
+                int(decision.shortcut_hit),
+                int(decision.router_called),
+                decision.matched_by,
+                decision.target_task_id,
+                utc_now_iso(),
+            ),
+        )
+
+    def _unique_short_id(self, conn: sqlite3.Connection, prefix: str, seed: str) -> str:
         base = f"{prefix}_{sha256(seed.encode('utf-8')).hexdigest()[:8]}"
-        with self.connect() as conn:
+        existing = conn.execute(
+            "SELECT short_id FROM tasks WHERE short_id = ?",
+            (base,),
+        ).fetchone()
+        if existing is None:
+            return base
+        for suffix in range(2, 100):
+            candidate = f"{base}_{suffix}"
             existing = conn.execute(
                 "SELECT short_id FROM tasks WHERE short_id = ?",
-                (base,),
+                (candidate,),
             ).fetchone()
             if existing is None:
-                return base
-            for suffix in range(2, 100):
-                candidate = f"{base}_{suffix}"
-                existing = conn.execute(
-                    "SELECT short_id FROM tasks WHERE short_id = ?",
-                    (candidate,),
-                ).fetchone()
-                if existing is None:
-                    return candidate
+                return candidate
         raise RuntimeError("could not allocate task short id")
 
     def _add_task_message(

@@ -372,7 +372,12 @@ class IngestionService:
             now=self.clock(),
             watch_until=_plus_minutes(self.clock(), WATCH_EXTEND_MINUTES),
         )
-        if _should_process_resources(inserted=inserted, message=message, result=result):
+        if _should_process_resources(
+            store=self.store,
+            inserted=inserted,
+            message=message,
+            result=result,
+        ):
             self.resources.process(message, run_id=run_id)
         return result
 
@@ -568,15 +573,24 @@ def _filter_raws_in_window(raws: list[dict[str, Any]], *, start: str, end: str) 
 
 def _should_process_resources(
     *,
+    store: SQLiteStore,
     inserted: bool,
     message: NormalizedMessage,
     result: RoutingResult,
 ) -> bool:
-    if not inserted or not message.resources:
+    if not message.resources:
         return False
     if message.is_self_message or message.sender_role == "owner_message" or message.at_all:
         return False
-    return result.decision.route in {"new_task", "attach_task", "reopen_task", "ambiguous"}
+    eligible_routes = {"new_task", "attach_task", "reopen_task", "ambiguous"}
+    if result.decision.route in eligible_routes:
+        return True
+    return (
+        not inserted
+        and result.decision.reason == "duplicate_message"
+        and store.has_resource_eligible_routing_audit(message.message_id)
+        and store.has_missing_resources(message.resources)
+    )
 
 
 def _minus_seconds(value: str, seconds: int) -> str:

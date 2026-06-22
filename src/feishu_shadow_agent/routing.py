@@ -74,18 +74,12 @@ class MessageRouter:
 
         sent_action_task = self.store.find_task_for_sent_action_message(message.message_id)
         if sent_action_task is not None:
-            self.store.record_agent_message_for_task(sent_action_task.id, message, watch_until=watch_until)
-            return self._audit(
-                message,
-                RouteDecision(
-                    "ignore",
-                    target_task_id=sent_action_task.id,
-                    target_task_short_id=sent_action_task.short_id,
-                    reason="self_message",
-                    matched_by="sent_action",
-                ),
+            decision = self.store.record_agent_message_for_task_and_audit(
                 sent_action_task,
+                message,
+                watch_until=watch_until,
             )
+            return RoutingResult(decision=decision, task=sent_action_task)
 
         if message.is_self_message:
             return self._audit(message, RouteDecision("ignore", reason="self_message"))
@@ -102,20 +96,14 @@ class MessageRouter:
         candidates = self.collector.collect(message, now=now)
         deterministic = self._deterministic_match(message, candidates, now=now)
         if deterministic is not None:
-            self.store.attach_message_to_task(deterministic.task.id, message, watch_until=watch_until)
-            return self._audit(
-                message,
-                RouteDecision(
-                    "attach_task",
-                    target_task_id=deterministic.task.id,
-                    target_task_short_id=deterministic.task.short_id,
-                    reason="deterministic_shortcut",
-                    candidates_count=len(candidates),
-                    shortcut_hit=True,
-                    matched_by=deterministic.matched_by,
-                ),
+            decision = self.store.attach_message_to_task_and_audit(
                 deterministic.task,
+                message,
+                watch_until=watch_until,
+                candidates_count=len(candidates),
+                matched_by=deterministic.matched_by,
             )
+            return RoutingResult(decision=decision, task=deterministic.task)
 
         if not candidates and source in TRIGGER_SOURCES and message.chat_id:
             historical = self.store.get_related_closed_tasks(
@@ -132,20 +120,11 @@ class MessageRouter:
                         router_called=False,
                     ),
                 )
-            task = self.store.create_task_for_message(message, watch_until=watch_until)
-            return self._audit(
+            task, decision = self.store.create_task_for_message_and_audit(
                 message,
-                RouteDecision(
-                    "new_task",
-                    target_task_id=task.id,
-                    target_task_short_id=task.short_id,
-                    reason="new_trigger",
-                    candidates_count=0,
-                    shortcut_hit=False,
-                    matched_by="new_trigger",
-                ),
-                task,
+                watch_until=watch_until,
             )
+            return RoutingResult(decision=decision, task=task)
 
         if source == "active_watch" and not candidates:
             return self._audit(
@@ -173,19 +152,11 @@ class MessageRouter:
                 message,
                 RouteDecision("ignore", reason="owner_message_not_task_intervention"),
             )
-        self.store.close_task_for_owner_takeover(task.id)
-        return self._audit(
-            message,
-            RouteDecision(
-                "human_taken_over",
-                target_task_id=task.id,
-                target_task_short_id=task.short_id,
-                reason="owner_message_related_to_active_task",
-                candidates_count=1,
-                matched_by="owner_takeover",
-            ),
+        decision = self.store.close_task_for_owner_takeover_and_audit(
             task,
+            message,
         )
+        return RoutingResult(decision=decision, task=task)
 
     def _owner_takeover_task(self, message: NormalizedMessage, *, now: str) -> TaskRecord | None:
         if not message.chat_id:
