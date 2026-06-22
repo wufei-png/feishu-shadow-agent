@@ -404,7 +404,7 @@ class IngestionService:
             data={"message_id": message.message_id, "source": source, "inserted": inserted},
         )
         if source == "approval_inbox":
-            if inserted and self.approval_service is not None and message.sender_role == "owner_message":
+            if self.approval_service is not None and message.sender_role == "owner_message":
                 result = self.approval_service.apply_command(message=message)
                 self.logger.emit(
                     "info",

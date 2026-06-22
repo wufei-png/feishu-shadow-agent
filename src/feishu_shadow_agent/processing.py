@@ -150,7 +150,7 @@ class ApprovalService:
         verb = match.group(1)
         target_id = match.group(2)
         final_reply = match.group(3)
-        if verb in {"approve", "reject"} and target_id:
+        if verb in {"approve", "reject"} and target_id and final_reply is None:
             return self.store.apply_approval_command(
                 message_id=message.message_id,
                 command=command,

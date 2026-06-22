@@ -635,7 +635,7 @@ def test_task_router_can_reopen_historical_closed_recall_candidate(tmp_path: Pat
             "SELECT route, route_reason, target_task_id, router_called FROM routing_audits WHERE message_id = ? ORDER BY id DESC LIMIT 1",
             ("om_2",),
         ).fetchone()
-        task = conn.execute("SELECT status FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
+        task = conn.execute("SELECT status, closed_at FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
         task_message = conn.execute(
             "SELECT role FROM task_messages WHERE task_id = ? AND message_id = ?",
             (created.task.id, "om_2"),
@@ -649,6 +649,7 @@ def test_task_router_can_reopen_historical_closed_recall_candidate(tmp_path: Pat
     assert route_row["target_task_id"] == created.task.id
     assert route_row["router_called"] == 1
     assert task["status"] == "watching"
+    assert task["closed_at"] is None
     assert task_message["role"] == "follow_up"
     assert invalid_notification is None
 
@@ -824,6 +825,67 @@ def test_approval_inbox_approves_pending_request_and_advances_checkpoint(tmp_pat
     assert task["closed_at"] is None
 
 
+def test_approval_inbox_processes_existing_owner_command_message(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config()
+    fake = FakeFeishu()
+    logger = JSONLLogger(tmp_path / "agent.jsonl")
+    approval_service = ApprovalService(store=store, config=cfg)
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=cfg,
+        logger=logger,
+        approval_service=approval_service,
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_root", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    approval_service.request_send_reply(
+        task=created.task,
+        reply_target_message_id="om_root",
+        proposed_reply="manual reply",
+        reason="test",
+    )
+    with store.connect() as conn:
+        approval_short_id = conn.execute("SELECT short_id FROM approvals").fetchone()["short_id"]
+    command_raw = _message(
+        "om_existing_cmd",
+        chat_id="ou_bot_chat",
+        chat_type="p2p",
+        sender_id="ou_owner",
+        sender_name="Owner",
+        text=f"/approve {approval_short_id}",
+    )
+    service.process_raw_message(
+        command_raw,
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    fake.pages[None] = MessagePage([command_raw])
+
+    result = service.run_approval_inbox(run_id="run_1")
+
+    assert result.processed == 1
+    with store.connect() as conn:
+        command = conn.execute(
+            "SELECT status FROM approval_commands WHERE message_id = ?",
+            ("om_existing_cmd",),
+        ).fetchone()
+        approval = conn.execute("SELECT status FROM approvals WHERE short_id = ?", (approval_short_id,)).fetchone()
+        action = conn.execute("SELECT status, target_message_id FROM actions WHERE kind = 'send_reply'").fetchone()
+    assert command["status"] == "applied"
+    assert approval["status"] == "approved"
+    assert action["status"] == "pending"
+    assert action["target_message_id"] == "om_root"
+
+
 def test_approve_task_shortcut_single_pending_sets_task_watching(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     cfg = _config()
@@ -901,6 +963,67 @@ def test_failed_approval_command_rolls_back_state_changes(tmp_path: Path) -> Non
     assert approval["status"] == "pending"
     assert command["status"] == "failed"
     assert actions == 0
+
+
+@pytest.mark.parametrize("verb", ["approve", "reject"])
+def test_approval_command_with_extra_text_fails_without_consuming_approval(tmp_path: Path, verb: str) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config()
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    approval_service = ApprovalService(store=store, config=cfg)
+    created = service.process_raw_message(
+        _message("om_root", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    approval_service.request_send_reply(
+        task=created.task,
+        reply_target_message_id="om_root",
+        proposed_reply="manual reply",
+        reason="test",
+    )
+    with store.connect() as conn:
+        approval_short_id = conn.execute("SELECT short_id FROM approvals").fetchone()["short_id"]
+    message = NormalizedMessage(
+        message_id=f"om_{verb}_extra",
+        chat_id="ou_bot_chat",
+        chat_type="p2p",
+        sender_id="ou_owner",
+        sender_name="Owner",
+        sender_type="user",
+        sender_role="owner_message",
+        sent_at="2026-06-22T10:11:00+08:00",
+        thread_id=None,
+        reply_to_message_id=None,
+        text=f"/{verb} {approval_short_id} extra text",
+        direct_mention=False,
+        at_all=False,
+    )
+
+    result = approval_service.apply_command(message=message)
+
+    assert result is not None
+    assert result["status"] == "failed"
+    with store.connect() as conn:
+        approval = conn.execute("SELECT status FROM approvals WHERE short_id = ?", (approval_short_id,)).fetchone()
+        task = conn.execute("SELECT status FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
+        action_count = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
+        command = conn.execute(
+            "SELECT status FROM approval_commands WHERE message_id = ?",
+            (f"om_{verb}_extra",),
+        ).fetchone()
+    assert approval["status"] == "pending"
+    assert task["status"] == "waiting_approval"
+    assert action_count == 0
+    assert command["status"] == "failed"
 
 
 def test_approval_creation_rolls_back_when_owner_notification_fails(tmp_path: Path) -> None:

@@ -809,7 +809,9 @@ class SQLiteStore:
         if status is not None:
             assignments.append("status = ?")
             params.append(status)
-            if status not in {"watching", "waiting_approval"}:
+            if status in {"watching", "waiting_approval"}:
+                assignments.append("closed_at = NULL")
+            else:
                 assignments.append("closed_at = ?")
                 params.append(utc_now_iso())
         if watch_until is not None:
@@ -1183,7 +1185,7 @@ class SQLiteStore:
         conn.execute(
             """
             UPDATE tasks
-            SET status = ?, updated_at = ?
+            SET status = ?, updated_at = ?, closed_at = NULL
             WHERE id = ?
             """,
             ("watching", now, task_id),
