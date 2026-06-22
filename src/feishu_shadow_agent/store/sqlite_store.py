@@ -890,33 +890,13 @@ class SQLiteStore:
     ) -> int:
         self.migrate()
         now = utc_now_iso()
-        seed = json.dumps({"task_id": task_id, "payload": payload}, ensure_ascii=False, sort_keys=True, default=str)
-        idempotency_key = f"owner-{sha256(seed.encode('utf-8')).hexdigest()[:16]}"
         with self.connect() as conn:
-            cursor = conn.execute(
-                """
-                INSERT OR IGNORE INTO actions(
-                  idempotency_key, task_id, kind, status, dry_run, payload_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    idempotency_key,
-                    task_id,
-                    "owner_notification",
-                    "pending",
-                    1,
-                    json.dumps(payload, ensure_ascii=False, default=str),
-                    now,
-                    now,
-                ),
+            return self._create_owner_notification_action_locked(
+                conn,
+                task_id=task_id,
+                payload=payload,
+                now=now,
             )
-            if cursor.lastrowid:
-                return int(cursor.lastrowid)
-            row = conn.execute(
-                "SELECT id FROM actions WHERE idempotency_key = ?",
-                (idempotency_key,),
-            ).fetchone()
-        return int(row["id"])
 
     def create_send_reply_approval(
         self,
@@ -993,7 +973,7 @@ class SQLiteStore:
                 status = "failed"
             else:
                 conn.execute("RELEASE SAVEPOINT approval_command")
-                status = "applied"
+                status = str(result.pop("_status", "applied"))
             conn.execute(
                 """
                 INSERT INTO approval_commands(message_id, command, status, result_json, created_at, updated_at)
@@ -1076,16 +1056,38 @@ class SQLiteStore:
                 """,
                 (task["id"],),
             ).fetchall()
-            if len(pending) != 1:
-                raise ValueError(f"/send requires exactly one pending approval for {target_id}")
-            payload = json.loads(pending[0]["payload_json"] or "{}")
-            target_message_id = payload.get("reply_target_message_id") or payload.get("target_message_id")
-            conn.execute(
-                "UPDATE approvals SET status = ?, resolved_at = ? WHERE id = ?",
-                ("approved", now, pending[0]["id"]),
-            )
-            approval_id = int(pending[0]["id"])
-            approval_short_id = pending[0]["short_id"]
+            if len(pending) > 1:
+                pending_short_ids = [row["short_id"] for row in pending]
+                action_id = self._create_owner_notification_action_locked(
+                    conn,
+                    task_id=int(task["id"]),
+                    payload={
+                        "type": "approval_command_conflict",
+                        "task_id": target_id,
+                        "reason": "multiple_pending_approvals",
+                        "pending_approval_ids": pending_short_ids,
+                        "message": f"Multiple pending approvals exist for {target_id}; use a concrete a_ approval id.",
+                    },
+                    now=now,
+                )
+                return {
+                    "_status": "failed",
+                    "error": f"/send requires a concrete approval id for {target_id}",
+                    "notification_action_id": action_id,
+                    "pending_approval_ids": pending_short_ids,
+                }
+            target_message_id: Any
+            approval_id: int
+            approval_short_id: str
+            if len(pending) == 1:
+                previous_payload = json.loads(pending[0]["payload_json"] or "{}")
+                target_message_id = previous_payload.get("reply_target_message_id") or previous_payload.get("target_message_id")
+                approval_id = int(pending[0]["id"])
+                approval_short_id = pending[0]["short_id"]
+            else:
+                target_message_id = task["root_message_id"]
+                approval_short_id = self._unique_short_id_in_table(conn, "approvals", "a", f"{target_id}:{reply_text}:{now}")
+                approval_id = 0
             if not isinstance(target_message_id, str) or not target_message_id:
                 raise ValueError("task does not have a reply target")
             payload = {
@@ -1094,6 +1096,40 @@ class SQLiteStore:
                 "identity": "user",
                 "source": "owner_send",
             }
+            if approval_id:
+                conn.execute(
+                    """
+                    UPDATE approvals
+                    SET status = ?, resolved_at = ?, payload_json = ?, preview = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        "approved",
+                        now,
+                        json.dumps(payload, ensure_ascii=False, default=str),
+                        reply_text,
+                        approval_id,
+                    ),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO approvals(
+                      short_id, task_id, kind, status, payload_json, preview, created_at, resolved_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        approval_short_id,
+                        int(task["id"]),
+                        "send_reply",
+                        "approved",
+                        json.dumps(payload, ensure_ascii=False, default=str),
+                        reply_text,
+                        now,
+                        now,
+                    ),
+                )
+                approval_id = int(cursor.lastrowid)
             action_id = self._create_send_reply_action_locked(
                 conn,
                 task_id=int(task["id"]),
@@ -1169,6 +1205,41 @@ class SQLiteStore:
         except sqlite3.IntegrityError:
             return None
         return int(cursor.lastrowid)
+
+    def _create_owner_notification_action_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        task_id: int | None,
+        payload: dict[str, Any],
+        now: str,
+    ) -> int:
+        seed = json.dumps({"task_id": task_id, "payload": payload}, ensure_ascii=False, sort_keys=True, default=str)
+        idempotency_key = f"owner-{sha256(seed.encode('utf-8')).hexdigest()[:16]}"
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO actions(
+              idempotency_key, task_id, kind, status, dry_run, payload_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                idempotency_key,
+                task_id,
+                "owner_notification",
+                "pending",
+                1,
+                json.dumps(payload, ensure_ascii=False, default=str),
+                now,
+                now,
+            ),
+        )
+        if cursor.lastrowid:
+            return int(cursor.lastrowid)
+        row = conn.execute(
+            "SELECT id FROM actions WHERE idempotency_key = ?",
+            (idempotency_key,),
+        ).fetchone()
+        return int(row["id"])
 
     def insert_action_for_test(
         self,

@@ -287,6 +287,78 @@ def test_task_router_ignore_records_audit_without_notification(tmp_path: Path) -
     assert notifications == 0
 
 
+def test_task_router_invalid_target_records_ambiguous_audit_and_notification(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
+    hermes.router_outputs.append(
+        {
+            "route": "attach_task",
+            "target_task_id": "t_missing",
+            "confidence": 0.9,
+            "reason": "bad target",
+            "updated_watch_keys": [],
+        }
+    )
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)})
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    service.process_raw_message(
+        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    service.process_raw_message(
+        _message("om_2", sender_id="ou_b", sender_name="Bob", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        route = conn.execute(
+            "SELECT route, route_reason, router_called FROM routing_audits WHERE message_id = ? ORDER BY id DESC LIMIT 1",
+            ("om_2",),
+        ).fetchone()
+        notification = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'owner_notification'",
+        ).fetchone()
+    assert route["route"] == "ambiguous"
+    assert route["route_reason"] == "task_router_invalid_target"
+    assert route["router_called"] == 1
+    assert "task_router_invalid_target" in notification["payload_json"]
+
+
+def test_task_router_failure_records_ambiguous_audit(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
+    hermes.router_outputs.append(HermesCliResult(["hermes"], 1, error="boom"))
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)})
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    service.process_raw_message(
+        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    service.process_raw_message(
+        _message("om_2", sender_id="ou_b", sender_name="Bob", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        route = conn.execute(
+            "SELECT route, route_reason, router_called FROM routing_audits WHERE message_id = ? ORDER BY id DESC LIMIT 1",
+            ("om_2",),
+        ).fetchone()
+    assert route["route"] == "ambiguous"
+    assert route["route_reason"] == "task_router_failed"
+    assert route["router_called"] == 1
+
+
 def test_task_session_followup_uses_stored_hermes_session(tmp_path: Path) -> None:
     hermes = FakeHermes()
     hermes.session_outputs.append(_session_output(_session_id="sid_1", reply_target_message_id="om_1"))
@@ -309,6 +381,27 @@ def test_task_session_followup_uses_stored_hermes_session(tmp_path: Path) -> Non
     assert hermes.session_ids_seen == [None, "sid_1"]
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"] == 2
+
+
+def test_empty_auto_reply_downgrades_to_approval(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1", proposed_reply="   "))
+    store, service, _ = _service(tmp_path, hermes=hermes)
+
+    service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        approval = conn.execute("SELECT status, payload_json FROM approvals").fetchone()
+        send_count = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
+    payload = json.loads(approval["payload_json"])
+    assert approval["status"] == "pending"
+    assert payload["reason"] == "empty_proposed_reply"
+    assert send_count == 0
 
 
 def test_send_composer_mentions_reply_target_sender_once() -> None:
@@ -416,7 +509,7 @@ def test_failed_approval_command_rolls_back_state_changes(tmp_path: Path) -> Non
     assert actions == 0
 
 
-def test_send_command_requires_exactly_one_pending_approval(tmp_path: Path) -> None:
+def test_send_command_multiple_pending_approvals_creates_owner_notification(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     cfg = _config()
     service = IngestionService(
@@ -456,11 +549,55 @@ def test_send_command_requires_exactly_one_pending_approval(tmp_path: Path) -> N
     )
 
     assert result["status"] == "failed"
+    assert result["result"]["pending_approval_ids"]
     with store.connect() as conn:
         pending = conn.execute("SELECT COUNT(*) AS c FROM approvals WHERE status = 'pending'").fetchone()["c"]
-        actions = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
+        send_actions = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
+        notification = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'owner_notification' AND payload_json LIKE ?",
+            ("%multiple_pending_approvals%",),
+        ).fetchone()
     assert pending == 2
-    assert actions == 0
+    assert send_actions == 0
+    assert "multiple_pending_approvals" in notification["payload_json"]
+
+
+def test_send_command_without_pending_approval_uses_task_root_message(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config()
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_root", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+
+    result = store.apply_approval_command(
+        message_id="om_send_root",
+        command=f"/send {created.task.short_id} final root reply",
+        verb="send",
+        target_id=created.task.short_id,
+        final_reply="final root reply",
+    )
+
+    assert result["status"] == "applied"
+    with store.connect() as conn:
+        approval = conn.execute("SELECT status, payload_json FROM approvals").fetchone()
+        action = conn.execute("SELECT status, target_message_id, payload_json FROM actions WHERE kind = 'send_reply'").fetchone()
+    approval_payload = json.loads(approval["payload_json"])
+    action_payload = json.loads(action["payload_json"])
+    assert approval["status"] == "approved"
+    assert approval_payload["source"] == "owner_send"
+    assert action["target_message_id"] == "om_root"
+    assert action_payload["text"] == "final root reply"
 
 
 def test_send_command_creates_action_for_single_pending_approval(tmp_path: Path) -> None:
@@ -504,3 +641,4 @@ def test_send_command_creates_action_for_single_pending_approval(tmp_path: Path)
     assert approval["status"] == "approved"
     assert action["status"] == "pending"
     assert payload["text"] == "final reply"
+    assert payload["source"] == "owner_send"

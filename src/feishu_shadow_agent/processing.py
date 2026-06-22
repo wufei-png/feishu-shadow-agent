@@ -241,12 +241,23 @@ class TaskProcessingService:
             latency_ms=result.latency_ms,
             prompt={"text": prompt} if self.config.debug.save_full_hermes_io else None,
         )
+        candidates_count = len(active_candidates) + len(historical)
         if not result.ok or not isinstance(result.json_data, dict):
+            self._audit_router_ambiguity(
+                message=message,
+                reason="task_router_failed",
+                candidates_count=candidates_count,
+            )
             self.approvals.notify_owner(task=None, reason="task_router_failed", payload={"message_id": message.message_id})
             return None
         try:
             output = TaskRouterOutput.model_validate(result.json_data)
         except ValidationError as exc:
+            self._audit_router_ambiguity(
+                message=message,
+                reason="task_router_schema_failed",
+                candidates_count=candidates_count,
+            )
             self.approvals.notify_owner(
                 task=None,
                 reason="task_router_schema_failed",
@@ -259,7 +270,7 @@ class TaskProcessingService:
                 decision=RouteDecision(
                     "ambiguous",
                     reason=output.reason or "task_router_ambiguous",
-                    candidates_count=len(active_candidates) + len(historical),
+                    candidates_count=candidates_count,
                     router_called=True,
                 ),
             )
@@ -286,6 +297,11 @@ class TaskProcessingService:
                 reason="task_router_invalid_target",
                 payload={"message_id": message.message_id, "target": output.target_task_id},
             )
+            self._audit_router_ambiguity(
+                message=message,
+                reason="task_router_invalid_target",
+                candidates_count=candidates_count,
+            )
             return None
         if output.route in {"attach_task", "reopen_task"}:
             self.store.attach_message_to_task(target.id, message, watch_until=watch_until)
@@ -294,7 +310,7 @@ class TaskProcessingService:
                 target_task_id=target.id,
                 target_task_short_id=target.short_id,
                 reason=output.reason or "task_router",
-                candidates_count=len(active_candidates) + len(historical),
+                candidates_count=candidates_count,
                 router_called=True,
                 matched_by="task_router",
             )
@@ -435,6 +451,8 @@ class TaskProcessingService:
             return {"allow": False, "reason": "needs_owner", "identity": "user"}
         if composed.had_forbidden_mentions:
             return {"allow": False, "reason": "forbidden_mentions", "identity": "user"}
+        if not output.proposed_reply.strip() or not composed.text.strip():
+            return {"allow": False, "reason": "empty_proposed_reply", "identity": "user"}
         chat_type = task.chat_type or message.chat_type
         policy = self._chat_policy(task.chat_id or message.chat_id)
         threshold = policy.confidence_threshold if chat_type == "group" else self.config.reply_policy.confidence_threshold
@@ -471,6 +489,23 @@ class TaskProcessingService:
         if not target_task_id:
             return None
         return self.store.get_task_by_short_id(target_task_id)
+
+    def _audit_router_ambiguity(
+        self,
+        *,
+        message: NormalizedMessage,
+        reason: str,
+        candidates_count: int,
+    ) -> None:
+        self.store.record_routing_audit(
+            message_id=message.message_id,
+            decision=RouteDecision(
+                "ambiguous",
+                reason=reason,
+                candidates_count=candidates_count,
+                router_called=True,
+            ),
+        )
 
 
 def _router_prompt(*, message: NormalizedMessage, active: list[Any], historical: list[TaskRecord]) -> str:
