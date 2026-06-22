@@ -275,6 +275,11 @@ class IngestionService:
                     page_token=token,
                     page_size=PAGE_SIZE,
                 ))
+                raws = self._filter_active_watch_chat_followups(
+                    raws,
+                    default_chat_type=target["chat_type"],
+                    now=now,
+                )
             processed += self._process_raw_batch(
                 raws,
                 source="active_watch",
@@ -385,6 +390,43 @@ class IngestionService:
                 raise RuntimeError(f"pagination token loop detected: {next_token}")
             seen_tokens.add(next_token)
             page_token = next_token
+
+    def _filter_active_watch_chat_followups(
+        self,
+        raws: list[dict[str, Any]],
+        *,
+        default_chat_type: str | None,
+        now: str,
+    ) -> list[dict[str, Any]]:
+        if default_chat_type != "group":
+            return raws
+        return [
+            raw
+            for raw in raws
+            if self._matches_active_watch_key(raw, default_chat_type=default_chat_type, now=now)
+        ]
+
+    def _matches_active_watch_key(
+        self,
+        raw: dict[str, Any],
+        *,
+        default_chat_type: str | None,
+        now: str,
+    ) -> bool:
+        message = self.normalizer.normalize(raw, default_chat_type=default_chat_type)
+        if not message.chat_id:
+            return False
+        keys: list[str] = []
+        if message.reply_to_message_id:
+            keys.append(f"msg:{message.reply_to_message_id}")
+        if message.thread_id:
+            keys.append(f"thread:{message.thread_id}")
+        if message.sender_id:
+            keys.append(f"user:{message.sender_id}")
+        return any(
+            self.store.get_active_tasks_by_watch_key(message.chat_id, key, now=now)
+            for key in keys
+        )
 
 
 def _content(raw: dict[str, Any]) -> dict[str, Any]:

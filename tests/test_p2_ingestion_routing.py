@@ -535,6 +535,99 @@ def test_active_watch_ignores_unmatched_resource_message_without_download(
         assert conn.execute("SELECT COUNT(*) AS c FROM resources").fetchone()["c"] == 0
 
 
+def test_group_active_watch_only_processes_watch_key_followups(tmp_path: Path) -> None:
+    fake = FakeFeishuClient()
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(daemon=DaemonConfig(overlap_seconds=120)),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message(
+            "om_root",
+            chat_id="oc_1",
+            sender_id="ou_a",
+            mentions=[{"open_id": "ou_owner"}],
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    direct_mention_new_task = _message(
+        "om_new_at",
+        chat_id="oc_1",
+        sender_id="ou_b",
+        text="新的权限问题",
+        mentions=[{"open_id": "ou_owner"}],
+        create_time="2026-06-22T10:06:00+08:00",
+    )
+    follow_up = _message(
+        "om_follow",
+        chat_id="oc_1",
+        sender_id="ou_a",
+        text="还是同一个问题",
+        create_time="2026-06-22T10:07:00+08:00",
+    )
+    fake.chat_pages[("oc_1", None)] = MessagePage([direct_mention_new_task, follow_up])
+
+    result = service.run_active_watch(run_id="run_1")
+
+    assert result.processed == 1
+    assert store.get_message("om_follow") is not None
+    assert store.get_message("om_new_at") is None
+
+
+def test_group_active_watch_leaves_new_direct_mention_for_group_ingest(tmp_path: Path) -> None:
+    fake = FakeFeishuClient()
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(daemon=DaemonConfig(overlap_seconds=120)),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message(
+            "om_root",
+            chat_id="oc_1",
+            sender_id="ou_a",
+            mentions=[{"open_id": "ou_owner"}],
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    direct_mention_new_task = _message(
+        "om_new_at",
+        chat_id="oc_1",
+        sender_id="ou_b",
+        text="新的权限问题",
+        mentions=[{"open_id": "ou_owner"}],
+    )
+    fake.chat_pages[("oc_1", None)] = MessagePage([direct_mention_new_task])
+
+    active_watch_result = service.run_active_watch(run_id="run_1")
+    fake.search_pages[("group", True, None)] = MessagePage([direct_mention_new_task])
+    group_result = service.ingest_group_at_me(run_id="run_1")
+
+    assert active_watch_result.processed == 0
+    assert group_result.processed == 1
+    assert store.get_message("om_new_at") is not None
+    with store.connect() as conn:
+        audit = conn.execute(
+            "SELECT route, route_reason FROM routing_audits WHERE message_id = ? ORDER BY id DESC LIMIT 1",
+            ("om_new_at",),
+        ).fetchone()
+    assert audit["route"] == "ambiguous"
+    assert audit["route_reason"] == "router_placeholder"
+
+
 def test_thread_active_watch_filters_by_checkpoint_window(tmp_path: Path) -> None:
     fake = FakeFeishuClient()
     store = SQLiteStore(tmp_path / "agent.sqlite3")
