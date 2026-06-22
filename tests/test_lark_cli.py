@@ -100,3 +100,47 @@ def test_run_json_preserves_command_failure() -> None:
 
     assert result.exit_code == 3
     assert result.error == "bad"
+
+
+def test_search_messages_returns_message_page() -> None:
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        return LarkCliResult(
+            argv=argv,
+            exit_code=0,
+            json_data={"data": {"items": [{"message_id": "om_1"}], "page_token": "next"}},
+        )
+
+    client = LarkCliClient(path="lark-cli", runner=runner)
+
+    page = client.search_messages(
+        chat_type="group",
+        is_at_me=True,
+        start="2026-06-22T00:00:00+08:00",
+        end="2026-06-22T01:00:00+08:00",
+    )
+
+    assert page.items == [{"message_id": "om_1"}]
+    assert page.has_more is True
+    assert page.next_page_token == "next"
+
+
+def test_download_resource_uses_bot_identity_and_actual_download() -> None:
+    seen: list[list[str]] = []
+
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        seen.append(argv)
+        return LarkCliResult(argv=argv, exit_code=0, json_data={})
+
+    client = LarkCliClient(path="lark-cli", runner=runner)
+
+    result = client.download_resource(
+        message_id="om_1",
+        file_key="img_1",
+        resource_type="image",
+        output="data/resources/om_1/image.bin",
+    )
+
+    assert result.ok
+    assert "--as" in seen[0]
+    assert "bot" in seen[0]
+    assert "--dry-run" not in seen[0]

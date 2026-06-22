@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from hashlib import sha256
 from importlib import resources
 from pathlib import Path
 from typing import Any, Iterable
 
-from ..types import HealthCheckResult, utc_now_iso
+from ..types import HealthCheckResult, NormalizedMessage, ResourceRef, RouteDecision, TaskRecord, utc_now_iso
 
 
 class SQLiteStore:
@@ -23,14 +24,30 @@ class SQLiteStore:
     def migrate(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
-            sql = resources.files("feishu_shadow_agent.store").joinpath(
-                "migrations/0001_foundation.sql"
-            ).read_text(encoding="utf-8")
-            conn.executescript(sql)
-            conn.execute(
-                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                ("0001_foundation", utc_now_iso()),
-            )
+            migration_dir = resources.files("feishu_shadow_agent.store").joinpath("migrations")
+            for migration in sorted(
+                path for path in migration_dir.iterdir() if path.name.endswith(".sql")
+            ):
+                version = migration.name.removesuffix(".sql")
+                if self._migration_applied(conn, version):
+                    continue
+                conn.executescript(migration.read_text(encoding="utf-8"))
+                conn.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (version, utc_now_iso()),
+                )
+
+    def _migration_applied(self, conn: sqlite3.Connection, version: str) -> bool:
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+        ).fetchone()
+        if table is None:
+            return False
+        row = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (version,),
+        ).fetchone()
+        return row is not None
 
     def health_probe(self) -> None:
         with self.connect() as conn:
@@ -145,3 +162,470 @@ class SQLiteStore:
         if row is None:
             return None
         return json.loads(row["value_json"])
+
+    def upsert_message(self, message: NormalizedMessage) -> bool:
+        self.migrate()
+        existing = self.get_message(message.message_id)
+        now = utc_now_iso()
+        normalized_json = json.dumps(
+            {
+                "mentions": message.mentions,
+                "resources": [resource.raw for resource in message.resources],
+                "thread_id": message.thread_id,
+                "reply_to_message_id": message.reply_to_message_id,
+                "direct_mention": message.direct_mention,
+                "at_all": message.at_all,
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+        raw_json = json.dumps(message.raw, ensure_ascii=False, default=str)
+        with self.connect() as conn:
+            if existing is None:
+                conn.execute(
+                    """
+                    INSERT INTO messages(
+                      message_id, chat_id, chat_type, sender_id, sender_type, sent_at,
+                      normalized_json, raw_json, inserted_at, thread_id, reply_to_message_id,
+                      sender_role, direct_mention, at_all, text
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        message.message_id,
+                        message.chat_id,
+                        message.chat_type,
+                        message.sender_id,
+                        message.sender_type,
+                        message.sent_at,
+                        normalized_json,
+                        raw_json,
+                        now,
+                        message.thread_id,
+                        message.reply_to_message_id,
+                        message.sender_role,
+                        int(message.direct_mention),
+                        int(message.at_all),
+                        message.text,
+                    ),
+                )
+                return True
+            conn.execute(
+                """
+                UPDATE messages
+                SET chat_id = ?, chat_type = ?, sender_id = ?, sender_type = ?, sent_at = ?,
+                    normalized_json = ?, raw_json = ?, thread_id = ?, reply_to_message_id = ?,
+                    sender_role = ?, direct_mention = ?, at_all = ?, text = ?
+                WHERE message_id = ?
+                """,
+                (
+                    message.chat_id,
+                    message.chat_type,
+                    message.sender_id,
+                    message.sender_type,
+                    message.sent_at,
+                    normalized_json,
+                    raw_json,
+                    message.thread_id,
+                    message.reply_to_message_id,
+                    message.sender_role,
+                    int(message.direct_mention),
+                    int(message.at_all),
+                    message.text,
+                    message.message_id,
+                ),
+            )
+            return False
+
+    def get_message(self, message_id: str) -> sqlite3.Row | None:
+        self.migrate()
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM messages WHERE message_id = ?",
+                (message_id,),
+            ).fetchone()
+
+    def upsert_resource(
+        self,
+        resource: ResourceRef,
+        *,
+        download_status: str,
+        path: str | None = None,
+        sha256_hex: str | None = None,
+        raw: dict[str, Any] | None = None,
+    ) -> None:
+        self.migrate()
+        now = utc_now_iso()
+        payload = resource.raw | (raw or {})
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO resources(
+                  message_id, file_key, resource_type, download_status, path, sha256, raw_json,
+                  created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(message_id, file_key, resource_type) DO UPDATE SET
+                  download_status = excluded.download_status,
+                  path = excluded.path,
+                  sha256 = excluded.sha256,
+                  raw_json = excluded.raw_json,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    resource.message_id,
+                    resource.file_key,
+                    resource.resource_type,
+                    download_status,
+                    path,
+                    sha256_hex,
+                    json.dumps(payload, ensure_ascii=False, default=str),
+                    now,
+                    now,
+                ),
+            )
+
+    def create_task_for_message(
+        self,
+        message: NormalizedMessage,
+        *,
+        watch_until: str,
+        task_label: str | None = None,
+    ) -> TaskRecord:
+        self.migrate()
+        now = utc_now_iso()
+        short_id = self._unique_short_id("t", message.message_id)
+        label = task_label or _clean_label(message.text)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO tasks(
+                  short_id, status, chat_id, root_message_id, task_label, hermes_session_id,
+                  created_at, updated_at, chat_type, thread_id, watch_until, last_user_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    short_id,
+                    "watching",
+                    message.chat_id,
+                    message.message_id,
+                    label,
+                    f"feishu-task-{short_id}",
+                    now,
+                    now,
+                    message.chat_type,
+                    message.thread_id,
+                    watch_until,
+                    _truncate(message.text),
+                ),
+            )
+            task_id = int(cursor.lastrowid)
+            self._add_task_message(conn, task_id, message.message_id, "root", now)
+            self._add_watch_keys(conn, task_id, _watch_keys_for_message(message), now)
+        return self.get_task_by_id(task_id)
+
+    def attach_message_to_task(self, task_id: int, message: NormalizedMessage, *, watch_until: str) -> None:
+        self.migrate()
+        now = utc_now_iso()
+        with self.connect() as conn:
+            self._add_task_message(conn, task_id, message.message_id, "follow_up", now)
+            self._add_watch_keys(conn, task_id, _watch_keys_for_message(message), now)
+            conn.execute(
+                """
+                UPDATE tasks
+                SET updated_at = ?, watch_until = ?, last_user_message = ?
+                WHERE id = ?
+                """,
+                (now, watch_until, _truncate(message.text), task_id),
+            )
+
+    def close_task_for_owner_takeover(self, task_id: int) -> None:
+        self.migrate()
+        now = utc_now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE tasks
+                SET status = ?, updated_at = ?, closed_at = ?
+                WHERE id = ?
+                """,
+                ("human_taken_over", now, now, task_id),
+            )
+            conn.execute(
+                """
+                UPDATE actions
+                SET status = ?, updated_at = ?
+                WHERE task_id = ? AND kind = ? AND status IN ('pending', 'sending')
+                """,
+                ("cancelled", now, task_id, "send_reply"),
+            )
+            conn.execute(
+                """
+                UPDATE approvals
+                SET status = ?, resolved_at = ?
+                WHERE task_id = ? AND kind = ? AND status = 'pending'
+                """,
+                ("expired", now, task_id, "send_reply"),
+            )
+
+    def get_task_by_id(self, task_id: int) -> TaskRecord:
+        self.migrate()
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"task not found: {task_id}")
+        return _task_from_row(row)
+
+    def get_active_tasks_for_chat(self, chat_id: str, *, now: str) -> list[TaskRecord]:
+        self.migrate()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM tasks
+                WHERE chat_id = ?
+                  AND status IN ('watching', 'waiting_approval')
+                  AND (watch_until IS NULL OR watch_until > ?)
+                ORDER BY updated_at DESC, id DESC
+                """,
+                (chat_id, now),
+            ).fetchall()
+        return [_task_from_row(row) for row in rows]
+
+    def get_active_tasks_by_thread(self, chat_id: str, thread_id: str, *, now: str) -> list[TaskRecord]:
+        self.migrate()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM tasks
+                WHERE chat_id = ?
+                  AND thread_id = ?
+                  AND status IN ('watching', 'waiting_approval')
+                  AND (watch_until IS NULL OR watch_until > ?)
+                ORDER BY updated_at DESC, id DESC
+                """,
+                (chat_id, thread_id, now),
+            ).fetchall()
+        return [_task_from_row(row) for row in rows]
+
+    def get_active_tasks_by_watch_key(
+        self,
+        chat_id: str,
+        key: str,
+        *,
+        now: str,
+    ) -> list[TaskRecord]:
+        self.migrate()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT t.*
+                FROM tasks t
+                JOIN task_watch_keys wk ON wk.task_id = t.id
+                WHERE t.chat_id = ?
+                  AND wk.key = ?
+                  AND t.status IN ('watching', 'waiting_approval')
+                  AND (t.watch_until IS NULL OR t.watch_until > ?)
+                ORDER BY t.updated_at DESC, t.id DESC
+                """,
+                (chat_id, key, now),
+            ).fetchall()
+        return [_task_from_row(row) for row in rows]
+
+    def get_recent_closed_tasks(self, chat_id: str, *, limit: int = 20) -> list[TaskRecord]:
+        self.migrate()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM tasks
+                WHERE chat_id = ?
+                  AND status NOT IN ('watching', 'waiting_approval')
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ?
+                """,
+                (chat_id, limit),
+            ).fetchall()
+        return [_task_from_row(row) for row in rows]
+
+    def find_task_ids_for_message(self, message_id: str) -> list[int]:
+        self.migrate()
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT task_id FROM task_messages WHERE message_id = ? ORDER BY task_id",
+                (message_id,),
+            ).fetchall()
+        return [int(row["task_id"]) for row in rows]
+
+    def list_active_watch_targets(self, *, now: str) -> list[dict[str, str | None]]:
+        self.migrate()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT chat_id, chat_type, thread_id
+                FROM tasks
+                WHERE status IN ('watching', 'waiting_approval')
+                  AND (watch_until IS NULL OR watch_until > ?)
+                  AND chat_id IS NOT NULL
+                ORDER BY chat_id, thread_id
+                """,
+                (now,),
+            ).fetchall()
+        return [
+            {
+                "chat_id": row["chat_id"],
+                "chat_type": row["chat_type"],
+                "thread_id": row["thread_id"],
+            }
+            for row in rows
+        ]
+
+    def record_routing_audit(self, *, message_id: str, decision: RouteDecision) -> None:
+        self.migrate()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO routing_audits(
+                  message_id, task_id, route, route_reason, candidates_count, shortcut_hit,
+                  router_called, matched_by, target_task_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message_id,
+                    decision.target_task_id,
+                    decision.route,
+                    decision.reason,
+                    decision.candidates_count,
+                    int(decision.shortcut_hit),
+                    int(decision.router_called),
+                    decision.matched_by,
+                    decision.target_task_id,
+                    utc_now_iso(),
+                ),
+            )
+
+    def count_pending_actions(self) -> int:
+        self.migrate()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM actions WHERE status IN ('pending', 'sending')"
+            ).fetchone()
+        return int(row["count"])
+
+    def insert_action_for_test(
+        self,
+        *,
+        idempotency_key: str,
+        task_id: int,
+        kind: str = "send_reply",
+        status: str = "pending",
+    ) -> None:
+        self.migrate()
+        now = utc_now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO actions(idempotency_key, task_id, kind, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (idempotency_key, task_id, kind, status, now, now),
+            )
+
+    def insert_approval_for_test(
+        self,
+        *,
+        short_id: str,
+        task_id: int,
+        kind: str = "send_reply",
+        status: str = "pending",
+    ) -> None:
+        self.migrate()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO approvals(short_id, task_id, kind, status, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (short_id, task_id, kind, status, utc_now_iso()),
+            )
+
+    def _unique_short_id(self, prefix: str, seed: str) -> str:
+        base = f"{prefix}_{sha256(seed.encode('utf-8')).hexdigest()[:8]}"
+        with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT short_id FROM tasks WHERE short_id = ?",
+                (base,),
+            ).fetchone()
+            if existing is None:
+                return base
+            for suffix in range(2, 100):
+                candidate = f"{base}_{suffix}"
+                existing = conn.execute(
+                    "SELECT short_id FROM tasks WHERE short_id = ?",
+                    (candidate,),
+                ).fetchone()
+                if existing is None:
+                    return candidate
+        raise RuntimeError("could not allocate task short id")
+
+    def _add_task_message(
+        self,
+        conn: sqlite3.Connection,
+        task_id: int,
+        message_id: str,
+        role: str,
+        created_at: str,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO task_messages(task_id, message_id, role, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (task_id, message_id, role, created_at),
+        )
+
+    def _add_watch_keys(
+        self,
+        conn: sqlite3.Connection,
+        task_id: int,
+        keys: Iterable[str],
+        created_at: str,
+    ) -> None:
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO task_watch_keys(task_id, key, created_at)
+            VALUES (?, ?, ?)
+            """,
+            [(task_id, key, created_at) for key in sorted(set(keys))],
+        )
+
+
+def _task_from_row(row: sqlite3.Row) -> TaskRecord:
+    return TaskRecord(
+        id=int(row["id"]),
+        short_id=row["short_id"],
+        status=row["status"],
+        chat_id=row["chat_id"],
+        chat_type=row["chat_type"],
+        thread_id=row["thread_id"],
+        root_message_id=row["root_message_id"],
+        task_label=row["task_label"],
+        watch_until=row["watch_until"],
+    )
+
+
+def _watch_keys_for_message(message: NormalizedMessage) -> set[str]:
+    keys: set[str] = {f"msg:{message.message_id}"}
+    if message.sender_id:
+        keys.add(f"user:{message.sender_id}")
+    if message.thread_id:
+        keys.add(f"thread:{message.thread_id}")
+    return keys
+
+
+def _clean_label(text: str) -> str:
+    return _truncate(" ".join(text.split()) or "未命名任务", limit=100)
+
+
+def _truncate(text: str, limit: int = 100) -> str:
+    cleaned = " ".join(text.split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return f"{cleaned[:limit - 3]}..."

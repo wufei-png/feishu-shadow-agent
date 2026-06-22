@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from ..types import LarkCliResult
+from ..types import LarkCliResult, MessagePage
 
 Runner = Callable[[list[str], int], LarkCliResult]
 
@@ -267,6 +267,89 @@ class LarkCliClient:
             )
         )
 
+    def search_messages(
+        self,
+        *,
+        chat_type: str,
+        is_at_me: bool,
+        start: str | None,
+        end: str | None,
+        page_token: str | None = None,
+        query: str = "",
+        page_size: int = 50,
+    ) -> MessagePage:
+        result = self.run_json(
+            self.build_messages_search(
+                chat_type=chat_type,
+                is_at_me=is_at_me,
+                start=start,
+                end=end,
+                page_token=page_token,
+                query=query,
+                page_size=page_size,
+            )
+        )
+        return _message_page_from_result(result)
+
+    def list_chat_messages(
+        self,
+        *,
+        chat_id: str,
+        start: str | None,
+        end: str | None,
+        page_token: str | None = None,
+        page_size: int = 50,
+    ) -> MessagePage:
+        result = self.run_json(
+            self.build_chat_messages_list(
+                as_identity="user",
+                chat_id=chat_id,
+                start=start,
+                end=end,
+                order="asc",
+                page_token=page_token,
+                page_size=page_size,
+            )
+        )
+        return _message_page_from_result(result)
+
+    def list_thread_messages(
+        self,
+        *,
+        thread_id: str,
+        page_token: str | None = None,
+        page_size: int = 50,
+    ) -> MessagePage:
+        result = self.run_json(
+            self.build_threads_messages_list(
+                as_identity="user",
+                thread=thread_id,
+                order="asc",
+                page_token=page_token,
+                page_size=page_size,
+            )
+        )
+        return _message_page_from_result(result)
+
+    def download_resource(
+        self,
+        *,
+        message_id: str,
+        file_key: str,
+        resource_type: str,
+        output: str,
+    ) -> LarkCliResult:
+        return self.run_json(
+            self.build_resources_download(
+                as_identity="bot",
+                message_id=message_id,
+                file_key=file_key,
+                resource_type=resource_type,
+                output=output,
+                dry_run=False,
+            )
+        )
+
     def run_text(self, argv: Sequence[str]) -> LarkCliResult:
         return self._run(list(argv), parse_json=False)
 
@@ -358,3 +441,56 @@ def _validate_safe_relative_output(value: str) -> None:
 def _extend_option(argv: list[str], option: str, value: str | None) -> None:
     if value is not None:
         argv.extend([option, value])
+
+
+def _message_page_from_result(result: LarkCliResult) -> MessagePage:
+    if not result.ok:
+        raise RuntimeError(result.error or "lark-cli command failed")
+    return _extract_message_page(result.json_data)
+
+
+def _extract_message_page(data: Any) -> MessagePage:
+    source = data
+    if isinstance(source, dict) and isinstance(source.get("data"), dict):
+        source = source["data"]
+    if isinstance(source, list):
+        return MessagePage(items=[item for item in source if isinstance(item, dict)], raw=data)
+    if not isinstance(source, dict):
+        return MessagePage(items=[], raw=data)
+
+    items = _extract_items(source)
+    next_page_token = _string_or_none(
+        source.get("page_token")
+        or source.get("next_page_token")
+        or source.get("next_page")
+        or source.get("nextPageToken")
+    )
+    has_more = _truthy(source.get("has_more")) or bool(next_page_token)
+    return MessagePage(items=items, next_page_token=next_page_token, has_more=has_more, raw=data)
+
+
+def _extract_items(source: dict[str, Any]) -> list[dict[str, Any]]:
+    for key in ("items", "messages", "message_list"):
+        value = source.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    if isinstance(source.get("data"), list):
+        return [item for item in source["data"] if isinstance(item, dict)]
+    return []
+
+
+def _string_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    value = str(value)
+    return value or None
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.lower() in {"true", "1", "yes"}
+    return False

@@ -21,6 +21,7 @@ EXPECTED_TABLES = {
     "health_checks",
     "chat_policies",
     "config_suggestions",
+    "routing_audits",
 }
 
 
@@ -82,3 +83,19 @@ def test_checkpoint_and_run_health_roundtrip(tmp_path: Path) -> None:
         health = conn.execute("SELECT check_name FROM health_checks WHERE run_id = ?", ("run_1",)).fetchone()
     assert run["status"] == "ok"
     assert health["check_name"] == "config_schema"
+
+
+def test_p2_migration_adds_routing_columns(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.migrate()
+
+    with store.connect() as conn:
+        message_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(messages)").fetchall()
+        }
+        task_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+
+    assert {"thread_id", "reply_to_message_id", "sender_role", "direct_mention", "at_all", "text"} <= message_columns
+    assert {"chat_type", "thread_id", "watch_until", "last_user_message", "last_agent_reply"} <= task_columns

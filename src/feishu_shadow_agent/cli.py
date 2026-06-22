@@ -113,6 +113,9 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         health_suite=suite,
         tick_interval_seconds=loaded.config.daemon.tick_interval_seconds,
         dry_run=args.dry_run,
+        app_config=loaded.config,
+        feishu_client=client,
+        send_owner_notifications=args.send_owner_notifications,
         run_metadata=_git_info(Path.cwd()),
     )
     return daemon.run_forever()
