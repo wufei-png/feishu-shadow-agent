@@ -69,12 +69,12 @@ class MessageRouter:
         now: str,
         watch_until: str,
     ) -> RoutingResult:
-        if not inserted:
+        if not inserted and self.store.message_has_routing_audit(message.message_id):
             return self._audit(message, RouteDecision("ignore", reason="duplicate_message"))
 
         sent_action_task = self.store.find_task_for_sent_action_message(message.message_id)
         if sent_action_task is not None:
-            self.store.record_agent_message_for_task(sent_action_task.id, message)
+            self.store.record_agent_message_for_task(sent_action_task.id, message, watch_until=watch_until)
             return self._audit(
                 message,
                 RouteDecision(

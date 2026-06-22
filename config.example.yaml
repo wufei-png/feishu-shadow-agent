@@ -13,6 +13,7 @@ health:
 
 storage:
   sqlite_path: data/agent.sqlite3
+  resource_dir: data/resources
 
 logging:
   jsonl_path: logs/agent.jsonl

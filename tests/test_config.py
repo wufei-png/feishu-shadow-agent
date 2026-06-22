@@ -15,6 +15,7 @@ def test_load_minimal_config() -> None:
     loaded = ConfigService().load(FIXTURE)
 
     assert loaded.config.owner.open_id == "ou_owner"
+    assert loaded.config.storage.resource_dir == "data/resources"
     assert loaded.config.tool_permissions.profile == "guarded_write"
     assert loaded.config.chats["oc_test"].auto_reply is True
 
@@ -57,6 +58,22 @@ chats:
     )
 
     with pytest.raises(ConfigError, match="auto_reply"):
+        ConfigService().load(config_path)
+
+
+def test_resource_dir_must_be_safe_relative_path(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+storage:
+  resource_dir: ../outside
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="resource_dir"):
         ConfigService().load(config_path)
 
 

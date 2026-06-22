@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from .config import AppConfig
@@ -26,6 +27,7 @@ class Daemon:
         feishu_client: FeishuClient | None = None,
         send_owner_notifications: bool = False,
         run_metadata: dict[str, Any] | None = None,
+        config_base_dir: str | Path | None = None,
         sleep_func: Callable[[float], None] = time.sleep,
     ):
         self.store = store
@@ -37,6 +39,7 @@ class Daemon:
         self.feishu_client = feishu_client
         self.send_owner_notifications = send_owner_notifications
         self.run_metadata = run_metadata or {}
+        self.config_base_dir = None if config_base_dir is None else Path(config_base_dir)
         self.sleep_func = sleep_func
 
     def run_startup_health(self) -> tuple[bool, list[HealthCheckResult]]:
@@ -60,6 +63,7 @@ class Daemon:
             feishu_client=self.feishu_client,
             config=self.app_config,
             logger=self.logger,
+            config_base_dir=self.config_base_dir,
         )
         stages = [
             service.run_approval_inbox_placeholder,

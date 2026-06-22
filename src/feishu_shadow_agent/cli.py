@@ -86,6 +86,7 @@ def _handle_doctor(args: argparse.Namespace) -> int:
     client = LarkCliClient(
         path=loaded.config.lark_cli.path,
         timeout_seconds=loaded.config.lark_cli.timeout_seconds,
+        cwd=loaded.base_dir,
     )
     suite = HealthSuite(loaded_config=loaded, store=store, feishu_client=client, run_id=run_id)
     results = suite.run(send_test=args.send_test)
@@ -105,6 +106,7 @@ def _handle_daemon(args: argparse.Namespace) -> int:
     client = LarkCliClient(
         path=loaded.config.lark_cli.path,
         timeout_seconds=loaded.config.lark_cli.timeout_seconds,
+        cwd=loaded.base_dir,
     )
     suite = HealthSuite(loaded_config=loaded, store=store, feishu_client=client, run_id=run_id)
     daemon = Daemon(
@@ -117,6 +119,7 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         feishu_client=client,
         send_owner_notifications=args.send_owner_notifications,
         run_metadata=_git_info(Path.cwd()),
+        config_base_dir=loaded.base_dir,
     )
     return daemon.run_forever()
 

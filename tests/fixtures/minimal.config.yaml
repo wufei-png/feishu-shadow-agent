@@ -13,6 +13,7 @@ health:
 
 storage:
   sqlite_path: data/test.sqlite3
+  resource_dir: data/resources
 
 logging:
   jsonl_path: logs/test.jsonl

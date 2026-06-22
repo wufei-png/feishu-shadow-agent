@@ -16,10 +16,12 @@ class LarkCliClient:
         *,
         path: str | None = None,
         timeout_seconds: int = 30,
+        cwd: str | Path | None = None,
         runner: Runner | None = None,
     ):
         self.path = path or "lark-cli"
         self.timeout_seconds = timeout_seconds
+        self.cwd = None if cwd is None else Path(cwd)
         self._runner = runner
 
     def build_version(self) -> list[str]:
@@ -360,7 +362,7 @@ class LarkCliClient:
         if self._runner is not None:
             result = self._runner(argv, self.timeout_seconds)
         else:
-            result = _run_subprocess(argv, self.timeout_seconds)
+            result = _run_subprocess(argv, self.timeout_seconds, cwd=self.cwd)
         if parse_json and result.ok:
             if result.json_data is not None:
                 return result
@@ -384,10 +386,11 @@ class LarkCliClient:
         return result
 
 
-def _run_subprocess(argv: list[str], timeout_seconds: int) -> LarkCliResult:
+def _run_subprocess(argv: list[str], timeout_seconds: int, *, cwd: Path | None = None) -> LarkCliResult:
     try:
         completed = subprocess.run(
             argv,
+            cwd=cwd,
             capture_output=True,
             text=True,
             timeout=timeout_seconds,

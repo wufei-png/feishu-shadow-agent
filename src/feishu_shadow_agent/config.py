@@ -37,6 +37,15 @@ class HealthConfig(StrictModel):
 
 class StorageConfig(StrictModel):
     sqlite_path: str = "data/agent.sqlite3"
+    resource_dir: str = "data/resources"
+
+    @field_validator("resource_dir")
+    @classmethod
+    def validate_resource_dir(cls, value: str) -> str:
+        path = Path(value)
+        if not value or path.is_absolute() or ".." in path.parts:
+            raise ValueError("storage.resource_dir must be a safe relative path")
+        return value
 
 
 class LoggingConfig(StrictModel):

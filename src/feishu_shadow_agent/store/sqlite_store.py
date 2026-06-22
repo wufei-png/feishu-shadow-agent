@@ -244,6 +244,15 @@ class SQLiteStore:
                 (message_id,),
             ).fetchone()
 
+    def message_has_routing_audit(self, message_id: str) -> bool:
+        self.migrate()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM routing_audits WHERE message_id = ? LIMIT 1",
+                (message_id,),
+            ).fetchone()
+        return row is not None
+
     def upsert_resource(
         self,
         resource: ResourceRef,
@@ -560,12 +569,26 @@ class SQLiteStore:
             return next(iter(matches.values()))
         return None
 
-    def record_agent_message_for_task(self, task_id: int, message: NormalizedMessage) -> None:
+    def record_agent_message_for_task(
+        self,
+        task_id: int,
+        message: NormalizedMessage,
+        *,
+        watch_until: str,
+    ) -> None:
         self.migrate()
         now = utc_now_iso()
         with self.connect() as conn:
             self._add_task_message(conn, task_id, message.message_id, "agent_reply", now)
             self._add_watch_keys(conn, task_id, _agent_reply_watch_keys_for_message(message), now)
+            conn.execute(
+                """
+                UPDATE tasks
+                SET updated_at = ?, watch_until = ?, last_agent_reply = ?
+                WHERE id = ?
+                """,
+                (now, watch_until, _truncate(message.text), task_id),
+            )
 
     def list_active_watch_targets(self, *, now: str) -> list[dict[str, str | None]]:
         self.migrate()

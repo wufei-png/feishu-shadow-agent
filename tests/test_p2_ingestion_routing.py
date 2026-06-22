@@ -7,6 +7,7 @@ from feishu_shadow_agent.config import AppConfig, ChatPolicyConfig, DaemonConfig
 from feishu_shadow_agent.daemon import Daemon
 from feishu_shadow_agent.ingestion import IngestionService, MessageNormalizer
 from feishu_shadow_agent.jsonl import JSONLLogger
+from feishu_shadow_agent.routing import MessageRouter
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import HealthCheckResult, LarkCliResult, MessagePage
 
@@ -109,6 +110,18 @@ class FakeFeishuClient:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"resource")
         return LarkCliResult(["lark-cli", "im", "+messages-resources-download"], 0, json_data={})
+
+
+class FailingOnceRouter:
+    def __init__(self, store: SQLiteStore):
+        self.inner = MessageRouter(store=store)
+        self.failed = False
+
+    def route(self, *args: Any, **kwargs: Any):
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("route failed after message insert")
+        return self.inner.route(*args, **kwargs)
 
 
 def _config(**kwargs: Any) -> AppConfig:
@@ -286,6 +299,43 @@ def test_failed_pagination_does_not_advance_checkpoint(tmp_path: Path) -> None:
     assert store.get_checkpoint("ingest.p2p") is None
 
 
+def test_existing_message_without_route_audit_is_routed_on_retry(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    router = FailingOnceRouter(store)
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        router=router,  # type: ignore[arg-type]
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    raw = _message("om_retry", chat_type="p2p", sender_id="ou_a")
+
+    try:
+        service.process_raw_message(raw, source="p2p", default_chat_type="p2p", run_id="run_1")
+    except RuntimeError:
+        pass
+    else:  # pragma: no cover - defensive
+        raise AssertionError("router failure did not raise")
+
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"] == 1
+        assert conn.execute("SELECT COUNT(*) AS c FROM routing_audits").fetchone()["c"] == 0
+
+    retried = service.process_raw_message(raw, source="p2p", default_chat_type="p2p", run_id="run_1")
+
+    assert retried is not None
+    assert retried.decision.route == "new_task"
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 1
+        audit = conn.execute(
+            "SELECT route FROM routing_audits WHERE message_id = ?",
+            ("om_retry",),
+        ).fetchone()
+    assert audit["route"] == "new_task"
+
+
 def test_p2p_shortcut_attaches_to_single_active_task(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     service = IngestionService(
@@ -460,12 +510,17 @@ def test_sent_user_identity_agent_message_is_self_message(tmp_path: Path) -> Non
     assert agent_reply.decision.route == "ignore"
     assert agent_reply.decision.reason == "self_message"
     with store.connect() as conn:
-        task = conn.execute("SELECT status FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
+        task = conn.execute(
+            "SELECT status, last_agent_reply, watch_until FROM tasks WHERE id = ?",
+            (created.task.id,),
+        ).fetchone()
         task_message = conn.execute(
             "SELECT role FROM task_messages WHERE task_id = ? AND message_id = ?",
             (created.task.id, "om_agent_reply"),
         ).fetchone()
     assert task["status"] == "watching"
+    assert task["last_agent_reply"] == "agent reply sent as user"
+    assert task["watch_until"] == "2026-06-22T12:10:00+08:00"
     assert task_message["role"] == "agent_reply"
 
 
@@ -622,12 +677,20 @@ def test_resource_status_downloaded_and_bot_not_joined(tmp_path: Path, monkeypat
     )
 
     assert fake.downloads[0]["file_key"] == "img_1"
+    assert fake.downloads[0]["output"].startswith("data/resources/om_img/image_")
+    assert not Path(fake.downloads[0]["output"]).is_absolute()
     with store.connect() as conn:
         statuses = {
             row["file_key"]: row["download_status"]
             for row in conn.execute("SELECT file_key, download_status FROM resources")
         }
+        stored_path = conn.execute(
+            "SELECT path FROM resources WHERE file_key = ?",
+            ("img_1",),
+        ).fetchone()["path"]
     assert statuses == {"img_1": "downloaded", "img_2": "bot_not_joined"}
+    assert stored_path.startswith("data/resources/om_img/image_")
+    assert not Path(stored_path).is_absolute()
 
 
 def test_resource_download_success_without_file_records_missing_file(tmp_path: Path, monkeypatch) -> None:

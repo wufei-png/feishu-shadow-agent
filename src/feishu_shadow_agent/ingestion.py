@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from .config import AppConfig, ChatPolicyConfig
@@ -119,11 +119,13 @@ class ResourceProcessor:
         feishu_client: FeishuClient,
         config: AppConfig,
         logger: JSONLLogger,
+        config_base_dir: str | Path | None = None,
     ):
         self.store = store
         self.feishu_client = feishu_client
         self.config = config
         self.logger = logger
+        self.config_base_dir = Path(config_base_dir or Path.cwd()).expanduser().resolve()
 
     def process(self, message: NormalizedMessage, *, run_id: str | None = None) -> None:
         if not message.resources:
@@ -140,9 +142,10 @@ class ResourceProcessor:
                     raw={"reason": "chat_policy_bot_joined_false"},
                 )
                 continue
-            output = _resource_output(resource)
+            output = _resource_output(resource, self.config.storage.resource_dir)
+            local_output = self.config_base_dir / output
             try:
-                Path(output).parent.mkdir(parents=True, exist_ok=True)
+                local_output.parent.mkdir(parents=True, exist_ok=True)
                 result = self.feishu_client.download_resource(
                     message_id=resource.message_id,
                     file_key=resource.file_key,
@@ -164,7 +167,7 @@ class ResourceProcessor:
                 )
                 continue
             if result.ok:
-                sha256_hex = _sha256_if_exists(output)
+                sha256_hex = _sha256_if_exists(local_output)
                 if sha256_hex is None:
                     self.store.upsert_resource(
                         resource,
@@ -211,6 +214,7 @@ class IngestionService:
         logger: JSONLLogger,
         router: MessageRouter | None = None,
         clock: Callable[[], str] = utc_now_iso,
+        config_base_dir: str | Path | None = None,
     ):
         self.store = store
         self.feishu_client = feishu_client
@@ -223,6 +227,7 @@ class IngestionService:
             feishu_client=feishu_client,
             config=config,
             logger=logger,
+            config_base_dir=config_base_dir,
         )
         self.clock = clock
 
@@ -596,17 +601,17 @@ def _parse_dt_or_none(value: str) -> datetime | None:
         return None
 
 
-def _resource_output(resource: ResourceRef) -> str:
+def _resource_output(resource: ResourceRef, resource_dir: str) -> str:
     message_part = _safe_path_part(resource.message_id)
     key_hash = sha256(resource.file_key.encode("utf-8")).hexdigest()[:12]
-    return f"data/resources/{message_part}/{resource.resource_type}_{key_hash}.bin"
+    return PurePosixPath(resource_dir, message_part, f"{resource.resource_type}_{key_hash}.bin").as_posix()
 
 
 def _safe_path_part(value: str) -> str:
     return "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in value)[:120]
 
 
-def _sha256_if_exists(path: str) -> str | None:
+def _sha256_if_exists(path: str | Path) -> str | None:
     file_path = Path(path)
     if not file_path.exists() or not file_path.is_file():
         return None
