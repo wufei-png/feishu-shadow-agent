@@ -215,6 +215,17 @@ at_all
 
 `at_all` 默认 suppressed，不自动回复，也不通知 owner。
 
+normalizer 还必须标记消息发送者角色：
+
+```text
+external_user_message
+owner_message
+bot_message
+agent_message
+```
+
+`bot_message` / `agent_message` 默认只入库和审计，不进入新任务匹配，不调用 TaskRouter，也不触发自动回复。发送后读回得到的 bot/agent 消息应关联到原 action/task，用于验证和审计，而不是作为新的 incoming work。
+
 资源下载只针对进入处理流程的 root message 和必要上下文资源，不对整个上下文窗口全量下载。
 
 ## 6. Tick 顺序
@@ -579,6 +590,7 @@ thread:<thread_id>
 ```text
 IncomingMessage
   -> normalize
+  -> loop guard
   -> owner intervention check
   -> CandidateCollector 纯代码找候选 task
   -> 必要时 Hermes TaskRouter 一次无状态结构化判断
@@ -586,6 +598,24 @@ IncomingMessage
 ```
 
 CandidateCollector 不调用 Hermes，只做 SQLite 检索。
+
+loop guard 在 TaskRouter 前执行：
+
+```text
+bot_message / agent_message:
+  入库和审计。
+  如来自发送后读回，则关联原 action/task。
+  写 routing audit：route=ignore, reason=self_message。
+  不创建新任务。
+  不进入 CandidateCollector。
+  不调用 TaskRouter。
+
+owner_message:
+  不因 watch_keys 命中而作为普通外部 follow-up。
+  先走 owner intervention check。
+  若无法确定关联 active task，写 routing audit：
+    route=ignore, reason=owner_message_not_task_intervention。
+```
 
 owner 在原 chat/thread 里直接回复 active task 相关消息时，视为人类接管，不作为普通 follow-up 送 Hermes，也不创建新任务。该判断在 CandidateCollector/TaskRouter 之前完成。
 

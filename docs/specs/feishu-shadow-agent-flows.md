@@ -24,7 +24,7 @@ flowchart LR
     Health["health check"]
     Ingest["ingest + normalize"]
     Store["SQLite Store"]
-    HumanTakeover["owner intervention / human_taken_over"]
+    HumanTakeover["loop guard / human_taken_over"]
     Match["CandidateCollector / TaskMatcher"]
     Router["Hermes TaskRouter"]
     TaskSession["Hermes Task Session"]
@@ -97,16 +97,18 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  Incoming["IncomingMessage batch<br/>create_time asc, message_id asc"] --> Normalize["normalize message"]
-  Normalize --> Suppressed{"at_all 或非处理入口"}
+  Incoming["IncomingMessage batch<br/>create_time asc, message_id asc"] --> Normalize["normalize message<br/>标记 sender_role"]
+  Normalize --> SenderRole{"sender_role"}
+  SenderRole -->|bot/agent| SelfAudit["messages upsert<br/>关联 action/task<br/>route=ignore self_message"]
+  SenderRole -->|owner| OwnerCheck{"owner 在原 chat/thread 直接回复?"}
+  OwnerCheck -->|是| OwnerRelated{"确定关联 active task?"}
+  OwnerRelated -->|是| HumanTakeover["messages upsert<br/>human_taken_over<br/>取消 pending send/approval<br/>关闭 task"]
+  OwnerRelated -->|否| OwnerAudit["messages upsert<br/>route=ignore owner_message_not_task_intervention"]
+  OwnerCheck -->|否| OwnerAudit
+  SenderRole -->|external| Suppressed{"at_all 或非处理入口"}
   Suppressed -->|是| RecordSuppressed["入库记录 suppressed / ignored"]
   Suppressed -->|否| SaveMsg["messages upsert"]
-
-  SaveMsg --> OwnerCheck{"owner 在原 chat/thread 直接回复?"}
-  OwnerCheck -->|是| OwnerRelated{"确定关联 active task?"}
-  OwnerRelated -->|是| HumanTakeover["human_taken_over<br/>取消 pending send/approval<br/>关闭 task"]
-  OwnerRelated -->|否| OwnerAudit["入库 + 审计<br/>不新建任务/不调用 Router"]
-  OwnerCheck -->|否| CandidateCollector["CandidateCollector 纯 SQLite 检索"]
+  SaveMsg --> CandidateCollector["CandidateCollector 纯 SQLite 检索"]
 
   CandidateCollector --> MatchAudit["写 candidates_count / shortcut_hit"]
   MatchAudit --> Deterministic{"确定性 shortcut 命中"}
