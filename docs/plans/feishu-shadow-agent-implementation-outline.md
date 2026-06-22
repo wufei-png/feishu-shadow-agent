@@ -14,9 +14,9 @@
 
 1. **P0 总纲**：沉淀计划拆分、实施顺序、计划文件命名，也就是本文。
 2. **P1 Foundation**：先把可运行、可测试、可诊断的本地骨架搭起来。
-3. **P2 Ingestion And Routing**：再实现消息进入、资源 gate、任务归属和 active watch。
-4. **P3 Hermes And Approval**：接入 AI 处理、审批队列和 owner 私聊命令。
-5. **P4 Dispatch And CLI Hardening**：最后闭合发送幂等、CLI 命令、daemon dry-run 和端到端验证。
+3. **P2 Ingestion And Routing**：再实现 daemon tick 骨架、消息进入、资源状态、任务归属和 active watch。
+4. **P3 Hermes And Approval**：接入 AI 处理、回复 gate、SendComposer、审批队列和 owner 私聊命令。
+5. **P4 Dispatch And CLI Hardening**：最后闭合真实发送、读回审计、CLI hardening 和端到端验证。
 
 ## 2. 计划文件
 
@@ -24,10 +24,10 @@
 
 | 阶段 | 计划文件 | 目标 |
 | --- | --- | --- |
-| P1 | `docs/plans/p1-foundation.md` | Python 包、配置、SQLite、日志、Store、`FeishuClient`/`LarkCliClient`、`doctor` |
-| P2 | `docs/plans/p2-ingestion-routing.md` | group `@me`、P2P、active watch、normalize、resource gate、checkpoint、CandidateCollector、watch_keys、owner takeover |
-| P3 | `docs/plans/p3-hermes-approval.md` | TaskRouter、Task Session、Hermes JSON schema、reply policy、ApprovalRequest、owner bot 通知、approval inbox |
-| P4 | `docs/plans/p4-dispatch-cli-hardening.md` | send dispatcher、dry-run/actual send/readback、idempotency、`daemon/status/replay/approve/reject/send/config show` |
+| P1 | `docs/plans/p1-foundation.md` | Python 包、配置、SQLite、日志、Store、`FeishuClient`/`LarkCliClient`、`doctor`、CLI/daemon 骨架 |
+| P2 | `docs/plans/p2-ingestion-routing.md` | daemon tick skeleton、approval inbox checkpoint 占位、group `@me`、P2P、active watch、normalize、resource metadata/status、checkpoint、CandidateCollector、watch_keys、owner takeover |
+| P3 | `docs/plans/p3-hermes-approval.md` | TaskRouter、Task Session、Hermes JSON schema、reply/per-chat/resource gate、SendComposer、ApprovalRequest、owner bot 通知、approval inbox 命令状态流转 |
+| P4 | `docs/plans/p4-dispatch-cli-hardening.md` | send dispatcher、dry-run/actual send/readback、idempotency、`status/replay/approve/reject/send/config show`、端到端验证 |
 
 ## 3. 阶段边界
 
@@ -35,15 +35,16 @@
 
 先读：
 
-- `docs/specs/feishu-shadow-agent-mvp-design.md`：第 1、2、3、21、22、23、24 节。
+- `docs/specs/feishu-shadow-agent-mvp-design.md`：第 1、2、3、9、10、21、22、23、24 节。
 - `docs/specs/feishu-shadow-agent-flows.md`：第 1、2 节。
 
 交付：
 
 - 创建 Python package 和 `python -m feishu_shadow_agent` 入口。
-- 提供 `config.example.yaml`、真实 `config.yaml` gitignore 策略、`ConfigService`。
+- 提供 `config.example.yaml`、真实 `config.yaml` gitignore 策略、`ConfigService`，配置 schema 明确覆盖 `chats`、`reply_policy`、`tool_permissions`。
 - 建立 SQLite schema/migration、基础 `Store`、JSONL logger、run/health 记录。
 - 封装 `FeishuClient` 接口和 MVP `LarkCliClient` command builder。
+- 提供 CLI skeleton 和 health-only/no-op `daemon` 子命令骨架，不拉消息、不发送消息。
 - 实现 `doctor`，包含 `lark-cli` 路径、版本、auth、scope、SQLite、Hermes reachability、配置 schema 检查。
 
 验收：
@@ -55,41 +56,45 @@
 
 先读：
 
-- `docs/specs/feishu-shadow-agent-mvp-design.md`：第 4、5、6、14、15、16、17、18 节。
+- `docs/specs/feishu-shadow-agent-mvp-design.md`：第 4、5、6、14、15、16、17、18、24 节。
 - `docs/specs/feishu-shadow-agent-flows.md`：第 2、3、4 节。
 
 交付：
 
+- 实现真实 `daemon` tick skeleton，按 approval inbox、group ingest、p2p ingest、active watch、dispatch 顺序编排；dispatch 阶段只保留 no-op/占位。
+- 实现 approval inbox 拉取/checkpoint 占位，暂不解析 `/approve|/reject|/send` 状态流转。
 - 实现 group `@me`、P2P 和 active task watch 的拉取入口。
 - 实现 message normalize、sender role、`direct_mention`/`at_all`、self-loop guard。
-- 实现资源 metadata 提取、bot resource download gate、bot 不在群的降级通知动作。
+- 实现资源 metadata 提取、bot resource download 尝试和 `resources.download_status` 记录；是否阻断回复、是否通知 owner 放到 P3 gate 判断。
 - 实现 checkpoint drain 成功后推进、失败不推进。
 - 实现 `CandidateCollector`、deterministic shortcut、`watch_keys`、closed recall、owner takeover。
 
 验收：
 
 - 用 fake Feishu 返回覆盖分页、乱序、重复 message_id、checkpoint 失败回滚。
-- 覆盖 owner takeover 取消 pending send/approval、bot/agent 自消息不触发新任务、bot 不在群时不自动回复。
+- 覆盖 owner takeover 取消 pending send/approval、bot/agent 自消息不触发新任务、bot 不在群时只记录资源状态、不在 P2 自动回复或通知。
 
 ### P3 Hermes And Approval
 
 先读：
 
-- `docs/specs/feishu-shadow-agent-mvp-design.md`：第 7、10、11、12、13、15、19、20 节。
+- `docs/specs/feishu-shadow-agent-mvp-design.md`：第 7、8、9、10、11、12、13、15、19、20 节。
 - `docs/specs/feishu-shadow-agent-flows.md`：第 3、5、6 节。
 
 交付：
 
 - 实现 `HermesClient`，区分无状态 TaskRouter 和一任务一会话 Task Session。
 - 定义并校验 Hermes 严格 JSON 输出 schema。
-- 实现 `reply_policy` gate、risk/confidence/resource gate 和审批降级。
+- 实现 `reply_policy` gate、per-chat policy gate、risk/confidence/resource gate 和审批降级。
+- 实现 `SendComposer`，由 Python 统一清理 Hermes 输出里的 `<at ...>` / `@所有人`，并生成 `<at user_id="...">显示名</at>` 前缀。
 - 实现 `ApprovalService`、ApprovalRequest 状态机、owner bot 通知 payload。
-- 实现 approval inbox 命令解析：`/approve <id>`、`/reject <id>`、`/send <task_id> <最终回复>`。
+- 实现 approval inbox 命令解析和状态流转：`/approve <id>`、`/reject <id>`、`/send <task_id> <最终回复>`。
 
 验收：
 
 - 覆盖 TaskRouter 的 `new_task|attach_task|reopen_task|close_task|ignore|ambiguous`。
 - 覆盖 Hermes 输出 schema 失败、非法 `reply_target_message_id`、task_id shortcut 多 pending approval 冲突。
+- 覆盖 per-chat 关闭自动回复、资源缺失需要 owner 通知、Hermes 误生成 @ 时清理或降级审批。
 
 ### P4 Dispatch And CLI Hardening
 
@@ -100,9 +105,8 @@
 
 交付：
 
-- 实现 `SendComposer`，由 Python 统一生成和清理 `<at user_id="...">显示名</at>`。
 - 实现 `Dispatcher`，包括 send action 互斥、dry-run、actual send、readback 验证和 warning 记录。
-- 实现 `daemon` tick 顺序、`--dry-run`、`--dry-run --send-owner-notifications`。
+- 补齐 `daemon --dry-run`、`--dry-run --send-owner-notifications` 的发送侧语义。
 - 实现 `status`、`replay`、`approve`、`reject`、`send`、`config show --redacted`。
 - 端到端 fake Feishu/Hermes dry-run 验证 MVP 主流程。
 
@@ -110,7 +114,7 @@
 
 - 同一 `task_id + reply_target_message_id` 只有一个 pending/sending send action。
 - 所有对外回复都先 dry-run，发送后读回验证 `reply_to` 和 mentions。
-- `daemon` 按 approval inbox、group ingest、p2p ingest、active watch、dispatch 顺序执行。
+- 端到端 fake Feishu/Hermes 覆盖 approval inbox、group ingest、p2p ingest、active watch、dispatch 的完整顺序。
 
 ## 4. 全局约束
 
@@ -120,4 +124,3 @@
 - 资源下载保持两阶段：user 读消息，bot 下载 `messages-resources-download`。
 - Hermes 不生成 @；Python `SendComposer` 负责 mention。
 - 所有真实发送必须有 dry-run、idempotency key 和读回审计。
-
