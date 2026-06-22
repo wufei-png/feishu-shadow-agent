@@ -571,6 +571,48 @@ def test_owner_takeover_accepts_top_level_reply_to_string(tmp_path: Path) -> Non
     assert task["status"] == "human_taken_over"
 
 
+def test_owner_takeover_matches_thread_watch_key_without_task_thread_id(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_root", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    follow_up = service.process_raw_message(
+        _message("om_follow", sender_id="ou_a", reply_to="om_root", thread_id="omt_1"),
+        source="active_watch",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    assert follow_up is not None and follow_up.decision.route == "attach_task"
+
+    takeover = service.process_raw_message(
+        _message("om_owner_thread", sender_id="ou_owner", thread_id="omt_1"),
+        source="active_watch",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert takeover is not None
+    assert takeover.decision.route == "human_taken_over"
+    with store.connect() as conn:
+        task = conn.execute(
+            "SELECT status, thread_id FROM tasks WHERE id = ?",
+            (created.task.id,),
+        ).fetchone()
+    assert task["status"] == "human_taken_over"
+    assert task["thread_id"] is None
+
+
 def test_sent_user_identity_agent_message_is_self_message(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     service = IngestionService(
@@ -1025,6 +1067,53 @@ def test_thread_active_watch_filters_by_checkpoint_window(tmp_path: Path) -> Non
     }
     assert store.get_message("om_old_thread") is None
     assert store.get_message("om_new_thread") is not None
+
+
+def test_thread_active_watch_target_comes_from_watch_key_without_task_thread_id(tmp_path: Path) -> None:
+    fake = FakeFeishuClient()
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(daemon=DaemonConfig(overlap_seconds=120)),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:20:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_root", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    attached = service.process_raw_message(
+        _message("om_follow", reply_to="om_root", thread_id="omt_1"),
+        source="active_watch",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    assert attached is not None and attached.decision.route == "attach_task"
+    fake.thread_pages[("omt_1", None)] = MessagePage(
+        [
+            _message(
+                "om_thread_new",
+                thread_id="omt_1",
+                create_time="2026-06-22T10:19:00+08:00",
+            ),
+        ]
+    )
+
+    result = service.run_active_watch(run_id="run_1")
+
+    assert result.processed == 1
+    assert fake.calls == ["thread:omt_1:None"]
+    assert store.get_message("om_thread_new") is not None
+    with store.connect() as conn:
+        task = conn.execute(
+            "SELECT thread_id FROM tasks WHERE id = ?",
+            (created.task.id,),
+        ).fetchone()
+    assert task["thread_id"] is None
 
 
 def test_daemon_tick_runs_p2_stages_in_order(tmp_path: Path) -> None:

@@ -170,9 +170,9 @@ class MessageRouter:
             if len(active) == 1:
                 return active[0]
         if message.thread_id:
-            active = self.store.get_active_tasks_by_thread(
+            active = self.store.get_active_tasks_by_watch_key(
                 message.chat_id,
-                message.thread_id,
+                f"thread:{message.thread_id}",
                 now=now,
             )
             if len(active) == 1:

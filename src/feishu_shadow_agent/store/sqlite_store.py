@@ -417,22 +417,6 @@ class SQLiteStore:
             ).fetchall()
         return [_task_from_row(row) for row in rows]
 
-    def get_active_tasks_by_thread(self, chat_id: str, thread_id: str, *, now: str) -> list[TaskRecord]:
-        self.migrate()
-        with self.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM tasks
-                WHERE chat_id = ?
-                  AND thread_id = ?
-                  AND status IN ('watching', 'waiting_approval')
-                  AND (watch_until IS NULL OR watch_until > ?)
-                ORDER BY updated_at DESC, id DESC
-                """,
-                (chat_id, thread_id, now),
-            ).fetchall()
-        return [_task_from_row(row) for row in rows]
-
     def get_active_tasks_by_watch_key(
         self,
         chat_id: str,
@@ -632,14 +616,35 @@ class SQLiteStore:
         with self.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT DISTINCT chat_id, chat_type, thread_id
-                FROM tasks
-                WHERE status IN ('watching', 'waiting_approval')
-                  AND (watch_until IS NULL OR watch_until > ?)
-                  AND chat_id IS NOT NULL
+                SELECT DISTINCT
+                  t.chat_id AS chat_id,
+                  t.chat_type AS chat_type,
+                  substr(wk.key, ?) AS thread_id
+                FROM tasks t
+                JOIN task_watch_keys wk ON wk.task_id = t.id
+                WHERE t.status IN ('watching', 'waiting_approval')
+                  AND (t.watch_until IS NULL OR t.watch_until > ?)
+                  AND t.chat_id IS NOT NULL
+                  AND wk.key LIKE 'thread:%'
+                  AND length(wk.key) > ?
+                UNION
+                SELECT DISTINCT
+                  t.chat_id AS chat_id,
+                  t.chat_type AS chat_type,
+                  NULL AS thread_id
+                FROM tasks t
+                WHERE t.status IN ('watching', 'waiting_approval')
+                  AND (t.watch_until IS NULL OR t.watch_until > ?)
+                  AND t.chat_id IS NOT NULL
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM task_watch_keys wk
+                    WHERE wk.task_id = t.id
+                      AND wk.key LIKE 'thread:%'
+                  )
                 ORDER BY chat_id, thread_id
                 """,
-                (now,),
+                (len("thread:") + 1, now, len("thread:"), now),
             ).fetchall()
         return [
             {
