@@ -26,6 +26,21 @@ class FakeHealthSuite:
         return self.results
 
 
+class SequenceHealthSuite:
+    def __init__(self, results: list[list[HealthCheckResult]]):
+        self.results = results
+        self.run_id = "run_1"
+        self.calls = 0
+
+    def run(self, *, send_test: bool = False) -> list[HealthCheckResult]:
+        return self.run_runtime_critical()
+
+    def run_runtime_critical(self) -> list[HealthCheckResult]:
+        index = min(self.calls, len(self.results) - 1)
+        self.calls += 1
+        return self.results[index]
+
+
 class FakeFeishu:
     def __init__(self):
         self.fail_approval_inbox = False
@@ -224,6 +239,95 @@ def test_runtime_critical_health_failure_blocks_ingestion_and_all_sends(tmp_path
     with store.connect() as conn:
         statuses = [row["status"] for row in conn.execute("SELECT status FROM actions ORDER BY id").fetchall()]
     assert statuses == ["pending", "pending"]
+
+
+def test_runtime_health_failure_rechecks_on_retry_interval_and_recovers(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    now = 0.0
+    monkeypatch.setattr("feishu_shadow_agent.daemon.time.monotonic", lambda: now)
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    logger = JSONLLogger(tmp_path / "agent.jsonl")
+    task_id = _insert_task(store)
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={"reply_target_message_id": "om_target", "text": "hello", "identity": "user"},
+    )
+    assert action_id is not None
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    suite = SequenceHealthSuite(
+        [
+            [HealthCheckResult("lark_auth_verify", "critical", "failed", "bad")],
+            [HealthCheckResult("lark_auth_verify", "critical", "ok", "ok")],
+        ]
+    )
+    fake = FakeFeishu()
+    daemon = Daemon(
+        store=store,
+        logger=logger,
+        health_suite=suite,  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=False,
+        app_config=config,
+        feishu_client=fake,  # type: ignore[arg-type]
+    )
+
+    first = daemon.run_one_tick(run_id="run_1")
+    now = config.health.retry_interval_seconds - 1
+    second = daemon.run_one_tick(run_id="run_1")
+    now = config.health.retry_interval_seconds
+    third = daemon.run_one_tick(run_id="run_1")
+
+    assert [result.name for result in first] == ["runtime_health"]
+    assert [result.name for result in second] == ["runtime_health"]
+    assert [result.name for result in third] == [
+        "approval_inbox",
+        "group_at_me",
+        "p2p",
+        "active_watch",
+        "dispatch",
+    ]
+    assert suite.calls == 2
+    assert [call["dry_run"] for call in fake.reply_calls] == [True, False]
+    with store.connect() as conn:
+        action = conn.execute("SELECT status FROM actions WHERE id = ?", (action_id,)).fetchone()
+    assert action["status"] == "sent"
+
+
+def test_runtime_health_ok_uses_interval_seconds_before_next_refresh(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    now = 0.0
+    monkeypatch.setattr("feishu_shadow_agent.daemon.time.monotonic", lambda: now)
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    logger = JSONLLogger(tmp_path / "agent.jsonl")
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    suite = SequenceHealthSuite(
+        [
+            [HealthCheckResult("lark_auth_verify", "critical", "ok", "ok")],
+            [HealthCheckResult("lark_auth_verify", "critical", "ok", "ok")],
+        ]
+    )
+    daemon = Daemon(
+        store=store,
+        logger=logger,
+        health_suite=suite,  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=True,
+        app_config=config,
+        feishu_client=FakeFeishu(),  # type: ignore[arg-type]
+    )
+
+    daemon.run_one_tick(run_id="run_1")
+    now = config.health.retry_interval_seconds
+    daemon.run_one_tick(run_id="run_1")
+    now = config.health.interval_seconds
+    daemon.run_one_tick(run_id="run_1")
+
+    assert suite.calls == 2
 
 
 def test_approval_inbox_failure_blocks_send_reply_but_allows_owner_notification(tmp_path: Path) -> None:

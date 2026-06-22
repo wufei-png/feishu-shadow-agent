@@ -135,3 +135,16 @@ def test_p3_migration_clears_legacy_fake_hermes_session_and_send_reply_guard(tmp
     assert first is not None
     assert second is None
     assert owner_action is not None
+
+    store.finish_action(first, status="failed", result={"error_stage": "send"})
+    retried = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_1",
+        payload={"text": "one", "source": "auto_reply"},
+    )
+
+    assert retried == first
+    retried_action = store.get_action(first)
+    assert retried_action is not None
+    assert retried_action.status == "pending"
+    assert retried_action.result == {}

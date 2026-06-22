@@ -162,10 +162,7 @@ class Daemon:
             return 0
 
     def _runtime_health_ok_for_tick(self, *, run_id: str) -> bool:
-        interval = self.runtime_health_interval_seconds
-        if interval is None and self.app_config is not None:
-            interval = self.app_config.health.interval_seconds
-        interval = interval or 0
+        interval = self._runtime_health_check_interval()
         now = time.monotonic()
         if self._last_runtime_health_at is not None and now - self._last_runtime_health_at < interval:
             return self._runtime_health_ok
@@ -183,6 +180,14 @@ class Daemon:
                 data=summarize_results(results),
             )
         return self._runtime_health_ok
+
+    def _runtime_health_check_interval(self) -> int:
+        if self.runtime_health_interval_seconds is not None:
+            return self.runtime_health_interval_seconds
+        if self.app_config is None:
+            return 0
+        health = self.app_config.health
+        return health.interval_seconds if self._runtime_health_ok else health.retry_interval_seconds
 
 
 def _stage_name(stage: Callable[..., StageResult]) -> str:

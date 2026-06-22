@@ -1078,32 +1078,15 @@ class SQLiteStore:
     ) -> int | None:
         self.migrate()
         now = utc_now_iso()
-        idempotency_key = _action_idempotency_key(task_id, target_message_id, payload)
         with self.connect() as conn:
-            try:
-                cursor = conn.execute(
-                    """
-                    INSERT INTO actions(
-                      idempotency_key, task_id, approval_id, kind, status, target_message_id,
-                      dry_run, payload_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        idempotency_key,
-                        task_id,
-                        approval_id,
-                        "send_reply",
-                        "pending",
-                        target_message_id,
-                        1,
-                        json.dumps(payload, ensure_ascii=False, default=str),
-                        now,
-                        now,
-                    ),
-                )
-            except sqlite3.IntegrityError:
-                return None
-        return int(cursor.lastrowid)
+            return self._create_send_reply_action_locked(
+                conn,
+                task_id=task_id,
+                target_message_id=target_message_id,
+                payload=payload,
+                approval_id=approval_id,
+                now=now,
+            )
 
     def create_owner_notification_action(
         self,
@@ -1520,7 +1503,56 @@ class SQLiteStore:
                 ),
             )
         except sqlite3.IntegrityError:
-            return None
+            row = conn.execute(
+                """
+                SELECT id, status
+                FROM actions
+                WHERE idempotency_key = ? AND kind = 'send_reply'
+                """,
+                (idempotency_key,),
+            ).fetchone()
+            if row is None or row["status"] != "failed":
+                return None
+            active = conn.execute(
+                """
+                SELECT id
+                FROM actions
+                WHERE task_id = ?
+                  AND target_message_id = ?
+                  AND kind = 'send_reply'
+                  AND status IN ('pending', 'sending')
+                  AND id != ?
+                LIMIT 1
+                """,
+                (task_id, target_message_id, row["id"]),
+            ).fetchone()
+            if active is not None:
+                return None
+            conn.execute(
+                """
+                UPDATE actions
+                SET task_id = ?,
+                    approval_id = ?,
+                    status = ?,
+                    target_message_id = ?,
+                    dry_run = ?,
+                    payload_json = ?,
+                    result_json = NULL,
+                    updated_at = ?
+                WHERE id = ? AND status = 'failed'
+                """,
+                (
+                    task_id,
+                    approval_id,
+                    "pending",
+                    target_message_id,
+                    1,
+                    json.dumps(payload, ensure_ascii=False, default=str),
+                    now,
+                    row["id"],
+                ),
+            )
+            return int(row["id"])
         return int(cursor.lastrowid)
 
     def _create_owner_notification_action_locked(
