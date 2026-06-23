@@ -17,6 +17,9 @@ storage:
 
 logging:
   jsonl_path: logs/test.jsonl
+  level: info
+  console: false
+  text_path: logs/test.log
 
 lark_cli:
   path: lark-cli

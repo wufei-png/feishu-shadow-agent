@@ -70,6 +70,18 @@ class LoggingConfig(StrictModel):
         default="logs/agent.jsonl",
         description="JSONL log path, resolved relative to the config file when not absolute.",
     )
+    level: Literal["debug", "info", "warning", "error"] = Field(
+        default="info",
+        description="Minimum runtime log level written to configured sinks.",
+    )
+    console: StrictBool = Field(
+        default=False,
+        description="Whether to also write human-readable runtime logs to stderr.",
+    )
+    text_path: str | None = Field(
+        default=None,
+        description="Optional human-readable log file path, resolved relative to the config file when not absolute.",
+    )
 
 
 class LarkCliConfig(StrictModel):

@@ -58,6 +58,17 @@ class Dispatcher:
                 for action in self.store.list_dispatchable_actions(limit=limit, kind="owner_notification")
                 if action.id not in seen_action_ids
             )
+        self.logger.debug(
+            "dispatch_actions_loaded",
+            run_id=run_id,
+            data={
+                "count": len(actions),
+                "limit": limit,
+                "allow_send_reply_actual": allow_send_reply_actual,
+                "allow_owner_notification_actual": allow_owner_notification_actual,
+                "blocked_send_reply_reason": blocked_send_reply_reason,
+            },
+        )
         for action in actions:
             actual_allowed = (
                 allow_send_reply_actual
@@ -69,6 +80,11 @@ class Dispatcher:
             if actual_allowed:
                 claimed = self.store.claim_action_for_dispatch(action.id)
                 if claimed is None:
+                    self.logger.warning(
+                        "dispatch_action_claim_skipped",
+                        run_id=run_id,
+                        data={"action_id": action.id, "kind": action.kind, "reason": "claim_failed"},
+                    )
                     summary = _bump(summary, skipped=1)
                     continue
                 result, sent = self._execute_actual(claimed, run_id=run_id)
@@ -81,8 +97,24 @@ class Dispatcher:
                     "info" if sent else "error",
                     "dispatch_action_completed",
                     run_id=run_id,
-                    data={"action_id": claimed.id, "kind": claimed.kind, "status": "sent" if sent else "failed"},
+                    data={
+                        "action_id": claimed.id,
+                        "kind": claimed.kind,
+                        "status": "sent" if sent else "failed",
+                        "error_stage": result.get("error_stage"),
+                        "warnings": result.get("warnings", []),
+                    },
                 )
+                if result.get("warnings"):
+                    self.logger.warning(
+                        "dispatch_action_completed_with_warnings",
+                        run_id=run_id,
+                        data={
+                            "action_id": claimed.id,
+                            "kind": claimed.kind,
+                            "warnings": result.get("warnings", []),
+                        },
+                    )
                 summary = _bump(summary, processed=1, sent=1 if sent else 0, failed=0 if sent else 1)
                 continue
 
@@ -111,6 +143,15 @@ class Dispatcher:
         if blocked_actual_reason:
             result["blocked_actual_reason"] = blocked_actual_reason
             result["warnings"].append(f"actual_send_blocked_{blocked_actual_reason}")
+            self.logger.warning(
+                "dispatch_actual_send_blocked",
+                run_id=run_id,
+                data={
+                    "action_id": action.id,
+                    "kind": action.kind,
+                    "reason": blocked_actual_reason,
+                },
+            )
         self.store.record_action_preview(action.id, result)
         self.logger.emit(
             "info",
@@ -166,6 +207,16 @@ class Dispatcher:
         except Exception as exc:
             result["readback"] = _exception_readback_result(sent_message_id, exc)
             result["warnings"].append("readback_exception")
+            self.logger.warning(
+                "dispatch_readback_exception",
+                run_id=run_id,
+                data={
+                    "action_id": action.id,
+                    "kind": action.kind,
+                    "sent_message_id": sent_message_id,
+                    "error": str(exc),
+                },
+            )
         else:
             result["readback"] = readback["result"]
             result["warnings"].extend(readback["warnings"])
@@ -220,18 +271,38 @@ class Dispatcher:
 
     def _readback(self, action: ActionRecord, *, sent_message_id: str | None, run_id: str) -> dict[str, Any]:
         if sent_message_id is None:
+            self.logger.warning(
+                "dispatch_readback_skipped",
+                run_id=run_id,
+                data={"action_id": action.id, "kind": action.kind, "reason": "sent_message_id_missing"},
+            )
             return {"result": None, "warnings": ["readback_skipped_no_sent_message_id"]}
         identity = _payload_identity(action) if action.kind == "send_reply" else "bot"
         warnings: list[str] = []
         try:
             page = self.feishu.get_messages(as_identity=identity, message_ids=[sent_message_id])
         except Exception as exc:
+            self.logger.warning(
+                "dispatch_readback_failed",
+                run_id=run_id,
+                data={
+                    "action_id": action.id,
+                    "kind": action.kind,
+                    "sent_message_id": sent_message_id,
+                    "error": str(exc),
+                },
+            )
             return {
                 "result": {"ok": False, "error": str(exc), "message_id": sent_message_id},
                 "warnings": ["readback_failed"],
             }
         item = _find_message(page.items, sent_message_id)
         if item is None:
+            self.logger.warning(
+                "dispatch_readback_message_missing",
+                run_id=run_id,
+                data={"action_id": action.id, "kind": action.kind, "sent_message_id": sent_message_id},
+            )
             return {
                 "result": {"ok": False, "message_id": sent_message_id, "raw": page.raw},
                 "warnings": ["readback_message_missing"],

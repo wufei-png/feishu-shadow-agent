@@ -17,6 +17,9 @@ storage:
 
 logging:
   jsonl_path: logs/agent.jsonl
+  level: info
+  console: true
+  text_path: logs/agent.log
 
 lark_cli:
   path: null

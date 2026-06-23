@@ -273,6 +273,37 @@
           "description": "JSONL log path, resolved relative to the config file when not absolute.",
           "title": "Jsonl Path",
           "type": "string"
+        },
+        "level": {
+          "default": "info",
+          "description": "Minimum runtime log level written to configured sinks.",
+          "enum": [
+            "debug",
+            "info",
+            "warning",
+            "error"
+          ],
+          "title": "Level",
+          "type": "string"
+        },
+        "console": {
+          "default": false,
+          "description": "Whether to also write human-readable runtime logs to stderr.",
+          "title": "Console",
+          "type": "boolean"
+        },
+        "text_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human-readable log file path, resolved relative to the config file when not absolute.",
+          "title": "Text Path"
         }
       },
       "title": "LoggingConfig",

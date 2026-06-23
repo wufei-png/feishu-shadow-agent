@@ -147,6 +147,16 @@ class ResourceProcessor:
         for resource in message.resources:
             if not policy.resource_download:
                 self.store.upsert_resource(resource, download_status="skipped")
+                self.logger.info(
+                    "resource_download_skipped",
+                    run_id=run_id,
+                    data={
+                        "message_id": resource.message_id,
+                        "file_key": resource.file_key,
+                        "resource_type": resource.resource_type,
+                        "reason": "disabled_by_chat_policy",
+                    },
+                )
                 continue
             if not policy.bot_joined:
                 # Resource download is bot-only for user messages. Recording the
@@ -157,9 +167,29 @@ class ResourceProcessor:
                     download_status="bot_not_joined",
                     raw={"reason": "chat_policy_bot_joined_false"},
                 )
+                self.logger.warning(
+                    "resource_download_skipped",
+                    run_id=run_id,
+                    data={
+                        "message_id": resource.message_id,
+                        "file_key": resource.file_key,
+                        "resource_type": resource.resource_type,
+                        "reason": "bot_not_joined",
+                    },
+                )
                 continue
             output = _resource_output(resource, self.config.storage.resource_dir)
             local_output = self.config_base_dir / output
+            self.logger.debug(
+                "resource_download_started",
+                run_id=run_id,
+                data={
+                    "message_id": resource.message_id,
+                    "file_key": resource.file_key,
+                    "resource_type": resource.resource_type,
+                    "output": output,
+                },
+            )
             try:
                 local_output.parent.mkdir(parents=True, exist_ok=True)
                 result = self.feishu_client.download_resource(
@@ -175,8 +205,7 @@ class ResourceProcessor:
                     path=output,
                     raw={"error": str(exc)},
                 )
-                self.logger.emit(
-                    "warning",
+                self.logger.warning(
                     "resource_download_failed",
                     run_id=run_id,
                     data={"message_id": resource.message_id, "file_key": resource.file_key, "error": str(exc)},
@@ -191,8 +220,7 @@ class ResourceProcessor:
                         path=output,
                         raw={"result": result.json_data, "error": "download output file missing"},
                     )
-                    self.logger.emit(
-                        "warning",
+                    self.logger.warning(
                         "resource_download_missing_file",
                         run_id=run_id,
                         data={"message_id": resource.message_id, "file_key": resource.file_key, "path": output},
@@ -205,6 +233,17 @@ class ResourceProcessor:
                     sha256_hex=sha256_hex,
                     raw={"result": result.json_data},
                 )
+                self.logger.info(
+                    "resource_downloaded",
+                    run_id=run_id,
+                    data={
+                        "message_id": resource.message_id,
+                        "file_key": resource.file_key,
+                        "resource_type": resource.resource_type,
+                        "path": output,
+                        "sha256": sha256_hex,
+                    },
+                )
             else:
                 status = "bot_invisible" if _bot_invisible_error(result) else "failed"
                 self.store.upsert_resource(
@@ -212,6 +251,19 @@ class ResourceProcessor:
                     download_status=status,
                     path=output,
                     raw={"error": result.error, "stderr": result.stderr, "stdout": result.stdout},
+                )
+                self.logger.warning(
+                    "resource_download_unavailable",
+                    run_id=run_id,
+                    data={
+                        "message_id": resource.message_id,
+                        "file_key": resource.file_key,
+                        "resource_type": resource.resource_type,
+                        "status": status,
+                        "error": result.error,
+                        "exit_code": result.exit_code,
+                        "timed_out": result.timed_out,
+                    },
                 )
 
     def _chat_policy(self, chat_id: str | None) -> ChatPolicyConfig:
@@ -267,13 +319,22 @@ class IngestionService:
         if not bot_open_id:
             raise RuntimeError("bot open_id is missing from lark-cli auth status")
         start, end = self._window("approval_inbox")
-        raws = self._drain(lambda token: self.feishu_client.list_p2p_messages(
-            user_id=bot_open_id,
-            start=start,
-            end=end,
-            page_token=token,
-            page_size=PAGE_SIZE,
-        ))
+        self.logger.debug(
+            "ingestion_window_selected",
+            run_id=run_id,
+            data={"source": "approval_inbox", "checkpoint_key": "approval_inbox", "start": start, "end": end},
+        )
+        raws = self._drain(
+            lambda token: self.feishu_client.list_p2p_messages(
+                user_id=bot_open_id,
+                start=start,
+                end=end,
+                page_token=token,
+                page_size=PAGE_SIZE,
+            ),
+            run_id=run_id,
+            source="approval_inbox",
+        )
         self._process_raw_batch(
             raws,
             source="approval_inbox",
@@ -304,30 +365,59 @@ class IngestionService:
     def run_active_watch(self, *, run_id: str) -> StageResult:
         now = self.clock()
         processed = 0
-        for target in self.store.list_active_watch_targets(now=now):
+        targets = self.store.list_active_watch_targets(now=now)
+        self.logger.debug(
+            "active_watch_targets_loaded",
+            run_id=run_id,
+            data={"count": len(targets), "now": now},
+        )
+        for target in targets:
             chat_id = target["chat_id"]
             thread_id = target["thread_id"]
             if not chat_id:
+                self.logger.warning(
+                    "active_watch_target_missing_chat_id",
+                    run_id=run_id,
+                    data={"target": target},
+                )
                 continue
             if thread_id:
                 key = f"active_watch.thread.{thread_id}"
                 start, end = self._window(key)
-                raws = self._drain(lambda token: self.feishu_client.list_thread_messages(
-                    thread_id=thread_id,
-                    page_token=token,
-                    page_size=PAGE_SIZE,
-                ))
+                self.logger.debug(
+                    "ingestion_window_selected",
+                    run_id=run_id,
+                    data={"source": "active_watch", "checkpoint_key": key, "start": start, "end": end},
+                )
+                raws = self._drain(
+                    lambda token: self.feishu_client.list_thread_messages(
+                        thread_id=thread_id,
+                        page_token=token,
+                        page_size=PAGE_SIZE,
+                    ),
+                    run_id=run_id,
+                    source="active_watch_thread",
+                )
                 raws = _filter_raws_in_window(raws, start=start, end=end)
             else:
                 key = f"active_watch.chat.{chat_id}"
                 start, end = self._window(key)
-                raws = self._drain(lambda token: self.feishu_client.list_chat_messages(
-                    chat_id=chat_id,
-                    start=start,
-                    end=end,
-                    page_token=token,
-                    page_size=PAGE_SIZE,
-                ))
+                self.logger.debug(
+                    "ingestion_window_selected",
+                    run_id=run_id,
+                    data={"source": "active_watch", "checkpoint_key": key, "start": start, "end": end},
+                )
+                raws = self._drain(
+                    lambda token: self.feishu_client.list_chat_messages(
+                        chat_id=chat_id,
+                        start=start,
+                        end=end,
+                        page_token=token,
+                        page_size=PAGE_SIZE,
+                    ),
+                    run_id=run_id,
+                    source="active_watch_chat",
+                )
                 raws = self._filter_active_watch_chat_followups(
                     raws,
                     default_chat_type=target["chat_type"],
@@ -352,15 +442,24 @@ class IngestionService:
         run_id: str,
     ) -> StageResult:
         start, end = self._window(checkpoint_key)
-        raws = self._drain(lambda token: self.feishu_client.search_messages(
-            chat_type=chat_type,
-            is_at_me=is_at_me,
-            start=start,
-            end=end,
-            page_token=token,
-            query="",
-            page_size=PAGE_SIZE,
-        ))
+        self.logger.debug(
+            "ingestion_window_selected",
+            run_id=run_id,
+            data={"source": name, "checkpoint_key": checkpoint_key, "start": start, "end": end},
+        )
+        raws = self._drain(
+            lambda token: self.feishu_client.search_messages(
+                chat_type=chat_type,
+                is_at_me=is_at_me,
+                start=start,
+                end=end,
+                page_token=token,
+                query="",
+                page_size=PAGE_SIZE,
+            ),
+            run_id=run_id,
+            source=name,
+        )
         processed = self._process_raw_batch(
             raws,
             source=name,
@@ -398,7 +497,20 @@ class IngestionService:
         default_chat_type: str | None,
         run_id: str,
     ) -> RoutingResult | None:
-        message = self.normalizer.normalize(raw, default_chat_type=default_chat_type)
+        try:
+            message = self.normalizer.normalize(raw, default_chat_type=default_chat_type)
+        except Exception as exc:
+            self.logger.error(
+                "message_normalize_failed",
+                run_id=run_id,
+                data={
+                    "raw_message_id": _first_string(raw, "message_id", "messageId", "id"),
+                    "source": source,
+                    "default_chat_type": default_chat_type,
+                    "error": str(exc),
+                },
+            )
+            raise
         inserted = self.store.upsert_message(message)
         self.logger.emit(
             "info",
@@ -426,13 +538,42 @@ class IngestionService:
             watch_until=watch_until,
             retry_incomplete_processing=self.task_processor is not None,
         )
+        self.logger.info(
+            "message_routed",
+            run_id=run_id,
+            task_id=None if result.task is None else str(result.task.id),
+            data={
+                "message_id": message.message_id,
+                "source": source,
+                "route": result.decision.route,
+                "reason": result.decision.reason,
+                "inserted": inserted,
+                "task_short_id": None if result.task is None else result.task.short_id,
+            },
+        )
         if _should_process_resources(
             store=self.store,
             inserted=inserted,
             message=message,
             result=result,
         ):
+            self.logger.debug(
+                "message_resources_processing_started",
+                run_id=run_id,
+                data={"message_id": message.message_id, "resource_count": len(message.resources)},
+            )
             self.resources.process(message, run_id=run_id)
+        elif message.resources:
+            self.logger.debug(
+                "message_resources_processing_skipped",
+                run_id=run_id,
+                data={
+                    "message_id": message.message_id,
+                    "resource_count": len(message.resources),
+                    "inserted": inserted,
+                    "route": result.decision.route,
+                },
+            )
         if self.task_processor is not None:
             processing = self.task_processor.process(
                 message=message,
@@ -468,17 +609,54 @@ class IngestionService:
             start = _minus_seconds(end, self.config.daemon.overlap_seconds)
         return start, end
 
-    def _drain(self, fetch_page: Callable[[str | None], MessagePage]) -> list[dict[str, Any]]:
+    def _drain(
+        self,
+        fetch_page: Callable[[str | None], MessagePage],
+        *,
+        run_id: str | None = None,
+        source: str | None = None,
+    ) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         page_token: str | None = None
         seen_tokens: set[str] = set()
+        page_number = 0
         while True:
-            page = fetch_page(page_token)
+            try:
+                page = fetch_page(page_token)
+            except Exception as exc:
+                self.logger.error(
+                    "message_page_fetch_failed",
+                    run_id=run_id,
+                    data={
+                        "source": source,
+                        "page_number": page_number + 1,
+                        "has_page_token": page_token is not None,
+                        "error": str(exc),
+                    },
+                )
+                raise
+            page_number += 1
+            self.logger.debug(
+                "message_page_fetched",
+                run_id=run_id,
+                data={
+                    "source": source,
+                    "page_number": page_number,
+                    "items": len(page.items),
+                    "has_more": page.has_more,
+                    "has_next_page_token": bool(page.next_page_token),
+                },
+            )
             items.extend(page.items)
             next_token = page.next_page_token
             if not page.has_more or not next_token:
                 return items
             if next_token in seen_tokens:
+                self.logger.error(
+                    "message_pagination_token_loop",
+                    run_id=run_id,
+                    data={"source": source, "page_number": page_number},
+                )
                 raise RuntimeError(f"pagination token loop detected: {next_token}")
             seen_tokens.add(next_token)
             page_token = next_token

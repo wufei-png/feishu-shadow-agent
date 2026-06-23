@@ -68,6 +68,16 @@ class Daemon:
         )
 
     def run_one_tick(self, *, run_id: str) -> list[StageResult]:
+        self.logger.debug(
+            "daemon_tick_started",
+            run_id=run_id,
+            data={
+                "dry_run": self.dry_run,
+                "has_app_config": self.app_config is not None,
+                "has_feishu_client": self.feishu_client is not None,
+                "send_owner_notifications": self.send_owner_notifications,
+            },
+        )
         if self.app_config is None or self.feishu_client is None:
             self.run_one_noop_tick(run_id=run_id)
             return [StageResult("noop", ok=True)]
@@ -131,6 +141,12 @@ class Daemon:
                 )
             results.append(result)
         approval_failed = any(result.name == "approval_inbox" and not result.ok for result in results)
+        if approval_failed and not self.dry_run:
+            self.logger.warning(
+                "daemon_dispatch_send_reply_blocked",
+                run_id=run_id,
+                data={"reason": "approval_inbox_failed", "owner_notifications_allowed": True},
+            )
         dispatcher = Dispatcher(
             store=self.store,
             feishu_client=self.feishu_client,
@@ -168,13 +184,27 @@ class Daemon:
         run_id = self.health_suite.run_id or new_run_id("run")
         self.store.record_run_start(run_id=run_id, dry_run=self.dry_run, **self.run_metadata)
         try:
+            self.logger.debug(
+                "daemon_startup_health_started",
+                run_id=run_id,
+                data={"dry_run": self.dry_run, "run_metadata": self.run_metadata},
+            )
             ok, results = self.run_startup_health()
             if not ok:
                 summary = summarize_results(results)
                 self.logger.emit("error", "daemon_startup_health_failed", run_id=run_id, data=summary)
                 self.store.record_run_finish(run_id=run_id, status="health_failed", health_summary=summary)
                 return 2
-            self.logger.emit("info", "daemon_started", run_id=run_id, data={"dry_run": self.dry_run})
+            self.logger.emit(
+                "info",
+                "daemon_started",
+                run_id=run_id,
+                data={
+                    "dry_run": self.dry_run,
+                    "tick_interval_seconds": self.tick_interval_seconds,
+                    "send_owner_notifications": self.send_owner_notifications,
+                },
+            )
             while True:
                 self.run_one_tick(run_id=run_id)
                 self.sleep_func(self.tick_interval_seconds)
@@ -187,7 +217,21 @@ class Daemon:
         interval = self._runtime_health_check_interval()
         now = time.monotonic()
         if self._last_runtime_health_at is not None and now - self._last_runtime_health_at < interval:
+            self.logger.debug(
+                "runtime_critical_health_reused",
+                run_id=run_id,
+                data={
+                    "ok": self._runtime_health_ok,
+                    "interval_seconds": interval,
+                    "age_seconds": round(now - self._last_runtime_health_at, 3),
+                },
+            )
             return self._runtime_health_ok
+        self.logger.debug(
+            "runtime_critical_health_started",
+            run_id=run_id,
+            data={"interval_seconds": interval, "previous_ok": self._runtime_health_ok},
+        )
         if hasattr(self.health_suite, "run_runtime_critical"):
             results = self.health_suite.run_runtime_critical()
         else:  # pragma: no cover - compatibility for narrow tests
@@ -198,6 +242,12 @@ class Daemon:
             self.logger.emit(
                 "error",
                 "runtime_critical_health_failed",
+                run_id=run_id,
+                data=summarize_results(results),
+            )
+        else:
+            self.logger.debug(
+                "runtime_critical_health_ok",
                 run_id=run_id,
                 data=summarize_results(results),
             )

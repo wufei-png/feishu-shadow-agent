@@ -301,7 +301,18 @@ def _load_runtime(config_path: str | None) -> tuple[LoadedConfig, SQLiteStore, J
     loaded = ConfigService().load(config_path)
     sqlite_path = resolve_relative_path(loaded.config.storage.sqlite_path, loaded.base_dir)
     jsonl_path = resolve_relative_path(loaded.config.logging.jsonl_path, loaded.base_dir)
-    return loaded, SQLiteStore(sqlite_path), JSONLLogger(jsonl_path)
+    text_path = (
+        None
+        if loaded.config.logging.text_path is None
+        else resolve_relative_path(loaded.config.logging.text_path, loaded.base_dir)
+    )
+    logger = JSONLLogger(
+        jsonl_path,
+        level=loaded.config.logging.level,
+        console=loaded.config.logging.console,
+        text_path=text_path,
+    )
+    return loaded, SQLiteStore(sqlite_path), logger
 
 
 def _git_info(cwd: Path) -> dict[str, object]:

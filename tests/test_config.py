@@ -18,6 +18,9 @@ def test_load_minimal_config() -> None:
 
     assert loaded.config.owner.open_id == "ou_owner"
     assert loaded.config.storage.resource_dir == "data/resources"
+    assert loaded.config.logging.level == "info"
+    assert loaded.config.logging.console is False
+    assert loaded.config.logging.text_path == "logs/test.log"
     assert loaded.config.tool_permissions == "guarded_write"
     assert loaded.config.chats["oc_test"].auto_reply is True
     assert loaded.config.hermes.mode == "cli"

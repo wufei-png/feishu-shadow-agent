@@ -236,7 +236,29 @@ class TaskProcessingService:
     ) -> ProcessingResult | None:
         route = routing.decision.route
         reason = routing.decision.reason
+        self.logger.debug(
+            "task_processing_started",
+            run_id=run_id,
+            task_id=None if routing.task is None else str(routing.task.id),
+            data={
+                "message_id": message.message_id,
+                "source": source,
+                "route": route,
+                "reason": reason,
+            },
+        )
         if route in {"ignore", "human_taken_over", "close_task"}:
+            self.logger.debug(
+                "task_processing_skipped",
+                run_id=run_id,
+                task_id=None if routing.task is None else str(routing.task.id),
+                data={
+                    "message_id": message.message_id,
+                    "source": source,
+                    "route": route,
+                    "reason": reason,
+                },
+            )
             return None
         if route == "ambiguous" and reason in {"router_placeholder", "closed_recall_router_placeholder"}:
             routed = self._run_task_router(
@@ -262,27 +284,115 @@ class TaskProcessingService:
             )
         return None
 
-    def _call_hermes_with_retries(self, call: Callable[[], HermesCliResult]) -> HermesAttemptOutcome:
+    def _call_hermes_with_retries(
+        self,
+        call: Callable[[], HermesCliResult],
+        *,
+        run_id: str | None,
+        stage: str,
+        message_id: str,
+        task_id: int | None = None,
+    ) -> HermesAttemptOutcome:
         last_result: HermesCliResult | None = None
         last_error: str | None = None
         attempts = 0
         for attempt in range(1, self.hermes_max_attempts + 1):
             attempts = attempt
+            self.logger.debug(
+                "hermes_call_attempt_started",
+                run_id=run_id,
+                task_id=None if task_id is None else str(task_id),
+                data={"stage": stage, "message_id": message_id, "attempt": attempt},
+            )
             try:
                 result = call()
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
                 if attempt < self.hermes_max_attempts:
+                    self.logger.warning(
+                        "hermes_call_retrying",
+                        run_id=run_id,
+                        task_id=None if task_id is None else str(task_id),
+                        data={
+                            "stage": stage,
+                            "message_id": message_id,
+                            "attempt": attempt,
+                            "error": last_error,
+                        },
+                    )
                     self._sleep_before_retry(attempt)
+                else:
+                    self.logger.error(
+                        "hermes_call_exception",
+                        run_id=run_id,
+                        task_id=None if task_id is None else str(task_id),
+                        data={
+                            "stage": stage,
+                            "message_id": message_id,
+                            "attempt": attempt,
+                            "error": last_error,
+                        },
+                    )
                 continue
             last_result = result
             if result.ok:
+                self.logger.debug(
+                    "hermes_call_succeeded",
+                    run_id=run_id,
+                    task_id=None if task_id is None else str(task_id),
+                    data={
+                        "stage": stage,
+                        "message_id": message_id,
+                        "attempt": attempt,
+                        "latency_ms": result.latency_ms,
+                    },
+                )
                 return HermesAttemptOutcome(result=result, attempt_count=attempt)
             last_error = _hermes_result_error(result)
             if not _is_retryable_hermes_result(result):
+                self.logger.error(
+                    "hermes_call_failed_terminal",
+                    run_id=run_id,
+                    task_id=None if task_id is None else str(task_id),
+                    data={
+                        "stage": stage,
+                        "message_id": message_id,
+                        "attempt": attempt,
+                        "error": last_error,
+                        "exit_code": result.exit_code,
+                        "timed_out": result.timed_out,
+                    },
+                )
                 return HermesAttemptOutcome(result=result, attempt_count=attempt, last_error=last_error)
             if attempt < self.hermes_max_attempts:
+                self.logger.warning(
+                    "hermes_call_retrying",
+                    run_id=run_id,
+                    task_id=None if task_id is None else str(task_id),
+                    data={
+                        "stage": stage,
+                        "message_id": message_id,
+                        "attempt": attempt,
+                        "error": last_error,
+                        "exit_code": result.exit_code,
+                        "timed_out": result.timed_out,
+                    },
+                )
                 self._sleep_before_retry(attempt)
+            else:
+                self.logger.error(
+                    "hermes_call_failed",
+                    run_id=run_id,
+                    task_id=None if task_id is None else str(task_id),
+                    data={
+                        "stage": stage,
+                        "message_id": message_id,
+                        "attempt": attempt,
+                        "error": last_error,
+                        "exit_code": result.exit_code,
+                        "timed_out": result.timed_out,
+                    },
+                )
         return HermesAttemptOutcome(result=last_result, attempt_count=attempts, last_error=last_error)
 
     def _sleep_before_retry(self, attempt: int) -> None:
@@ -370,8 +480,24 @@ class TaskProcessingService:
         allowed_target_short_ids = {candidate.task.short_id for candidate in active_candidates} | {
             task.short_id for task in historical
         }
+        self.logger.debug(
+            "task_router_started",
+            run_id=run_id,
+            data={
+                "message_id": message.message_id,
+                "source": source,
+                "reason": reason,
+                "active_candidates": len(active_candidates),
+                "historical_candidates": len(historical),
+            },
+        )
         prompt = _router_prompt(message=message, active=active_candidates, historical=historical)
-        outcome = self._call_hermes_with_retries(lambda: self.hermes.task_router(prompt))
+        outcome = self._call_hermes_with_retries(
+            lambda: self.hermes.task_router(prompt),
+            run_id=run_id,
+            stage="task_router",
+            message_id=message.message_id,
+        )
         result = outcome.result
         self.store.record_hermes_audit(
             request_type="router",
@@ -388,6 +514,16 @@ class TaskProcessingService:
         candidates_count = len(active_candidates) + len(historical)
         if result is None or not result.ok or not isinstance(result.json_data, dict):
             last_error = outcome.last_error or (None if result is None else _hermes_result_error(result))
+            self.logger.error(
+                "task_router_failed",
+                run_id=run_id,
+                data={
+                    "message_id": message.message_id,
+                    "attempt_count": outcome.attempt_count,
+                    "candidates_count": candidates_count,
+                    "error": _truncate_error(last_error),
+                },
+            )
             self._mark_processing_terminal(
                 message=message,
                 stage="task_router",
@@ -414,6 +550,15 @@ class TaskProcessingService:
             output = TaskRouterOutput.model_validate(result.json_data)
         except ValidationError as exc:
             last_error = str(exc)
+            self.logger.error(
+                "task_router_schema_failed",
+                run_id=run_id,
+                data={
+                    "message_id": message.message_id,
+                    "attempt_count": outcome.attempt_count,
+                    "error": _truncate_error(last_error),
+                },
+            )
             self._mark_processing_terminal(
                 message=message,
                 stage="task_router",
@@ -438,6 +583,16 @@ class TaskProcessingService:
             return ProcessingResult("owner_notification_created", action_id=action_id, reason="task_router_schema_failed")
         invalid_watch_keys = _invalid_watch_keys(output.updated_watch_keys)
         if invalid_watch_keys:
+            self.logger.warning(
+                "task_router_invalid_watch_keys",
+                run_id=run_id,
+                data={
+                    "message_id": message.message_id,
+                    "invalid_watch_keys": invalid_watch_keys,
+                    "route": output.route,
+                    "target_task_id": output.target_task_id,
+                },
+            )
             self._audit_router_ambiguity(
                 message=message,
                 reason="task_router_invalid_watch_keys",
@@ -456,6 +611,17 @@ class TaskProcessingService:
             )
             return ProcessingResult("owner_notification_created", action_id=action_id, reason="task_router_invalid_watch_keys")
         if output.confidence < 0.6 or output.route == "ambiguous":
+            self.logger.warning(
+                "task_router_ambiguous",
+                run_id=run_id,
+                data={
+                    "message_id": message.message_id,
+                    "route": output.route,
+                    "confidence": output.confidence,
+                    "reason": output.reason,
+                    "candidates_count": candidates_count,
+                },
+            )
             self.store.record_routing_audit(
                 message_id=message.message_id,
                 decision=RouteDecision(
@@ -489,6 +655,18 @@ class TaskProcessingService:
                 task_id=task.id,
                 attempt_count=outcome.attempt_count,
             )
+            self.logger.info(
+                "task_router_decided",
+                run_id=run_id,
+                task_id=str(task.id),
+                data={
+                    "message_id": message.message_id,
+                    "route": output.route,
+                    "reason": output.reason or "task_router_new",
+                    "task_short_id": task.short_id,
+                    "updated_watch_keys": output.updated_watch_keys,
+                },
+            )
             return RoutingResult(decision=decision, task=task)
         if output.route == "ignore":
             self.store.record_routing_audit(
@@ -506,8 +684,27 @@ class TaskProcessingService:
                 task_id=None,
                 attempt_count=outcome.attempt_count,
             )
+            self.logger.info(
+                "task_router_decided",
+                run_id=run_id,
+                data={
+                    "message_id": message.message_id,
+                    "route": output.route,
+                    "reason": output.reason or "task_router_ignore",
+                },
+            )
             return None
         if output.target_task_id not in allowed_target_short_ids:
+            self.logger.warning(
+                "task_router_invalid_target",
+                run_id=run_id,
+                data={
+                    "message_id": message.message_id,
+                    "route": output.route,
+                    "target_task_id": output.target_task_id,
+                    "allowed_target_count": len(allowed_target_short_ids),
+                },
+            )
             action_id = self._handle_invalid_router_target(
                 message=message,
                 target_task_id=output.target_task_id,
@@ -522,6 +719,15 @@ class TaskProcessingService:
             return ProcessingResult("owner_notification_created", action_id=action_id, reason="task_router_invalid_target")
         target = self._resolve_router_target(output.target_task_id)
         if target is None:
+            self.logger.warning(
+                "task_router_target_missing",
+                run_id=run_id,
+                data={
+                    "message_id": message.message_id,
+                    "route": output.route,
+                    "target_task_id": output.target_task_id,
+                },
+            )
             action_id = self._handle_invalid_router_target(
                 message=message,
                 target_task_id=output.target_task_id,
@@ -555,6 +761,18 @@ class TaskProcessingService:
                 task_id=target.id,
                 attempt_count=outcome.attempt_count,
             )
+            self.logger.info(
+                "task_router_decided",
+                run_id=run_id,
+                task_id=str(target.id),
+                data={
+                    "message_id": message.message_id,
+                    "route": output.route,
+                    "reason": output.reason or "task_router",
+                    "task_short_id": target.short_id,
+                    "updated_watch_keys": output.updated_watch_keys,
+                },
+            )
             return RoutingResult(decision=decision, task=self.store.get_task_by_id(target.id))
         if output.route == "close_task":
             self.store.update_task_after_hermes(task_id=target.id, status="closed")
@@ -574,6 +792,17 @@ class TaskProcessingService:
                 task_id=target.id,
                 attempt_count=outcome.attempt_count,
             )
+            self.logger.info(
+                "task_router_decided",
+                run_id=run_id,
+                task_id=str(target.id),
+                data={
+                    "message_id": message.message_id,
+                    "route": output.route,
+                    "reason": output.reason or "task_router_close",
+                    "task_short_id": target.short_id,
+                },
+            )
         return None
 
     def _run_task_session(
@@ -589,6 +818,18 @@ class TaskProcessingService:
         prompt_message_ids = self._task_session_prompt_message_ids(task=task, message=message, session_id=session_id)
         resources = self.store.list_resources_for_messages(prompt_message_ids)
         reply_target_message_ids = _reply_target_message_ids(task=task, current_message_id=message.message_id)
+        self.logger.debug(
+            "task_session_started",
+            run_id=run_id,
+            task_id=str(task.id),
+            data={
+                "message_id": message.message_id,
+                "task_short_id": task.short_id,
+                "resuming_session": session_id is not None,
+                "prompt_message_count": len(prompt_message_ids),
+                "resource_count": len(resources),
+            },
+        )
         prompt = _task_session_prompt(
             task=task,
             current_message_id=message.message_id,
@@ -596,7 +837,13 @@ class TaskProcessingService:
             messages=self.store.get_messages_by_ids(prompt_message_ids),
             resources=resources,
         )
-        outcome = self._call_hermes_with_retries(lambda: self.hermes.task_session(prompt, session_id=session_id))
+        outcome = self._call_hermes_with_retries(
+            lambda: self.hermes.task_session(prompt, session_id=session_id),
+            run_id=run_id,
+            stage="task_session",
+            message_id=message.message_id,
+            task_id=task.id,
+        )
         result = outcome.result
         self.store.record_hermes_audit(
             request_type="task_session",
@@ -612,6 +859,17 @@ class TaskProcessingService:
         )
         if result is None or not result.ok or not isinstance(result.json_data, dict):
             last_error = outcome.last_error or (None if result is None else _hermes_result_error(result))
+            self.logger.error(
+                "task_session_failed",
+                run_id=run_id,
+                task_id=str(task.id),
+                data={
+                    "message_id": message.message_id,
+                    "task_short_id": task.short_id,
+                    "attempt_count": outcome.attempt_count,
+                    "error": _truncate_error(last_error),
+                },
+            )
             self._mark_processing_terminal(
                 message=message,
                 stage="task_session",
@@ -633,6 +891,17 @@ class TaskProcessingService:
             output = TaskSessionOutput.model_validate(result.json_data)
         except ValidationError as exc:
             last_error = str(exc)
+            self.logger.error(
+                "task_session_schema_failed",
+                run_id=run_id,
+                task_id=str(task.id),
+                data={
+                    "message_id": message.message_id,
+                    "task_short_id": task.short_id,
+                    "attempt_count": outcome.attempt_count,
+                    "error": _truncate_error(last_error),
+                },
+            )
             self._mark_processing_terminal(
                 message=message,
                 stage="task_session",
@@ -652,11 +921,32 @@ class TaskProcessingService:
             return ProcessingResult("owner_notification_created", task.id, action_id=action_id, reason="schema_failed")
         if result.session_id and result.session_id != session_id:
             self.store.set_task_hermes_session_id(task.id, result.session_id)
+            self.logger.debug(
+                "task_session_id_updated",
+                run_id=run_id,
+                task_id=str(task.id),
+                data={
+                    "message_id": message.message_id,
+                    "task_short_id": task.short_id,
+                    "had_previous_session": session_id is not None,
+                },
+            )
 
         target_ids = {message.message_id}
         if task.root_message_id:
             target_ids.add(task.root_message_id)
         if output.reply_target_message_id and output.reply_target_message_id not in target_ids:
+            self.logger.warning(
+                "task_session_invalid_reply_target",
+                run_id=run_id,
+                task_id=str(task.id),
+                data={
+                    "message_id": message.message_id,
+                    "task_short_id": task.short_id,
+                    "reply_target_message_id": output.reply_target_message_id,
+                    "allowed_targets": sorted(target_ids),
+                },
+            )
             fallback_target = self.store.get_message(message.message_id)
             composed = self.composer.compose(
                 proposed_reply=output.proposed_reply,
@@ -693,6 +983,17 @@ class TaskProcessingService:
                 task_id=task.id,
                 attempt_count=outcome.attempt_count,
             )
+            self.logger.info(
+                "task_session_watch_only",
+                run_id=run_id,
+                task_id=str(task.id),
+                data={
+                    "message_id": message.message_id,
+                    "task_short_id": task.short_id,
+                    "task_state": output.task_state,
+                    "watch_action": output.watch_action,
+                },
+            )
             return ProcessingResult("watch_only", task.id, reason="no_reply")
 
         reply_target_id = output.reply_target_message_id or message.message_id
@@ -710,6 +1011,21 @@ class TaskProcessingService:
             resources=resources,
         )
         if not gate["allow"]:
+            self.logger.warning(
+                "task_session_auto_reply_blocked",
+                run_id=run_id,
+                task_id=str(task.id),
+                data={
+                    "message_id": message.message_id,
+                    "task_short_id": task.short_id,
+                    "reason": gate["reason"],
+                    "identity": gate["identity"],
+                    "answerability": output.answerability,
+                    "confidence": output.confidence,
+                    "risk_level": output.risk_level,
+                    "requires_resources": output.requires_resources,
+                },
+            )
             if gate["reason"] == "resource_needs_bot":
                 action_id = self.approvals.notify_owner(task=task, reason="resource_needs_bot", payload={"message_id": message.message_id})
                 self._mark_processing_processed(
@@ -750,6 +1066,18 @@ class TaskProcessingService:
             stage="task_session",
             task_id=task.id,
             attempt_count=outcome.attempt_count,
+        )
+        self.logger.info(
+            "task_session_auto_reply_ready",
+            run_id=run_id,
+            task_id=str(task.id),
+            data={
+                "message_id": message.message_id,
+                "task_short_id": task.short_id,
+                "action_id": action_id,
+                "reply_target_message_id": reply_target_id,
+                "identity": gate["identity"],
+            },
         )
         return ProcessingResult("send_action_created", task.id, action_id=action_id, reason="gate_passed")
 
