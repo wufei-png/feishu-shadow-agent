@@ -378,16 +378,18 @@ tool_permissions: guarded_write   # read_only | guarded_write | full_access
 ```text
 read_only:
   Hermes 使用 --toolsets safe。
-  用于只读分析，不授予写入类 Hermes 工具。
+  safe 禁用 terminal/file/execute_code 等本地写操作类工具，但保留 web、vision、image_generate。
+  不是严格意义的“零副作用只读”——image_generate 等仍可能产生文件。
 
 guarded_write:
-  Hermes 使用 --toolsets hermes-cli。
-  依赖 Hermes 自身的交互式/非交互式 guard 处理写入风险。
-  Hermes 阻塞、拒绝或超时都按 task_session 失败处理，并走现有 owner notification 路径。
+  Hermes 使用 --toolsets hermes-cli（不传 --yolo）。
+  启用完整 CLI 工具集。daemon 以无 TTY 子进程调用 Hermes，不会触发交互式危险命令审批；
+  非 gateway 场景下 Hermes 对 terminal 等路径通常自动放行。
+  写风险主要靠 toolset 边界 + 本项目 JSON schema / reply gate / owner 审批，而非 Hermes TTY 确认。
 
 full_access:
   Hermes 使用 --toolsets hermes-cli --yolo。
-  对齐默认信任模型，跳过普通危险命令审批。
+  显式跳过 Hermes 危险命令审批提示。
   仍受 Hermes hardline block、进程边界、系统权限和工具自身限制约束。
 ```
 
@@ -398,6 +400,23 @@ Python 只负责按 profile 派生 Hermes CLI 参数、记录审计、维护任�
 ## 11. Hermes 集成
 
 Python daemon 直接调用 Hermes CLI 非交互 `chat -q -Q`。不要用 user 身份私聊飞书 bot 来启动 Hermes。
+
+集成约束：
+
+```text
+任务处理:
+  始终 hermes chat -q -Q（CLI 子进程），与 hermes.mode 无关。
+
+Health 探测:
+  mode: cli  -> hermes --version / hermes status
+  mode: http -> GET hermes.health_url（仅可达性，不用于 chat）
+
+Prompt 隔离:
+  传 --ignore-rules，剥离 AGENTS.md / memory / 预加载 skill 注入。
+  不传 --ignore-user-config，保留个人助手的 ~/.hermes 配置、MCP、skills、provider。
+
+mode: http 不是 HTTP chat API；未来若接 Hermes API server，应单独设计客户端，不混用当前 health_url 字段。
+```
 
 职责拆分：
 

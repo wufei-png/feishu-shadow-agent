@@ -50,16 +50,16 @@ python -m feishu_shadow_agent config schema
 | `logging.text_path` | string/null | `null` | 可选普通文本日志文件路径；相对路径基于配置文件目录解析。 |
 | `lark_cli.path` | string/null | `null` | 指定 `lark-cli` 路径；`null` 使用当前 `PATH`。 |
 | `lark_cli.timeout_seconds` | int `> 0` | `30` | `lark-cli` 子进程调用超时。 |
-| `hermes.mode` | `cli`/`http` | `cli` | `cli` 使用本机 Hermes 可执行文件；`http` 只保留 health URL 兼容路径。 |
+| `hermes.mode` | `cli`/`http` | `cli` | 只影响 `doctor`/运行时 health 探测方式；**无论取何值，任务处理始终走本机 `hermes chat` CLI**。`http` 仅用于探测 Hermes gateway/API server 是否可达。 |
 | `hermes.path` | string/null | `null` | `cli` 模式下指定 Hermes 路径；`null` 使用当前 `PATH`。 |
-| `hermes.source` | string | `feishu-shadow-agent` | 传给 Hermes 会话和审计数据的来源标记；不能为空。 |
-| `hermes.router_max_turns` | int `> 0` | `4` | Hermes 任务路由调用的最大轮数。 |
-| `hermes.session_max_turns` | int `> 0` | `8` | Hermes 单任务会话调用的最大轮数。 |
-| `hermes.model` | string/null | `null` | 可选模型覆盖；`null` 使用 Hermes 默认值。 |
-| `hermes.provider` | string/null | `null` | 可选 provider 覆盖；`null` 使用 Hermes 默认值。 |
+| `hermes.source` | string | `feishu-shadow-agent` | 传给 Hermes 会话和审计数据的来源标记；不能为空。官方建议第三方集成可用 `tool` 以从用户 session 列表中过滤；本项目保留自定义标签便于审计区分。 |
+| `hermes.router_max_turns` | int `> 0` | `4` | Hermes 任务路由调用的最大 tool iteration 轮数（`--max-turns`）。 |
+| `hermes.session_max_turns` | int `> 0` | `8` | Hermes 单任务会话调用的最大 tool iteration 轮数（`--max-turns`）。 |
+| `hermes.model` | string/null | `null` | 可选模型覆盖；`null` 时沿用本机 Hermes 配置（`~/.hermes/config.yaml` 或 Hermes 内置默认）。 |
+| `hermes.provider` | string/null | `null` | 可选 provider 覆盖；`null` 时沿用本机 Hermes 配置。 |
 | `hermes.timeout_seconds` | int `> 0` | `60` | Hermes 子进程或 health 调用超时。 |
-| `hermes.health_url` | string/null | `null` | 仅 `mode: http` 使用；必须以 `http://` 或 `https://` 开头，HTTP 模式下必填。 |
-| `hermes.api_key_env` | string/null | `HERMES_API_KEY` | 保存 Hermes API key 的环境变量名，不是密钥值本身。 |
+| `hermes.health_url` | string/null | `null` | 仅 `mode: http` 时使用；必须以 `http://` 或 `https://` 开头，HTTP 模式下必填。典型值为 `http://127.0.0.1:8642/health`。**不用于 chat/路由/会话调用**。 |
+| `hermes.api_key_env` | string/null | `HERMES_API_KEY` | `mode: http` 时可选 Bearer token 环境变量名。Hermes 官方 API server 常用 `API_SERVER_KEY`；`/health` 端点通常无需认证，此字段主要留给需要鉴权的 health URL。 |
 | `reply_policy.p2p_auto_reply` | bool | `true` | P2P 私聊在风险和置信度通过时是否允许自动回复。 |
 | `reply_policy.default_group_auto_reply` | bool | `false` | 未在 `chats` 显式配置的群是否默认允许自动回复。 |
 | `reply_policy.risk_level_max` | `low`/`medium`/`high` | `low` | 全局自动回复允许的最高风险等级。 |
@@ -78,11 +78,40 @@ python -m feishu_shadow_agent config schema
 
 ## 权限档位
 
-| `tool_permissions` | 行为 |
-| --- | --- |
-| `read_only` | Hermes 只应使用只读能力。 |
-| `guarded_write` | 默认档位，允许受审批和 dispatch gate 保护的写操作。 |
-| `full_access` | 允许 Hermes 使用更高权限工具；需要本机 Hermes CLI 支持对应 flag。 |
+`tool_permissions` 控制传给 Hermes 的 `--toolsets` / `--yolo` 参数，并叠加本项目的 reply policy、审批队列和 dispatch gate。它与飞书对外发送权限是两套机制。
+
+| `tool_permissions` | Hermes CLI 参数 | 实际边界 |
+| --- | --- | --- |
+| `read_only` | `--toolsets safe` | Hermes `safe` 工具集：允许 web 搜索/抓取、vision、`image_generate` 等；**禁用** terminal、file、`execute_code` 等本地写操作类工具。不是“零副作用”——例如 `image_generate` 可能写入图片文件。 |
+| `guarded_write` | `--toolsets hermes-cli` | 启用 Hermes 完整 CLI 工具集（file、terminal、browser、skills、memory 等），**不**传 `--yolo`。 |
+| `full_access` | `--toolsets hermes-cli --yolo` | 同上，并显式跳过 Hermes 危险命令审批提示（`--yolo`）。仍受 Hermes hardline block（如 `rm -rf /`）约束。 |
+
+### 非交互子进程下的重要语义
+
+daemon 通过 `subprocess` 以无 TTY 方式调用 `hermes chat -q -Q`。在此模式下，Hermes **不会**弹出交互式危险命令审批；对 `terminal()` 等路径，非 gateway 场景下通常会 **自动放行**（见 Hermes `tools/approval.py`）。
+
+因此：
+
+- `guarded_write` **不能**理解为“Hermes 会在写操作前拦住并等人点确认”。它与 `full_access` 的主要差异是工具集范围（`safe` vs `hermes-cli`）以及是否显式 `--yolo`，而不是“有无交互审批”。
+- 飞书侧真正的写保护来自：结构化 JSON schema、`answerability`/置信度/风险 gate、owner 审批、`dry-run`、幂等和 dispatch 策略。
+- 若需要更严格的本地副作用控制，应使用 `read_only`（`safe`），而不是指望 `guarded_write` 触发 Hermes TTY 审批。
+
+## Hermes 集成说明
+
+### 调用方式
+
+任务路由和任务会话统一构造：
+
+```text
+hermes chat -q <prompt> -Q --source <source> --toolsets <...> [--yolo] --ignore-rules --max-turns N [--resume <session_id>] [--model ...] [--provider ...]
+```
+
+- `-Q`：程序化模式，stdout 为模型最终回复，stderr 输出 `session_id:`。
+- `--ignore-rules`：跳过 `AGENTS.md`、`SOUL.md`、memory 和预加载 skill 的自动注入，避免仓库/编辑器规则污染飞书任务 prompt。
+
+### `mode: http` 的范围
+
+`hermes.mode: http` **仅**改变 health 检查：对 `hermes.health_url` 发 `GET`，可选带 `hermes.api_key_env` 中的 Bearer token。任务处理、路由、会话恢复**始终**走 CLI，与 `mode` 无关。
 
 ## Schema
 
