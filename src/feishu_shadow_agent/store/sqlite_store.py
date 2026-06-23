@@ -411,6 +411,83 @@ class SQLiteStore:
                 ),
             )
 
+    def count_prunable_message_raw_json(self, *, cutoff: str, replacement_json: str) -> int:
+        self.migrate()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM messages
+                WHERE datetime(inserted_at) <= datetime(?)
+                  AND raw_json != ?
+                """,
+                (cutoff, replacement_json),
+            ).fetchone()
+        return int(row["count"])
+
+    def prune_message_raw_json(self, *, cutoff: str, replacement_json: str) -> int:
+        self.migrate()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE messages
+                SET raw_json = ?
+                WHERE datetime(inserted_at) <= datetime(?)
+                  AND raw_json != ?
+                """,
+                (replacement_json, cutoff, replacement_json),
+            )
+        return int(cursor.rowcount)
+
+    def list_prunable_resources(self, *, cutoff: str) -> list[sqlite3.Row]:
+        self.migrate()
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                SELECT r.*
+                FROM resources r
+                WHERE r.download_status = 'downloaded'
+                  AND r.path IS NOT NULL
+                  AND datetime(r.updated_at) <= datetime(?)
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM tasks t
+                    LEFT JOIN task_messages tm ON tm.task_id = t.id
+                    WHERE (t.root_message_id = r.message_id OR tm.message_id = r.message_id)
+                      AND t.status IN ('watching', 'waiting_approval')
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM approvals a
+                    LEFT JOIN tasks t ON t.id = a.task_id
+                    LEFT JOIN task_messages tm ON tm.task_id = t.id
+                    WHERE a.status = 'pending'
+                      AND (t.root_message_id = r.message_id OR tm.message_id = r.message_id)
+                  )
+                ORDER BY r.updated_at, r.id
+                """,
+                (cutoff,),
+            ).fetchall()
+
+    def mark_resources_expired(self, resource_ids: Iterable[int]) -> int:
+        self.migrate()
+        ids = list(dict.fromkeys(int(resource_id) for resource_id in resource_ids))
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE resources
+                SET download_status = 'expired',
+                    path = NULL,
+                    updated_at = ?
+                WHERE id IN ({placeholders})
+                """,
+                [utc_now_iso(), *ids],
+            )
+        return int(cursor.rowcount)
+
     def create_task_for_message(
         self,
         message: NormalizedMessage,

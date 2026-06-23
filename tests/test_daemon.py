@@ -291,6 +291,7 @@ def test_runtime_health_failure_rechecks_on_retry_interval_and_recovers(
         "p2p",
         "active_watch",
         "dispatch",
+        "retention",
     ]
     assert suite.calls == 2
     assert [call["dry_run"] for call in fake.reply_calls] == [True, False]
@@ -375,6 +376,7 @@ def test_approval_inbox_failure_blocks_send_reply_but_allows_owner_notification(
         "p2p",
         "active_watch",
         "dispatch",
+        "retention",
     ]
     assert [call["dry_run"] for call in fake.reply_calls] == [True]
     assert [call["dry_run"] for call in fake.owner_calls] == [True, False]
@@ -489,6 +491,7 @@ def test_fake_feishu_hermes_tick_runs_ordered_ingest_watch_and_dispatch(tmp_path
         "p2p",
         "active_watch",
         "dispatch",
+        "retention",
     ]
     assert fake.calls[:3] == [
         "approval_inbox",

@@ -19,6 +19,7 @@ from .hermes import HermesCliClient
 from .jsonl import JSONLLogger
 from .paths import resolve_relative_path
 from .processing import TaskProcessingService
+from .retention import RetentionService
 from .store.sqlite_store import SQLiteStore
 from .types import new_run_id
 
@@ -75,6 +76,13 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--message-id", required=True)
     replay.add_argument("--dry-run", action="store_true", required=True)
     replay.set_defaults(handler=_handle_replay)
+
+    retention = subparsers.add_parser("retention", help="retention helpers")
+    retention_subparsers = retention.add_subparsers(dest="retention_command")
+    retention_prune = retention_subparsers.add_parser("prune", help="prune expired local data")
+    _add_config_arg(retention_prune)
+    retention_prune.add_argument("--dry-run", action="store_true", help="preview retention cleanup")
+    retention_prune.set_defaults(handler=_handle_retention_prune)
 
     approve = subparsers.add_parser("approve", help="approve a pending approval")
     _add_config_arg(approve)
@@ -252,6 +260,18 @@ def _handle_replay(args: argparse.Namespace) -> int:
         "mutated_real_db": False,
     }
     print(yaml.safe_dump(output, allow_unicode=True, sort_keys=False), end="")
+    return 0
+
+
+def _handle_retention_prune(args: argparse.Namespace) -> int:
+    loaded, store, logger = _load_runtime(args.config)
+    summary = RetentionService(
+        store=store,
+        config=loaded.config,
+        base_dir=loaded.base_dir,
+        logger=logger,
+    ).prune(run_id=new_run_id("retention"), dry_run=args.dry_run)
+    print(yaml.safe_dump(summary.as_dict(), allow_unicode=True, sort_keys=False), end="")
     return 0
 
 

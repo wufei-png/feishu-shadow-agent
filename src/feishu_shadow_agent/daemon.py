@@ -12,6 +12,11 @@ from .health import HealthSuite, has_critical_failure, summarize_results
 from .ingestion import IngestionService, StageResult
 from .jsonl import JSONLLogger
 from .processing import TaskProcessingService
+from .retention import (
+    RetentionService,
+    daemon_retention_is_due,
+    record_daemon_retention_checkpoint,
+)
 from .store.sqlite_store import SQLiteStore
 from .types import HealthCheckResult, new_run_id
 
@@ -153,6 +158,7 @@ class Daemon:
             },
         )
         results.append(StageResult("dispatch", ok=True, processed=dispatch.processed))
+        results.append(self._run_retention_stage(run_id=run_id))
         return results
 
     def run_forever(self) -> int:
@@ -201,6 +207,48 @@ class Daemon:
             return 0
         health = self.app_config.health
         return health.interval_seconds if self._runtime_health_ok else health.retry_interval_seconds
+
+    def _run_retention_stage(self, *, run_id: str) -> StageResult:
+        if self.app_config is None:
+            return StageResult("retention", ok=True)
+        if self.dry_run:
+            self.logger.emit(
+                "info",
+                "retention_skipped",
+                run_id=run_id,
+                data={"reason": "dry_run"},
+            )
+            return StageResult("retention", ok=True)
+        if not daemon_retention_is_due(self.store):
+            self.logger.emit(
+                "info",
+                "retention_skipped",
+                run_id=run_id,
+                data={"reason": "not_due"},
+            )
+            return StageResult("retention", ok=True)
+        base_dir = self.config_base_dir or Path.cwd()
+        try:
+            summary = RetentionService(
+                store=self.store,
+                config=self.app_config,
+                base_dir=base_dir,
+                logger=self.logger,
+            ).prune(run_id=run_id)
+            record_daemon_retention_checkpoint(self.store, summary=summary)
+        except Exception as exc:
+            self.logger.emit(
+                "error",
+                "daemon_stage_failed",
+                run_id=run_id,
+                data={"stage": "retention", "error": str(exc)},
+            )
+            return StageResult("retention", ok=False, error=str(exc))
+        return StageResult(
+            "retention",
+            ok=True,
+            processed=summary.raw_messages_pruned + summary.resources_expired,
+        )
 
 
 def _stage_name(stage: Callable[..., StageResult]) -> str:

@@ -1137,6 +1137,7 @@ def test_daemon_tick_runs_p2_stages_in_order(tmp_path: Path) -> None:
         "p2p",
         "active_watch",
         "dispatch",
+        "retention",
     ]
     assert fake.calls == ["search:group:True:None", "search:p2p:False:None"]
 
