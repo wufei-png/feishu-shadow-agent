@@ -278,6 +278,100 @@ class SQLiteStore:
             ).fetchone()
         return row is not None
 
+    def get_latest_non_duplicate_routing_decision(
+        self,
+        message_id: str,
+    ) -> tuple[RouteDecision, TaskRecord | None] | None:
+        self.migrate()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM routing_audits
+                WHERE message_id = ?
+                  AND NOT (route = 'ignore' AND route_reason = 'duplicate_message')
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (message_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            target_task_id = row["target_task_id"] or row["task_id"]
+            task = None
+            if target_task_id is not None:
+                task_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (target_task_id,)).fetchone()
+                if task_row is not None:
+                    task = _task_from_row(task_row)
+            decision = RouteDecision(
+                row["route"],
+                target_task_id=None if target_task_id is None else int(target_task_id),
+                target_task_short_id=None if task is None else task.short_id,
+                reason=row["route_reason"] or "",
+                candidates_count=int(row["candidates_count"] or 0),
+                shortcut_hit=bool(row["shortcut_hit"]),
+                router_called=bool(row["router_called"]),
+                matched_by=row["matched_by"],
+            )
+        return decision, task
+
+    def message_processing_is_final(self, message_id: str, *, stage: str) -> bool:
+        self.migrate()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM message_processing
+                WHERE message_id = ?
+                  AND stage = ?
+                  AND status IN ('processed', 'processing_failed_terminal')
+                LIMIT 1
+                """,
+                (message_id, stage),
+            ).fetchone()
+        return row is not None
+
+    def record_message_processing(
+        self,
+        *,
+        message_id: str,
+        stage: str,
+        status: str,
+        task_id: int | None = None,
+        attempt_count: int = 0,
+        last_error: str | None = None,
+        terminal_reason: str | None = None,
+    ) -> None:
+        self.migrate()
+        now = utc_now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO message_processing(
+                  message_id, task_id, stage, status, attempt_count, last_error,
+                  terminal_reason, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(message_id, stage) DO UPDATE SET
+                  task_id = COALESCE(excluded.task_id, message_processing.task_id),
+                  status = excluded.status,
+                  attempt_count = excluded.attempt_count,
+                  last_error = excluded.last_error,
+                  terminal_reason = excluded.terminal_reason,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    message_id,
+                    task_id,
+                    stage,
+                    status,
+                    attempt_count,
+                    last_error,
+                    terminal_reason,
+                    now,
+                    now,
+                ),
+            )
+
     def upsert_resource(
         self,
         resource: ResourceRef,
@@ -1585,7 +1679,12 @@ class SQLiteStore:
         payload: dict[str, Any],
         now: str,
     ) -> int:
-        seed = json.dumps({"task_id": task_id, "payload": payload}, ensure_ascii=False, sort_keys=True, default=str)
+        dedupe_key = payload.get("dedupe_key")
+        seed = (
+            str(dedupe_key)
+            if isinstance(dedupe_key, str) and dedupe_key
+            else json.dumps({"task_id": task_id, "payload": payload}, ensure_ascii=False, sort_keys=True, default=str)
+        )
         idempotency_key = f"owner-{sha256(seed.encode('utf-8')).hexdigest()[:16]}"
         cursor = conn.execute(
             """

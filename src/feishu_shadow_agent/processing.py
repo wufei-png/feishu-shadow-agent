@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from html import escape
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -14,12 +15,25 @@ from .hermes import HermesClient
 from .jsonl import JSONLLogger
 from .routing import CandidateCollector, RoutingResult
 from .store.sqlite_store import SQLiteStore
-from .types import NormalizedMessage, RouteDecision, TaskRecord
+from .types import HermesCliResult, NormalizedMessage, RouteDecision, TaskRecord
 
 WATCH_EXTEND_MINUTES = 120
+HERMES_MAX_ATTEMPTS = 3
 HERMES_AT_SPAN_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE | re.DOTALL)
 FORBIDDEN_MENTION_RE = re.compile(r"<at\b[^>]*>|</at>|@所有人|@_all|@all", re.IGNORECASE)
 WATCH_KEY_RE = re.compile(r"^(?:user|msg|thread):[^\s:]+$")
+TERMINAL_HERMES_ERROR_MARKERS = (
+    "no such file",
+    "not found",
+    "permission denied",
+    "unknown option",
+    "invalid option",
+    "missing required",
+    "configuration",
+    "config",
+    "auth",
+    "permission",
+)
 
 
 class StrictModel(BaseModel):
@@ -66,6 +80,13 @@ class ProcessingResult:
 class ComposedReply:
     text: str
     had_forbidden_mentions: bool
+
+
+@dataclass(frozen=True)
+class HermesAttemptOutcome:
+    result: HermesCliResult | None
+    attempt_count: int
+    last_error: str | None = None
 
 
 class SendComposer:
@@ -184,6 +205,9 @@ class TaskProcessingService:
         config: AppConfig,
         hermes_client: HermesClient,
         logger: JSONLLogger,
+        hermes_max_attempts: int = HERMES_MAX_ATTEMPTS,
+        hermes_retry_delays_seconds: tuple[float, ...] = (1.0, 3.0),
+        sleep_func: Callable[[float], None] = time.sleep,
     ):
         self.store = store
         self.config = config
@@ -192,6 +216,9 @@ class TaskProcessingService:
         self.collector = CandidateCollector(store)
         self.approvals = ApprovalService(store=store, config=config)
         self.composer = SendComposer(owner_open_id=config.owner.open_id)
+        self.hermes_max_attempts = max(1, hermes_max_attempts)
+        self.hermes_retry_delays_seconds = hermes_retry_delays_seconds
+        self.sleep_func = sleep_func
 
     def process(
         self,
@@ -216,8 +243,10 @@ class TaskProcessingService:
                 watch_until=watch_until,
                 run_id=run_id,
             )
-            if routed is None or routed.task is None:
+            if isinstance(routed, ProcessingResult):
                 return routed
+            if routed is None or routed.task is None:
+                return None
             routing = routed
         if routing.decision.route in {"new_task", "attach_task", "reopen_task"} and routing.task is not None:
             return self._run_task_session(
@@ -229,6 +258,97 @@ class TaskProcessingService:
             )
         return None
 
+    def _call_hermes_with_retries(self, call: Callable[[], HermesCliResult]) -> HermesAttemptOutcome:
+        last_result: HermesCliResult | None = None
+        last_error: str | None = None
+        attempts = 0
+        for attempt in range(1, self.hermes_max_attempts + 1):
+            attempts = attempt
+            try:
+                result = call()
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                if attempt < self.hermes_max_attempts:
+                    self._sleep_before_retry(attempt)
+                continue
+            last_result = result
+            if result.ok:
+                return HermesAttemptOutcome(result=result, attempt_count=attempt)
+            last_error = _hermes_result_error(result)
+            if not _is_retryable_hermes_result(result):
+                return HermesAttemptOutcome(result=result, attempt_count=attempt, last_error=last_error)
+            if attempt < self.hermes_max_attempts:
+                self._sleep_before_retry(attempt)
+        return HermesAttemptOutcome(result=last_result, attempt_count=attempts, last_error=last_error)
+
+    def _sleep_before_retry(self, attempt: int) -> None:
+        if attempt <= 0 or not self.hermes_retry_delays_seconds:
+            return
+        index = min(attempt - 1, len(self.hermes_retry_delays_seconds) - 1)
+        delay = self.hermes_retry_delays_seconds[index]
+        if delay > 0:
+            self.sleep_func(delay)
+
+    def _mark_processing_processed(
+        self,
+        *,
+        message: NormalizedMessage,
+        stage: str,
+        task_id: int | None,
+        attempt_count: int,
+    ) -> None:
+        self.store.record_message_processing(
+            message_id=message.message_id,
+            task_id=task_id,
+            stage=stage,
+            status="processed",
+            attempt_count=attempt_count,
+        )
+
+    def _mark_processing_terminal(
+        self,
+        *,
+        message: NormalizedMessage,
+        stage: str,
+        task_id: int | None,
+        attempt_count: int,
+        last_error: str | None,
+        terminal_reason: str,
+    ) -> None:
+        self.store.record_message_processing(
+            message_id=message.message_id,
+            task_id=task_id,
+            stage=stage,
+            status="processing_failed_terminal",
+            attempt_count=attempt_count,
+            last_error=_truncate_error(last_error),
+            terminal_reason=terminal_reason,
+        )
+
+    def _notify_processing_failed(
+        self,
+        *,
+        message: NormalizedMessage,
+        task: TaskRecord | None,
+        stage: str,
+        attempt_count: int,
+        last_error: str | None,
+        reason: str,
+    ) -> int:
+        return self.approvals.notify_owner(
+            task=task,
+            reason=reason,
+            payload={
+                "type": "processing_failed",
+                "message_id": message.message_id,
+                "stage": stage,
+                "attempt_count": attempt_count,
+                "error": _truncate_error(last_error),
+                "message": "Hermes processing failed; no reply was generated.",
+                "dedupe_key": f"owner-processing-failed:{message.message_id}:{stage}",
+            },
+        )
+
     def _run_task_router(
         self,
         *,
@@ -238,7 +358,7 @@ class TaskProcessingService:
         now: str,
         watch_until: str,
         run_id: str,
-    ) -> RoutingResult | None:
+    ) -> RoutingResult | ProcessingResult | None:
         active_candidates = self.collector.collect(message, now=now)
         historical = []
         if reason == "closed_recall_router_placeholder":
@@ -247,41 +367,70 @@ class TaskProcessingService:
             task.short_id for task in historical
         }
         prompt = _router_prompt(message=message, active=active_candidates, historical=historical)
-        result = self.hermes.task_router(prompt)
+        outcome = self._call_hermes_with_retries(lambda: self.hermes.task_router(prompt))
+        result = outcome.result
         self.store.record_hermes_audit(
             request_type="router",
             task_id=None,
-            hermes_session_id=result.session_id,
+            hermes_session_id=None if result is None else result.session_id,
             input_message_ids=[message.message_id],
             input_resource_ids=[resource.file_key for resource in message.resources],
-            response=result.json_data if isinstance(result.json_data, dict) else None,
-            error=result.error,
-            latency_ms=result.latency_ms,
+            response=result.json_data if result is not None and isinstance(result.json_data, dict) else None,
+            error=outcome.last_error if result is None else result.error,
+            latency_ms=None if result is None else result.latency_ms,
             prompt={"text": prompt} if self.config.debug.save_full_hermes_io else None,
         )
         candidates_count = len(active_candidates) + len(historical)
-        if not result.ok or not isinstance(result.json_data, dict):
+        if result is None or not result.ok or not isinstance(result.json_data, dict):
+            last_error = outcome.last_error or (None if result is None else _hermes_result_error(result))
+            self._mark_processing_terminal(
+                message=message,
+                stage="task_router",
+                task_id=None,
+                attempt_count=outcome.attempt_count,
+                last_error=last_error,
+                terminal_reason="task_router_failed",
+            )
             self._audit_router_ambiguity(
                 message=message,
                 reason="task_router_failed",
                 candidates_count=candidates_count,
             )
-            self.approvals.notify_owner(task=None, reason="task_router_failed", payload={"message_id": message.message_id})
-            return None
+            action_id = self._notify_processing_failed(
+                message=message,
+                task=None,
+                stage="task_router",
+                attempt_count=outcome.attempt_count,
+                last_error=last_error,
+                reason="task_router_failed",
+            )
+            return ProcessingResult("owner_notification_created", action_id=action_id, reason="task_router_failed")
         try:
             output = TaskRouterOutput.model_validate(result.json_data)
         except ValidationError as exc:
+            last_error = str(exc)
+            self._mark_processing_terminal(
+                message=message,
+                stage="task_router",
+                task_id=None,
+                attempt_count=outcome.attempt_count,
+                last_error=last_error,
+                terminal_reason="task_router_schema_failed",
+            )
             self._audit_router_ambiguity(
                 message=message,
                 reason="task_router_schema_failed",
                 candidates_count=candidates_count,
             )
-            self.approvals.notify_owner(
+            action_id = self._notify_processing_failed(
+                message=message,
                 task=None,
+                stage="task_router",
+                attempt_count=outcome.attempt_count,
+                last_error=last_error,
                 reason="task_router_schema_failed",
-                payload={"message_id": message.message_id, "error": str(exc)},
             )
-            return None
+            return ProcessingResult("owner_notification_created", action_id=action_id, reason="task_router_schema_failed")
         invalid_watch_keys = _invalid_watch_keys(output.updated_watch_keys)
         if invalid_watch_keys:
             self._audit_router_ambiguity(
@@ -289,12 +438,18 @@ class TaskProcessingService:
                 reason="task_router_invalid_watch_keys",
                 candidates_count=candidates_count,
             )
-            self.approvals.notify_owner(
+            action_id = self.approvals.notify_owner(
                 task=None,
                 reason="task_router_invalid_watch_keys",
                 payload={"message_id": message.message_id, "invalid_watch_keys": invalid_watch_keys},
             )
-            return None
+            self._mark_processing_processed(
+                message=message,
+                stage="task_router",
+                task_id=None,
+                attempt_count=outcome.attempt_count,
+            )
+            return ProcessingResult("owner_notification_created", action_id=action_id, reason="task_router_invalid_watch_keys")
         if output.confidence < 0.6 or output.route == "ambiguous":
             self.store.record_routing_audit(
                 message_id=message.message_id,
@@ -305,8 +460,14 @@ class TaskProcessingService:
                     router_called=True,
                 ),
             )
-            self.approvals.notify_owner(task=None, reason="task_router_ambiguous", payload={"message_id": message.message_id})
-            return None
+            action_id = self.approvals.notify_owner(task=None, reason="task_router_ambiguous", payload={"message_id": message.message_id})
+            self._mark_processing_processed(
+                message=message,
+                stage="task_router",
+                task_id=None,
+                attempt_count=outcome.attempt_count,
+            )
+            return ProcessingResult("owner_notification_created", action_id=action_id, reason="task_router_ambiguous")
         if output.route == "new_task":
             task, decision = self.store.create_task_for_message_and_audit(
                 message,
@@ -317,6 +478,12 @@ class TaskProcessingService:
                 matched_by="task_router",
             )
             self.store.add_task_watch_keys(task.id, output.updated_watch_keys)
+            self._mark_processing_processed(
+                message=message,
+                stage="task_router",
+                task_id=task.id,
+                attempt_count=outcome.attempt_count,
+            )
             return RoutingResult(decision=decision, task=task)
         if output.route == "ignore":
             self.store.record_routing_audit(
@@ -328,22 +495,40 @@ class TaskProcessingService:
                     router_called=True,
                 ),
             )
+            self._mark_processing_processed(
+                message=message,
+                stage="task_router",
+                task_id=None,
+                attempt_count=outcome.attempt_count,
+            )
             return None
         if output.target_task_id not in allowed_target_short_ids:
-            self._handle_invalid_router_target(
+            action_id = self._handle_invalid_router_target(
                 message=message,
                 target_task_id=output.target_task_id,
                 candidates_count=candidates_count,
             )
-            return None
+            self._mark_processing_processed(
+                message=message,
+                stage="task_router",
+                task_id=None,
+                attempt_count=outcome.attempt_count,
+            )
+            return ProcessingResult("owner_notification_created", action_id=action_id, reason="task_router_invalid_target")
         target = self._resolve_router_target(output.target_task_id)
         if target is None:
-            self._handle_invalid_router_target(
+            action_id = self._handle_invalid_router_target(
                 message=message,
                 target_task_id=output.target_task_id,
                 candidates_count=candidates_count,
             )
-            return None
+            self._mark_processing_processed(
+                message=message,
+                stage="task_router",
+                task_id=None,
+                attempt_count=outcome.attempt_count,
+            )
+            return ProcessingResult("owner_notification_created", action_id=action_id, reason="task_router_invalid_target")
         if output.route in {"attach_task", "reopen_task"}:
             self.store.attach_message_to_task(target.id, message, watch_until=watch_until)
             self.store.add_task_watch_keys(target.id, output.updated_watch_keys)
@@ -359,6 +544,12 @@ class TaskProcessingService:
             self.store.record_routing_audit(message_id=message.message_id, decision=decision)
             if output.route == "reopen_task":
                 self.store.update_task_after_hermes(task_id=target.id, status="watching", watch_until=watch_until)
+            self._mark_processing_processed(
+                message=message,
+                stage="task_router",
+                task_id=target.id,
+                attempt_count=outcome.attempt_count,
+            )
             return RoutingResult(decision=decision, task=self.store.get_task_by_id(target.id))
         if output.route == "close_task":
             self.store.update_task_after_hermes(task_id=target.id, status="closed")
@@ -371,6 +562,12 @@ class TaskProcessingService:
                     reason=output.reason or "task_router_close",
                     router_called=True,
                 ),
+            )
+            self._mark_processing_processed(
+                message=message,
+                stage="task_router",
+                task_id=target.id,
+                attempt_count=outcome.attempt_count,
             )
         return None
 
@@ -394,38 +591,59 @@ class TaskProcessingService:
             messages=self.store.get_messages_by_ids(prompt_message_ids),
             resources=resources,
         )
-        result = self.hermes.task_session(prompt, session_id=session_id)
+        outcome = self._call_hermes_with_retries(lambda: self.hermes.task_session(prompt, session_id=session_id))
+        result = outcome.result
         self.store.record_hermes_audit(
             request_type="task_session",
             task_id=task.id,
-            hermes_session_id=result.session_id or session_id,
+            hermes_session_id=session_id if result is None else result.session_id or session_id,
             input_message_ids=prompt_message_ids,
             input_resource_ids=[row["file_key"] for row in resources],
-            response=result.json_data if isinstance(result.json_data, dict) else None,
-            error=result.error,
-            latency_ms=result.latency_ms,
+            response=result.json_data if result is not None and isinstance(result.json_data, dict) else None,
+            error=outcome.last_error if result is None else result.error,
+            latency_ms=None if result is None else result.latency_ms,
             prompt={"text": prompt} if self.config.debug.save_full_hermes_io else None,
         )
-        if not result.ok or not isinstance(result.json_data, dict):
-            approval_id = self.approvals.request_send_reply(
-                task=task,
-                reply_target_message_id=message.message_id,
-                proposed_reply="",
-                reason="hermes_task_session_failed",
-                approvable=False,
+        if result is None or not result.ok or not isinstance(result.json_data, dict):
+            last_error = outcome.last_error or (None if result is None else _hermes_result_error(result))
+            self._mark_processing_terminal(
+                message=message,
+                stage="task_session",
+                task_id=task.id,
+                attempt_count=outcome.attempt_count,
+                last_error=last_error,
+                terminal_reason="hermes_task_session_failed",
             )
-            return ProcessingResult("approval_created", task.id, approval_id=approval_id, reason="hermes_failed")
+            action_id = self._notify_processing_failed(
+                message=message,
+                task=task,
+                stage="task_session",
+                attempt_count=outcome.attempt_count,
+                last_error=last_error,
+                reason="hermes_task_session_failed",
+            )
+            return ProcessingResult("owner_notification_created", task.id, action_id=action_id, reason="hermes_failed")
         try:
             output = TaskSessionOutput.model_validate(result.json_data)
         except ValidationError as exc:
-            approval_id = self.approvals.request_send_reply(
-                task=task,
-                reply_target_message_id=message.message_id,
-                proposed_reply="",
-                reason=f"hermes_schema_failed: {exc.errors()[0]['msg']}",
-                approvable=False,
+            last_error = str(exc)
+            self._mark_processing_terminal(
+                message=message,
+                stage="task_session",
+                task_id=task.id,
+                attempt_count=outcome.attempt_count,
+                last_error=last_error,
+                terminal_reason="hermes_schema_failed",
             )
-            return ProcessingResult("approval_created", task.id, approval_id=approval_id, reason="schema_failed")
+            action_id = self._notify_processing_failed(
+                message=message,
+                task=task,
+                stage="task_session",
+                attempt_count=outcome.attempt_count,
+                last_error=last_error,
+                reason=f"hermes_schema_failed: {exc.errors()[0]['msg']}",
+            )
+            return ProcessingResult("owner_notification_created", task.id, action_id=action_id, reason="schema_failed")
         if result.session_id and result.session_id != session_id:
             self.store.set_task_hermes_session_id(task.id, result.session_id)
 
@@ -447,6 +665,12 @@ class TaskProcessingService:
                 reason="invalid_reply_target_message_id",
                 approvable=_can_directly_approve(output.proposed_reply, composed),
             )
+            self._mark_processing_processed(
+                message=message,
+                stage="task_session",
+                task_id=task.id,
+                attempt_count=outcome.attempt_count,
+            )
             return ProcessingResult("approval_created", task.id, approval_id=approval_id, reason="invalid_reply_target")
 
         next_status = "closed" if output.watch_action == "close" or output.task_state == "closed" else "watching"
@@ -457,6 +681,12 @@ class TaskProcessingService:
             watch_until=_plus_minutes(now, output.watch_extend_minutes) if next_status == "watching" else None,
         )
         if output.answerability == "no_reply":
+            self._mark_processing_processed(
+                message=message,
+                stage="task_session",
+                task_id=task.id,
+                attempt_count=outcome.attempt_count,
+            )
             return ProcessingResult("watch_only", task.id, reason="no_reply")
 
         reply_target_id = output.reply_target_message_id or message.message_id
@@ -476,6 +706,12 @@ class TaskProcessingService:
         if not gate["allow"]:
             if gate["reason"] == "resource_needs_bot":
                 action_id = self.approvals.notify_owner(task=task, reason="resource_needs_bot", payload={"message_id": message.message_id})
+                self._mark_processing_processed(
+                    message=message,
+                    stage="task_session",
+                    task_id=task.id,
+                    attempt_count=outcome.attempt_count,
+                )
                 return ProcessingResult("owner_notification_created", task.id, action_id=action_id, reason=gate["reason"])
             approval_id = self.approvals.request_send_reply(
                 task=task,
@@ -484,6 +720,12 @@ class TaskProcessingService:
                 final_reply=composed.text,
                 reason=gate["reason"],
                 approvable=_can_directly_approve(output.proposed_reply, composed),
+            )
+            self._mark_processing_processed(
+                message=message,
+                stage="task_session",
+                task_id=task.id,
+                attempt_count=outcome.attempt_count,
             )
             return ProcessingResult("approval_created", task.id, approval_id=approval_id, reason=gate["reason"])
         payload = {
@@ -496,6 +738,12 @@ class TaskProcessingService:
             task_id=task.id,
             target_message_id=reply_target_id,
             payload=payload,
+        )
+        self._mark_processing_processed(
+            message=message,
+            stage="task_session",
+            task_id=task.id,
+            attempt_count=outcome.attempt_count,
         )
         return ProcessingResult("send_action_created", task.id, action_id=action_id, reason="gate_passed")
 
@@ -574,8 +822,8 @@ class TaskProcessingService:
         message: NormalizedMessage,
         target_task_id: str | None,
         candidates_count: int,
-    ) -> None:
-        self.approvals.notify_owner(
+    ) -> int:
+        action_id = self.approvals.notify_owner(
             task=None,
             reason="task_router_invalid_target",
             payload={"message_id": message.message_id, "target": target_task_id},
@@ -585,6 +833,7 @@ class TaskProcessingService:
             reason="task_router_invalid_target",
             candidates_count=candidates_count,
         )
+        return action_id
 
     def _audit_router_ambiguity(
         self,
@@ -753,6 +1002,39 @@ def _resource_gate_reason(resources: list[Any], *, requires_resources: bool) -> 
     if statuses & {"failed", "missing_file"}:
         return "resource_unavailable"
     return "resource_unavailable"
+
+
+def _hermes_result_error(result: HermesCliResult) -> str:
+    parts = [
+        result.error,
+        result.stderr,
+        result.stdout,
+        f"exit_code={result.exit_code}" if result.exit_code is not None else None,
+        "timed_out=True" if result.timed_out else None,
+    ]
+    return " ".join(str(part).strip() for part in parts if part).strip() or "Hermes call failed"
+
+
+def _is_retryable_hermes_result(result: HermesCliResult) -> bool:
+    error_text = _hermes_result_error(result).lower()
+    if result.timed_out:
+        return True
+    if any(marker in error_text for marker in TERMINAL_HERMES_ERROR_MARKERS):
+        return False
+    if "stdout was not valid json" in error_text:
+        return True
+    if result.exit_code is None:
+        return True
+    return result.exit_code != 0
+
+
+def _truncate_error(value: str | None, *, limit: int = 1000) -> str | None:
+    if value is None:
+        return None
+    cleaned = " ".join(str(value).split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return f"{cleaned[:limit - 3]}..."
 
 
 def _plus_minutes(value: str, minutes: int) -> str:

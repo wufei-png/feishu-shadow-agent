@@ -421,6 +421,7 @@ class IngestionService:
             inserted=inserted,
             now=now,
             watch_until=watch_until,
+            retry_incomplete_processing=self.task_processor is not None,
         )
         if _should_process_resources(
             store=self.store,

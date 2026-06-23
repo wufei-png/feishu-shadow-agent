@@ -7,6 +7,8 @@ from .store.sqlite_store import SQLiteStore
 from .types import NormalizedMessage, RouteDecision, TaskCandidate, TaskRecord
 
 TRIGGER_SOURCES = {"group_at_me", "p2p"}
+ROUTER_PLACEHOLDER_REASONS = {"router_placeholder", "closed_recall_router_placeholder"}
+TASK_SESSION_ROUTES = {"new_task", "attach_task", "reopen_task"}
 
 
 @dataclass(frozen=True)
@@ -68,8 +70,21 @@ class MessageRouter:
         inserted: bool,
         now: str,
         watch_until: str,
+        retry_incomplete_processing: bool = False,
     ) -> RoutingResult:
         if not inserted and self.store.message_has_routing_audit(message.message_id):
+            if retry_incomplete_processing:
+                existing = self.store.get_latest_non_duplicate_routing_decision(message.message_id)
+                if existing is not None:
+                    decision, task = existing
+                    stage = _processing_stage_for_decision(decision)
+                    if stage is not None and not self.store.message_processing_is_final(
+                        message.message_id,
+                        stage=stage,
+                    ):
+                        if decision.route in TASK_SESSION_ROUTES and task is None:
+                            return self._audit(message, RouteDecision("ignore", reason="duplicate_message"))
+                        return RoutingResult(decision=decision, task=task)
             return self._audit(message, RouteDecision("ignore", reason="duplicate_message"))
 
         sent_action_task = self.store.find_task_for_sent_action_message(message.message_id)
@@ -218,6 +233,14 @@ def _is_active(task: TaskRecord, *, now: str) -> bool:
     return task.status in {"watching", "waiting_approval"} and (
         task.watch_until is None or task.watch_until > now
     )
+
+
+def _processing_stage_for_decision(decision: RouteDecision) -> str | None:
+    if decision.route in TASK_SESSION_ROUTES:
+        return "task_session"
+    if decision.route == "ambiguous" and decision.reason in ROUTER_PLACEHOLDER_REASONS:
+        return "task_router"
+    return None
 
 
 def _minus_days(value: str, days: int) -> str:

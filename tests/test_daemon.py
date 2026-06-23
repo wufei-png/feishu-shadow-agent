@@ -353,6 +353,7 @@ def test_approval_inbox_failure_blocks_send_reply_but_allows_owner_notification(
         config=config,
         hermes_client=FakeHermes(),
         logger=logger,
+        hermes_retry_delays_seconds=(0.0, 0.0),
     )
     daemon = Daemon(
         store=store,
@@ -413,6 +414,7 @@ logging:
         config=config,
         hermes_client=FakeHermes(),
         logger=logger,
+        hermes_retry_delays_seconds=(0.0, 0.0),
     )
     daemon = Daemon(
         store=store,
@@ -465,6 +467,7 @@ def test_fake_feishu_hermes_tick_runs_ordered_ingest_watch_and_dispatch(tmp_path
         config=config,
         hermes_client=FakeHermes(),
         logger=logger,
+        hermes_retry_delays_seconds=(0.0, 0.0),
     )
     daemon = Daemon(
         store=store,

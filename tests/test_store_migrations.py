@@ -25,6 +25,7 @@ EXPECTED_TABLES = {
     "routing_audits",
     "hermes_audits",
     "approval_commands",
+    "message_processing",
 }
 
 

@@ -16,13 +16,15 @@ from feishu_shadow_agent.types import HermesCliResult, LarkCliResult, MessagePag
 
 class FakeHermes:
     def __init__(self):
-        self.router_outputs: list[dict[str, Any] | HermesCliResult] = []
-        self.session_outputs: list[dict[str, Any] | HermesCliResult] = []
+        self.router_outputs: list[dict[str, Any] | HermesCliResult | Exception] = []
+        self.session_outputs: list[dict[str, Any] | HermesCliResult | Exception] = []
         self.session_ids_seen: list[str | None] = []
         self.session_prompts: list[str] = []
 
     def task_router(self, prompt: str) -> HermesCliResult:
         output = self.router_outputs.pop(0)
+        if isinstance(output, Exception):
+            raise output
         if isinstance(output, HermesCliResult):
             return output
         return HermesCliResult(["hermes"], 0, json_data=output, session_id="router_sid")
@@ -31,6 +33,8 @@ class FakeHermes:
         self.session_ids_seen.append(session_id)
         self.session_prompts.append(prompt)
         output = self.session_outputs.pop(0)
+        if isinstance(output, Exception):
+            raise output
         if isinstance(output, HermesCliResult):
             return output
         output = dict(output)
@@ -134,6 +138,7 @@ def _service(tmp_path: Path, *, config: AppConfig | None = None, hermes: FakeHer
         config=cfg,
         hermes_client=fake_hermes,
         logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        hermes_retry_delays_seconds=(0.0, 0.0),
     )
     service = IngestionService(
         store=store,
@@ -744,10 +749,120 @@ def test_task_session_schema_failure_does_not_persist_session_id(tmp_path: Path)
 
     with store.connect() as conn:
         task = conn.execute("SELECT hermes_session_id FROM tasks").fetchone()
-        approval = conn.execute("SELECT payload_json FROM approvals").fetchone()
-    payload = json.loads(approval["payload_json"])
+        approval_count = conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()["c"]
+        processing = conn.execute(
+            "SELECT stage, status, attempt_count, terminal_reason FROM message_processing WHERE message_id = ?",
+            ("om_1",),
+        ).fetchone()
+        notification = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'owner_notification'",
+        ).fetchone()
     assert task["hermes_session_id"] is None
-    assert payload["approvable"] is False
+    assert approval_count == 0
+    assert processing["stage"] == "task_session"
+    assert processing["status"] == "processing_failed_terminal"
+    assert processing["attempt_count"] == 1
+    assert processing["terminal_reason"] == "hermes_schema_failed"
+    assert "processing_failed" in notification["payload_json"]
+
+
+def test_task_session_exception_retries_terminal_without_empty_approval(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.extend(
+        [
+            RuntimeError("session exploded"),
+            RuntimeError("session exploded"),
+            RuntimeError("session exploded"),
+        ]
+    )
+    store, service, _ = _service(tmp_path, hermes=hermes)
+    raw = _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a")
+
+    result = service.process_raw_message(raw, source="p2p", default_chat_type="p2p", run_id="run_1")
+
+    assert result is not None
+    assert hermes.session_ids_seen == [None, None, None]
+    with store.connect() as conn:
+        processing = conn.execute(
+            "SELECT stage, status, attempt_count, terminal_reason, last_error FROM message_processing WHERE message_id = ?",
+            ("om_1",),
+        ).fetchone()
+        approval_count = conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()["c"]
+        notification = conn.execute(
+            "SELECT id, idempotency_key, payload_json FROM actions WHERE kind = 'owner_notification'",
+        ).fetchone()
+        task = conn.execute("SELECT status FROM tasks").fetchone()
+    payload = json.loads(notification["payload_json"])
+    assert processing["stage"] == "task_session"
+    assert processing["status"] == "processing_failed_terminal"
+    assert processing["attempt_count"] == 3
+    assert processing["terminal_reason"] == "hermes_task_session_failed"
+    assert "session exploded" in processing["last_error"]
+    assert approval_count == 0
+    assert payload["type"] == "processing_failed"
+    assert payload["message_id"] == "om_1"
+    assert payload["stage"] == "task_session"
+    assert payload["dedupe_key"] == "owner-processing-failed:om_1:task_session"
+    assert task["status"] == "watching"
+
+    service.process_raw_message(raw, source="p2p", default_chat_type="p2p", run_id="run_1")
+
+    assert hermes.session_ids_seen == [None, None, None]
+    with store.connect() as conn:
+        notification_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM actions WHERE kind = 'owner_notification'",
+        ).fetchone()["c"]
+    assert notification_count == 1
+
+
+def test_duplicate_with_routing_audit_but_no_processing_reruns_task_session(tmp_path: Path) -> None:
+    cfg = _config()
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    raw = _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a")
+    p2_service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    first = p2_service.process_raw_message(raw, source="p2p", default_chat_type="p2p", run_id="run_1")
+    assert first is not None
+    assert first.decision.route == "new_task"
+
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
+    processor = TaskProcessingService(
+        store=store,
+        config=cfg,
+        hermes_client=hermes,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        hermes_retry_delays_seconds=(0.0, 0.0),
+    )
+    p3_service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        task_processor=processor,
+        clock=lambda: "2026-06-22T10:11:00+08:00",
+    )
+
+    second = p3_service.process_raw_message(raw, source="p2p", default_chat_type="p2p", run_id="run_2")
+
+    assert second is not None
+    assert second.decision.route == "new_task"
+    assert hermes.session_ids_seen == [None]
+    with store.connect() as conn:
+        action = conn.execute("SELECT kind, status FROM actions WHERE kind = 'send_reply'").fetchone()
+        processing = conn.execute(
+            "SELECT stage, status, attempt_count FROM message_processing WHERE message_id = ?",
+            ("om_1",),
+        ).fetchone()
+    assert action["status"] == "pending"
+    assert processing["stage"] == "task_session"
+    assert processing["status"] == "processed"
+    assert processing["attempt_count"] == 1
 
 
 def test_empty_auto_reply_downgrades_to_approval(tmp_path: Path) -> None:
