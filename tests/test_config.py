@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from feishu_shadow_agent.config import ConfigError, ConfigService
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "minimal.config.yaml"
+SCHEMA_FILE = Path(__file__).resolve().parents[1] / "schemas" / "config.schema.json"
 
 
 def test_load_minimal_config() -> None:
@@ -19,6 +21,12 @@ def test_load_minimal_config() -> None:
     assert loaded.config.tool_permissions == "guarded_write"
     assert loaded.config.chats["oc_test"].auto_reply is True
     assert loaded.config.hermes.mode == "cli"
+
+
+def test_tracked_config_schema_matches_generated_schema() -> None:
+    tracked_schema = json.loads(SCHEMA_FILE.read_text(encoding="utf-8"))
+
+    assert tracked_schema == ConfigService().json_schema_dict()
 
 
 def test_missing_owner_fails(tmp_path: Path) -> None:

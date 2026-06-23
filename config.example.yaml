@@ -46,6 +46,11 @@ chats:
     name: 示例产品群
     auto_reply: true
     bot_joined: true
+    reply_identity: bot_preferred
+    allow_user_fallback: true
+    resource_download: true
+    risk_level_max: low
+    confidence_threshold: 0.85
 
 tool_permissions: guarded_write
 

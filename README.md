@@ -34,6 +34,8 @@ cp config.example.yaml config.yaml
 - 需要下载图片/文件资源的群配置了 `bot_joined: true`
 - `lark_cli.path` 和 `hermes.path` 留空时会使用当前 `PATH`
 
+完整配置项见 [配置参考](docs/configuration.md)；JSON Schema 见 [schemas/config.schema.json](schemas/config.schema.json)。
+
 启动前先跑健康检查：
 
 ```bash
@@ -58,6 +60,8 @@ python -m feishu_shadow_agent daemon --config config.yaml
 python -m feishu_shadow_agent status --config config.yaml
 python -m feishu_shadow_agent replay --config config.yaml --message-id <message_id> --dry-run
 python -m feishu_shadow_agent config show --config config.yaml --redacted
+python -m feishu_shadow_agent config validate --config config.yaml
+python -m feishu_shadow_agent config schema
 python -m feishu_shadow_agent retention prune --config config.yaml --dry-run
 ```
 

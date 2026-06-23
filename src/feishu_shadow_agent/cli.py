@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import subprocess
 import sys
@@ -66,6 +67,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_config_arg(config_show)
     config_show.add_argument("--redacted", action="store_true", help="redact secret-like fields")
     config_show.set_defaults(handler=_handle_config_show)
+    config_schema = config_subparsers.add_parser("schema", help="print config JSON schema")
+    config_schema.set_defaults(handler=_handle_config_schema)
+    config_validate = config_subparsers.add_parser("validate", help="validate config without runtime health checks")
+    _add_config_arg(config_validate)
+    config_validate.set_defaults(handler=_handle_config_validate)
 
     status = subparsers.add_parser("status", help="show daemon and queue status")
     _add_config_arg(status)
@@ -170,6 +176,18 @@ def _handle_config_show(args: argparse.Namespace) -> int:
     loaded = service.load(args.config)
     data = service.redacted_dict(loaded.config) if args.redacted else loaded.config.model_dump(mode="json")
     print(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), end="")
+    return 0
+
+
+def _handle_config_schema(args: argparse.Namespace) -> int:
+    schema = ConfigService().json_schema_dict()
+    print(json.dumps(schema, ensure_ascii=False, indent=2), end="\n")
+    return 0
+
+
+def _handle_config_validate(args: argparse.Namespace) -> int:
+    loaded = ConfigService().load(args.config)
+    print(f"config ok: {loaded.path}")
     return 0
 
 

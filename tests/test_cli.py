@@ -115,6 +115,39 @@ def test_daemon_send_owner_notifications_help_describes_dry_run_send(capsys) -> 
     assert "external replies stay pending" in output
 
 
+def test_config_schema_outputs_json_schema(capsys) -> None:
+    assert main(["config", "schema"]) == 0
+
+    schema = json.loads(capsys.readouterr().out)
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["tool_permissions"]["enum"] == ["read_only", "guarded_write", "full_access"]
+    assert "description" in schema["properties"]["reply_policy"]
+    assert (
+        schema["$defs"]["ChatPolicyConfig"]["properties"]["reply_identity"]["description"]
+        == "Reply identity for this chat: prefer bot with fallback, require bot, or send as user."
+    )
+
+
+def test_config_validate_returns_zero_for_valid_config(tmp_path: Path, capsys) -> None:
+    config = _write_config(tmp_path)
+
+    assert main(["config", "validate", "--config", str(config)]) == 0
+
+    assert capsys.readouterr().out == f"config ok: {config}\n"
+
+
+def test_config_validate_returns_two_for_invalid_config(tmp_path: Path, capsys) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text("tool_permissions: guarded_write\n", encoding="utf-8")
+
+    assert main(["config", "validate", "--config", str(config)]) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "config error:" in captured.err
+    assert "owner" in captured.err
+
+
 def test_status_includes_failed_approval_commands(tmp_path: Path, capsys) -> None:
     config = _write_config(tmp_path)
     assert main(["reject", "--config", str(config), "a_missing"]) == 2

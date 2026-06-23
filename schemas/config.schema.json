@@ -1,0 +1,449 @@
+{
+  "$defs": {
+    "ChatPolicyConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "default": "",
+          "description": "Human-readable chat name for operators; not used as an identifier.",
+          "title": "Name",
+          "type": "string"
+        },
+        "auto_reply": {
+          "default": false,
+          "description": "Whether this chat may auto-reply when all gates pass.",
+          "title": "Auto Reply",
+          "type": "boolean"
+        },
+        "bot_joined": {
+          "default": false,
+          "description": "Whether the bot has joined this chat and can be used for bot replies and resource access.",
+          "title": "Bot Joined",
+          "type": "boolean"
+        },
+        "reply_identity": {
+          "default": "bot_preferred",
+          "description": "Reply identity for this chat: prefer bot with fallback, require bot, or send as user.",
+          "enum": [
+            "bot_preferred",
+            "bot",
+            "user"
+          ],
+          "title": "Reply Identity",
+          "type": "string"
+        },
+        "allow_user_fallback": {
+          "default": true,
+          "description": "Whether group replies may fall back to user identity when bot_preferred cannot use the bot.",
+          "title": "Allow User Fallback",
+          "type": "boolean"
+        },
+        "resource_download": {
+          "default": true,
+          "description": "Whether downloadable message resources may be saved for this chat.",
+          "title": "Resource Download",
+          "type": "boolean"
+        },
+        "risk_level_max": {
+          "default": "low",
+          "description": "Chat-specific maximum risk level allowed for automatic replies.",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Risk Level Max",
+          "type": "string"
+        },
+        "confidence_threshold": {
+          "default": 0.85,
+          "description": "Chat-specific minimum Hermes confidence required for automatic replies.",
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence Threshold",
+          "type": "number"
+        }
+      },
+      "title": "ChatPolicyConfig",
+      "type": "object"
+    },
+    "DaemonConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "tick_interval_seconds": {
+          "default": 60,
+          "description": "Seconds between daemon polling ticks.",
+          "exclusiveMinimum": 0,
+          "title": "Tick Interval Seconds",
+          "type": "integer"
+        },
+        "overlap_seconds": {
+          "default": 120,
+          "description": "Look-back window added to message fetches so delayed Feishu results are not missed.",
+          "minimum": 0,
+          "title": "Overlap Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "DaemonConfig",
+      "type": "object"
+    },
+    "DebugConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "save_full_hermes_io": {
+          "default": false,
+          "description": "Whether to persist full Hermes prompts and outputs for debugging; keep false for normal operation.",
+          "title": "Save Full Hermes Io",
+          "type": "boolean"
+        }
+      },
+      "title": "DebugConfig",
+      "type": "object"
+    },
+    "HealthConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "interval_seconds": {
+          "default": 300,
+          "description": "Seconds between full runtime health refreshes.",
+          "exclusiveMinimum": 0,
+          "title": "Interval Seconds",
+          "type": "integer"
+        },
+        "retry_interval_seconds": {
+          "default": 60,
+          "description": "Seconds to wait before retrying runtime health after a critical failure.",
+          "exclusiveMinimum": 0,
+          "title": "Retry Interval Seconds",
+          "type": "integer"
+        },
+        "timeout_seconds": {
+          "default": 10,
+          "description": "Default timeout in seconds for health probes.",
+          "exclusiveMinimum": 0,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "HealthConfig",
+      "type": "object"
+    },
+    "HermesConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "default": "cli",
+          "description": "Hermes integration mode. 'cli' uses the local Hermes executable; 'http' keeps compatibility with a health URL.",
+          "enum": [
+            "cli",
+            "http"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional Hermes executable path for cli mode; null uses the current PATH.",
+          "title": "Path"
+        },
+        "source": {
+          "default": "feishu-shadow-agent",
+          "description": "Source label passed to Hermes sessions and audit data.",
+          "title": "Source",
+          "type": "string"
+        },
+        "router_max_turns": {
+          "default": 4,
+          "description": "Maximum Hermes turns for task routing calls.",
+          "exclusiveMinimum": 0,
+          "title": "Router Max Turns",
+          "type": "integer"
+        },
+        "session_max_turns": {
+          "default": 8,
+          "description": "Maximum Hermes turns for task session calls.",
+          "exclusiveMinimum": 0,
+          "title": "Session Max Turns",
+          "type": "integer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional Hermes model override; null uses the Hermes default.",
+          "title": "Model"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional Hermes provider override; null uses the Hermes default.",
+          "title": "Provider"
+        },
+        "timeout_seconds": {
+          "default": 60,
+          "description": "Timeout in seconds for Hermes subprocess or health calls.",
+          "exclusiveMinimum": 0,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        },
+        "health_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "HTTP health URL used only when hermes.mode is 'http'; must start with http:// or https://.",
+          "title": "Health Url"
+        },
+        "api_key_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "HERMES_API_KEY",
+          "description": "Environment variable name that holds the Hermes API key for http mode; the secret value is never stored here.",
+          "title": "Api Key Env"
+        }
+      },
+      "title": "HermesConfig",
+      "type": "object"
+    },
+    "LarkCliConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional lark-cli executable path; null uses the current PATH.",
+          "title": "Path"
+        },
+        "timeout_seconds": {
+          "default": 30,
+          "description": "Timeout in seconds for lark-cli subprocess calls.",
+          "exclusiveMinimum": 0,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "LarkCliConfig",
+      "type": "object"
+    },
+    "LoggingConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "jsonl_path": {
+          "default": "logs/agent.jsonl",
+          "description": "JSONL log path, resolved relative to the config file when not absolute.",
+          "title": "Jsonl Path",
+          "type": "string"
+        }
+      },
+      "title": "LoggingConfig",
+      "type": "object"
+    },
+    "OwnerConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "open_id": {
+          "description": "Feishu open_id of the single owner who receives approval notifications and can run local commands.",
+          "minLength": 1,
+          "title": "Open Id",
+          "type": "string"
+        },
+        "name": {
+          "default": "",
+          "description": "Optional display name for humans reading config and logs.",
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "open_id"
+      ],
+      "title": "OwnerConfig",
+      "type": "object"
+    },
+    "ReplyPolicyConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "p2p_auto_reply": {
+          "default": true,
+          "description": "Whether one-to-one chats may auto-reply when risk and confidence gates pass.",
+          "title": "P2P Auto Reply",
+          "type": "boolean"
+        },
+        "default_group_auto_reply": {
+          "default": false,
+          "description": "Default auto-reply behavior for groups without an explicit chats entry.",
+          "title": "Default Group Auto Reply",
+          "type": "boolean"
+        },
+        "risk_level_max": {
+          "default": "low",
+          "description": "Maximum risk level allowed for automatic replies: low, medium, or high.",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Risk Level Max",
+          "type": "string"
+        },
+        "confidence_threshold": {
+          "default": 0.85,
+          "description": "Minimum Hermes confidence required for automatic replies.",
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence Threshold",
+          "type": "number"
+        }
+      },
+      "title": "ReplyPolicyConfig",
+      "type": "object"
+    },
+    "RetentionConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "raw_message_days": {
+          "default": 30,
+          "description": "Days to retain raw message payloads.",
+          "minimum": 1,
+          "title": "Raw Message Days",
+          "type": "integer"
+        },
+        "resource_days": {
+          "default": 30,
+          "description": "Days to retain downloaded resource files.",
+          "minimum": 1,
+          "title": "Resource Days",
+          "type": "integer"
+        }
+      },
+      "title": "RetentionConfig",
+      "type": "object"
+    },
+    "StorageConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "sqlite_path": {
+          "default": "data/agent.sqlite3",
+          "description": "SQLite database path, resolved relative to the config file when not absolute.",
+          "title": "Sqlite Path",
+          "type": "string"
+        },
+        "resource_dir": {
+          "default": "data/resources",
+          "description": "Safe relative directory for downloaded message resources; absolute paths and '..' are rejected.",
+          "title": "Resource Dir",
+          "type": "string"
+        }
+      },
+      "title": "StorageConfig",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "owner": {
+      "$ref": "#/$defs/OwnerConfig",
+      "description": "Single owner identity used for approvals and operator notifications."
+    },
+    "daemon": {
+      "$ref": "#/$defs/DaemonConfig",
+      "description": "Daemon polling and overlap settings."
+    },
+    "health": {
+      "$ref": "#/$defs/HealthConfig",
+      "description": "Runtime health refresh and timeout settings."
+    },
+    "storage": {
+      "$ref": "#/$defs/StorageConfig",
+      "description": "Local SQLite and resource storage settings."
+    },
+    "logging": {
+      "$ref": "#/$defs/LoggingConfig",
+      "description": "Local structured logging settings."
+    },
+    "lark_cli": {
+      "$ref": "#/$defs/LarkCliConfig",
+      "description": "lark-cli executable and timeout settings."
+    },
+    "hermes": {
+      "$ref": "#/$defs/HermesConfig",
+      "description": "Hermes integration and timeout settings."
+    },
+    "reply_policy": {
+      "$ref": "#/$defs/ReplyPolicyConfig",
+      "description": "Global auto-reply policy used before chat-specific overrides."
+    },
+    "chats": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ChatPolicyConfig"
+      },
+      "description": "Per-chat policy overrides keyed by Feishu chat_id, such as oc_xxx.",
+      "title": "Chats",
+      "type": "object"
+    },
+    "tool_permissions": {
+      "default": "guarded_write",
+      "description": "Hermes tool permission profile: read_only, guarded_write, or full_access.",
+      "enum": [
+        "read_only",
+        "guarded_write",
+        "full_access"
+      ],
+      "title": "Tool Permissions",
+      "type": "string"
+    },
+    "retention": {
+      "$ref": "#/$defs/RetentionConfig",
+      "description": "Local data retention settings."
+    },
+    "debug": {
+      "$ref": "#/$defs/DebugConfig",
+      "description": "Debug-only persistence settings."
+    }
+  },
+  "required": [
+    "owner"
+  ],
+  "title": "AppConfig",
+  "type": "object"
+}
