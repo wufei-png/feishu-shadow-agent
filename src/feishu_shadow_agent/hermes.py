@@ -4,14 +4,37 @@ import json
 import re
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence
 
-from .config import HermesConfig
+from .config import HermesConfig, ToolPermissionsProfile
 from .types import HermesCliResult
 
 HermesRunner = Callable[[list[str], int], HermesCliResult]
 SESSION_ID_RE = re.compile(r"session_id:\s*([^\s]+)")
+
+
+@dataclass(frozen=True)
+class HermesExecutionPolicy:
+    toolsets: str
+    yolo: bool = False
+
+    def cli_args(self) -> list[str]:
+        args = ["--toolsets", self.toolsets]
+        if self.yolo:
+            args.append("--yolo")
+        return args
+
+
+def hermes_execution_policy(profile: ToolPermissionsProfile) -> HermesExecutionPolicy:
+    if profile == "read_only":
+        return HermesExecutionPolicy(toolsets="safe")
+    if profile == "guarded_write":
+        return HermesExecutionPolicy(toolsets="hermes-cli")
+    if profile == "full_access":
+        return HermesExecutionPolicy(toolsets="hermes-cli", yolo=True)
+    raise ValueError(f"unknown tool permissions profile: {profile}")
 
 
 class HermesClient(Protocol):
@@ -27,10 +50,12 @@ class HermesCliClient:
         self,
         *,
         config: HermesConfig,
+        tool_permissions: ToolPermissionsProfile = "guarded_write",
         cwd: str | Path | None = None,
         runner: HermesRunner | None = None,
     ):
         self.config = config
+        self.execution_policy = hermes_execution_policy(tool_permissions)
         self.path = config.path or "hermes"
         self.cwd = None if cwd is None else Path(cwd)
         self._runner = runner
@@ -50,8 +75,7 @@ class HermesCliClient:
             "-Q",
             "--source",
             self.config.source,
-            "--toolsets",
-            self.config.toolsets,
+            *self.execution_policy.cli_args(),
             "--ignore-rules",
             "--max-turns",
             str(max_turns),

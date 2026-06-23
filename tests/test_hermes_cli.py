@@ -5,11 +5,10 @@ from feishu_shadow_agent.hermes import HermesCliClient
 from feishu_shadow_agent.types import HermesCliResult
 
 
-def test_hermes_cli_builds_quiet_safe_chat_command_with_model_provider_and_resume() -> None:
+def test_hermes_cli_builds_guarded_write_chat_command_with_model_provider_and_resume() -> None:
     config = HermesConfig(
         path="/bin/hermes",
         source="feishu-shadow-agent",
-        toolsets="safe",
         session_max_turns=7,
         model="m",
         provider="p",
@@ -27,7 +26,7 @@ def test_hermes_cli_builds_quiet_safe_chat_command_with_model_provider_and_resum
         "--source",
         "feishu-shadow-agent",
         "--toolsets",
-        "safe",
+        "hermes-cli",
         "--ignore-rules",
         "--max-turns",
         "7",
@@ -38,6 +37,25 @@ def test_hermes_cli_builds_quiet_safe_chat_command_with_model_provider_and_resum
         "--provider",
         "p",
     ]
+
+
+def test_hermes_cli_maps_read_only_to_safe_toolset() -> None:
+    client = HermesCliClient(config=HermesConfig(path="/bin/hermes"), tool_permissions="read_only")
+
+    argv = client.build_chat_command(prompt="{}", max_turns=1)
+
+    assert "--toolsets" in argv
+    assert argv[argv.index("--toolsets") + 1] == "safe"
+    assert "--yolo" not in argv
+
+
+def test_hermes_cli_maps_full_access_to_yolo_full_toolset() -> None:
+    client = HermesCliClient(config=HermesConfig(path="/bin/hermes"), tool_permissions="full_access")
+
+    argv = client.build_chat_command(prompt="{}", max_turns=1)
+
+    assert argv[argv.index("--toolsets") + 1] == "hermes-cli"
+    assert "--yolo" in argv
 
 
 def test_hermes_cli_parses_json_and_session_id() -> None:

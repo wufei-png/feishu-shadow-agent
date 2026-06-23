@@ -379,6 +379,7 @@ class TaskProcessingService:
             error=outcome.last_error if result is None else result.error,
             latency_ms=None if result is None else result.latency_ms,
             prompt={"text": prompt} if self.config.debug.save_full_hermes_io else None,
+            tool_permissions_profile=self.config.tool_permissions,
         )
         candidates_count = len(active_candidates) + len(historical)
         if result is None or not result.ok or not isinstance(result.json_data, dict):
@@ -603,6 +604,7 @@ class TaskProcessingService:
             error=outcome.last_error if result is None else result.error,
             latency_ms=None if result is None else result.latency_ms,
             prompt={"text": prompt} if self.config.debug.save_full_hermes_io else None,
+            tool_permissions_profile=self.config.tool_permissions,
         )
         if result is None or not result.ok or not isinstance(result.json_data, dict):
             last_error = outcome.last_error or (None if result is None else _hermes_result_error(result))

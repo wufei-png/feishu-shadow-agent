@@ -1228,6 +1228,7 @@ class SQLiteStore:
         error: str | None = None,
         latency_ms: int | None = None,
         prompt: dict[str, Any] | None = None,
+        tool_permissions_profile: str | None = None,
     ) -> None:
         self.migrate()
         with self.connect() as conn:
@@ -1235,8 +1236,9 @@ class SQLiteStore:
                 """
                 INSERT INTO hermes_audits(
                   request_type, task_id, hermes_session_id, input_message_ids_json,
-                  input_resource_ids_json, response_json, error, latency_ms, prompt_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  input_resource_ids_json, response_json, error, latency_ms, prompt_json,
+                  tool_permissions_profile, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     request_type,
@@ -1248,6 +1250,7 @@ class SQLiteStore:
                     error,
                     latency_ms,
                     None if prompt is None else json.dumps(prompt, ensure_ascii=False, default=str),
+                    tool_permissions_profile,
                     utc_now_iso(),
                 ),
             )

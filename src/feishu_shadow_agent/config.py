@@ -61,7 +61,6 @@ class HermesConfig(StrictModel):
     mode: Literal["cli", "http"] = "cli"
     path: str | None = None
     source: str = "feishu-shadow-agent"
-    toolsets: str = "safe"
     router_max_turns: int = Field(default=4, gt=0)
     session_max_turns: int = Field(default=8, gt=0)
     model: str | None = None
@@ -79,7 +78,7 @@ class HermesConfig(StrictModel):
             raise ValueError("hermes.health_url must start with http:// or https://")
         return value
 
-    @field_validator("source", "toolsets")
+    @field_validator("source")
     @classmethod
     def validate_non_empty_string(cls, value: str) -> str:
         if not value.strip():
@@ -94,6 +93,7 @@ class HermesConfig(StrictModel):
 
 
 RiskLevel = Literal["low", "medium", "high"]
+ToolPermissionsProfile = Literal["read_only", "guarded_write", "full_access"]
 
 
 class ReplyPolicyConfig(StrictModel):
@@ -112,10 +112,6 @@ class ChatPolicyConfig(StrictModel):
     resource_download: StrictBool = True
     risk_level_max: RiskLevel = "low"
     confidence_threshold: float = Field(default=0.85, ge=0, le=1)
-
-
-class ToolPermissionsConfig(StrictModel):
-    profile: Literal["read_only", "guarded_write", "full_access"] = "guarded_write"
 
 
 class RetentionConfig(StrictModel):
@@ -137,7 +133,7 @@ class AppConfig(StrictModel):
     hermes: HermesConfig = Field(default_factory=HermesConfig)
     reply_policy: ReplyPolicyConfig = Field(default_factory=ReplyPolicyConfig)
     chats: dict[str, ChatPolicyConfig] = Field(default_factory=dict)
-    tool_permissions: ToolPermissionsConfig = Field(default_factory=ToolPermissionsConfig)
+    tool_permissions: ToolPermissionsProfile = "guarded_write"
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
     debug: DebugConfig = Field(default_factory=DebugConfig)
 

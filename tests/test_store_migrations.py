@@ -152,6 +152,18 @@ def test_p3_migration_clears_legacy_fake_hermes_session_and_send_reply_guard(tmp
     assert retried_action.result == {}
 
 
+def test_hermes_audits_include_tool_permissions_profile(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.migrate()
+
+    with store.connect() as conn:
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(hermes_audits)").fetchall()
+        }
+
+    assert "tool_permissions_profile" in columns
+
+
 def test_send_reply_retry_does_not_revive_failed_action_when_same_text_was_sent(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.migrate()

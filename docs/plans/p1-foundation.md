@@ -99,7 +99,7 @@ tests/
 - `daemon`：启动时跑完整 health；critical fail 则 fail-closed；通过后进入 long-running no-op loop，只记录 run/health/no-op tick，不 ingest、不 send。测试直接调用 `run_one_noop_tick()`，不新增 cron/once CLI 模式。
 
 ## Test Checklist
-- 配置：最小配置可加载；缺 owner/open_id、非法 `tool_permissions.profile`、chat policy 类型错误会失败；`config show --redacted` 不泄露 env key value。
+- 配置：最小配置可加载；缺 owner/open_id、非法 `tool_permissions`、chat policy 类型错误会失败；`config show --redacted` 不泄露 env key value。
 - SQLite：migration 可重复执行；所有核心表存在；关键唯一约束生效；checkpoint upsert、run/health 写入可读回。
 - JSONL：每行合法 JSON；必填字段存在；目录不存在时自动创建；异常对象可序列化为字符串。
 - Lark CLI：argv 顺序和参数正确；互斥参数校验；资源 output 拒绝绝对路径和 `..`；subprocess 超时、非 0 exit、非 JSON stdout 都转为结构化错误。

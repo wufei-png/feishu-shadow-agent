@@ -722,7 +722,7 @@ def test_task_session_followup_uses_stored_hermes_session(tmp_path: Path) -> Non
         assert conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"] == 2
         audit = conn.execute(
             """
-            SELECT input_message_ids_json, input_resource_ids_json
+            SELECT input_message_ids_json, input_resource_ids_json, tool_permissions_profile
             FROM hermes_audits
             WHERE request_type = 'task_session'
             ORDER BY id DESC
@@ -731,6 +731,7 @@ def test_task_session_followup_uses_stored_hermes_session(tmp_path: Path) -> Non
         ).fetchone()
     assert json.loads(audit["input_message_ids_json"]) == ["om_2"]
     assert json.loads(audit["input_resource_ids_json"]) == []
+    assert audit["tool_permissions_profile"] == "guarded_write"
 
 
 def test_task_session_schema_failure_does_not_persist_session_id(tmp_path: Path) -> None:

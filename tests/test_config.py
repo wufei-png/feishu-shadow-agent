@@ -16,15 +16,14 @@ def test_load_minimal_config() -> None:
 
     assert loaded.config.owner.open_id == "ou_owner"
     assert loaded.config.storage.resource_dir == "data/resources"
-    assert loaded.config.tool_permissions.profile == "guarded_write"
+    assert loaded.config.tool_permissions == "guarded_write"
     assert loaded.config.chats["oc_test"].auto_reply is True
     assert loaded.config.hermes.mode == "cli"
-    assert loaded.config.hermes.toolsets == "safe"
 
 
 def test_missing_owner_fails(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("tool_permissions:\n  profile: guarded_write\n", encoding="utf-8")
+    config_path.write_text("tool_permissions: guarded_write\n", encoding="utf-8")
 
     with pytest.raises(ConfigError, match="owner"):
         ConfigService().load(config_path)
@@ -36,13 +35,44 @@ def test_invalid_tool_permission_fails(tmp_path: Path) -> None:
         """
 owner:
   open_id: ou_owner
-tool_permissions:
-  profile: dangerous
+tool_permissions: dangerous
 """,
         encoding="utf-8",
     )
 
-    with pytest.raises(ConfigError, match="profile"):
+    with pytest.raises(ConfigError, match="tool_permissions"):
+        ConfigService().load(config_path)
+
+
+def test_nested_tool_permissions_config_is_rejected(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+tool_permissions:
+  profile: guarded_write
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="tool_permissions"):
+        ConfigService().load(config_path)
+
+
+def test_legacy_hermes_toolsets_config_is_rejected(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+hermes:
+  toolsets: safe
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="toolsets"):
         ConfigService().load(config_path)
 
 

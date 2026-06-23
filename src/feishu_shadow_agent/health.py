@@ -10,6 +10,7 @@ from typing import Callable
 
 from .config import LoadedConfig
 from .feishu.client import FeishuClient
+from .hermes import hermes_execution_policy
 from .store.sqlite_store import SQLiteStore
 from .types import HealthCheckResult, HermesCliResult, LarkCliResult, new_run_id
 
@@ -99,7 +100,9 @@ class HermesCliChecker:
             "Hermes CLI status command failed",
             severity="warning",
         )
-        return [version_result, status_result]
+        chat_help = _run_hermes_command([path, "chat", "--help"], timeout_seconds=hermes.timeout_seconds)
+        permissions_result = _hermes_tool_permissions_result(loaded, chat_help)
+        return [version_result, status_result, permissions_result]
 
 
 class HermesHealthChecker:
@@ -431,6 +434,48 @@ def _hermes_command_result(
             "stderr": result.stderr.strip(),
             "latency_ms": result.latency_ms,
         },
+    )
+
+
+def _hermes_tool_permissions_result(loaded: LoadedConfig, result: HermesCliResult) -> HealthCheckResult:
+    profile = loaded.config.tool_permissions
+    policy = hermes_execution_policy(profile)
+    details = {
+        "tool_permissions_profile": profile,
+        "effective_args": policy.cli_args(),
+        "argv": result.argv,
+        "stdout": result.stdout.strip(),
+        "stderr": result.stderr.strip(),
+        "exit_code": result.exit_code,
+        "error": result.error,
+        "timed_out": result.timed_out,
+    }
+    if not result.ok:
+        return HealthCheckResult(
+            "hermes_tool_permissions",
+            "critical",
+            "failed",
+            "Hermes chat help command failed",
+            details,
+        )
+    help_text = f"{result.stdout}\n{result.stderr}"
+    missing = ["--toolsets"] if "--toolsets" not in help_text else []
+    if policy.yolo and "--yolo" not in help_text:
+        missing.append("--yolo")
+    if missing:
+        return HealthCheckResult(
+            "hermes_tool_permissions",
+            "critical",
+            "failed",
+            "Hermes CLI does not expose required permission flags",
+            details | {"missing_flags": missing},
+        )
+    return HealthCheckResult(
+        "hermes_tool_permissions",
+        "critical",
+        "ok",
+        "Hermes CLI supports configured tool permission mode",
+        details,
     )
 
 

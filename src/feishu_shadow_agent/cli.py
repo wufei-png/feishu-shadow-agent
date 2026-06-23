@@ -138,7 +138,11 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         cwd=loaded.base_dir,
     )
     suite = HealthSuite(loaded_config=loaded, store=store, feishu_client=client, run_id=run_id)
-    hermes_client = HermesCliClient(config=loaded.config.hermes, cwd=loaded.base_dir)
+    hermes_client = HermesCliClient(
+        config=loaded.config.hermes,
+        tool_permissions=loaded.config.tool_permissions,
+        cwd=loaded.base_dir,
+    )
     task_processor = TaskProcessingService(
         store=store,
         config=loaded.config,

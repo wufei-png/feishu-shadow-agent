@@ -367,53 +367,33 @@ P2P MVP 使用默认策略，不做 per-user 配置，但预留 `UserPolicyStore
 
 ## 10. Tool permission profile
 
-工具权限和对外回复权限分开。
+工具权限和飞书对外回复权限分开。`tool_permissions` 只控制 Hermes CLI 运行时的工具权限，Python daemon 不解析、不执行 `tool_plan`。
 
 ```yaml
-tool_permissions:
-  profile: guarded_write   # read_only | guarded_write | full_access
+tool_permissions: guarded_write   # read_only | guarded_write | full_access
 ```
 
 三档：
 
 ```text
 read_only:
-  只允许读消息、读文件、下载资源、图片分析、只读命令。
+  Hermes 使用 --toolsets safe。
+  用于只读分析，不授予写入类 Hermes 工具。
 
 guarded_write:
-  safe_write 自动允许。
-  项目文件修改需要 ApprovalRequest。
-  高影响操作拒绝。
+  Hermes 使用 --toolsets hermes-cli。
+  依赖 Hermes 自身的交互式/非交互式 guard 处理写入风险。
+  Hermes 阻塞、拒绝或超时都按 task_session 失败处理，并走现有 owner notification 路径。
 
 full_access:
-  允许完整本机和 lark-cli 能力。
-  仍保留审计、dry-run、idempotency、reply policy gate。
+  Hermes 使用 --toolsets hermes-cli --yolo。
+  对齐默认信任模型，跳过普通危险命令审批。
+  仍受 Hermes hardline block、进程边界、系统权限和工具自身限制约束。
 ```
 
-`guarded_write` 审核由 Python 工具执行层做，不靠模型自觉判断。Hermes 只提出 `tool_plan`。
+Python 只负责按 profile 派生 Hermes CLI 参数、记录审计、维护任务状态、执行飞书发送策略和幂等保护。
 
-safe_write 示例：
-
-- 写 SQLite 状态。
-- 写 cache。
-- 保存资源文件。
-- 生成本地报告。
-
-需要审批：
-
-- 修改项目文件。
-- 更新配置文件。
-- 生成补丁并应用。
-
-拒绝或要求 full_access：
-
-- `rm -rf`、`chmod/chown`、`kill`、`launchctl`。
-- git push。
-- 部署、重启、删除。
-- 改飞书权限、拉人入群。
-- 发消息给第三方。
-
-飞书对外回复不走 tool permission，统一由 reply policy 和 ApprovalRequest 管。
+飞书对外回复不走 tool permission，统一由 reply policy、ApprovalRequest、dry-run、idempotency 和发送后读回管控。
 
 ## 11. Hermes 集成
 
@@ -987,6 +967,7 @@ Hermes 审计默认保存：
 
 - `hermes_session_id`
 - `task_id`
+- `tool_permissions_profile`
 - request type: router/task_session
 - input message IDs / resource IDs
 - endpoint/model metadata
@@ -1026,6 +1007,7 @@ python -m feishu_shadow_agent doctor --send-test
 - approval inbox 可发送 dry-run。
 - 数据库可写。
 - Hermes CLI `--version` critical check 和 `status` warning check。
+- Hermes tool permission profile 到 CLI flag 的派生检查。
 - 配置 YAML schema。
 
 ### daemon

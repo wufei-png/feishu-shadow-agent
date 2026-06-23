@@ -26,7 +26,6 @@ hermes:
   mode: cli
   path: null
   source: feishu-shadow-agent
-  toolsets: safe
   router_max_turns: 4
   session_max_turns: 8
   model: null
@@ -48,8 +47,7 @@ chats:
     auto_reply: true
     bot_joined: true
 
-tool_permissions:
-  profile: guarded_write
+tool_permissions: guarded_write
 
 retention:
   raw_message_days: 30

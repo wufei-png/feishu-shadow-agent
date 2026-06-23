@@ -75,9 +75,9 @@ dispatcher hardening.
 ## Key Changes
 
 - Add Hermes CLI integration:
-  - Extend `hermes` config with CLI fields: `mode: cli`, `path`, `timeout_seconds`, `source: feishu-shadow-agent`, `toolsets: safe`, optional `model/provider`, and separate `router_max_turns` / `session_max_turns`.
+  - Extend `hermes` config with CLI fields: `mode: cli`, `path`, `timeout_seconds`, `source: feishu-shadow-agent`, optional `model/provider`, and separate `router_max_turns` / `session_max_turns`. Hermes tool arguments are derived from top-level `tool_permissions`.
   - Replace the P1 HTTP-only health check path with CLI-mode checks: `hermes --version` and `hermes status` exit code. Keep old HTTP fields only as future-compatible optional config, not the default P3 path.
-  - Add `HermesClient` protocol plus `HermesCliClient`: build `hermes chat -q <prompt> -Q --source feishu-shadow-agent --toolsets safe --ignore-rules`, parse stdout as strict JSON, parse `session_id:` from stderr, and pass `--resume <stored_session_id>` on task follow-ups.
+  - Add `HermesClient` protocol plus `HermesCliClient`: build `hermes chat -q <prompt> -Q --source feishu-shadow-agent <permission args> --ignore-rules`, parse stdout as strict JSON, parse `session_id:` from stderr, and pass `--resume <stored_session_id>` on task follow-ups.
 
 - Add task routing/session processing:
   - Replace P2 `router_placeholder` branches with a real stateless Hermes TaskRouter only when deterministic shortcuts fail.

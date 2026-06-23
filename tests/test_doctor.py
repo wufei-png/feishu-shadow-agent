@@ -159,14 +159,52 @@ def test_hermes_cli_checker_version_critical_and_status_warning(
         calls.append(list(argv))
         if argv[1] == "--version":
             return subprocess.CompletedProcess(argv, 0, stdout="Hermes Agent v0.16.0\n", stderr="")
+        if argv[1:3] == ["chat", "--help"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="usage: hermes chat [--toolsets TOOLSETS] [--yolo]\n", stderr="")
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="not logged in")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     results = HermesCliChecker()(loaded)
 
-    assert [result.name for result in results] == ["hermes_cli_version", "hermes_cli_status"]
+    assert [result.name for result in results] == [
+        "hermes_cli_version",
+        "hermes_cli_status",
+        "hermes_tool_permissions",
+    ]
     assert results[0].status == "ok"
     assert results[1].severity == "warning"
     assert results[1].status == "failed"
-    assert calls == [["hermes", "--version"], ["hermes", "status"]]
+    assert results[2].status == "ok"
+    assert calls == [["hermes", "--version"], ["hermes", "status"], ["hermes", "chat", "--help"]]
+
+
+def test_hermes_cli_checker_fails_when_full_access_yolo_is_missing(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+tool_permissions: full_access
+""",
+        encoding="utf-8",
+    )
+    loaded = ConfigService().load(config_path)
+
+    def fake_run(argv, **kwargs):
+        if argv[1] == "--version":
+            return subprocess.CompletedProcess(argv, 0, stdout="Hermes Agent v0.16.0\n", stderr="")
+        if argv[1:3] == ["chat", "--help"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="usage: hermes chat [--toolsets TOOLSETS]\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    results = HermesCliChecker()(loaded)
+
+    permissions = next(result for result in results if result.name == "hermes_tool_permissions")
+    assert permissions.is_critical_failure
+    assert permissions.details["missing_flags"] == ["--yolo"]
