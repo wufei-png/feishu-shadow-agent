@@ -149,6 +149,9 @@ class ResourceProcessor:
                 self.store.upsert_resource(resource, download_status="skipped")
                 continue
             if not policy.bot_joined:
+                # Resource download is bot-only for user messages. Recording the
+                # gate here avoids repeated 234040/234002 calls and lets reply
+                # policy decide whether the task can proceed without the asset.
                 self.store.upsert_resource(
                     resource,
                     download_status="bot_not_joined",

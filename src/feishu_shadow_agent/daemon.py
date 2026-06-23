@@ -137,6 +137,9 @@ class Daemon:
             config=self.app_config,
             logger=self.logger,
         )
+        # Owner commands are the safety valve for outgoing replies. If the inbox is
+        # unhealthy, external send_reply actions stay preview-only while owner
+        # notifications can still surface the failure.
         dispatch = dispatcher.dispatch(
             run_id=run_id,
             allow_send_reply_actual=not self.dry_run and not approval_failed,

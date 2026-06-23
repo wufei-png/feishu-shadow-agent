@@ -109,6 +109,8 @@ class HermesCliClient:
             result = _run_subprocess(argv, self.config.timeout_seconds, cwd=self.cwd)
         if not result.ok:
             return result
+        # Hermes writes session metadata to stderr while stdout remains the strict
+        # JSON contract consumed by the daemon.
         parsed_session_id = result.session_id or _parse_session_id(result.stderr)
         stdout = result.stdout.strip()
         try:

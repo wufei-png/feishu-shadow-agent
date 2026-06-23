@@ -52,6 +52,8 @@ class LarkCliClient:
         no_reactions: bool = True,
     ) -> list[str]:
         if as_identity != "user":
+            # The search shortcut is user-only in the MVP path; failing locally
+            # keeps bot visibility assumptions out of ingestion.
             raise ValueError("+messages-search is user-only")
         argv = [self.path, "im", "+messages-search", "--as", "user", "--json"]
         _extend_option(argv, "--chat-id", chat_id)

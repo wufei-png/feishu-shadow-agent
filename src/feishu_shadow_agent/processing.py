@@ -37,6 +37,8 @@ TERMINAL_HERMES_ERROR_MARKERS = (
 
 
 class StrictModel(BaseModel):
+    # Hermes output is an API boundary. Unknown fields are rejected so prompt
+    # drift becomes an auditable owner path instead of silently changing policy.
     model_config = ConfigDict(extra="forbid")
 
 
@@ -90,6 +92,8 @@ class HermesAttemptOutcome:
 
 
 class SendComposer:
+    """Build Feishu-safe reply text after Hermes proposes plain content."""
+
     def __init__(self, *, owner_open_id: str):
         self.owner_open_id = owner_open_id
 
@@ -784,6 +788,8 @@ class TaskProcessingService:
                 return {"allow": False, "reason": "group_not_direct_mention", "identity": "user"}
             chat_configured = bool((task.chat_id or message.chat_id) in self.config.chats)
             if not chat_configured:
+                # Unknown groups are still processed for owner visibility, but
+                # never auto-replied until a per-chat policy exists.
                 return {"allow": False, "reason": "unknown_group_auto_reply_disabled", "identity": "user"}
             if not policy.auto_reply:
                 return {"allow": False, "reason": "group_auto_reply_disabled", "identity": "user"}
@@ -809,6 +815,8 @@ class TaskProcessingService:
         session_id: str | None,
     ) -> list[str]:
         if session_id is not None:
+            # Resumed Hermes sessions already carry task history; sending only
+            # the current message keeps follow-up prompts compact and bounded.
             return [message.message_id]
         message_ids = self.store.list_task_message_ids(task.id)
         return message_ids or [message.message_id]

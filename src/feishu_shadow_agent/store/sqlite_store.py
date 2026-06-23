@@ -1369,6 +1369,8 @@ class SQLiteStore:
                     now=now,
                 )
             except Exception as exc:
+                # State changes are rolled back, but the command itself is still
+                # recorded below so status/replay can explain failed approvals.
                 conn.execute("ROLLBACK TO SAVEPOINT approval_command")
                 conn.execute("RELEASE SAVEPOINT approval_command")
                 result = {"error": str(exc)}
@@ -1667,6 +1669,9 @@ class SQLiteStore:
         approval_id: int | None,
         now: str,
     ) -> int | None:
+        # A sent action for the same task/target/text is terminal idempotency.
+        # Failed actions are revived to preserve the original idempotency key,
+        # but only when no pending/sending action could race the same reply.
         if _has_sent_send_reply_action_for_payload(
             conn,
             task_id=task_id,

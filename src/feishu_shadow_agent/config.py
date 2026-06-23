@@ -186,6 +186,8 @@ class ConfigService:
             for key, child in value.items():
                 lowered = str(key).lower()
                 if lowered.endswith("_env"):
+                    # *_env values are environment variable names, not secrets.
+                    # Keeping them visible makes redacted config output useful.
                     redacted[key] = self._redact_mapping(child)
                 elif any(marker in lowered for marker in ("secret", "token", "api_key", "password")):
                     redacted[key] = "<redacted>"

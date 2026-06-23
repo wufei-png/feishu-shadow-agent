@@ -74,6 +74,9 @@ class MessageRouter:
     ) -> RoutingResult:
         if not inserted and self.store.message_has_routing_audit(message.message_id):
             if retry_incomplete_processing:
+                # A duplicate route audit means ingestion was durable, but Hermes
+                # processing may have crashed before reaching a terminal marker.
+                # Reuse that route only when the downstream stage is still open.
                 existing = self.store.get_latest_non_duplicate_routing_decision(message.message_id)
                 if existing is not None:
                     decision, task = existing
@@ -89,6 +92,8 @@ class MessageRouter:
 
         sent_action_task = self.store.find_task_for_sent_action_message(message.message_id)
         if sent_action_task is not None:
+            # Readback messages prove a dispatch happened. Link them to the task
+            # audit trail, then ignore them as fresh work to prevent reply loops.
             decision = self.store.record_agent_message_for_task_and_audit(
                 sent_action_task,
                 message,
