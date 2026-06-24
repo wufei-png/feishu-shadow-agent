@@ -1,23 +1,22 @@
 from __future__ import annotations
 
-import json
 import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from html import escape
-from typing import Any, Callable, Literal
+from typing import Any, Callable
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import ValidationError
 
 from .agent_backend import AgentBackend, AgentRunResult
 from .config import AppConfig, ChatPolicyConfig
 from .jsonl import JSONLLogger
+from .prompt import TaskRouterOutput, TaskSessionOutput, build_router_prompt, build_task_session_prompt
 from .routing import CandidateCollector, RoutingResult
 from .store.sqlite_store import SQLiteStore
 from .types import NormalizedMessage, RouteDecision, TaskRecord
 
-WATCH_EXTEND_MINUTES = 120
 AGENT_MAX_ATTEMPTS = 3
 AGENT_AT_SPAN_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE | re.DOTALL)
 FORBIDDEN_MENTION_RE = re.compile(r"<at\b[^>]*>|</at>|@所有人|@_all|@all", re.IGNORECASE)
@@ -34,39 +33,6 @@ TERMINAL_AGENT_ERROR_MARKERS = (
     "auth",
     "permission",
 )
-
-
-class StrictModel(BaseModel):
-    # Agent output is an API boundary. Unknown fields are rejected so prompt
-    # drift becomes an auditable owner path instead of silently changing policy.
-    model_config = ConfigDict(extra="forbid")
-
-
-class TaskRouterOutput(StrictModel):
-    route: Literal["new_task", "attach_task", "reopen_task", "close_task", "ignore", "ambiguous"]
-    target_task_id: str | None = None
-    confidence: float = Field(ge=0, le=1)
-    reason: str = ""
-    updated_watch_keys: list[str] = Field(default_factory=list)
-
-
-class TaskSessionOutput(StrictModel):
-    task_label: str
-    task_state: Literal["needs_reply", "watching", "closed", "waiting"]
-    answerability: Literal["auto_reply", "needs_owner", "no_reply"]
-    confidence: float = Field(ge=0, le=1)
-    proposed_reply: str = ""
-    reply_target_message_id: str | None = None
-    watch_action: Literal["keep_watching", "close"] = "keep_watching"
-    watch_extend_minutes: int = Field(default=WATCH_EXTEND_MINUTES, ge=0, le=24 * 60)
-    risk_level: Literal["low", "medium", "high"] = "low"
-    safety_notes: list[str] = Field(default_factory=list)
-    requires_resources: bool = False
-
-    @field_validator("task_label")
-    @classmethod
-    def trim_label(cls, value: str) -> str:
-        return " ".join(value.split())[:100]
 
 
 @dataclass(frozen=True)
@@ -491,7 +457,7 @@ class TaskProcessingService:
                 "historical_candidates": len(historical),
             },
         )
-        prompt = _router_prompt(message=message, active=active_candidates, historical=historical)
+        prompt = build_router_prompt(message=message, active=active_candidates, historical=historical)
         outcome = self._call_agent_with_retries(
             lambda: self.agent_backend.task_router(prompt),
             run_id=run_id,
@@ -831,7 +797,7 @@ class TaskProcessingService:
                 "resource_count": len(resources),
             },
         )
-        prompt = _task_session_prompt(
+        prompt = build_task_session_prompt(
             task=task,
             current_message_id=message.message_id,
             reply_target_message_ids=reply_target_message_ids,
@@ -1191,114 +1157,6 @@ class TaskProcessingService:
                 router_called=True,
             ),
         )
-
-
-def _router_prompt(*, message: NormalizedMessage, active: list[Any], historical: list[TaskRecord]) -> str:
-    payload = {
-        "instruction": "Route the incoming Feishu message. Return strict JSON only.",
-        "schema": {
-            "route": "new_task|attach_task|reopen_task|close_task|ignore|ambiguous",
-            "target_task_id": "task short id or null",
-            "confidence": "0..1",
-            "reason": "short reason",
-            "updated_watch_keys": [],
-        },
-        "message": _message_card(message),
-        "active_candidates": [_candidate_card(candidate.task, candidate.matched_by) for candidate in active],
-        "historical_candidates": [_task_card(task) for task in historical],
-    }
-    return json.dumps(payload, ensure_ascii=False, default=str)
-
-
-def _task_session_prompt(
-    *,
-    task: TaskRecord,
-    current_message_id: str,
-    reply_target_message_ids: list[str],
-    messages: list[Any],
-    resources: list[Any],
-) -> str:
-    payload = {
-        "instruction": "Handle this Feishu task. Return strict JSON only and do not include @ mentions.",
-        "metadata": {
-            "current_message_id": current_message_id,
-            "root_message_id": task.root_message_id,
-            "reply_target_message_ids": reply_target_message_ids,
-        },
-        "schema": {
-            "task_label": "short label",
-            "task_state": "needs_reply|watching|closed|waiting",
-            "answerability": "auto_reply|needs_owner|no_reply",
-            "confidence": "0..1",
-            "proposed_reply": "reply without at-mentions",
-            "reply_target_message_id": "current or root message id",
-            "watch_action": "keep_watching|close",
-            "watch_extend_minutes": 120,
-            "risk_level": "low|medium|high",
-            "safety_notes": [],
-            "requires_resources": False,
-        },
-        "task": _task_card(task),
-        "messages": [_row_message_card(row) for row in messages],
-        "resources": [_resource_card(row) for row in resources],
-    }
-    return json.dumps(payload, ensure_ascii=False, default=str)
-
-
-def _message_card(message: NormalizedMessage) -> dict[str, Any]:
-    return {
-        "message_id": message.message_id,
-        "chat_id": message.chat_id,
-        "chat_type": message.chat_type,
-        "sender_id": message.sender_id,
-        "sender_name": message.sender_name,
-        "sent_at": message.sent_at,
-        "thread_id": message.thread_id,
-        "reply_to_message_id": message.reply_to_message_id,
-        "text": message.text,
-        "direct_mention": message.direct_mention,
-    }
-
-
-def _row_message_card(row: Any) -> dict[str, Any]:
-    return {
-        "message_id": row["message_id"],
-        "chat_id": row["chat_id"],
-        "chat_type": row["chat_type"],
-        "sender_id": row["sender_id"],
-        "sender_name": row["sender_name"],
-        "sender_role": row["sender_role"],
-        "sent_at": row["sent_at"],
-        "text": row["text"],
-        "thread_id": row["thread_id"],
-        "reply_to_message_id": row["reply_to_message_id"],
-    }
-
-
-def _task_card(task: TaskRecord) -> dict[str, Any]:
-    return {
-        "task_id": task.short_id,
-        "status": task.status,
-        "chat_id": task.chat_id,
-        "chat_type": task.chat_type,
-        "root_message_id": task.root_message_id,
-        "task_label": task.task_label,
-        "watch_until": task.watch_until,
-    }
-
-
-def _candidate_card(task: TaskRecord, matched_by: str) -> dict[str, Any]:
-    return _task_card(task) | {"matched_by": matched_by}
-
-
-def _resource_card(row: Any) -> dict[str, Any]:
-    return {
-        "message_id": row["message_id"],
-        "file_key": row["file_key"],
-        "resource_type": row["resource_type"],
-        "download_status": row["download_status"],
-        "path": row["path"],
-    }
 
 
 def _risk_rank(value: str) -> int:
