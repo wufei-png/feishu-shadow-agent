@@ -174,6 +174,11 @@ class HealthSuite:
         results.append(self._check_user_scopes(auth_json))
         results.append(self._check_bot_available(auth_json))
         results.append(self._check_owner_config())
+        hermes_results = self.hermes_checker(self.loaded_config)
+        if isinstance(hermes_results, list):
+            results.extend(hermes_results)
+        else:
+            results.append(hermes_results)
         self.store.record_health_results(run_id=self.run_id, results=results)
         return results
 
@@ -507,7 +512,7 @@ def _hermes_tool_permissions_result(loaded: LoadedConfig, result: AgentRunResult
             details,
         )
     help_text = f"{result.stdout}\n{result.stderr}"
-    required_flags = ["--toolsets", *_required_hermes_context_flags(loaded)]
+    required_flags = ["--toolsets", *_required_hermes_backend_flags(loaded)]
     missing = [flag for flag in required_flags if flag not in help_text]
     if policy.yolo and "--yolo" not in help_text:
         missing.append("--yolo")
@@ -528,8 +533,9 @@ def _hermes_tool_permissions_result(loaded: LoadedConfig, result: AgentRunResult
     )
 
 
-def _required_hermes_context_flags(loaded: LoadedConfig) -> list[str]:
+def _required_hermes_backend_flags(loaded: LoadedConfig) -> list[str]:
     backend = loaded.config.agent_backend
+    hermes = backend.hermes
     flags: list[str] = []
     if backend.config_scope == "isolated":
         flags.append("--ignore-user-config")
@@ -537,6 +543,10 @@ def _required_hermes_context_flags(loaded: LoadedConfig) -> list[str]:
         flags.append("--ignore-rules")
     if backend.explicit_context.skills:
         flags.append("--skills")
+    if hermes.model:
+        flags.append("--model")
+    if hermes.provider:
+        flags.append("--provider")
     return flags
 
 

@@ -180,6 +180,24 @@ def test_hermes_unreachable_is_critical_failure(tmp_path: Path) -> None:
     assert "hermes_reachable" in {result.name for result in results if result.is_critical_failure}
 
 
+def test_runtime_critical_health_includes_agent_backend(tmp_path: Path) -> None:
+    loaded = ConfigService().load(FIXTURE)
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    client = FakeFeishuClient()
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=store,
+        feishu_client=client,
+        hermes_checker=failed_hermes,
+        run_id="doctor_1",
+    )
+
+    results = suite.run_runtime_critical()
+
+    assert "hermes_reachable" in {result.name for result in results if result.is_critical_failure}
+    assert client.owner_message_dry_runs == []
+
+
 def test_hermes_cli_checker_version_critical_and_status_warning(
     monkeypatch,
 ) -> None:
@@ -309,6 +327,45 @@ agent_backend:
     permissions = next(result for result in results if result.name == "hermes_tool_permissions")
     assert permissions.is_critical_failure
     assert permissions.details["missing_flags"] == ["--skills"]
+
+
+def test_hermes_cli_checker_requires_configured_model_provider_flags(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+agent_backend:
+  hermes:
+    model: test-model
+    provider: test-provider
+""",
+        encoding="utf-8",
+    )
+    loaded = ConfigService().load(config_path)
+
+    def fake_run(argv, **kwargs):
+        if argv[1] == "--version":
+            return subprocess.CompletedProcess(argv, 0, stdout="Hermes Agent v0.16.0\n", stderr="")
+        if argv[1:3] == ["chat", "--help"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout="usage: hermes chat [--toolsets TOOLSETS] [--ignore-user-config] [--ignore-rules]\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    results = HermesCliChecker()(loaded)
+
+    permissions = next(result for result in results if result.name == "hermes_tool_permissions")
+    assert permissions.is_critical_failure
+    assert permissions.details["missing_flags"] == ["--model", "--provider"]
 
 
 def test_doctor_warns_when_explicit_agent_skill_is_missing(tmp_path: Path) -> None:
