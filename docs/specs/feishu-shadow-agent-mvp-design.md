@@ -411,10 +411,6 @@ Health 探测:
   mode: cli  -> hermes --version / hermes status
   mode: http -> GET hermes.health_url（仅可达性，不用于 chat）
 
-Prompt 隔离:
-  传 --ignore-rules，剥离 AGENTS.md / memory / 预加载 skill 注入。
-  不传 --ignore-user-config，保留个人助手的 ~/.hermes 配置、MCP、skills、provider。
-
 mode: http 不是 HTTP chat API；未来若接 Hermes API server，应单独设计客户端，不混用当前 health_url 字段。
 ```
 
