@@ -479,9 +479,13 @@ def _hermes_command_result(
 def _hermes_tool_permissions_result(loaded: LoadedConfig, result: AgentRunResult) -> HealthCheckResult:
     profile = loaded.config.tool_permissions
     policy = hermes_execution_policy(profile)
+    backend = loaded.config.agent_backend
     details = {
         "tool_permissions_profile": profile,
         "effective_args": policy.cli_args(),
+        "config_scope": backend.config_scope,
+        "auto_context": backend.auto_context,
+        "explicit_skills_count": len(backend.explicit_context.skills),
         "argv": result.argv,
         "stdout": result.stdout.strip(),
         "stderr": result.stderr.strip(),
@@ -498,7 +502,8 @@ def _hermes_tool_permissions_result(loaded: LoadedConfig, result: AgentRunResult
             details,
         )
     help_text = f"{result.stdout}\n{result.stderr}"
-    missing = ["--toolsets"] if "--toolsets" not in help_text else []
+    required_flags = ["--toolsets", *_required_hermes_context_flags(loaded)]
+    missing = [flag for flag in required_flags if flag not in help_text]
     if policy.yolo and "--yolo" not in help_text:
         missing.append("--yolo")
     if missing:
@@ -506,16 +511,28 @@ def _hermes_tool_permissions_result(loaded: LoadedConfig, result: AgentRunResult
             "hermes_tool_permissions",
             "critical",
             "failed",
-            "Hermes CLI does not expose required permission flags",
+            "Hermes CLI does not expose required backend flags",
             details | {"missing_flags": missing},
         )
     return HealthCheckResult(
         "hermes_tool_permissions",
         "critical",
         "ok",
-        "Hermes CLI supports configured tool permission mode",
+        "Hermes CLI supports configured backend flags",
         details,
     )
+
+
+def _required_hermes_context_flags(loaded: LoadedConfig) -> list[str]:
+    backend = loaded.config.agent_backend
+    flags: list[str] = []
+    if backend.config_scope == "isolated":
+        flags.append("--ignore-user-config")
+    if backend.auto_context == "disabled":
+        flags.append("--ignore-rules")
+    if backend.explicit_context.skills:
+        flags.append("--skills")
+    return flags
 
 
 def _resolve_executable_path(path: str | None) -> str | None:
