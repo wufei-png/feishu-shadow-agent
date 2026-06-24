@@ -50,7 +50,7 @@ python -m feishu_shadow_agent config schema
 | `logging.text_path` | string/null | `null` | 可选普通文本日志文件路径；相对路径基于配置文件目录解析。 |
 | `lark_cli.path` | string/null | `null` | 指定 `lark-cli` 路径；`null` 使用当前 `PATH`。 |
 | `lark_cli.timeout_seconds` | int `> 0` | `30` | `lark-cli` 子进程调用超时。 |
-| `agent_backend.provider` | `hermes`/`codex`/`claude_code` | `hermes` | Agent backend provider。当前版本只实现 `hermes`，`codex` 和 `claude_code` 是保留值，配置校验会拒绝。 |
+| `agent_backend.provider` | `hermes` | `hermes` | Agent backend provider。当前版本配置只接受 `hermes`；内部保留的其他 backend 类型尚未对配置开放。 |
 | `agent_backend.config_scope` | `isolated`/`native` | `isolated` | 是否加载普通用户级配置；不等同于清除 credentials、managed policy 或 auth state。当前 Hermes backend 的 `isolated` 映射为 `--ignore-user-config`。 |
 | `agent_backend.auto_context` | `disabled`/`enabled` | `disabled` | 是否加载 CLI 自带规则、memory、默认 skill 等隐式上下文。当前 Hermes backend 的 `disabled` 映射为 `--ignore-rules`。 |
 | `agent_backend.explicit_context.skills` | list[string] | `[]` | 显式注入 task session 的 skill 目录或 `SKILL.md` 文件路径。相对路径基于配置文件目录解析；`SKILL.md` 文件路径会规范化为其父目录。当前只传给 Hermes task session，不传给 task router。 |

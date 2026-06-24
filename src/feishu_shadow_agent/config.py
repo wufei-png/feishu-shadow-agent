@@ -8,8 +8,6 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, field_validator, model_validator
 
-from .agent_backend import AgentBackendProvider
-
 CONFIG_ENV_VAR = "FEISHU_SHADOW_AGENT_CONFIG"
 
 
@@ -145,6 +143,7 @@ RiskLevel = Literal["low", "medium", "high"]
 ToolPermissionsProfile = Literal["read_only", "guarded_write", "full_access"]
 ConfigScopeMode = Literal["isolated", "native"]
 AutoContextMode = Literal["disabled", "enabled"]
+ConfigAgentBackendProvider = Literal["hermes"]
 
 
 class ExplicitAgentContextConfig(StrictModel):
@@ -163,9 +162,9 @@ class ExplicitAgentContextConfig(StrictModel):
 
 
 class AgentBackendConfig(StrictModel):
-    provider: AgentBackendProvider = Field(
+    provider: ConfigAgentBackendProvider = Field(
         default="hermes",
-        description="Agent backend provider. Only hermes is implemented in this release; codex and claude_code are reserved.",
+        description="Agent backend provider. Config currently accepts only hermes.",
     )
     config_scope: ConfigScopeMode = Field(
         default="isolated",
@@ -180,12 +179,6 @@ class AgentBackendConfig(StrictModel):
         description="Context explicitly injected by feishu-shadow-agent instead of discovered from user-global state.",
     )
     hermes: HermesConfig = Field(default_factory=HermesConfig, description="Hermes backend settings.")
-
-    @model_validator(mode="after")
-    def validate_provider(self) -> "AgentBackendConfig":
-        if self.provider != "hermes":
-            raise ValueError(f"agent_backend.provider={self.provider!r} is reserved but not implemented")
-        return self
 
 
 class ReplyPolicyConfig(StrictModel):

@@ -32,7 +32,7 @@ cp config.example.yaml config.yaml
 - `owner.open_id` 是 owner 的飞书 open_id
 - `chats` 中需要自动回复的群配置了 `auto_reply: true`
 - 需要下载图片/文件资源的群配置了 `bot_joined: true`
-- `lark_cli.path` 和 `hermes.path` 留空时会使用当前 `PATH`
+- `lark_cli.path` 和 `agent_backend.hermes.path` 留空时会使用当前 `PATH`
 
 完整配置项见 [配置参考](docs/configuration.md)；JSON Schema 见 [schemas/config.schema.json](schemas/config.schema.json)。
 

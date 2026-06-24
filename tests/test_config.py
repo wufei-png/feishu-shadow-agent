@@ -35,6 +35,16 @@ def test_tracked_config_schema_matches_generated_schema() -> None:
     assert tracked_schema == ConfigService().json_schema_dict()
 
 
+def test_agent_backend_provider_schema_accepts_only_hermes() -> None:
+    schema = ConfigService().json_schema_dict()
+    provider_schema = schema["$defs"]["AgentBackendConfig"]["properties"]["provider"]
+
+    assert provider_schema.get("const") == "hermes"
+    assert "enum" not in provider_schema
+    assert "codex" not in json.dumps(provider_schema)
+    assert "claude_code" not in json.dumps(provider_schema)
+
+
 def test_missing_owner_fails(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("tool_permissions: guarded_write\n", encoding="utf-8")
@@ -153,7 +163,7 @@ agent_backend:
         ConfigService().load(config_path)
 
 
-def test_reserved_agent_backend_provider_is_rejected(tmp_path: Path) -> None:
+def test_unsupported_agent_backend_provider_is_rejected(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
@@ -165,5 +175,10 @@ agent_backend:
         encoding="utf-8",
     )
 
-    with pytest.raises(ConfigError, match="reserved but not implemented"):
+    with pytest.raises(ConfigError) as exc_info:
         ConfigService().load(config_path)
+
+    error = str(exc_info.value)
+    assert "agent_backend" in error
+    assert "provider" in error
+    assert "hermes" in error

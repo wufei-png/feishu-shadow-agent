@@ -4,13 +4,9 @@
       "additionalProperties": false,
       "properties": {
         "provider": {
+          "const": "hermes",
           "default": "hermes",
-          "description": "Agent backend provider. Only hermes is implemented in this release; codex and claude_code are reserved.",
-          "enum": [
-            "hermes",
-            "codex",
-            "claude_code"
-          ],
+          "description": "Agent backend provider. Config currently accepts only hermes.",
           "title": "Provider",
           "type": "string"
         },
