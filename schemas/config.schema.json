@@ -275,7 +275,7 @@
             }
           ],
           "default": null,
-          "description": "HTTP health URL used only when hermes.mode is 'http'; must start with http:// or https://.",
+          "description": "HTTP health URL used only when agent_backend.hermes.mode is 'http'; must start with http:// or https://.",
           "title": "Health Url"
         },
         "api_key_env": {
@@ -288,7 +288,7 @@
             }
           ],
           "default": "HERMES_API_KEY",
-          "description": "Environment variable name that holds the Hermes API key for http mode; the secret value is never stored here.",
+          "description": "Environment variable name that holds the Hermes API key for agent_backend.hermes.mode http; the secret value is never stored here.",
           "title": "Api Key Env"
         }
       },

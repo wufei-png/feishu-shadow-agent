@@ -405,13 +405,13 @@ Python daemon 直接调用 Hermes CLI 非交互 `chat -q -Q`。不要用 user �
 
 ```text
 任务处理:
-  始终 hermes chat -q -Q（CLI 子进程），与 hermes.mode 无关。
+  始终 hermes chat -q -Q（CLI 子进程），与 agent_backend.hermes.mode 无关。
 
 Health 探测:
-  mode: cli  -> hermes --version / hermes status
-  mode: http -> GET hermes.health_url（仅可达性，不用于 chat）
+  agent_backend.hermes.mode: cli  -> hermes --version / hermes status
+  agent_backend.hermes.mode: http -> GET agent_backend.hermes.health_url（仅可达性，不用于 chat）
 
-mode: http 不是 HTTP chat API；未来若接 Hermes API server，应单独设计客户端，不混用当前 health_url 字段。
+agent_backend.hermes.mode: http 不是 HTTP chat API；未来若接 Hermes API server，应单独设计客户端，不混用当前 health_url 字段。
 ```
 
 职责拆分：

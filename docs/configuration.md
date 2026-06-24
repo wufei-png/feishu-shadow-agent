@@ -62,8 +62,8 @@ python -m feishu_shadow_agent config schema
 | `agent_backend.hermes.model` | string/null | `null` | 可选模型覆盖；`null` 时由 Hermes CLI 决定。`config_scope: isolated` 下不会读取用户全局 Hermes 配置。 |
 | `agent_backend.hermes.provider` | string/null | `null` | 可选 provider 覆盖；`null` 时由 Hermes CLI 决定。`config_scope: isolated` 下不会读取用户全局 Hermes 配置。 |
 | `agent_backend.hermes.timeout_seconds` | int `> 0` | `60` | Hermes 子进程或 health 调用超时。 |
-| `agent_backend.hermes.health_url` | string/null | `null` | 仅 `mode: http` 时使用；必须以 `http://` 或 `https://` 开头，HTTP 模式下必填。典型值为 `http://127.0.0.1:8642/health`。**不用于 chat/路由/会话调用**。 |
-| `agent_backend.hermes.api_key_env` | string/null | `HERMES_API_KEY` | `mode: http` 时可选 Bearer token 环境变量名。Hermes 官方 API server 常用 `API_SERVER_KEY`；`/health` 端点通常无需认证，此字段主要留给需要鉴权的 health URL。 |
+| `agent_backend.hermes.health_url` | string/null | `null` | 仅 `agent_backend.hermes.mode: http` 时使用；必须以 `http://` 或 `https://` 开头，HTTP 模式下必填。典型值为 `http://127.0.0.1:8642/health`。**不用于 chat/路由/会话调用**。 |
+| `agent_backend.hermes.api_key_env` | string/null | `HERMES_API_KEY` | `agent_backend.hermes.mode: http` 时可选 Bearer token 环境变量名。Hermes 官方 API server 常用 `API_SERVER_KEY`；`/health` 端点通常无需认证，此字段主要留给需要鉴权的 health URL。 |
 | `reply_policy.p2p_auto_reply` | bool | `true` | P2P 私聊在风险和置信度通过时是否允许自动回复。 |
 | `reply_policy.default_group_auto_reply` | bool | `false` | 未在 `chats` 显式配置的群是否默认允许自动回复。 |
 | `reply_policy.risk_level_max` | `low`/`medium`/`high` | `low` | 全局自动回复允许的最高风险等级。 |

@@ -109,11 +109,11 @@ class HermesConfig(StrictModel):
     timeout_seconds: int = Field(default=60, gt=0, description="Timeout in seconds for Hermes subprocess or health calls.")
     health_url: str | None = Field(
         default=None,
-        description="HTTP health URL used only when hermes.mode is 'http'; must start with http:// or https://.",
+        description="HTTP health URL used only when agent_backend.hermes.mode is 'http'; must start with http:// or https://.",
     )
     api_key_env: str | None = Field(
         default="HERMES_API_KEY",
-        description="Environment variable name that holds the Hermes API key for http mode; the secret value is never stored here.",
+        description="Environment variable name that holds the Hermes API key for agent_backend.hermes.mode http; the secret value is never stored here.",
     )
 
     @field_validator("health_url")
