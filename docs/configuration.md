@@ -10,7 +10,7 @@ python -m feishu_shadow_agent config validate --config config.yaml
 python -m feishu_shadow_agent config schema
 ```
 
-`config validate` 只校验 YAML 结构和 Pydantic 语义，不检查 Feishu、Hermes、SQLite 或 CLI 可用性。运行前完整健康检查仍使用 `doctor`。
+`config validate` 只校验 YAML 结构和 Pydantic 语义，不检查 Feishu、agent backend、SQLite 或 CLI 可用性。运行前完整健康检查仍使用 `doctor`。
 
 ## 顶层配置
 
@@ -22,14 +22,14 @@ python -m feishu_shadow_agent config schema
 | `storage` | object | 见下表 | 本地 SQLite 和资源下载目录。 |
 | `logging` | object | 见下表 | 本地 JSONL 日志路径。 |
 | `lark_cli` | object | 见下表 | `lark-cli` 可执行文件和超时。 |
-| `hermes` | object | 见下表 | Hermes 集成方式和调用参数。 |
+| `agent_backend` | object | 见下表 | Agent backend 选择、上下文隔离策略和 provider 专属参数。 |
 | `reply_policy` | object | 见下表 | 全局自动回复策略。 |
 | `chats` | map | `{}` | 按 Feishu `chat_id` 配置群级策略覆盖，例如 `oc_xxx`。 |
-| `tool_permissions` | enum | `guarded_write` | Hermes 工具权限档位：`read_only`、`guarded_write`、`full_access`。 |
+| `tool_permissions` | enum | `guarded_write` | Agent backend 工具权限档位：`read_only`、`guarded_write`、`full_access`。当前仅 Hermes backend 实现映射。 |
 | `retention` | object | 见下表 | 本地数据保留时间。 |
 | `debug` | object | 见下表 | 调试用持久化开关。 |
 
-未知字段会被拒绝。真实密钥不要写入 `config.yaml`，只允许写环境变量名，例如 `hermes.api_key_env`。
+未知字段会被拒绝。真实密钥不要写入 `config.yaml`，只允许写环境变量名，例如 `agent_backend.hermes.api_key_env`。
 
 ## 字段明细
 
@@ -50,16 +50,20 @@ python -m feishu_shadow_agent config schema
 | `logging.text_path` | string/null | `null` | 可选普通文本日志文件路径；相对路径基于配置文件目录解析。 |
 | `lark_cli.path` | string/null | `null` | 指定 `lark-cli` 路径；`null` 使用当前 `PATH`。 |
 | `lark_cli.timeout_seconds` | int `> 0` | `30` | `lark-cli` 子进程调用超时。 |
-| `hermes.mode` | `cli`/`http` | `cli` | 只影响 `doctor`/运行时 health 探测方式；**无论取何值，任务处理始终走本机 `hermes chat` CLI**。`http` 仅用于探测 Hermes gateway/API server 是否可达。 |
-| `hermes.path` | string/null | `null` | `cli` 模式下指定 Hermes 路径；`null` 使用当前 `PATH`。 |
-| `hermes.source` | string | `feishu-shadow-agent` | 传给 Hermes 会话和审计数据的来源标记；不能为空。官方建议第三方集成可用 `tool` 以从用户 session 列表中过滤；本项目保留自定义标签便于审计区分。 |
-| `hermes.router_max_turns` | int `> 0` | `4` | Hermes 任务路由调用的最大 tool iteration 轮数（`--max-turns`）。 |
-| `hermes.session_max_turns` | int `> 0` | `8` | Hermes 单任务会话调用的最大 tool iteration 轮数（`--max-turns`）。 |
-| `hermes.model` | string/null | `null` | 可选模型覆盖；`null` 时沿用本机 Hermes 配置（`~/.hermes/config.yaml` 或 Hermes 内置默认）。 |
-| `hermes.provider` | string/null | `null` | 可选 provider 覆盖；`null` 时沿用本机 Hermes 配置。 |
-| `hermes.timeout_seconds` | int `> 0` | `60` | Hermes 子进程或 health 调用超时。 |
-| `hermes.health_url` | string/null | `null` | 仅 `mode: http` 时使用；必须以 `http://` 或 `https://` 开头，HTTP 模式下必填。典型值为 `http://127.0.0.1:8642/health`。**不用于 chat/路由/会话调用**。 |
-| `hermes.api_key_env` | string/null | `HERMES_API_KEY` | `mode: http` 时可选 Bearer token 环境变量名。Hermes 官方 API server 常用 `API_SERVER_KEY`；`/health` 端点通常无需认证，此字段主要留给需要鉴权的 health URL。 |
+| `agent_backend.provider` | `hermes`/`codex`/`claude_code` | `hermes` | Agent backend provider。当前版本只实现 `hermes`，`codex` 和 `claude_code` 是保留值，配置校验会拒绝。 |
+| `agent_backend.config_scope` | `isolated`/`native` | `isolated` | 是否加载普通用户级配置；不等同于清除 credentials、managed policy 或 auth state。当前 Hermes backend 的 `isolated` 映射为 `--ignore-user-config`。 |
+| `agent_backend.auto_context` | `disabled`/`enabled` | `disabled` | 是否加载 CLI 自带规则、memory、默认 skill 等隐式上下文。当前 Hermes backend 的 `disabled` 映射为 `--ignore-rules`。 |
+| `agent_backend.explicit_context.skills` | list[string] | `[]` | 显式注入 task session 的 skill 目录或 `SKILL.md` 文件路径。相对路径基于配置文件目录解析；`SKILL.md` 文件路径会规范化为其父目录。当前只传给 Hermes task session，不传给 task router。 |
+| `agent_backend.hermes.mode` | `cli`/`http` | `cli` | 只影响 `doctor`/运行时 health 探测方式；**无论取何值，任务处理始终走本机 `hermes chat` CLI**。`http` 仅用于探测 Hermes gateway/API server 是否可达。 |
+| `agent_backend.hermes.path` | string/null | `null` | `cli` 模式下指定 Hermes 路径；`null` 使用当前 `PATH`。 |
+| `agent_backend.hermes.source` | string | `feishu-shadow-agent` | 传给 Hermes 会话和审计数据的来源标记；不能为空。官方建议第三方集成可用 `tool` 以从用户 session 列表中过滤；本项目保留自定义标签便于审计区分。 |
+| `agent_backend.hermes.router_max_turns` | int `> 0` | `4` | Hermes 任务路由调用的最大 tool iteration 轮数（`--max-turns`）。 |
+| `agent_backend.hermes.session_max_turns` | int `> 0` | `8` | Hermes 单任务会话调用的最大 tool iteration 轮数（`--max-turns`）。 |
+| `agent_backend.hermes.model` | string/null | `null` | 可选模型覆盖；`null` 时由 Hermes CLI 决定。`config_scope: isolated` 下不会读取用户全局 Hermes 配置。 |
+| `agent_backend.hermes.provider` | string/null | `null` | 可选 provider 覆盖；`null` 时由 Hermes CLI 决定。`config_scope: isolated` 下不会读取用户全局 Hermes 配置。 |
+| `agent_backend.hermes.timeout_seconds` | int `> 0` | `60` | Hermes 子进程或 health 调用超时。 |
+| `agent_backend.hermes.health_url` | string/null | `null` | 仅 `mode: http` 时使用；必须以 `http://` 或 `https://` 开头，HTTP 模式下必填。典型值为 `http://127.0.0.1:8642/health`。**不用于 chat/路由/会话调用**。 |
+| `agent_backend.hermes.api_key_env` | string/null | `HERMES_API_KEY` | `mode: http` 时可选 Bearer token 环境变量名。Hermes 官方 API server 常用 `API_SERVER_KEY`；`/health` 端点通常无需认证，此字段主要留给需要鉴权的 health URL。 |
 | `reply_policy.p2p_auto_reply` | bool | `true` | P2P 私聊在风险和置信度通过时是否允许自动回复。 |
 | `reply_policy.default_group_auto_reply` | bool | `false` | 未在 `chats` 显式配置的群是否默认允许自动回复。 |
 | `reply_policy.risk_level_max` | `low`/`medium`/`high` | `low` | 全局自动回复允许的最高风险等级。 |
@@ -74,11 +78,23 @@ python -m feishu_shadow_agent config schema
 | `chats.<chat_id>.confidence_threshold` | number `0..1` | `0.85` | 该群自动回复所需最低 Hermes 置信度。 |
 | `retention.raw_message_days` | int `>= 1` | `30` | 原始消息 payload 保留天数。 |
 | `retention.resource_days` | int `>= 1` | `30` | 下载资源文件保留天数。 |
-| `debug.save_full_hermes_io` | bool | `false` | 是否保存完整 Hermes 输入输出；常规运行应保持关闭。 |
+| `debug.save_full_agent_io` | bool | `false` | 是否保存完整 agent 输入输出；常规运行应保持关闭。 |
+
+## Agent Backend 上下文语义
+
+`config_scope`、`auto_context` 和 `explicit_context` 是 provider-neutral 语义，不应简单套用同名 CLI flag。未来新增 provider 时按下表落地：
+
+| Provider | `config_scope: isolated` | `auto_context: disabled` | `explicit_context` |
+| --- | --- | --- | --- |
+| Hermes | 传 `--ignore-user-config`。 | 传 `--ignore-rules`，跳过 Hermes 自动规则、memory 和预加载 skill。 | 当前只在 task session 传 `--skills <path>`，task router 不注入。 |
+| Codex | 可传 `codex exec --ignore-user-config`，但它只是不加载 `$CODEX_HOME/config.toml`；auth 仍使用 `CODEX_HOME`。 | 不要只映射为 `--ignore-rules`；该 flag 只跳过 user/project execpolicy `.rules`。禁用 `AGENTS.md`、memory、skills、MCP 等需要 wrapper 层隔离 `CODEX_HOME`、工作目录和显式 config。 | 用临时 `CODEX_HOME`、显式 `config.toml`、`skills.config`、受控工作目录和必要 prompt 模拟。 |
+| Claude Code | CLI 可用 `--setting-sources` 限制 user/project/local settings；`--bare` 是更强的最小模式，会连带改变 auth 和启动行为。SDK 用 `settingSources`。 | CLI 可用 `--safe-mode` 禁大多数自定义上下文；需要更强隔离时才用 `--bare`。SDK 用 `settingSources`，并显式控制 plugins、MCP、memory 等非 settings 输入。 | CLI/SDK 都可显式提供 settings、system prompt、plugins、MCP、agents、skills；MCP 隔离需配合 `--strict-mcp-config`。 |
+
+最重要的边界：Codex `--ignore-rules` 不是“禁项目规则、memory、skills”的总开关；它只处理 execpolicy `.rules`。
 
 ## 权限档位
 
-`tool_permissions` 控制传给 Hermes 的 `--toolsets` / `--yolo` 参数，并叠加本项目的 reply policy、审批队列和 dispatch gate。它与飞书对外发送权限是两套机制。
+`tool_permissions` 控制传给 agent backend 的工具权限。当前 Hermes backend 会映射为 `--toolsets` / `--yolo` 参数，并叠加本项目的 reply policy、审批队列和 dispatch gate。它与飞书对外发送权限是两套机制。
 
 | `tool_permissions` | Hermes CLI 参数 | 实际边界 |
 | --- | --- | --- |
@@ -103,15 +119,17 @@ daemon 通过 `subprocess` 以无 TTY 方式调用 `hermes chat -q -Q`。在此�
 任务路由和任务会话统一构造：
 
 ```text
-hermes chat -q <prompt> -Q --source <source> --toolsets <...> [--yolo] --ignore-rules --max-turns N [--resume <session_id>] [--model ...] [--provider ...]
+hermes chat -q <prompt> -Q --source <source> --toolsets <...> [--yolo] --max-turns N [--ignore-user-config] [--ignore-rules] [--skills <path> ...] [--resume <session_id>] [--model ...] [--provider ...]
 ```
 
 - `-Q`：程序化模式，stdout 为模型最终回复，stderr 输出 `session_id:`。
-- `--ignore-rules`：跳过 `AGENTS.md`、`SOUL.md`、memory 和预加载 skill 的自动注入，避免仓库/编辑器规则污染飞书任务 prompt。
+- `--ignore-user-config`：默认由 `agent_backend.config_scope: isolated` 启用，避免用户全局配置改变后台服务行为。
+- `--ignore-rules`：默认由 `agent_backend.auto_context: disabled` 启用，跳过 `AGENTS.md`、`SOUL.md`、memory 和预加载 skill 的自动注入，避免仓库/编辑器规则污染飞书任务 prompt。
+- `--skills <path>`：只在 task session 中根据 `agent_backend.explicit_context.skills` 注入；task router 默认不加载 skill，保持路由决策更窄、更稳定。
 
 ### `mode: http` 的范围
 
-`hermes.mode: http` **仅**改变 health 检查：对 `hermes.health_url` 发 `GET`，可选带 `hermes.api_key_env` 中的 Bearer token。任务处理、路由、会话恢复**始终**走 CLI，与 `mode` 无关。
+`agent_backend.hermes.mode: http` **仅**改变 health 检查：对 `agent_backend.hermes.health_url` 发 `GET`，可选带 `agent_backend.hermes.api_key_env` 中的 Bearer token。任务处理、路由、会话恢复**始终**走 CLI，与 `mode` 无关。
 
 ## Schema
 

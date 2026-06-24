@@ -8,6 +8,8 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, field_validator, model_validator
 
+from .agent_backend import AgentBackendProvider
+
 CONFIG_ENV_VAR = "FEISHU_SHADOW_AGENT_CONFIG"
 
 
@@ -122,7 +124,7 @@ class HermesConfig(StrictModel):
         if value is None:
             return value
         if not value.startswith(("http://", "https://")):
-            raise ValueError("hermes.health_url must start with http:// or https://")
+            raise ValueError("agent_backend.hermes.health_url must start with http:// or https://")
         return value
 
     @field_validator("source")
@@ -135,12 +137,55 @@ class HermesConfig(StrictModel):
     @model_validator(mode="after")
     def validate_http_mode(self) -> "HermesConfig":
         if self.mode == "http" and not self.health_url:
-            raise ValueError("hermes.health_url is required when hermes.mode is http")
+            raise ValueError("agent_backend.hermes.health_url is required when agent_backend.hermes.mode is http")
         return self
 
 
 RiskLevel = Literal["low", "medium", "high"]
 ToolPermissionsProfile = Literal["read_only", "guarded_write", "full_access"]
+ConfigScopeMode = Literal["isolated", "native"]
+AutoContextMode = Literal["disabled", "enabled"]
+
+
+class ExplicitAgentContextConfig(StrictModel):
+    skills: list[str] = Field(
+        default_factory=list,
+        description="Explicit skill directory paths or SKILL.md file paths to pass only to task-session agent turns.",
+    )
+
+    @field_validator("skills")
+    @classmethod
+    def validate_skills(cls, value: list[str]) -> list[str]:
+        cleaned = [item.strip() for item in value]
+        if any(not item for item in cleaned):
+            raise ValueError("agent_backend.explicit_context.skills entries must not be empty")
+        return cleaned
+
+
+class AgentBackendConfig(StrictModel):
+    provider: AgentBackendProvider = Field(
+        default="hermes",
+        description="Agent backend provider. Only hermes is implemented in this release; codex and claude_code are reserved.",
+    )
+    config_scope: ConfigScopeMode = Field(
+        default="isolated",
+        description="Whether agent CLI calls load user-global configuration or run isolated from it.",
+    )
+    auto_context: AutoContextMode = Field(
+        default="disabled",
+        description="Whether agent CLI calls auto-load rules, memory, and implicit skill context.",
+    )
+    explicit_context: ExplicitAgentContextConfig = Field(
+        default_factory=ExplicitAgentContextConfig,
+        description="Context explicitly injected by feishu-shadow-agent instead of discovered from user-global state.",
+    )
+    hermes: HermesConfig = Field(default_factory=HermesConfig, description="Hermes backend settings.")
+
+    @model_validator(mode="after")
+    def validate_provider(self) -> "AgentBackendConfig":
+        if self.provider != "hermes":
+            raise ValueError(f"agent_backend.provider={self.provider!r} is reserved but not implemented")
+        return self
 
 
 class ReplyPolicyConfig(StrictModel):
@@ -201,9 +246,9 @@ class RetentionConfig(StrictModel):
 
 
 class DebugConfig(StrictModel):
-    save_full_hermes_io: StrictBool = Field(
+    save_full_agent_io: StrictBool = Field(
         default=False,
-        description="Whether to persist full Hermes prompts and outputs for debugging; keep false for normal operation.",
+        description="Whether to persist full agent prompts and outputs for debugging; keep false for normal operation.",
     )
 
 
@@ -214,7 +259,10 @@ class AppConfig(StrictModel):
     storage: StorageConfig = Field(default_factory=StorageConfig, description="Local SQLite and resource storage settings.")
     logging: LoggingConfig = Field(default_factory=LoggingConfig, description="Local structured logging settings.")
     lark_cli: LarkCliConfig = Field(default_factory=LarkCliConfig, description="lark-cli executable and timeout settings.")
-    hermes: HermesConfig = Field(default_factory=HermesConfig, description="Hermes integration and timeout settings.")
+    agent_backend: AgentBackendConfig = Field(
+        default_factory=AgentBackendConfig,
+        description="Agent backend provider, isolation policy, explicit context, and provider-specific settings.",
+    )
     reply_policy: ReplyPolicyConfig = Field(
         default_factory=ReplyPolicyConfig,
         description="Global auto-reply policy used before chat-specific overrides.",
@@ -225,7 +273,7 @@ class AppConfig(StrictModel):
     )
     tool_permissions: ToolPermissionsProfile = Field(
         default="guarded_write",
-        description="Hermes tool permission profile: read_only, guarded_write, or full_access.",
+        description="Agent backend tool permission profile: read_only, guarded_write, or full_access.",
     )
     retention: RetentionConfig = Field(default_factory=RetentionConfig, description="Local data retention settings.")
     debug: DebugConfig = Field(default_factory=DebugConfig, description="Debug-only persistence settings.")

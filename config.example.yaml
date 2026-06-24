@@ -25,18 +25,25 @@ lark_cli:
   path: null
   timeout_seconds: 30
 
-hermes:
-  mode: cli
-  path: null
-  source: feishu-shadow-agent
-  router_max_turns: 4
-  session_max_turns: 8
-  model: null
-  provider: null
-  timeout_seconds: 60
-  # HTTP mode compatibility. Used only when mode: http.
-  health_url: null
-  api_key_env: HERMES_API_KEY
+agent_backend:
+  provider: hermes
+  config_scope: isolated
+  auto_context: disabled
+  explicit_context:
+    # Skill directories or SKILL.md file paths; only injected into task-session turns.
+    skills: []
+  hermes:
+    mode: cli
+    path: null
+    source: feishu-shadow-agent
+    router_max_turns: 4
+    session_max_turns: 8
+    model: null
+    provider: null
+    timeout_seconds: 60
+    # HTTP mode compatibility. Used only when mode: http.
+    health_url: null
+    api_key_env: HERMES_API_KEY
 
 reply_policy:
   p2p_auto_reply: true
@@ -62,4 +69,4 @@ retention:
   resource_days: 30
 
 debug:
-  save_full_hermes_io: false
+  save_full_agent_io: false

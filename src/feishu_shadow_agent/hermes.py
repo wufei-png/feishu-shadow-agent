@@ -6,12 +6,12 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Protocol, Sequence
+from typing import Any, Callable, Sequence
 
-from .config import HermesConfig, ToolPermissionsProfile
-from .types import HermesCliResult
+from .agent_backend import AgentRunResult
+from .config import AutoContextMode, ConfigScopeMode, HermesConfig, ToolPermissionsProfile
 
-HermesRunner = Callable[[list[str], int], HermesCliResult]
+HermesRunner = Callable[[list[str], int], AgentRunResult]
 SESSION_ID_RE = re.compile(r"session_id:\s*([^\s]+)")
 
 
@@ -37,25 +37,25 @@ def hermes_execution_policy(profile: ToolPermissionsProfile) -> HermesExecutionP
     raise ValueError(f"unknown tool permissions profile: {profile}")
 
 
-class HermesClient(Protocol):
-    def task_router(self, prompt: str) -> HermesCliResult:
-        ...
-
-    def task_session(self, prompt: str, *, session_id: str | None = None) -> HermesCliResult:
-        ...
-
-
 class HermesCliClient:
+    provider = "hermes"
+
     def __init__(
         self,
         *,
         config: HermesConfig,
         tool_permissions: ToolPermissionsProfile = "guarded_write",
+        config_scope: ConfigScopeMode = "isolated",
+        auto_context: AutoContextMode = "disabled",
+        session_skills: Sequence[str | Path] = (),
         cwd: str | Path | None = None,
         runner: HermesRunner | None = None,
     ):
         self.config = config
         self.execution_policy = hermes_execution_policy(tool_permissions)
+        self.config_scope = config_scope
+        self.auto_context = auto_context
+        self.session_skills = [str(skill) for skill in session_skills]
         self.path = config.path or "hermes"
         self.cwd = None if cwd is None else Path(cwd)
         self._runner = runner
@@ -66,6 +66,7 @@ class HermesCliClient:
         prompt: str,
         max_turns: int,
         session_id: str | None = None,
+        include_session_skills: bool = False,
     ) -> list[str]:
         argv = [
             self.path,
@@ -76,10 +77,16 @@ class HermesCliClient:
             "--source",
             self.config.source,
             *self.execution_policy.cli_args(),
-            "--ignore-rules",
             "--max-turns",
             str(max_turns),
         ]
+        if self.config_scope == "isolated":
+            argv.append("--ignore-user-config")
+        if self.auto_context == "disabled":
+            argv.append("--ignore-rules")
+        if include_session_skills:
+            for skill in self.session_skills:
+                argv.extend(["--skills", skill])
         if session_id:
             argv.extend(["--resume", session_id])
         if self.config.model:
@@ -88,21 +95,22 @@ class HermesCliClient:
             argv.extend(["--provider", self.config.provider])
         return argv
 
-    def task_router(self, prompt: str) -> HermesCliResult:
+    def task_router(self, prompt: str) -> AgentRunResult:
         return self._run(
             self.build_chat_command(prompt=prompt, max_turns=self.config.router_max_turns),
         )
 
-    def task_session(self, prompt: str, *, session_id: str | None = None) -> HermesCliResult:
+    def task_session(self, prompt: str, *, session_id: str | None = None) -> AgentRunResult:
         return self._run(
             self.build_chat_command(
                 prompt=prompt,
                 max_turns=self.config.session_max_turns,
                 session_id=session_id,
+                include_session_skills=True,
             ),
         )
 
-    def _run(self, argv: list[str]) -> HermesCliResult:
+    def _run(self, argv: list[str]) -> AgentRunResult:
         if self._runner is not None:
             result = self._runner(argv, self.config.timeout_seconds)
         else:
@@ -116,7 +124,7 @@ class HermesCliClient:
         try:
             json_data: Any = json.loads(stdout)
         except json.JSONDecodeError as exc:
-            return HermesCliResult(
+            return AgentRunResult(
                 argv=result.argv,
                 exit_code=result.exit_code,
                 stdout=result.stdout,
@@ -124,8 +132,9 @@ class HermesCliClient:
                 session_id=parsed_session_id,
                 error=f"stdout was not valid JSON: {exc}",
                 latency_ms=result.latency_ms,
+                backend_provider=self.provider,
             )
-        return HermesCliResult(
+        return AgentRunResult(
             argv=result.argv,
             exit_code=result.exit_code,
             stdout=result.stdout,
@@ -133,10 +142,11 @@ class HermesCliClient:
             json_data=json_data,
             session_id=parsed_session_id,
             latency_ms=result.latency_ms,
+            backend_provider=self.provider,
         )
 
 
-def _run_subprocess(argv: Sequence[str], timeout_seconds: int, *, cwd: Path | None = None) -> HermesCliResult:
+def _run_subprocess(argv: Sequence[str], timeout_seconds: int, *, cwd: Path | None = None) -> AgentRunResult:
     started = time.monotonic()
     try:
         completed = subprocess.run(
@@ -148,7 +158,7 @@ def _run_subprocess(argv: Sequence[str], timeout_seconds: int, *, cwd: Path | No
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        return HermesCliResult(
+        return AgentRunResult(
             argv=list(argv),
             exit_code=None,
             stdout=exc.stdout or "",
@@ -156,11 +166,18 @@ def _run_subprocess(argv: Sequence[str], timeout_seconds: int, *, cwd: Path | No
             error=f"command timed out after {timeout_seconds}s",
             timed_out=True,
             latency_ms=_latency_ms(started),
+            backend_provider="hermes",
         )
     except OSError as exc:
-        return HermesCliResult(argv=list(argv), exit_code=None, error=str(exc), latency_ms=_latency_ms(started))
+        return AgentRunResult(
+            argv=list(argv),
+            exit_code=None,
+            error=str(exc),
+            latency_ms=_latency_ms(started),
+            backend_provider="hermes",
+        )
     if completed.returncode != 0:
-        return HermesCliResult(
+        return AgentRunResult(
             argv=list(argv),
             exit_code=completed.returncode,
             stdout=completed.stdout,
@@ -168,14 +185,16 @@ def _run_subprocess(argv: Sequence[str], timeout_seconds: int, *, cwd: Path | No
             session_id=_parse_session_id(completed.stderr),
             error=completed.stderr.strip() or completed.stdout.strip() or "command failed",
             latency_ms=_latency_ms(started),
+            backend_provider="hermes",
         )
-    return HermesCliResult(
+    return AgentRunResult(
         argv=list(argv),
         exit_code=completed.returncode,
         stdout=completed.stdout,
         stderr=completed.stderr,
         session_id=_parse_session_id(completed.stderr),
         latency_ms=_latency_ms(started),
+        backend_provider="hermes",
     )
 
 

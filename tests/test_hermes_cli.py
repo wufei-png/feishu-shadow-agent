@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from feishu_shadow_agent.agent_backend import AgentRunResult
 from feishu_shadow_agent.config import HermesConfig
 from feishu_shadow_agent.hermes import HermesCliClient
-from feishu_shadow_agent.types import HermesCliResult
 
 
 def test_hermes_cli_builds_guarded_write_chat_command_with_model_provider_and_resume() -> None:
@@ -27,9 +27,10 @@ def test_hermes_cli_builds_guarded_write_chat_command_with_model_provider_and_re
         "feishu-shadow-agent",
         "--toolsets",
         "hermes-cli",
-        "--ignore-rules",
         "--max-turns",
         "7",
+        "--ignore-user-config",
+        "--ignore-rules",
         "--resume",
         "sid_1",
         "--model",
@@ -58,9 +59,37 @@ def test_hermes_cli_maps_full_access_to_yolo_full_toolset() -> None:
     assert "--yolo" in argv
 
 
+def test_hermes_cli_can_use_native_config_and_auto_context() -> None:
+    client = HermesCliClient(
+        config=HermesConfig(path="/bin/hermes"),
+        config_scope="native",
+        auto_context="enabled",
+    )
+
+    argv = client.build_chat_command(prompt="{}", max_turns=1)
+
+    assert "--ignore-user-config" not in argv
+    assert "--ignore-rules" not in argv
+
+
+def test_hermes_cli_injects_explicit_skills_only_for_task_session() -> None:
+    client = HermesCliClient(
+        config=HermesConfig(path="/bin/hermes"),
+        session_skills=["/skills/triage", "/skills/support"],
+    )
+
+    router_argv = client.build_chat_command(prompt="{}", max_turns=1)
+    session_argv = client.build_chat_command(prompt="{}", max_turns=1, include_session_skills=True)
+
+    assert "--skills" not in router_argv
+    assert session_argv.count("--skills") == 2
+    assert session_argv[session_argv.index("--skills") + 1] == "/skills/triage"
+    assert session_argv[session_argv.index("--skills", session_argv.index("--skills") + 1) + 1] == "/skills/support"
+
+
 def test_hermes_cli_parses_json_and_session_id() -> None:
-    def runner(argv: list[str], timeout: int) -> HermesCliResult:
-        return HermesCliResult(
+    def runner(argv: list[str], timeout: int) -> AgentRunResult:
+        return AgentRunResult(
             argv=argv,
             exit_code=0,
             stdout='{"route":"ignore","confidence":1,"updated_watch_keys":[]}',
@@ -77,8 +106,8 @@ def test_hermes_cli_parses_json_and_session_id() -> None:
 
 
 def test_hermes_cli_rejects_non_json_stdout() -> None:
-    def runner(argv: list[str], timeout: int) -> HermesCliResult:
-        return HermesCliResult(argv=argv, exit_code=0, stdout="not json", stderr="session_id: sid")
+    def runner(argv: list[str], timeout: int) -> AgentRunResult:
+        return AgentRunResult(argv=argv, exit_code=0, stdout="not json", stderr="session_id: sid")
 
     client = HermesCliClient(config=HermesConfig(path="hermes"), runner=runner)
 

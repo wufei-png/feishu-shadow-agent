@@ -23,7 +23,7 @@ EXPECTED_TABLES = {
     "chat_policies",
     "config_suggestions",
     "routing_audits",
-    "hermes_audits",
+    "agent_audits",
     "approval_commands",
     "message_processing",
 }
@@ -113,7 +113,7 @@ def test_p3_migration_clears_legacy_fake_hermes_session_and_send_reply_guard(tmp
     with store.connect() as conn:
         conn.execute(
             """
-            INSERT INTO tasks(short_id, status, chat_id, root_message_id, task_label, hermes_session_id, created_at, updated_at)
+            INSERT INTO tasks(short_id, status, chat_id, root_message_id, task_label, agent_session_id, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             ("t_legacy", "watching", "oc_1", "om_1", "label", "feishu-task-t_legacy", "now", "now"),
@@ -121,7 +121,7 @@ def test_p3_migration_clears_legacy_fake_hermes_session_and_send_reply_guard(tmp
         task_id = conn.execute("SELECT id FROM tasks WHERE short_id = ?", ("t_legacy",)).fetchone()["id"]
     store.migrate()
 
-    assert store.get_initialized_hermes_session_id(task_id) is None
+    assert store.get_initialized_agent_session_id(task_id) is None
     first = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_1",
@@ -152,16 +152,101 @@ def test_p3_migration_clears_legacy_fake_hermes_session_and_send_reply_guard(tmp
     assert retried_action.result == {}
 
 
-def test_hermes_audits_include_tool_permissions_profile(tmp_path: Path) -> None:
+def test_agent_audits_include_tool_permissions_profile(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.migrate()
 
     with store.connect() as conn:
         columns = {
-            row["name"] for row in conn.execute("PRAGMA table_info(hermes_audits)").fetchall()
+            row["name"] for row in conn.execute("PRAGMA table_info(agent_audits)").fetchall()
         }
 
     assert "tool_permissions_profile" in columns
+
+
+def test_agent_backend_rename_migrates_existing_hermes_schema(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    with store.connect() as conn:
+        conn.executescript(
+            """
+            CREATE TABLE schema_migrations (
+              version TEXT PRIMARY KEY,
+              applied_at TEXT NOT NULL
+            );
+            CREATE TABLE tasks (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              short_id TEXT NOT NULL UNIQUE,
+              status TEXT NOT NULL,
+              hermes_session_id TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE TABLE hermes_audits (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              request_type TEXT NOT NULL,
+              task_id INTEGER,
+              hermes_session_id TEXT,
+              input_message_ids_json TEXT NOT NULL DEFAULT '[]',
+              input_resource_ids_json TEXT NOT NULL DEFAULT '[]',
+              response_json TEXT,
+              error TEXT,
+              latency_ms INTEGER,
+              prompt_json TEXT,
+              created_at TEXT NOT NULL,
+              tool_permissions_profile TEXT
+            );
+            CREATE INDEX idx_hermes_audits_task ON hermes_audits(task_id, created_at);
+            INSERT INTO schema_migrations(version, applied_at) VALUES
+              ('0001_foundation', 'now'),
+              ('0002_ingestion_routing', 'now'),
+              ('0003_hermes_approval', 'now'),
+              ('0004_message_processing', 'now'),
+              ('0005_hermes_tool_permissions', 'now');
+            INSERT INTO tasks(short_id, status, hermes_session_id, created_at, updated_at) VALUES
+              ('t_real', 'watching', 'sid_old', 'now', 'now'),
+              ('t_fake', 'watching', 'feishu-task-t_fake', 'now', 'now');
+            INSERT INTO hermes_audits(
+              request_type, task_id, hermes_session_id, input_message_ids_json,
+              input_resource_ids_json, created_at, tool_permissions_profile
+            ) VALUES ('task_session', 1, 'sid_old', '[]', '[]', 'now', 'guarded_write');
+            """
+        )
+
+    store.migrate()
+
+    with store.connect() as conn:
+        task_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        audit_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(agent_audits)").fetchall()
+        }
+        tables = {
+            row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+        indexes = {
+            row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()
+        }
+        real_task = conn.execute("SELECT agent_session_id FROM tasks WHERE short_id = 't_real'").fetchone()
+        fake_task = conn.execute("SELECT agent_session_id FROM tasks WHERE short_id = 't_fake'").fetchone()
+        audit = conn.execute(
+            "SELECT backend_provider, agent_session_id, tool_permissions_profile FROM agent_audits"
+        ).fetchone()
+
+    assert "agent_session_id" in task_columns
+    assert "hermes_session_id" not in task_columns
+    assert "agent_audits" in tables
+    assert "hermes_audits" not in tables
+    assert {"backend_provider", "agent_session_id", "tool_permissions_profile"} <= audit_columns
+    assert "idx_agent_audits_task" in indexes
+    assert "idx_hermes_audits_task" not in indexes
+    assert real_task["agent_session_id"] == "sid_old"
+    assert fake_task["agent_session_id"] is None
+    assert dict(audit) == {
+        "backend_provider": "hermes",
+        "agent_session_id": "sid_old",
+        "tool_permissions_profile": "guarded_write",
+    }
 
 
 def test_send_reply_retry_does_not_revive_failed_action_when_same_text_was_sent(tmp_path: Path) -> None:

@@ -23,7 +23,10 @@ def test_load_minimal_config() -> None:
     assert loaded.config.logging.text_path == "logs/test.log"
     assert loaded.config.tool_permissions == "guarded_write"
     assert loaded.config.chats["oc_test"].auto_reply is True
-    assert loaded.config.hermes.mode == "cli"
+    assert loaded.config.agent_backend.provider == "hermes"
+    assert loaded.config.agent_backend.config_scope == "isolated"
+    assert loaded.config.agent_backend.auto_context == "disabled"
+    assert loaded.config.agent_backend.hermes.mode == "cli"
 
 
 def test_tracked_config_schema_matches_generated_schema() -> None:
@@ -71,19 +74,19 @@ tool_permissions:
         ConfigService().load(config_path)
 
 
-def test_legacy_hermes_toolsets_config_is_rejected(tmp_path: Path) -> None:
+def test_top_level_hermes_config_is_rejected(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
 owner:
   open_id: ou_owner
 hermes:
-  toolsets: safe
+  mode: cli
 """,
         encoding="utf-8",
     )
 
-    with pytest.raises(ConfigError, match="toolsets"):
+    with pytest.raises(ConfigError, match="hermes"):
         ConfigService().load(config_path)
 
 
@@ -127,7 +130,7 @@ def test_redacted_config_does_not_leak_env_secret(monkeypatch: pytest.MonkeyPatc
 
     redacted = service.redacted_dict(loaded.config)
 
-    assert redacted["hermes"]["api_key_env"] == "HERMES_API_KEY"
+    assert redacted["agent_backend"]["hermes"]["api_key_env"] == "HERMES_API_KEY"
     assert "super-secret-value" not in str(redacted)
     assert os.environ["HERMES_API_KEY"] == "super-secret-value"
 
@@ -138,11 +141,29 @@ def test_http_hermes_mode_requires_health_url(tmp_path: Path) -> None:
         """
 owner:
   open_id: ou_owner
-hermes:
-  mode: http
+agent_backend:
+  provider: hermes
+  hermes:
+    mode: http
 """,
         encoding="utf-8",
     )
 
     with pytest.raises(ConfigError, match="health_url"):
+        ConfigService().load(config_path)
+
+
+def test_reserved_agent_backend_provider_is_rejected(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+agent_backend:
+  provider: codex
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="reserved but not implemented"):
         ConfigService().load(config_path)

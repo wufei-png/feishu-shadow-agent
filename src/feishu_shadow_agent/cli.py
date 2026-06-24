@@ -18,7 +18,7 @@ from .feishu.lark_cli import LarkCliClient
 from .health import HealthSuite, has_critical_failure, summarize_results
 from .hermes import HermesCliClient
 from .jsonl import JSONLLogger
-from .paths import resolve_relative_path
+from .paths import resolve_agent_skill_path, resolve_relative_path
 from .processing import TaskProcessingService
 from .retention import RetentionService
 from .store.sqlite_store import SQLiteStore
@@ -144,15 +144,23 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         cwd=loaded.base_dir,
     )
     suite = HealthSuite(loaded_config=loaded, store=store, feishu_client=client, run_id=run_id)
-    hermes_client = HermesCliClient(
-        config=loaded.config.hermes,
+    backend_config = loaded.config.agent_backend
+    session_skills = [
+        resolve_agent_skill_path(skill, loaded.base_dir)
+        for skill in backend_config.explicit_context.skills
+    ]
+    agent_backend = HermesCliClient(
+        config=backend_config.hermes,
         tool_permissions=loaded.config.tool_permissions,
+        config_scope=backend_config.config_scope,
+        auto_context=backend_config.auto_context,
+        session_skills=session_skills,
         cwd=loaded.base_dir,
     )
     task_processor = TaskProcessingService(
         store=store,
         config=loaded.config,
-        hermes_client=hermes_client,
+        agent_backend=agent_backend,
         logger=logger,
     )
     daemon = Daemon(

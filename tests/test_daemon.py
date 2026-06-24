@@ -5,13 +5,14 @@ from typing import Any
 
 import yaml
 
+from feishu_shadow_agent.agent_backend import AgentRunResult
 from feishu_shadow_agent.cli import main
 from feishu_shadow_agent.config import AppConfig, ChatPolicyConfig, OwnerConfig
 from feishu_shadow_agent.daemon import Daemon
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.processing import TaskProcessingService
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
-from feishu_shadow_agent.types import HealthCheckResult, HermesCliResult, LarkCliResult, MessagePage
+from feishu_shadow_agent.types import HealthCheckResult, LarkCliResult, MessagePage
 
 
 class FakeHealthSuite:
@@ -118,17 +119,19 @@ class FakeFeishu:
         return LarkCliResult(["lark-cli", "im", "+messages-resources-download"], 0, json_data={})
 
 
-class FakeHermes:
+class FakeAgentBackend:
+    provider = "hermes"
+
     def __init__(self):
         self.session_calls = 0
 
-    def task_router(self, prompt: str) -> HermesCliResult:
-        return HermesCliResult(["hermes"], 0, json_data={"route": "ignore", "confidence": 1, "reason": ""})
+    def task_router(self, prompt: str) -> AgentRunResult:
+        return AgentRunResult(["hermes"], 0, json_data={"route": "ignore", "confidence": 1, "reason": ""})
 
-    def task_session(self, prompt: str, *, session_id: str | None = None) -> HermesCliResult:
+    def task_session(self, prompt: str, *, session_id: str | None = None) -> AgentRunResult:
         self.session_calls += 1
         target = "om_group" if self.session_calls == 1 else "om_p2p"
-        return HermesCliResult(
+        return AgentRunResult(
             ["hermes"],
             0,
             json_data={
@@ -352,9 +355,9 @@ def test_approval_inbox_failure_blocks_send_reply_but_allows_owner_notification(
     processor = TaskProcessingService(
         store=store,
         config=config,
-        hermes_client=FakeHermes(),
+        agent_backend=FakeAgentBackend(),
         logger=logger,
-        hermes_retry_delays_seconds=(0.0, 0.0),
+        agent_retry_delays_seconds=(0.0, 0.0),
     )
     daemon = Daemon(
         store=store,
@@ -414,9 +417,9 @@ logging:
     processor = TaskProcessingService(
         store=store,
         config=config,
-        hermes_client=FakeHermes(),
+        agent_backend=FakeAgentBackend(),
         logger=logger,
-        hermes_retry_delays_seconds=(0.0, 0.0),
+        agent_retry_delays_seconds=(0.0, 0.0),
     )
     daemon = Daemon(
         store=store,
@@ -467,9 +470,9 @@ def test_fake_feishu_hermes_tick_runs_ordered_ingest_watch_and_dispatch(tmp_path
     processor = TaskProcessingService(
         store=store,
         config=config,
-        hermes_client=FakeHermes(),
+        agent_backend=FakeAgentBackend(),
         logger=logger,
-        hermes_retry_delays_seconds=(0.0, 0.0),
+        agent_retry_delays_seconds=(0.0, 0.0),
     )
     daemon = Daemon(
         store=store,

@@ -208,3 +208,104 @@ tool_permissions: full_access
     permissions = next(result for result in results if result.name == "hermes_tool_permissions")
     assert permissions.is_critical_failure
     assert permissions.details["missing_flags"] == ["--yolo"]
+
+
+def test_doctor_warns_when_explicit_agent_skill_is_missing(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+agent_backend:
+  explicit_context:
+    skills:
+      - skills/missing
+""",
+        encoding="utf-8",
+    )
+    loaded = ConfigService().load(config_path)
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    client = FakeFeishuClient()
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=store,
+        feishu_client=client,
+        hermes_checker=ok_hermes,
+        run_id="doctor_1",
+    )
+
+    results = suite.run(send_test=False)
+
+    explicit_skills = next(result for result in results if result.name == "agent_explicit_skills")
+    assert explicit_skills.severity == "warning"
+    assert explicit_skills.status == "failed"
+    assert explicit_skills.details["missing"] == [str(tmp_path / "skills" / "missing")]
+
+
+def test_doctor_accepts_explicit_agent_skill_directory(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "skills" / "support"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Support\n", encoding="utf-8")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+agent_backend:
+  explicit_context:
+    skills:
+      - skills/support
+""",
+        encoding="utf-8",
+    )
+    loaded = ConfigService().load(config_path)
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    client = FakeFeishuClient()
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=store,
+        feishu_client=client,
+        hermes_checker=ok_hermes,
+        run_id="doctor_1",
+    )
+
+    results = suite.run(send_test=False)
+
+    explicit_skills = next(result for result in results if result.name == "agent_explicit_skills")
+    assert explicit_skills.status == "ok"
+    assert explicit_skills.details["resolved"] == [str(skill_dir)]
+
+
+def test_doctor_accepts_explicit_agent_skill_file_path(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "skills" / "support"
+    skill_dir.mkdir(parents=True)
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text("# Support\n", encoding="utf-8")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+agent_backend:
+  explicit_context:
+    skills:
+      - skills/support/SKILL.md
+""",
+        encoding="utf-8",
+    )
+    loaded = ConfigService().load(config_path)
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    client = FakeFeishuClient()
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=store,
+        feishu_client=client,
+        hermes_checker=ok_hermes,
+        run_id="doctor_1",
+    )
+
+    results = suite.run(send_test=False)
+
+    explicit_skills = next(result for result in results if result.name == "agent_explicit_skills")
+    assert explicit_skills.status == "ok"
+    assert explicit_skills.details["resolved"] == [str(skill_dir)]

@@ -8,11 +8,13 @@ import urllib.error
 import urllib.request
 from typing import Callable
 
+from .agent_backend import AgentRunResult
 from .config import LoadedConfig
 from .feishu.client import FeishuClient
 from .hermes import hermes_execution_policy
+from .paths import resolve_agent_skill_path
 from .store.sqlite_store import SQLiteStore
-from .types import HealthCheckResult, HermesCliResult, LarkCliResult, new_run_id
+from .types import HealthCheckResult, LarkCliResult, new_run_id
 
 REQUIRED_USER_SCOPES = {
     "search:message",
@@ -30,13 +32,13 @@ HermesChecker = Callable[[LoadedConfig], HealthCheckResult | list[HealthCheckRes
 
 class HermesHttpChecker:
     def __call__(self, loaded: LoadedConfig) -> HealthCheckResult:
-        hermes = loaded.config.hermes
+        hermes = loaded.config.agent_backend.hermes
         if not hermes.health_url:
             return HealthCheckResult(
                 "hermes_reachable",
                 "critical",
                 "failed",
-                "hermes.health_url is not configured",
+                "agent_backend.hermes.health_url is not configured",
             )
         headers = {}
         if hermes.api_key_env:
@@ -80,7 +82,7 @@ class HermesHttpChecker:
 
 class HermesCliChecker:
     def __call__(self, loaded: LoadedConfig) -> list[HealthCheckResult]:
-        hermes = loaded.config.hermes
+        hermes = loaded.config.agent_backend.hermes
         path = hermes.path or "hermes"
         version = _run_hermes_command([path, "--version"], timeout_seconds=hermes.timeout_seconds)
         version_result = _hermes_command_result(
@@ -116,7 +118,7 @@ class HermesHealthChecker:
         self.http_checker = http_checker or HermesHttpChecker()
 
     def __call__(self, loaded: LoadedConfig) -> list[HealthCheckResult]:
-        checker = self.http_checker if loaded.config.hermes.mode == "http" else self.cli_checker
+        checker = self.http_checker if loaded.config.agent_backend.hermes.mode == "http" else self.cli_checker
         result = checker(loaded)
         return result if isinstance(result, list) else [result]
 
@@ -155,6 +157,7 @@ class HealthSuite:
             results.extend(hermes_results)
         else:
             results.append(hermes_results)
+        results.append(self._check_agent_explicit_skills())
         self.store.record_health_results(run_id=self.run_id, results=results)
         return results
 
@@ -327,6 +330,42 @@ class HealthSuite:
             {"dry_run": not send_test, "argv": result.argv},
         )
 
+    def _check_agent_explicit_skills(self) -> HealthCheckResult:
+        skills = self.loaded_config.config.agent_backend.explicit_context.skills
+        if not skills:
+            return HealthCheckResult(
+                "agent_explicit_skills",
+                "warning",
+                "ok",
+                "no explicit agent skills configured",
+            )
+        missing: list[str] = []
+        invalid: list[str] = []
+        resolved: list[str] = []
+        for skill in skills:
+            path = resolve_agent_skill_path(skill, self.loaded_config.base_dir)
+            resolved.append(str(path))
+            if not path.exists():
+                missing.append(str(path))
+                continue
+            if not path.is_dir() or not (path / "SKILL.md").is_file():
+                invalid.append(str(path))
+        if missing or invalid:
+            return HealthCheckResult(
+                "agent_explicit_skills",
+                "warning",
+                "failed",
+                "some explicit agent skills are missing or invalid",
+                {"configured": skills, "resolved": resolved, "missing": missing, "invalid": invalid},
+            )
+        return HealthCheckResult(
+            "agent_explicit_skills",
+            "warning",
+            "ok",
+            "explicit agent skills are present",
+            {"configured": skills, "resolved": resolved},
+        )
+
 
 def has_critical_failure(results: list[HealthCheckResult]) -> bool:
     return any(result.is_critical_failure for result in results)
@@ -362,7 +401,7 @@ def _command_failed(
     )
 
 
-def _run_hermes_command(argv: list[str], *, timeout_seconds: int) -> HermesCliResult:
+def _run_hermes_command(argv: list[str], *, timeout_seconds: int) -> AgentRunResult:
     started = time.monotonic()
     try:
         completed = subprocess.run(
@@ -373,7 +412,7 @@ def _run_hermes_command(argv: list[str], *, timeout_seconds: int) -> HermesCliRe
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        return HermesCliResult(
+        return AgentRunResult(
             argv=argv,
             exit_code=None,
             stdout=exc.stdout or "",
@@ -383,13 +422,13 @@ def _run_hermes_command(argv: list[str], *, timeout_seconds: int) -> HermesCliRe
             latency_ms=int((time.monotonic() - started) * 1000),
         )
     except OSError as exc:
-        return HermesCliResult(
+        return AgentRunResult(
             argv=argv,
             exit_code=None,
             error=str(exc),
             latency_ms=int((time.monotonic() - started) * 1000),
         )
-    return HermesCliResult(
+    return AgentRunResult(
         argv=argv,
         exit_code=completed.returncode,
         stdout=completed.stdout,
@@ -401,7 +440,7 @@ def _run_hermes_command(argv: list[str], *, timeout_seconds: int) -> HermesCliRe
 
 def _hermes_command_result(
     name: str,
-    result: HermesCliResult,
+    result: AgentRunResult,
     ok_message: str,
     failed_message: str,
     *,
@@ -437,7 +476,7 @@ def _hermes_command_result(
     )
 
 
-def _hermes_tool_permissions_result(loaded: LoadedConfig, result: HermesCliResult) -> HealthCheckResult:
+def _hermes_tool_permissions_result(loaded: LoadedConfig, result: AgentRunResult) -> HealthCheckResult:
     profile = loaded.config.tool_permissions
     policy = hermes_execution_policy(profile)
     details = {

@@ -1158,33 +1158,33 @@ class SQLiteStore:
                 ids,
             ).fetchall()
 
-    def get_initialized_hermes_session_id(self, task_id: int) -> str | None:
+    def get_initialized_agent_session_id(self, task_id: int) -> str | None:
         self.migrate()
         with self.connect() as conn:
             row = conn.execute(
-                "SELECT hermes_session_id FROM tasks WHERE id = ?",
+                "SELECT agent_session_id FROM tasks WHERE id = ?",
                 (task_id,),
             ).fetchone()
         if row is None:
             return None
-        session_id = row["hermes_session_id"]
+        session_id = row["agent_session_id"]
         if not session_id or str(session_id).startswith("feishu-task-"):
             return None
         return str(session_id)
 
-    def set_task_hermes_session_id(self, task_id: int, session_id: str) -> None:
+    def set_task_agent_session_id(self, task_id: int, session_id: str) -> None:
         self.migrate()
         with self.connect() as conn:
             conn.execute(
                 """
                 UPDATE tasks
-                SET hermes_session_id = ?, updated_at = ?
+                SET agent_session_id = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (session_id, utc_now_iso(), task_id),
             )
 
-    def update_task_after_hermes(
+    def update_task_after_agent(
         self,
         *,
         task_id: int,
@@ -1216,12 +1216,13 @@ class SQLiteStore:
                 params,
             )
 
-    def record_hermes_audit(
+    def record_agent_audit(
         self,
         *,
+        backend_provider: str,
         request_type: str,
         task_id: int | None,
-        hermes_session_id: str | None,
+        agent_session_id: str | None,
         input_message_ids: Iterable[str],
         input_resource_ids: Iterable[str],
         response: dict[str, Any] | None = None,
@@ -1234,16 +1235,17 @@ class SQLiteStore:
         with self.connect() as conn:
             conn.execute(
                 """
-                INSERT INTO hermes_audits(
-                  request_type, task_id, hermes_session_id, input_message_ids_json,
+                INSERT INTO agent_audits(
+                  backend_provider, request_type, task_id, agent_session_id, input_message_ids_json,
                   input_resource_ids_json, response_json, error, latency_ms, prompt_json,
                   tool_permissions_profile, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    backend_provider,
                     request_type,
                     task_id,
-                    hermes_session_id,
+                    agent_session_id,
                     json.dumps(list(input_message_ids), ensure_ascii=False, default=str),
                     json.dumps(list(input_resource_ids), ensure_ascii=False, default=str),
                     None if response is None else json.dumps(response, ensure_ascii=False, default=str),
@@ -1884,7 +1886,7 @@ class SQLiteStore:
         cursor = conn.execute(
             """
             INSERT INTO tasks(
-              short_id, status, chat_id, root_message_id, task_label, hermes_session_id,
+              short_id, status, chat_id, root_message_id, task_label, agent_session_id,
               created_at, updated_at, chat_type, thread_id, watch_until, last_user_message
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -2080,7 +2082,7 @@ def _task_from_row(row: sqlite3.Row) -> TaskRecord:
         root_message_id=row["root_message_id"],
         task_label=row["task_label"],
         watch_until=row["watch_until"],
-        hermes_session_id=row["hermes_session_id"],
+        agent_session_id=row["agent_session_id"],
     )
 
 

@@ -10,19 +10,19 @@ from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from .agent_backend import AgentBackend, AgentRunResult
 from .config import AppConfig, ChatPolicyConfig
-from .hermes import HermesClient
 from .jsonl import JSONLLogger
 from .routing import CandidateCollector, RoutingResult
 from .store.sqlite_store import SQLiteStore
-from .types import HermesCliResult, NormalizedMessage, RouteDecision, TaskRecord
+from .types import NormalizedMessage, RouteDecision, TaskRecord
 
 WATCH_EXTEND_MINUTES = 120
-HERMES_MAX_ATTEMPTS = 3
-HERMES_AT_SPAN_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE | re.DOTALL)
+AGENT_MAX_ATTEMPTS = 3
+AGENT_AT_SPAN_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE | re.DOTALL)
 FORBIDDEN_MENTION_RE = re.compile(r"<at\b[^>]*>|</at>|@所有人|@_all|@all", re.IGNORECASE)
 WATCH_KEY_RE = re.compile(r"^(?:user|msg|thread):[^\s:]+$")
-TERMINAL_HERMES_ERROR_MARKERS = (
+TERMINAL_AGENT_ERROR_MARKERS = (
     "no such file",
     "not found",
     "permission denied",
@@ -37,7 +37,7 @@ TERMINAL_HERMES_ERROR_MARKERS = (
 
 
 class StrictModel(BaseModel):
-    # Hermes output is an API boundary. Unknown fields are rejected so prompt
+    # Agent output is an API boundary. Unknown fields are rejected so prompt
     # drift becomes an auditable owner path instead of silently changing policy.
     model_config = ConfigDict(extra="forbid")
 
@@ -85,14 +85,14 @@ class ComposedReply:
 
 
 @dataclass(frozen=True)
-class HermesAttemptOutcome:
-    result: HermesCliResult | None
+class AgentAttemptOutcome:
+    result: AgentRunResult | None
     attempt_count: int
     last_error: str | None = None
 
 
 class SendComposer:
-    """Build Feishu-safe reply text after Hermes proposes plain content."""
+    """Build Feishu-safe reply text after the agent proposes plain content."""
 
     def __init__(self, *, owner_open_id: str):
         self.owner_open_id = owner_open_id
@@ -104,8 +104,8 @@ class SendComposer:
         reply_target: Any,
         chat_type: str | None,
     ) -> ComposedReply:
-        had_forbidden = bool(HERMES_AT_SPAN_RE.search(proposed_reply) or FORBIDDEN_MENTION_RE.search(proposed_reply))
-        cleaned = HERMES_AT_SPAN_RE.sub("", proposed_reply)
+        had_forbidden = bool(AGENT_AT_SPAN_RE.search(proposed_reply) or FORBIDDEN_MENTION_RE.search(proposed_reply))
+        cleaned = AGENT_AT_SPAN_RE.sub("", proposed_reply)
         cleaned = FORBIDDEN_MENTION_RE.sub("", cleaned)
         cleaned = " ".join(cleaned.split())
         if chat_type == "group" and reply_target is not None:
@@ -207,21 +207,21 @@ class TaskProcessingService:
         *,
         store: SQLiteStore,
         config: AppConfig,
-        hermes_client: HermesClient,
+        agent_backend: AgentBackend,
         logger: JSONLLogger,
-        hermes_max_attempts: int = HERMES_MAX_ATTEMPTS,
-        hermes_retry_delays_seconds: tuple[float, ...] = (1.0, 3.0),
+        agent_max_attempts: int = AGENT_MAX_ATTEMPTS,
+        agent_retry_delays_seconds: tuple[float, ...] = (1.0, 3.0),
         sleep_func: Callable[[float], None] = time.sleep,
     ):
         self.store = store
         self.config = config
-        self.hermes = hermes_client
+        self.agent_backend = agent_backend
         self.logger = logger
         self.collector = CandidateCollector(store)
         self.approvals = ApprovalService(store=store, config=config)
         self.composer = SendComposer(owner_open_id=config.owner.open_id)
-        self.hermes_max_attempts = max(1, hermes_max_attempts)
-        self.hermes_retry_delays_seconds = hermes_retry_delays_seconds
+        self.agent_max_attempts = max(1, agent_max_attempts)
+        self.agent_retry_delays_seconds = agent_retry_delays_seconds
         self.sleep_func = sleep_func
 
     def process(
@@ -284,22 +284,22 @@ class TaskProcessingService:
             )
         return None
 
-    def _call_hermes_with_retries(
+    def _call_agent_with_retries(
         self,
-        call: Callable[[], HermesCliResult],
+        call: Callable[[], AgentRunResult],
         *,
         run_id: str | None,
         stage: str,
         message_id: str,
         task_id: int | None = None,
-    ) -> HermesAttemptOutcome:
-        last_result: HermesCliResult | None = None
+    ) -> AgentAttemptOutcome:
+        last_result: AgentRunResult | None = None
         last_error: str | None = None
         attempts = 0
-        for attempt in range(1, self.hermes_max_attempts + 1):
+        for attempt in range(1, self.agent_max_attempts + 1):
             attempts = attempt
             self.logger.debug(
-                "hermes_call_attempt_started",
+                "agent_call_attempt_started",
                 run_id=run_id,
                 task_id=None if task_id is None else str(task_id),
                 data={"stage": stage, "message_id": message_id, "attempt": attempt},
@@ -308,9 +308,9 @@ class TaskProcessingService:
                 result = call()
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
-                if attempt < self.hermes_max_attempts:
+                if attempt < self.agent_max_attempts:
                     self.logger.warning(
-                        "hermes_call_retrying",
+                        "agent_call_retrying",
                         run_id=run_id,
                         task_id=None if task_id is None else str(task_id),
                         data={
@@ -323,7 +323,7 @@ class TaskProcessingService:
                     self._sleep_before_retry(attempt)
                 else:
                     self.logger.error(
-                        "hermes_call_exception",
+                        "agent_call_exception",
                         run_id=run_id,
                         task_id=None if task_id is None else str(task_id),
                         data={
@@ -337,7 +337,7 @@ class TaskProcessingService:
             last_result = result
             if result.ok:
                 self.logger.debug(
-                    "hermes_call_succeeded",
+                    "agent_call_succeeded",
                     run_id=run_id,
                     task_id=None if task_id is None else str(task_id),
                     data={
@@ -347,11 +347,11 @@ class TaskProcessingService:
                         "latency_ms": result.latency_ms,
                     },
                 )
-                return HermesAttemptOutcome(result=result, attempt_count=attempt)
-            last_error = _hermes_result_error(result)
-            if not _is_retryable_hermes_result(result):
+                return AgentAttemptOutcome(result=result, attempt_count=attempt)
+            last_error = _agent_result_error(result)
+            if not _is_retryable_agent_result(result):
                 self.logger.error(
-                    "hermes_call_failed_terminal",
+                    "agent_call_failed_terminal",
                     run_id=run_id,
                     task_id=None if task_id is None else str(task_id),
                     data={
@@ -363,10 +363,10 @@ class TaskProcessingService:
                         "timed_out": result.timed_out,
                     },
                 )
-                return HermesAttemptOutcome(result=result, attempt_count=attempt, last_error=last_error)
-            if attempt < self.hermes_max_attempts:
+                return AgentAttemptOutcome(result=result, attempt_count=attempt, last_error=last_error)
+            if attempt < self.agent_max_attempts:
                 self.logger.warning(
-                    "hermes_call_retrying",
+                    "agent_call_retrying",
                     run_id=run_id,
                     task_id=None if task_id is None else str(task_id),
                     data={
@@ -381,7 +381,7 @@ class TaskProcessingService:
                 self._sleep_before_retry(attempt)
             else:
                 self.logger.error(
-                    "hermes_call_failed",
+                    "agent_call_failed",
                     run_id=run_id,
                     task_id=None if task_id is None else str(task_id),
                     data={
@@ -393,13 +393,13 @@ class TaskProcessingService:
                         "timed_out": result.timed_out,
                     },
                 )
-        return HermesAttemptOutcome(result=last_result, attempt_count=attempts, last_error=last_error)
+        return AgentAttemptOutcome(result=last_result, attempt_count=attempts, last_error=last_error)
 
     def _sleep_before_retry(self, attempt: int) -> None:
-        if attempt <= 0 or not self.hermes_retry_delays_seconds:
+        if attempt <= 0 or not self.agent_retry_delays_seconds:
             return
-        index = min(attempt - 1, len(self.hermes_retry_delays_seconds) - 1)
-        delay = self.hermes_retry_delays_seconds[index]
+        index = min(attempt - 1, len(self.agent_retry_delays_seconds) - 1)
+        delay = self.agent_retry_delays_seconds[index]
         if delay > 0:
             self.sleep_func(delay)
 
@@ -458,7 +458,7 @@ class TaskProcessingService:
                 "stage": stage,
                 "attempt_count": attempt_count,
                 "error": _truncate_error(last_error),
-                "message": "Hermes processing failed; no reply was generated.",
+                "message": "Agent processing failed; no reply was generated.",
                 "dedupe_key": f"owner-processing-failed:{message.message_id}:{stage}",
             },
         )
@@ -492,28 +492,29 @@ class TaskProcessingService:
             },
         )
         prompt = _router_prompt(message=message, active=active_candidates, historical=historical)
-        outcome = self._call_hermes_with_retries(
-            lambda: self.hermes.task_router(prompt),
+        outcome = self._call_agent_with_retries(
+            lambda: self.agent_backend.task_router(prompt),
             run_id=run_id,
             stage="task_router",
             message_id=message.message_id,
         )
         result = outcome.result
-        self.store.record_hermes_audit(
+        self.store.record_agent_audit(
+            backend_provider=self.agent_backend.provider,
             request_type="router",
             task_id=None,
-            hermes_session_id=None if result is None else result.session_id,
+            agent_session_id=None if result is None else result.session_id,
             input_message_ids=[message.message_id],
             input_resource_ids=[resource.file_key for resource in message.resources],
             response=result.json_data if result is not None and isinstance(result.json_data, dict) else None,
             error=outcome.last_error if result is None else result.error,
             latency_ms=None if result is None else result.latency_ms,
-            prompt={"text": prompt} if self.config.debug.save_full_hermes_io else None,
+            prompt={"text": prompt} if self.config.debug.save_full_agent_io else None,
             tool_permissions_profile=self.config.tool_permissions,
         )
         candidates_count = len(active_candidates) + len(historical)
         if result is None or not result.ok or not isinstance(result.json_data, dict):
-            last_error = outcome.last_error or (None if result is None else _hermes_result_error(result))
+            last_error = outcome.last_error or (None if result is None else _agent_result_error(result))
             self.logger.error(
                 "task_router_failed",
                 run_id=run_id,
@@ -754,7 +755,7 @@ class TaskProcessingService:
             )
             self.store.record_routing_audit(message_id=message.message_id, decision=decision)
             if output.route == "reopen_task":
-                self.store.update_task_after_hermes(task_id=target.id, status="watching", watch_until=watch_until)
+                self.store.update_task_after_agent(task_id=target.id, status="watching", watch_until=watch_until)
             self._mark_processing_processed(
                 message=message,
                 stage="task_router",
@@ -775,7 +776,7 @@ class TaskProcessingService:
             )
             return RoutingResult(decision=decision, task=self.store.get_task_by_id(target.id))
         if output.route == "close_task":
-            self.store.update_task_after_hermes(task_id=target.id, status="closed")
+            self.store.update_task_after_agent(task_id=target.id, status="closed")
             self.store.record_routing_audit(
                 message_id=message.message_id,
                 decision=RouteDecision(
@@ -814,7 +815,7 @@ class TaskProcessingService:
         watch_until: str,
         run_id: str,
     ) -> ProcessingResult:
-        session_id = self.store.get_initialized_hermes_session_id(task.id)
+        session_id = self.store.get_initialized_agent_session_id(task.id)
         prompt_message_ids = self._task_session_prompt_message_ids(task=task, message=message, session_id=session_id)
         resources = self.store.list_resources_for_messages(prompt_message_ids)
         reply_target_message_ids = _reply_target_message_ids(task=task, current_message_id=message.message_id)
@@ -837,28 +838,29 @@ class TaskProcessingService:
             messages=self.store.get_messages_by_ids(prompt_message_ids),
             resources=resources,
         )
-        outcome = self._call_hermes_with_retries(
-            lambda: self.hermes.task_session(prompt, session_id=session_id),
+        outcome = self._call_agent_with_retries(
+            lambda: self.agent_backend.task_session(prompt, session_id=session_id),
             run_id=run_id,
             stage="task_session",
             message_id=message.message_id,
             task_id=task.id,
         )
         result = outcome.result
-        self.store.record_hermes_audit(
+        self.store.record_agent_audit(
+            backend_provider=self.agent_backend.provider,
             request_type="task_session",
             task_id=task.id,
-            hermes_session_id=session_id if result is None else result.session_id or session_id,
+            agent_session_id=session_id if result is None else result.session_id or session_id,
             input_message_ids=prompt_message_ids,
             input_resource_ids=[row["file_key"] for row in resources],
             response=result.json_data if result is not None and isinstance(result.json_data, dict) else None,
             error=outcome.last_error if result is None else result.error,
             latency_ms=None if result is None else result.latency_ms,
-            prompt={"text": prompt} if self.config.debug.save_full_hermes_io else None,
+            prompt={"text": prompt} if self.config.debug.save_full_agent_io else None,
             tool_permissions_profile=self.config.tool_permissions,
         )
         if result is None or not result.ok or not isinstance(result.json_data, dict):
-            last_error = outcome.last_error or (None if result is None else _hermes_result_error(result))
+            last_error = outcome.last_error or (None if result is None else _agent_result_error(result))
             self.logger.error(
                 "task_session_failed",
                 run_id=run_id,
@@ -876,7 +878,7 @@ class TaskProcessingService:
                 task_id=task.id,
                 attempt_count=outcome.attempt_count,
                 last_error=last_error,
-                terminal_reason="hermes_task_session_failed",
+                terminal_reason="agent_task_session_failed",
             )
             action_id = self._notify_processing_failed(
                 message=message,
@@ -884,9 +886,9 @@ class TaskProcessingService:
                 stage="task_session",
                 attempt_count=outcome.attempt_count,
                 last_error=last_error,
-                reason="hermes_task_session_failed",
+                reason="agent_task_session_failed",
             )
-            return ProcessingResult("owner_notification_created", task.id, action_id=action_id, reason="hermes_failed")
+            return ProcessingResult("owner_notification_created", task.id, action_id=action_id, reason="agent_failed")
         try:
             output = TaskSessionOutput.model_validate(result.json_data)
         except ValidationError as exc:
@@ -908,7 +910,7 @@ class TaskProcessingService:
                 task_id=task.id,
                 attempt_count=outcome.attempt_count,
                 last_error=last_error,
-                terminal_reason="hermes_schema_failed",
+                terminal_reason="agent_schema_failed",
             )
             action_id = self._notify_processing_failed(
                 message=message,
@@ -916,11 +918,11 @@ class TaskProcessingService:
                 stage="task_session",
                 attempt_count=outcome.attempt_count,
                 last_error=last_error,
-                reason=f"hermes_schema_failed: {exc.errors()[0]['msg']}",
+                reason=f"agent_schema_failed: {exc.errors()[0]['msg']}",
             )
             return ProcessingResult("owner_notification_created", task.id, action_id=action_id, reason="schema_failed")
         if result.session_id and result.session_id != session_id:
-            self.store.set_task_hermes_session_id(task.id, result.session_id)
+            self.store.set_task_agent_session_id(task.id, result.session_id)
             self.logger.debug(
                 "task_session_id_updated",
                 run_id=run_id,
@@ -970,7 +972,7 @@ class TaskProcessingService:
             return ProcessingResult("approval_created", task.id, approval_id=approval_id, reason="invalid_reply_target")
 
         next_status = "closed" if output.watch_action == "close" or output.task_state == "closed" else "watching"
-        self.store.update_task_after_hermes(
+        self.store.update_task_after_agent(
             task_id=task.id,
             task_label=output.task_label,
             status=next_status,
@@ -1143,7 +1145,7 @@ class TaskProcessingService:
         session_id: str | None,
     ) -> list[str]:
         if session_id is not None:
-            # Resumed Hermes sessions already carry task history; sending only
+            # Resumed agent sessions already carry task history; sending only
             # the current message keeps follow-up prompts compact and bounded.
             return [message.message_id]
         message_ids = self.store.list_task_message_ids(task.id)
@@ -1342,7 +1344,7 @@ def _resource_gate_reason(resources: list[Any], *, requires_resources: bool) -> 
     return "resource_unavailable"
 
 
-def _hermes_result_error(result: HermesCliResult) -> str:
+def _agent_result_error(result: AgentRunResult) -> str:
     parts = [
         result.error,
         result.stderr,
@@ -1350,14 +1352,14 @@ def _hermes_result_error(result: HermesCliResult) -> str:
         f"exit_code={result.exit_code}" if result.exit_code is not None else None,
         "timed_out=True" if result.timed_out else None,
     ]
-    return " ".join(str(part).strip() for part in parts if part).strip() or "Hermes call failed"
+    return " ".join(str(part).strip() for part in parts if part).strip() or "Agent backend call failed"
 
 
-def _is_retryable_hermes_result(result: HermesCliResult) -> bool:
-    error_text = _hermes_result_error(result).lower()
+def _is_retryable_agent_result(result: AgentRunResult) -> bool:
+    error_text = _agent_result_error(result).lower()
     if result.timed_out:
         return True
-    if any(marker in error_text for marker in TERMINAL_HERMES_ERROR_MARKERS):
+    if any(marker in error_text for marker in TERMINAL_AGENT_ERROR_MARKERS):
         return False
     if "stdout was not valid json" in error_text:
         return True

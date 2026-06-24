@@ -436,9 +436,9 @@ TaskRouter:
 
 Task Session:
   一任务一会话。
-  新 task 初始 `hermes_session_id = NULL`。
-  首次 Task Session 成功后保存 Hermes stderr 返回的真实 `session_id`。
-  后续 follow-up 使用 `hermes chat --resume <hermes_session_id>`。
+  新 task 初始 `agent_session_id = NULL`。
+  首次 Task Session 成功后保存 agent backend 返回的真实 `session_id`。
+  后续 follow-up 使用 agent backend 的 resume/session 机制；Hermes backend 对应 `hermes chat --resume <agent_session_id>`。
 ```
 
 已有 `feishu-task-*` 旧值视为未初始化，迁移后清空。同一飞书 thread 后续消息可以挂到同一个 task session。
@@ -978,9 +978,10 @@ logs/agent.jsonl
 }
 ```
 
-Hermes 审计默认保存：
+Agent 审计默认保存：
 
-- `hermes_session_id`
+- `backend_provider`
+- `agent_session_id`
 - `task_id`
 - `tool_permissions_profile`
 - request type: router/task_session
@@ -993,7 +994,7 @@ Hermes 审计默认保存：
 
 ```yaml
 debug:
-  save_full_hermes_io: false
+  save_full_agent_io: false
 ```
 
 不单独维护 prompt_version。通过 `runs.git_commit` 和 `runs.git_dirty` 回溯代码与 prompt 版本。

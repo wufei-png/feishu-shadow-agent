@@ -6,40 +6,43 @@ from typing import Any
 
 import pytest
 
+from feishu_shadow_agent.agent_backend import AgentRunResult
 from feishu_shadow_agent.config import AppConfig, ChatPolicyConfig, OwnerConfig, ReplyPolicyConfig
 from feishu_shadow_agent.ingestion import IngestionService
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.processing import ApprovalService, SendComposer, TaskProcessingService
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
-from feishu_shadow_agent.types import HermesCliResult, LarkCliResult, MessagePage, NormalizedMessage
+from feishu_shadow_agent.types import LarkCliResult, MessagePage, NormalizedMessage
 
 
 class FakeHermes:
+    provider = "hermes"
+
     def __init__(self):
-        self.router_outputs: list[dict[str, Any] | HermesCliResult | Exception] = []
-        self.session_outputs: list[dict[str, Any] | HermesCliResult | Exception] = []
+        self.router_outputs: list[dict[str, Any] | AgentRunResult | Exception] = []
+        self.session_outputs: list[dict[str, Any] | AgentRunResult | Exception] = []
         self.session_ids_seen: list[str | None] = []
         self.session_prompts: list[str] = []
 
-    def task_router(self, prompt: str) -> HermesCliResult:
+    def task_router(self, prompt: str) -> AgentRunResult:
         output = self.router_outputs.pop(0)
         if isinstance(output, Exception):
             raise output
-        if isinstance(output, HermesCliResult):
+        if isinstance(output, AgentRunResult):
             return output
-        return HermesCliResult(["hermes"], 0, json_data=output, session_id="router_sid")
+        return AgentRunResult(["hermes"], 0, json_data=output, session_id="router_sid")
 
-    def task_session(self, prompt: str, *, session_id: str | None = None) -> HermesCliResult:
+    def task_session(self, prompt: str, *, session_id: str | None = None) -> AgentRunResult:
         self.session_ids_seen.append(session_id)
         self.session_prompts.append(prompt)
         output = self.session_outputs.pop(0)
         if isinstance(output, Exception):
             raise output
-        if isinstance(output, HermesCliResult):
+        if isinstance(output, AgentRunResult):
             return output
         output = dict(output)
-        hermes_session_id = output.pop("_session_id", "sid_1")
-        return HermesCliResult(["hermes"], 0, json_data=output, session_id=hermes_session_id)
+        agent_session_id = output.pop("_session_id", "sid_1")
+        return AgentRunResult(["hermes"], 0, json_data=output, session_id=agent_session_id)
 
 
 class FakeFeishu:
@@ -136,9 +139,9 @@ def _service(tmp_path: Path, *, config: AppConfig | None = None, hermes: FakeHer
     processor = TaskProcessingService(
         store=store,
         config=cfg,
-        hermes_client=fake_hermes,
+        agent_backend=fake_hermes,
         logger=JSONLLogger(tmp_path / "agent.jsonl"),
-        hermes_retry_delays_seconds=(0.0, 0.0),
+        agent_retry_delays_seconds=(0.0, 0.0),
     )
     service = IngestionService(
         store=store,
@@ -164,11 +167,11 @@ def test_gate_passed_p2p_creates_pending_send_and_persists_session(tmp_path: Pat
     )
 
     with store.connect() as conn:
-        task = conn.execute("SELECT hermes_session_id FROM tasks").fetchone()
+        task = conn.execute("SELECT agent_session_id FROM tasks").fetchone()
         action = conn.execute("SELECT kind, status, payload_json FROM actions").fetchone()
         approvals = conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()["c"]
     payload = json.loads(action["payload_json"])
-    assert task["hermes_session_id"] == "sid_1"
+    assert task["agent_session_id"] == "sid_1"
     assert action["kind"] == "send_reply"
     assert action["status"] == "pending"
     assert payload["identity"] == "user"
@@ -409,7 +412,7 @@ def test_task_router_placeholder_can_create_new_task(tmp_path: Path) -> None:
 
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 2
-        assert conn.execute("SELECT COUNT(*) AS c FROM hermes_audits WHERE request_type = 'router'").fetchone()["c"] == 1
+        assert conn.execute("SELECT COUNT(*) AS c FROM agent_audits WHERE request_type = 'router'").fetchone()["c"] == 1
         route = conn.execute(
             """
             SELECT route_reason, router_called, matched_by
@@ -664,7 +667,7 @@ def test_task_router_can_reopen_historical_closed_recall_candidate(tmp_path: Pat
 def test_task_router_failure_records_ambiguous_audit(tmp_path: Path) -> None:
     hermes = FakeHermes()
     hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
-    hermes.router_outputs.append(HermesCliResult(["hermes"], 1, error="boom"))
+    hermes.router_outputs.append(AgentRunResult(["hermes"], 1, error="boom"))
     cfg = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)})
     store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
 
@@ -723,7 +726,7 @@ def test_task_session_followup_uses_stored_hermes_session(tmp_path: Path) -> Non
         audit = conn.execute(
             """
             SELECT input_message_ids_json, input_resource_ids_json, tool_permissions_profile
-            FROM hermes_audits
+            FROM agent_audits
             WHERE request_type = 'task_session'
             ORDER BY id DESC
             LIMIT 1
@@ -749,7 +752,7 @@ def test_task_session_schema_failure_does_not_persist_session_id(tmp_path: Path)
     )
 
     with store.connect() as conn:
-        task = conn.execute("SELECT hermes_session_id FROM tasks").fetchone()
+        task = conn.execute("SELECT agent_session_id FROM tasks").fetchone()
         approval_count = conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()["c"]
         processing = conn.execute(
             "SELECT stage, status, attempt_count, terminal_reason FROM message_processing WHERE message_id = ?",
@@ -758,12 +761,12 @@ def test_task_session_schema_failure_does_not_persist_session_id(tmp_path: Path)
         notification = conn.execute(
             "SELECT payload_json FROM actions WHERE kind = 'owner_notification'",
         ).fetchone()
-    assert task["hermes_session_id"] is None
+    assert task["agent_session_id"] is None
     assert approval_count == 0
     assert processing["stage"] == "task_session"
     assert processing["status"] == "processing_failed_terminal"
     assert processing["attempt_count"] == 1
-    assert processing["terminal_reason"] == "hermes_schema_failed"
+    assert processing["terminal_reason"] == "agent_schema_failed"
     assert "processing_failed" in notification["payload_json"]
 
 
@@ -797,7 +800,7 @@ def test_task_session_exception_retries_terminal_without_empty_approval(tmp_path
     assert processing["stage"] == "task_session"
     assert processing["status"] == "processing_failed_terminal"
     assert processing["attempt_count"] == 3
-    assert processing["terminal_reason"] == "hermes_task_session_failed"
+    assert processing["terminal_reason"] == "agent_task_session_failed"
     assert "session exploded" in processing["last_error"]
     assert approval_count == 0
     assert payload["type"] == "processing_failed"
@@ -836,9 +839,9 @@ def test_duplicate_with_routing_audit_but_no_processing_reruns_task_session(tmp_
     processor = TaskProcessingService(
         store=store,
         config=cfg,
-        hermes_client=hermes,
+        agent_backend=hermes,
         logger=JSONLLogger(tmp_path / "agent.jsonl"),
-        hermes_retry_delays_seconds=(0.0, 0.0),
+        agent_retry_delays_seconds=(0.0, 0.0),
     )
     p3_service = IngestionService(
         store=store,

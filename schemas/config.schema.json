@@ -1,5 +1,51 @@
 {
   "$defs": {
+    "AgentBackendConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "default": "hermes",
+          "description": "Agent backend provider. Only hermes is implemented in this release; codex and claude_code are reserved.",
+          "enum": [
+            "hermes",
+            "codex",
+            "claude_code"
+          ],
+          "title": "Provider",
+          "type": "string"
+        },
+        "config_scope": {
+          "default": "isolated",
+          "description": "Whether agent CLI calls load user-global configuration or run isolated from it.",
+          "enum": [
+            "isolated",
+            "native"
+          ],
+          "title": "Config Scope",
+          "type": "string"
+        },
+        "auto_context": {
+          "default": "disabled",
+          "description": "Whether agent CLI calls auto-load rules, memory, and implicit skill context.",
+          "enum": [
+            "disabled",
+            "enabled"
+          ],
+          "title": "Auto Context",
+          "type": "string"
+        },
+        "explicit_context": {
+          "$ref": "#/$defs/ExplicitAgentContextConfig",
+          "description": "Context explicitly injected by feishu-shadow-agent instead of discovered from user-global state."
+        },
+        "hermes": {
+          "$ref": "#/$defs/HermesConfig",
+          "description": "Hermes backend settings."
+        }
+      },
+      "title": "AgentBackendConfig",
+      "type": "object"
+    },
     "ChatPolicyConfig": {
       "additionalProperties": false,
       "properties": {
@@ -91,14 +137,29 @@
     "DebugConfig": {
       "additionalProperties": false,
       "properties": {
-        "save_full_hermes_io": {
+        "save_full_agent_io": {
           "default": false,
-          "description": "Whether to persist full Hermes prompts and outputs for debugging; keep false for normal operation.",
-          "title": "Save Full Hermes Io",
+          "description": "Whether to persist full agent prompts and outputs for debugging; keep false for normal operation.",
+          "title": "Save Full Agent Io",
           "type": "boolean"
         }
       },
       "title": "DebugConfig",
+      "type": "object"
+    },
+    "ExplicitAgentContextConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "skills": {
+          "description": "Explicit skill directory paths or SKILL.md file paths to pass only to task-session agent turns.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Skills",
+          "type": "array"
+        }
+      },
+      "title": "ExplicitAgentContextConfig",
       "type": "object"
     },
     "HealthConfig": {
@@ -436,9 +497,9 @@
       "$ref": "#/$defs/LarkCliConfig",
       "description": "lark-cli executable and timeout settings."
     },
-    "hermes": {
-      "$ref": "#/$defs/HermesConfig",
-      "description": "Hermes integration and timeout settings."
+    "agent_backend": {
+      "$ref": "#/$defs/AgentBackendConfig",
+      "description": "Agent backend provider, isolation policy, explicit context, and provider-specific settings."
     },
     "reply_policy": {
       "$ref": "#/$defs/ReplyPolicyConfig",
@@ -454,7 +515,7 @@
     },
     "tool_permissions": {
       "default": "guarded_write",
-      "description": "Hermes tool permission profile: read_only, guarded_write, or full_access.",
+      "description": "Agent backend tool permission profile: read_only, guarded_write, or full_access.",
       "enum": [
         "read_only",
         "guarded_write",
