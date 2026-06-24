@@ -118,9 +118,10 @@ class HermesHealthChecker:
         self.http_checker = http_checker or HermesHttpChecker()
 
     def __call__(self, loaded: LoadedConfig) -> list[HealthCheckResult]:
-        checker = self.http_checker if loaded.config.agent_backend.hermes.mode == "http" else self.cli_checker
-        result = checker(loaded)
-        return result if isinstance(result, list) else [result]
+        cli_results = _health_result_list(self.cli_checker(loaded))
+        if loaded.config.agent_backend.hermes.mode != "http":
+            return cli_results
+        return [*cli_results, *_health_result_list(self.http_checker(loaded))]
 
 
 class HealthSuite:
@@ -369,6 +370,10 @@ class HealthSuite:
 
 def has_critical_failure(results: list[HealthCheckResult]) -> bool:
     return any(result.is_critical_failure for result in results)
+
+
+def _health_result_list(result: HealthCheckResult | list[HealthCheckResult]) -> list[HealthCheckResult]:
+    return result if isinstance(result, list) else [result]
 
 
 def summarize_results(results: list[HealthCheckResult]) -> dict[str, object]:

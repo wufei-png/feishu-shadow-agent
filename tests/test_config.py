@@ -84,7 +84,7 @@ tool_permissions:
         ConfigService().load(config_path)
 
 
-def test_top_level_hermes_config_is_rejected(tmp_path: Path) -> None:
+def test_legacy_top_level_hermes_config_is_migrated(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
@@ -92,11 +92,74 @@ owner:
   open_id: ou_owner
 hermes:
   mode: cli
+  path: /bin/hermes
+debug:
+  save_full_hermes_io: true
 """,
         encoding="utf-8",
     )
 
-    with pytest.raises(ConfigError, match="hermes"):
+    loaded = ConfigService().load(config_path)
+
+    assert loaded.config.agent_backend.provider == "hermes"
+    assert loaded.config.agent_backend.hermes.path == "/bin/hermes"
+    assert loaded.config.debug.save_full_agent_io is True
+
+
+def test_legacy_top_level_hermes_config_merges_with_partial_agent_backend(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+hermes:
+  path: /bin/hermes
+agent_backend:
+  config_scope: native
+""",
+        encoding="utf-8",
+    )
+
+    loaded = ConfigService().load(config_path)
+
+    assert loaded.config.agent_backend.config_scope == "native"
+    assert loaded.config.agent_backend.hermes.path == "/bin/hermes"
+
+
+def test_ambiguous_legacy_and_new_hermes_config_is_rejected(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+hermes:
+  mode: cli
+agent_backend:
+  provider: hermes
+  hermes:
+    mode: cli
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="agent_backend.hermes"):
+        ConfigService().load(config_path)
+
+
+def test_ambiguous_legacy_and_new_debug_agent_io_config_is_rejected(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+debug:
+  save_full_agent_io: false
+  save_full_hermes_io: true
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="save_full_hermes_io"):
         ConfigService().load(config_path)
 
 

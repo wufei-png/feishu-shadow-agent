@@ -191,7 +191,7 @@
       "properties": {
         "mode": {
           "default": "cli",
-          "description": "Hermes integration mode. 'cli' uses the local Hermes executable; 'http' keeps compatibility with a health URL.",
+          "description": "Hermes health mode. Runtime task processing always uses the local Hermes CLI; 'http' adds a health URL check.",
           "enum": [
             "cli",
             "http"
@@ -275,7 +275,7 @@
             }
           ],
           "default": null,
-          "description": "HTTP health URL used only when agent_backend.hermes.mode is 'http'; must start with http:// or https://.",
+          "description": "Additional HTTP health URL used when agent_backend.hermes.mode is 'http'; must start with http:// or https://.",
           "title": "Health Url"
         },
         "api_key_env": {

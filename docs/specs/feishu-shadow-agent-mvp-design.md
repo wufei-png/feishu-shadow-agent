@@ -409,7 +409,7 @@ Python daemon 直接调用 Hermes CLI 非交互 `chat -q -Q`。不要用 user �
 
 Health 探测:
   agent_backend.hermes.mode: cli  -> hermes --version / hermes status
-  agent_backend.hermes.mode: http -> GET agent_backend.hermes.health_url（仅可达性，不用于 chat）
+  agent_backend.hermes.mode: http -> 仍检查 CLI backend readiness，并追加 GET agent_backend.hermes.health_url（仅可达性，不用于 chat）
 
 agent_backend.hermes.mode: http 不是 HTTP chat API；未来若接 Hermes API server，应单独设计客户端，不混用当前 health_url 字段。
 ```

@@ -6,7 +6,16 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 CONFIG_ENV_VAR = "FEISHU_SHADOW_AGENT_CONFIG"
 
@@ -95,7 +104,7 @@ class LarkCliConfig(StrictModel):
 class HermesConfig(StrictModel):
     mode: Literal["cli", "http"] = Field(
         default="cli",
-        description="Hermes integration mode. 'cli' uses the local Hermes executable; 'http' keeps compatibility with a health URL.",
+        description="Hermes health mode. Runtime task processing always uses the local Hermes CLI; 'http' adds a health URL check.",
     )
     path: str | None = Field(
         default=None,
@@ -109,7 +118,7 @@ class HermesConfig(StrictModel):
     timeout_seconds: int = Field(default=60, gt=0, description="Timeout in seconds for Hermes subprocess or health calls.")
     health_url: str | None = Field(
         default=None,
-        description="HTTP health URL used only when agent_backend.hermes.mode is 'http'; must start with http:// or https://.",
+        description="Additional HTTP health URL used when agent_backend.hermes.mode is 'http'; must start with http:// or https://.",
     )
     api_key_env: str | None = Field(
         default="HERMES_API_KEY",
@@ -241,6 +250,7 @@ class RetentionConfig(StrictModel):
 class DebugConfig(StrictModel):
     save_full_agent_io: StrictBool = Field(
         default=False,
+        validation_alias=AliasChoices("save_full_agent_io", "save_full_hermes_io"),
         description="Whether to persist full agent prompts and outputs for debugging; keep false for normal operation.",
     )
 
@@ -270,6 +280,22 @@ class AppConfig(StrictModel):
     )
     retention: RetentionConfig = Field(default_factory=RetentionConfig, description="Local data retention settings.")
     debug: DebugConfig = Field(default_factory=DebugConfig, description="Debug-only persistence settings.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_hermes_config(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "hermes" not in value:
+            return value
+        migrated = dict(value)
+        hermes = migrated.pop("hermes")
+        if "agent_backend" not in migrated:
+            migrated["agent_backend"] = {"provider": "hermes", "hermes": hermes}
+            return migrated
+        agent_backend = migrated["agent_backend"]
+        if not isinstance(agent_backend, dict) or "hermes" in agent_backend:
+            raise ValueError("top-level hermes is deprecated; configure agent_backend.hermes instead")
+        migrated["agent_backend"] = dict(agent_backend) | {"hermes": hermes}
+        return migrated
 
 
 @dataclass(frozen=True)

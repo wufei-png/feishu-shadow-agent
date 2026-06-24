@@ -4,7 +4,7 @@ from pathlib import Path
 import subprocess
 
 from feishu_shadow_agent.config import ConfigService, LoadedConfig
-from feishu_shadow_agent.health import HermesCliChecker, REQUIRED_USER_SCOPES, HealthSuite
+from feishu_shadow_agent.health import HermesCliChecker, HermesHealthChecker, REQUIRED_USER_SCOPES, HealthSuite
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import HealthCheckResult, LarkCliResult
 
@@ -54,6 +54,37 @@ def ok_hermes(loaded: LoadedConfig) -> HealthCheckResult:
 
 def failed_hermes(loaded: LoadedConfig) -> HealthCheckResult:
     return HealthCheckResult("hermes_reachable", "critical", "failed", "down")
+
+
+def test_http_hermes_health_mode_still_checks_cli_runtime_backend(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+agent_backend:
+  hermes:
+    mode: http
+    health_url: http://127.0.0.1:8642/health
+    api_key_env: null
+""",
+        encoding="utf-8",
+    )
+    loaded = ConfigService().load(config_path)
+    calls: list[str] = []
+
+    def cli_checker(loaded: LoadedConfig) -> list[HealthCheckResult]:
+        calls.append("cli")
+        return [HealthCheckResult("hermes_cli_version", "critical", "failed", "missing")]
+
+    def http_checker(loaded: LoadedConfig) -> HealthCheckResult:
+        calls.append("http")
+        return HealthCheckResult("hermes_reachable", "critical", "ok", "ok")
+
+    results = HermesHealthChecker(cli_checker=cli_checker, http_checker=http_checker)(loaded)
+
+    assert calls == ["cli", "http"]
+    assert "hermes_cli_version" in {result.name for result in results if result.is_critical_failure}
 
 
 def test_doctor_all_green_and_default_owner_notification_is_dry_run(tmp_path: Path) -> None:
