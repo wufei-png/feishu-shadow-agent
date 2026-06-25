@@ -118,16 +118,10 @@ def _message(
 def _session_output(**overrides: Any) -> dict[str, Any]:
     base = {
         "task_label": "label",
-        "task_state": "needs_reply",
         "answerability": "auto_reply",
-        "confidence": 0.95,
         "proposed_reply": "reply text",
         "reply_target_message_id": "om_1",
         "watch_action": "keep_watching",
-        "watch_extend_minutes": 120,
-        "risk_level": "low",
-        "safety_notes": [],
-        "requires_resources": False,
     }
     return base | overrides
 
@@ -338,7 +332,6 @@ def test_explicit_bot_identity_requires_bot_joined(tmp_path: Path) -> None:
 
 def test_resource_dependent_bot_not_joined_creates_owner_notification(tmp_path: Path) -> None:
     hermes = FakeHermes()
-    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1", requires_resources=True))
     cfg = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=False)})
     store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
 
@@ -352,35 +345,49 @@ def test_resource_dependent_bot_not_joined_creates_owner_notification(tmp_path: 
     with store.connect() as conn:
         resource = conn.execute("SELECT download_status FROM resources").fetchone()
         notification = conn.execute("SELECT kind, status, payload_json FROM actions").fetchone()
+        processing = conn.execute("SELECT stage, status, terminal_reason FROM message_processing").fetchone()
         approvals = conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()["c"]
     assert resource["download_status"] == "bot_not_joined"
     assert notification["kind"] == "owner_notification"
     assert "resource_needs_bot" in notification["payload_json"]
+    assert processing["stage"] == "resource_download"
+    assert processing["status"] == "processed"
+    assert processing["terminal_reason"] is None
     assert approvals == 0
+    assert hermes.session_prompts == []
 
 
-def test_resource_required_without_resource_records_downgrades_to_approval(tmp_path: Path) -> None:
+def test_resource_download_failure_blocks_task_session_after_retries(tmp_path: Path) -> None:
     hermes = FakeHermes()
-    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1", requires_resources=True))
-    store, service, _ = _service(tmp_path, hermes=hermes)
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)})
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
 
     service.process_raw_message(
-        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
-        source="p2p",
-        default_chat_type="p2p",
+        _message("om_1", mentions=[{"open_id": "ou_owner"}], image_key="img_1"),
+        source="group_at_me",
+        default_chat_type="group",
         run_id="run_1",
     )
 
     with store.connect() as conn:
-        approval = conn.execute("SELECT status, payload_json FROM approvals").fetchone()
-        notification = conn.execute("SELECT kind, status FROM actions WHERE kind = 'owner_notification'").fetchone()
+        resource = conn.execute("SELECT download_status FROM resources").fetchone()
+        notification = conn.execute("SELECT kind, status, payload_json FROM actions WHERE kind = 'owner_notification'").fetchone()
+        processing = conn.execute("SELECT stage, status, attempt_count, terminal_reason FROM message_processing").fetchone()
+        approval_count = conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()["c"]
         send_count = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
-    payload = json.loads(approval["payload_json"])
-    assert approval["status"] == "pending"
-    assert payload["reason"] == "resource_missing"
+    payload = json.loads(notification["payload_json"])
+    assert resource["download_status"] == "missing_file"
     assert notification["kind"] == "owner_notification"
     assert notification["status"] == "pending"
+    assert payload["reason"] == "resource_download_failed"
+    assert payload["stage"] == "resource_download"
+    assert processing["stage"] == "resource_download"
+    assert processing["status"] == "processing_failed_terminal"
+    assert processing["attempt_count"] == 3
+    assert processing["terminal_reason"] == "resource_download_failed"
+    assert approval_count == 0
     assert send_count == 0
+    assert hermes.session_prompts == []
 
 
 def test_task_router_placeholder_can_create_new_task(tmp_path: Path) -> None:
@@ -389,9 +396,7 @@ def test_task_router_placeholder_can_create_new_task(tmp_path: Path) -> None:
     hermes.router_outputs.append({
         "route": "new_task",
         "target_task_id": None,
-        "confidence": 0.9,
         "reason": "new",
-        "updated_watch_keys": ["user:ou_extra"],
     })
     hermes.session_outputs.append(_session_output(_session_id="sid_2", reply_target_message_id="om_2"))
     cfg = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)})
@@ -425,58 +430,18 @@ def test_task_router_placeholder_can_create_new_task(tmp_path: Path) -> None:
         task_id = conn.execute("SELECT id FROM tasks WHERE root_message_id = ?", ("om_2",)).fetchone()["id"]
         watch_key = conn.execute(
             "SELECT key FROM task_watch_keys WHERE task_id = ? AND key = ?",
-            (task_id, "user:ou_extra"),
+            (task_id, "user:ou_b"),
         ).fetchone()
     assert route["route_reason"] == "new"
     assert route["router_called"] == 1
     assert route["matched_by"] == "task_router"
-    assert watch_key["key"] == "user:ou_extra"
-
-
-def test_task_router_invalid_updated_watch_key_downgrades_to_ambiguity(tmp_path: Path) -> None:
-    hermes = FakeHermes()
-    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
-    cfg = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)})
-    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
-
-    service.process_raw_message(
-        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
-        source="group_at_me",
-        default_chat_type="group",
-        run_id="run_1",
-    )
-    with store.connect() as conn:
-        task_short_id = conn.execute("SELECT short_id FROM tasks WHERE root_message_id = ?", ("om_1",)).fetchone()["short_id"]
-    hermes.router_outputs.append({
-        "route": "attach_task",
-        "target_task_id": task_short_id,
-        "confidence": 0.9,
-        "reason": "attach",
-        "updated_watch_keys": ["user:ou_ok", "bad:ou_no"],
-    })
-    service.process_raw_message(
-        _message("om_2", sender_id="ou_b", sender_name="Bob", mentions=[{"open_id": "ou_owner"}]),
-        source="group_at_me",
-        default_chat_type="group",
-        run_id="run_1",
-    )
-
-    with store.connect() as conn:
-        route = conn.execute(
-            "SELECT route, route_reason, router_called FROM routing_audits WHERE message_id = ? ORDER BY id DESC LIMIT 1",
-            ("om_2",),
-        ).fetchone()
-        notification = conn.execute("SELECT payload_json FROM actions WHERE kind = 'owner_notification'").fetchone()
-    assert route["route"] == "ambiguous"
-    assert route["route_reason"] == "task_router_invalid_watch_keys"
-    assert route["router_called"] == 1
-    assert "bad:ou_no" in notification["payload_json"]
+    assert watch_key["key"] == "user:ou_b"
 
 
 def test_task_router_ignore_records_audit_without_notification(tmp_path: Path) -> None:
     hermes = FakeHermes()
     hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
-    hermes.router_outputs.append({"route": "ignore", "target_task_id": None, "confidence": 0.9, "reason": "not actionable", "updated_watch_keys": []})
+    hermes.router_outputs.append({"route": "ignore", "target_task_id": None, "reason": "not actionable"})
     cfg = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)})
     store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
 
@@ -510,9 +475,7 @@ def test_task_router_invalid_target_records_ambiguous_audit_and_notification(tmp
         {
             "route": "attach_task",
             "target_task_id": "t_missing",
-            "confidence": 0.9,
             "reason": "bad target",
-            "updated_watch_keys": [],
         }
     )
     cfg = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)})
@@ -573,9 +536,7 @@ def test_task_router_existing_non_candidate_target_is_invalid(tmp_path: Path, ro
         {
             "route": route,
             "target_task_id": stray_task.short_id,
-            "confidence": 0.9,
             "reason": "wrong existing target",
-            "updated_watch_keys": [],
         }
     )
 
@@ -627,9 +588,7 @@ def test_task_router_can_reopen_historical_closed_recall_candidate(tmp_path: Pat
         {
             "route": "reopen_task",
             "target_task_id": created.task.short_id,
-            "confidence": 0.9,
             "reason": "historical follow-up",
-            "updated_watch_keys": ["user:ou_a"],
         }
     )
 
@@ -662,6 +621,66 @@ def test_task_router_can_reopen_historical_closed_recall_candidate(tmp_path: Pat
     assert task["closed_at"] is None
     assert task_message["role"] == "follow_up"
     assert invalid_notification is None
+
+
+def test_task_router_cannot_attach_historical_closed_recall_candidate(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(_session_id="sid_1", reply_target_message_id="om_1"))
+    hermes.session_outputs.append(_session_output(_session_id="sid_1", reply_target_message_id="om_2"))
+    store, service, _ = _service(tmp_path, hermes=hermes)
+
+    created = service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    store.close_task_for_owner_takeover(created.task.id)
+
+    hermes.router_outputs.append(
+        {
+            "route": "attach_task",
+            "target_task_id": created.task.short_id,
+            "reason": "historical follow-up",
+        }
+    )
+
+    service.process_raw_message(
+        _message("om_2", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        route_row = conn.execute(
+            "SELECT route, route_reason, target_task_id, router_called FROM routing_audits WHERE message_id = ? ORDER BY id DESC LIMIT 1",
+            ("om_2",),
+        ).fetchone()
+        task = conn.execute("SELECT status, closed_at FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
+        task_message = conn.execute(
+            "SELECT role FROM task_messages WHERE task_id = ? AND message_id = ?",
+            (created.task.id, "om_2"),
+        ).fetchone()
+        notification = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'owner_notification' AND payload_json LIKE ?",
+            ("%task_router_invalid_route%",),
+        ).fetchone()
+        send_reply_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply' AND target_message_id = ?",
+            ("om_2",),
+        ).fetchone()["c"]
+    assert route_row["route"] == "ambiguous"
+    assert route_row["route_reason"] == "task_router_invalid_route"
+    assert route_row["target_task_id"] is None
+    assert route_row["router_called"] == 1
+    assert task["status"] == "human_taken_over"
+    assert task["closed_at"] is not None
+    assert task_message is None
+    assert notification is not None
+    assert send_reply_count == 0
+    assert hermes.session_ids_seen == [None]
 
 
 def test_task_router_failure_records_ambiguous_audit(tmp_path: Path) -> None:

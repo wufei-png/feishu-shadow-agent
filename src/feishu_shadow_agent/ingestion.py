@@ -301,6 +301,10 @@ class IngestionService:
             logger=logger,
             config_base_dir=config_base_dir,
         )
+        if self.task_processor is not None:
+            self.task_processor.set_resource_retry_func(
+                lambda message, retry_run_id: self.resources.process(message, run_id=retry_run_id)
+            )
         self.clock = clock
 
     def run_approval_inbox_placeholder(self, *, run_id: str) -> StageResult:

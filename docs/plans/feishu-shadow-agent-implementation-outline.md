@@ -89,7 +89,7 @@
 - 迁移 `agent_session_id`：新任务置空，旧 `feishu-task-*` 视为未初始化，首次 Task Session 成功后保存 agent backend 真实 session id。
 - 定义并校验 Hermes 严格 JSON 输出 schema。
 - 新增 `TaskProcessingService`，把 P2 placeholder route 接到 Hermes TaskRouter，把确定性 route 接到 Task Session。
-- 实现 `reply_policy` gate、per-chat policy gate、risk/confidence/resource gate 和审批降级。
+- 实现 `reply_policy` gate、per-chat policy gate、Python 资源 preflight 和审批降级。
 - 实现 `SendComposer`，由 Python 统一清理 Hermes 输出里的 `<at ...>` / `@所有人`，并生成 `<at user_id="...">显示名</at>` 前缀。
 - 实现 `ApprovalService`、ApprovalRequest 状态机、owner bot 通知 payload。
 - 实现 approval inbox 命令解析和事务化状态流转：`/approve <id>`、`/reject <id>`、`/send <task_id> <最终回复>`。

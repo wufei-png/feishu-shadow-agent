@@ -150,4 +150,4 @@ python -m feishu_shadow_agent replay --config config.yaml --message-id <message_
 tail -n 100 logs/agent.jsonl
 ```
 
-资源下载失败时，优先看 `status` 和日志中的 `bot_not_joined`、`bot_invisible`、`resource_unavailable`。这类问题通常需要确认 bot 是否在群里，以及该群的 `bot_joined` / `resource_download` 配置。
+资源下载失败时，优先看 `status` 和日志中的 `bot_not_joined`、`bot_invisible`、`resource_download_failed`。这类问题通常需要确认 bot 是否在群里，以及该群的 `bot_joined` / `resource_download` 配置。

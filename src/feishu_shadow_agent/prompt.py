@@ -7,8 +7,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .types import NormalizedMessage, TaskRecord
 
-WATCH_EXTEND_MINUTES = 120
-
 ROUTER_INSTRUCTION = (
     "Route the incoming Feishu message. Return one strict JSON object that conforms to output_schema. "
     "Do not include Markdown or explanatory text."
@@ -30,23 +28,14 @@ class TaskRouterOutput(StrictModel):
         description="Routing decision for the incoming message."
     )
     target_task_id: str | None = Field(default=None, description="Task short id to target, or null when no target applies.")
-    confidence: float = Field(ge=0, le=1, description="Confidence in the routing decision, from 0 to 1.")
     reason: str = Field(default="", description="Short operator-readable reason for the decision.")
-    updated_watch_keys: list[str] = Field(
-        default_factory=list,
-        description="Task watch keys to add, formatted as user:<id>, msg:<id>, or thread:<id>.",
-    )
 
 
 class TaskSessionOutput(StrictModel):
     task_label: str = Field(description="Short task label for operator status views.")
-    task_state: Literal["needs_reply", "watching", "closed", "waiting"] = Field(
-        description="Current task state after handling the message."
-    )
     answerability: Literal["auto_reply", "needs_owner", "no_reply"] = Field(
         description="Whether the daemon may reply automatically, needs owner review, or should not reply."
     )
-    confidence: float = Field(ge=0, le=1, description="Confidence in the proposed action, from 0 to 1.")
     proposed_reply: str = Field(default="", description="Plain reply text without Feishu @ mentions.")
     reply_target_message_id: str | None = Field(
         default=None,
@@ -55,21 +44,6 @@ class TaskSessionOutput(StrictModel):
     watch_action: Literal["keep_watching", "close"] = Field(
         default="keep_watching",
         description="Whether to keep watching this task or close it.",
-    )
-    watch_extend_minutes: int = Field(
-        default=WATCH_EXTEND_MINUTES,
-        ge=0,
-        le=24 * 60,
-        description="Minutes to extend task watching when watch_action keeps watching.",
-    )
-    risk_level: Literal["low", "medium", "high"] = Field(
-        default="low",
-        description="Risk level of sending the proposed reply.",
-    )
-    safety_notes: list[str] = Field(default_factory=list, description="Short safety or uncertainty notes.")
-    requires_resources: bool = Field(
-        default=False,
-        description="True when the answer depends on downloaded image/file resources.",
     )
 
     @field_validator("task_label")

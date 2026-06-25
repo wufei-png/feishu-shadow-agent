@@ -23,19 +23,18 @@ dispatcher hardening.
 - P2 placeholder routes call Hermes TaskRouter, then apply
   `new_task|attach_task|reopen_task|close_task|ignore|ambiguous`.
 - TaskRouter and Task Session outputs are strict Pydantic models.
-- Invalid JSON/schema, invalid route target, invalid `reply_target_message_id`, or
-  low confidence becomes audited ambiguity plus approval/notification state.
+- Invalid JSON/schema, invalid route target, or invalid `reply_target_message_id`
+  becomes audited ambiguity plus approval/notification state.
 - `hermes_audits` records request type, task/session ids, input message/resource
   ids, response JSON, error, latency, and optional full prompt.
 - Gate-passed auto replies create pending `send_reply` actions.
 - `approved` is reserved for owner approval commands.
 - Resource gate mapping:
-  - `downloaded`: usable.
-  - `bot_not_joined` / `bot_invisible`: block only when Hermes says resources are
-    required, and create owner notification to add the bot.
-  - `failed` / `missing_file`: downgrade to approval only when resources are
-    required.
-  - Resource-independent replies may proceed by Hermes decision.
+  - Task Session only runs after all task prompt resources are `downloaded`.
+  - `bot_not_joined` / `bot_invisible`: create a `resource_needs_bot` owner notification.
+  - `failed` / `missing_file`: retry resource download, then create a
+    `resource_download_failed` owner notification if resources still are not ready.
+  - Resource failures do not create send approval drafts and do not close the task.
 - `sender_name` is persisted from raw sender/name/profile fields, with sender id
   fallback.
 - `SendComposer` removes Hermes-generated `<at ...>`, `@所有人`, and `@_all`.
@@ -81,12 +80,12 @@ dispatcher hardening.
 
 - Add task routing/session processing:
   - Replace P2 `router_placeholder` branches with a real stateless Hermes TaskRouter only when deterministic shortcuts fail.
-  - Validate router output against `new_task | attach_task | reopen_task | close_task | ignore | ambiguous`; reject invalid `target_task_id`, low confidence, or unknown watch keys into an audited `ambiguous` result plus owner notification action.
-  - After `new_task | attach_task | reopen_task`, run one Hermes Task Session turn, validate `task_label`, `task_state`, `answerability`, `confidence`, `proposed_reply`, `reply_target_message_id`, `watch_action`, `watch_extend_minutes`, `risk_level`, and `safety_notes`.
+  - Validate router output against `new_task | attach_task | reopen_task | close_task | ignore | ambiguous`; reject invalid `target_task_id` into an audited `ambiguous` result plus owner notification action.
+  - After `new_task | attach_task | reopen_task`, run resource preflight first. Only after all prompt resources are downloaded, run one Hermes Task Session turn and validate `task_label`, `answerability`, `proposed_reply`, `reply_target_message_id`, and `watch_action`.
   - Record Hermes audits in a new `hermes_audits` table with request type, task id, session id, input message/resource ids, response JSON, error, latency, and full prompt only when `debug.save_full_hermes_io` is true.
 
 - Add reply gate, composer, and pending actions:
-  - Gate auto-reply on `answerability=auto_reply`, confidence threshold, risk threshold, per-chat policy, known group policy, direct mention, no missing resource evidence, valid reply target, and no forbidden mention content.
+  - Gate auto-reply on `answerability=auto_reply`, per-chat policy, known group policy, direct mention, valid reply target, and no forbidden mention content.
   - For group auto-reply, prefer bot identity when `bot_joined=true`; allow user fallback only when policy allows it and no bot-only resource dependency failed. P2P auto-reply uses user identity. Approved replies and `/send` use user identity.
   - Add `SendComposer` that removes Hermes-generated `<at ...>`, `@所有人`, and `@_all`; forbidden mention content downgrades auto-reply to approval. For group replies, prepend exactly one `<at user_id="...">显示名</at>` for the reply-target sender unless the sender is owner/bot.
   - Add message `sender_name` normalization/storage so mentions have a display-name source, falling back to sender id when missing.
@@ -103,7 +102,7 @@ dispatcher hardening.
 
 - Add focused P3 tests for Hermes CLI command construction, stdout JSON validation, stderr session id capture, resume behavior, schema failures, invalid `reply_target_message_id`, and audit rows.
 - Cover every TaskRouter route, including closed recall reopen, ambiguous owner notification, invalid target rejection, and deterministic shortcuts still bypassing Hermes.
-- Cover reply gates: P2P allowed, unknown group blocked, per-chat auto-reply disabled, risk/confidence failures, missing resources, bot-not-joined fallback, and forbidden Hermes mentions.
+- Cover reply gates: P2P allowed, unknown group blocked, per-chat auto-reply disabled, resource preflight blocks, bot-not-joined fallback, and forbidden Hermes mentions.
 - Cover `SendComposer`: one group mention, no P2P mention, owner/bot sender skipped, sender name fallback, and Hermes-generated `@` cleanup/downgrade.
 - Cover approvals: `a_...` approve/reject, `t_...` shortcut success/conflict, `/send`, duplicate command message id, checkpoint rollback on inbox failure, and no real send during P3.
 - Acceptance command remains `.venv/bin/python -m pytest`.

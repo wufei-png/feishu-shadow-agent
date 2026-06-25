@@ -64,18 +64,14 @@ python -m feishu_shadow_agent config schema
 | `agent_backend.hermes.timeout_seconds` | int `> 0` | `60` | Hermes 子进程或 health 调用超时。 |
 | `agent_backend.hermes.health_url` | string/null | `null` | `agent_backend.hermes.mode: http` 时追加使用；必须以 `http://` 或 `https://` 开头，HTTP 模式下必填。典型值为 `http://127.0.0.1:8642/health`。**不用于 chat/路由/会话调用**。 |
 | `agent_backend.hermes.api_key_env` | string/null | `HERMES_API_KEY` | `agent_backend.hermes.mode: http` 时可选 Bearer token 环境变量名。Hermes 官方 API server 常用 `API_SERVER_KEY`；`/health` 端点通常无需认证，此字段主要留给需要鉴权的 health URL。 |
-| `reply_policy.p2p_auto_reply` | bool | `true` | P2P 私聊在风险和置信度通过时是否允许自动回复。 |
+| `reply_policy.p2p_auto_reply` | bool | `true` | P2P 私聊在确定性 gate 通过时是否允许自动回复。 |
 | `reply_policy.default_group_auto_reply` | bool | `false` | 未在 `chats` 显式配置的群是否默认允许自动回复。 |
-| `reply_policy.risk_level_max` | `low`/`medium`/`high` | `low` | 全局自动回复允许的最高风险等级。 |
-| `reply_policy.confidence_threshold` | number `0..1` | `0.85` | 全局自动回复所需最低 Hermes 置信度。 |
 | `chats.<chat_id>.name` | string | `""` | 方便 operator 识别的群名，不作为 chat_id。 |
 | `chats.<chat_id>.auto_reply` | bool | `false` | 该群在所有 gate 通过时是否允许自动回复。 |
 | `chats.<chat_id>.bot_joined` | bool | `false` | bot 是否已进群；影响 bot 回复和资源访问能力判断。 |
 | `chats.<chat_id>.reply_identity` | `bot_preferred`/`bot`/`user` | `bot_preferred` | 群回复身份策略：优先 bot、强制 bot、或 user 代发。 |
 | `chats.<chat_id>.allow_user_fallback` | bool | `true` | `bot_preferred` 无法用 bot 时是否允许 fallback 到 user。 |
 | `chats.<chat_id>.resource_download` | bool | `true` | 是否允许保存该群消息中的可下载资源。 |
-| `chats.<chat_id>.risk_level_max` | `low`/`medium`/`high` | `low` | 该群自动回复允许的最高风险等级。 |
-| `chats.<chat_id>.confidence_threshold` | number `0..1` | `0.85` | 该群自动回复所需最低 Hermes 置信度。 |
 | `retention.raw_message_days` | int `>= 1` | `30` | 原始消息 payload 保留天数。 |
 | `retention.resource_days` | int `>= 1` | `30` | 下载资源文件保留天数。 |
 | `debug.save_full_agent_io` | bool | `false` | 是否保存完整 agent 输入输出；常规运行应保持关闭。 |
@@ -109,7 +105,7 @@ daemon 通过 `subprocess` 以无 TTY 方式调用 `hermes chat -q -Q`。在此�
 因此：
 
 - `guarded_write` **不能**理解为“Hermes 会在写操作前拦住并等人点确认”。它与 `full_access` 的主要差异是工具集范围（`safe` vs `hermes-cli`）以及是否显式 `--yolo`，而不是“有无交互审批”。
-- 飞书侧真正的写保护来自：结构化 JSON schema、`answerability`/置信度/风险 gate、owner 审批、`dry-run`、幂等和 dispatch 策略。
+- 飞书侧真正的写保护来自：结构化 JSON schema、`answerability`/置信度等级/风险 gate、owner 审批、`dry-run`、幂等和 dispatch 策略。
 - 若需要更严格的本地副作用控制，应使用 `read_only`（`safe`），而不是指望 `guarded_write` 触发 Hermes TTY 审批。
 
 ## Hermes 集成说明

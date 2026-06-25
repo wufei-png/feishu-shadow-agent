@@ -105,7 +105,9 @@ def test_task_session_prompt_embeds_pydantic_output_schema() -> None:
 
     assert prompt["output_schema"] == TaskSessionOutput.model_json_schema()
     assert prompt["output_schema"]["additionalProperties"] is False
-    assert prompt["output_schema"]["properties"]["watch_extend_minutes"]["default"] == 120
+    assert "confidence" not in prompt["output_schema"]["properties"]
+    assert "watch_extend_minutes" not in prompt["output_schema"]["properties"]
+    assert "requires_resources" not in prompt["output_schema"]["properties"]
     assert "schema" not in prompt
     assert prompt["metadata"]["reply_target_message_ids"] == ["om_1", "om_root"]
     assert prompt["resources"][0]["path"] == "data/resources/om_1/img_1.jpg"

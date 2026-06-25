@@ -92,7 +92,7 @@ def test_hermes_cli_parses_json_and_session_id() -> None:
         return AgentRunResult(
             argv=argv,
             exit_code=0,
-            stdout='{"route":"ignore","confidence":1,"updated_watch_keys":[]}',
+            stdout='{"route":"ignore","target_task_id":null,"reason":"not relevant"}',
             stderr="\nsession_id: 20260622_abc\n",
         )
 

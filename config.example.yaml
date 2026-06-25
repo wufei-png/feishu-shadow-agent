@@ -48,8 +48,6 @@ agent_backend:
 reply_policy:
   p2p_auto_reply: true
   default_group_auto_reply: false
-  risk_level_max: low
-  confidence_threshold: 0.85
 
 chats:
   oc_xxx:
@@ -59,8 +57,6 @@ chats:
     reply_identity: bot_preferred
     allow_user_fallback: true
     resource_download: true
-    risk_level_max: low
-    confidence_threshold: 0.85
 
 tool_permissions: guarded_write
 

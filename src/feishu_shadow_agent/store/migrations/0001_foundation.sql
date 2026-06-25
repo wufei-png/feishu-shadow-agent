@@ -126,8 +126,6 @@ CREATE TABLE IF NOT EXISTS chat_policies (
   reply_identity TEXT NOT NULL DEFAULT 'bot_preferred',
   allow_user_fallback INTEGER NOT NULL DEFAULT 1,
   resource_download INTEGER NOT NULL DEFAULT 1,
-  risk_level_max TEXT NOT NULL DEFAULT 'low',
-  confidence_threshold REAL NOT NULL DEFAULT 0.85,
   updated_at TEXT NOT NULL
 );
 

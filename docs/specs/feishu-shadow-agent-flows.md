@@ -149,17 +149,16 @@ flowchart TD
   HasResource -->|否| Continue["继续任务处理"]
   HasResource -->|是| Extract["user 身份读消息并提取 file_key"]
   Extract --> BotKnown{"chat policy 标记 bot_joined"}
-  BotKnown -->|否| NeedResource{"任务是否依赖该资源"}
-  NeedResource -->|否| Continue
-  NeedResource -->|是| NotifyJoin["创建 ApprovalRequest/通知 owner 拉 bot 入群"]
+  BotKnown -->|否| NotifyJoin["创建 resource_needs_bot owner notification"]
 
   BotKnown -->|是| Download["bot 身份 messages-resources-download"]
   Download --> DownloadOK{"下载成功"}
   DownloadOK -->|是| SaveResource["保存 data/resources + resources 元数据"]
   SaveResource --> Continue
   DownloadOK -->|234040/不可见| NotifyJoin
-  DownloadOK -->|其他错误| ResourceFailed["记录 download_status failed"]
-  ResourceFailed --> NeedResource
+  DownloadOK -->|其他错误| Retry{"同轮重试未超过上限"}
+  Retry -->|是| Download
+  Retry -->|否| ResourceFailed["记录 resource_download terminal failed + owner notification"]
 ```
 
 <a id="hermes-reply-flow"></a>
@@ -168,16 +167,18 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  TaskInput["task message + new resources"] --> BuildPrompt["构建 minimal metadata + conversation block"]
+  TaskInput["task message + resources"] --> ResourceReady{"相关资源全部 downloaded"}
+  ResourceReady -->|否| ResourceBlocked["资源阶段阻断：owner notification，不调用 Hermes"]
+  ResourceReady -->|是| BuildPrompt["构建 minimal metadata + conversation block"]
   BuildPrompt --> Hermes["Hermes Task Session"]
   Hermes --> Parse{"严格 JSON schema 校验"}
   Parse -->|失败| Approval["创建 send_reply ApprovalRequest"]
   Parse -->|通过| ValidateTarget{"reply_target_message_id 在候选内"}
   ValidateTarget -->|否| Approval
-  ValidateTarget -->|是| UpdateTask["更新 task_state / task_label / watch_action"]
+  ValidateTarget -->|是| UpdateTask["更新 task_label / watch_action"]
 
   UpdateTask --> Answerability{"answerability"}
-  Answerability -->|auto_reply| Gates{"risk/confidence/policy/resource gates 通过"}
+  Answerability -->|auto_reply| Gates{"policy / direct mention / composer gates 通过"}
   Answerability -->|needs_owner| Approval
   Answerability -->|no_reply| WatchOnly["仅更新 watch_until / close"]
 

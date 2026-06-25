@@ -81,10 +81,15 @@ class MessageRouter:
                 if existing is not None:
                     decision, task = existing
                     stage = _processing_stage_for_decision(decision)
-                    if stage is not None and not self.store.message_processing_is_final(
+                    stage_final = stage is not None and self.store.message_processing_is_final(
                         message.message_id,
                         stage=stage,
-                    ):
+                    )
+                    resource_final = stage == "task_session" and self.store.message_processing_is_final(
+                        message.message_id,
+                        stage="resource_download",
+                    )
+                    if stage is not None and not stage_final and not resource_final:
                         if decision.route in TASK_SESSION_ROUTES and task is None:
                             return self._audit(message, RouteDecision("ignore", reason="duplicate_message"))
                         return RoutingResult(decision=decision, task=task)

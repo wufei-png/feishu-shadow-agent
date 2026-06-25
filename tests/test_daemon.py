@@ -126,7 +126,7 @@ class FakeAgentBackend:
         self.session_calls = 0
 
     def task_router(self, prompt: str) -> AgentRunResult:
-        return AgentRunResult(["hermes"], 0, json_data={"route": "ignore", "confidence": 1, "reason": ""})
+        return AgentRunResult(["hermes"], 0, json_data={"route": "ignore", "target_task_id": None, "reason": ""})
 
     def task_session(self, prompt: str, *, session_id: str | None = None) -> AgentRunResult:
         self.session_calls += 1
@@ -136,16 +136,10 @@ class FakeAgentBackend:
             0,
             json_data={
                 "task_label": "label",
-                "task_state": "needs_reply",
                 "answerability": "auto_reply",
-                "confidence": 0.99,
                 "proposed_reply": "reply text",
                 "reply_target_message_id": target,
                 "watch_action": "keep_watching",
-                "watch_extend_minutes": 120,
-                "risk_level": "low",
-                "safety_notes": [],
-                "requires_resources": False,
             },
             session_id=f"sid_{self.session_calls}",
         )

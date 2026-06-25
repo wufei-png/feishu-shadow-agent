@@ -85,25 +85,6 @@
           "description": "Whether downloadable message resources may be saved for this chat.",
           "title": "Resource Download",
           "type": "boolean"
-        },
-        "risk_level_max": {
-          "default": "low",
-          "description": "Chat-specific maximum risk level allowed for automatic replies.",
-          "enum": [
-            "low",
-            "medium",
-            "high"
-          ],
-          "title": "Risk Level Max",
-          "type": "string"
-        },
-        "confidence_threshold": {
-          "default": 0.85,
-          "description": "Chat-specific minimum Hermes confidence required for automatic replies.",
-          "maximum": 1,
-          "minimum": 0,
-          "title": "Confidence Threshold",
-          "type": "number"
         }
       },
       "title": "ChatPolicyConfig",
@@ -393,7 +374,7 @@
       "properties": {
         "p2p_auto_reply": {
           "default": true,
-          "description": "Whether one-to-one chats may auto-reply when risk and confidence gates pass.",
+          "description": "Whether one-to-one chats may auto-reply when deterministic reply gates pass.",
           "title": "P2P Auto Reply",
           "type": "boolean"
         },
@@ -402,25 +383,6 @@
           "description": "Default auto-reply behavior for groups without an explicit chats entry.",
           "title": "Default Group Auto Reply",
           "type": "boolean"
-        },
-        "risk_level_max": {
-          "default": "low",
-          "description": "Maximum risk level allowed for automatic replies: low, medium, or high.",
-          "enum": [
-            "low",
-            "medium",
-            "high"
-          ],
-          "title": "Risk Level Max",
-          "type": "string"
-        },
-        "confidence_threshold": {
-          "default": 0.85,
-          "description": "Minimum Hermes confidence required for automatic replies.",
-          "maximum": 1,
-          "minimum": 0,
-          "title": "Confidence Threshold",
-          "type": "number"
         }
       },
       "title": "ReplyPolicyConfig",

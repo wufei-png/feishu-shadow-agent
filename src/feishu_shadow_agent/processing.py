@@ -18,9 +18,9 @@ from .store.sqlite_store import SQLiteStore
 from .types import NormalizedMessage, RouteDecision, TaskRecord
 
 AGENT_MAX_ATTEMPTS = 3
+RESOURCE_MAX_ATTEMPTS = 3
 AGENT_AT_SPAN_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE | re.DOTALL)
 FORBIDDEN_MENTION_RE = re.compile(r"<at\b[^>]*>|</at>|@所有人|@_all|@all", re.IGNORECASE)
-WATCH_KEY_RE = re.compile(r"^(?:user|msg|thread):[^\s:]+$")
 TERMINAL_AGENT_ERROR_MARKERS = (
     "no such file",
     "not found",
@@ -54,6 +54,15 @@ class ComposedReply:
 class AgentAttemptOutcome:
     result: AgentRunResult | None
     attempt_count: int
+    last_error: str | None = None
+
+
+@dataclass(frozen=True)
+class ResourcePreflightResult:
+    allow: bool
+    reason: str
+    resources: list[Any]
+    attempt_count: int = 0
     last_error: str | None = None
 
 
@@ -189,6 +198,10 @@ class TaskProcessingService:
         self.agent_max_attempts = max(1, agent_max_attempts)
         self.agent_retry_delays_seconds = agent_retry_delays_seconds
         self.sleep_func = sleep_func
+        self.resource_retry_func: Callable[[NormalizedMessage, str | None], None] | None = None
+
+    def set_resource_retry_func(self, func: Callable[[NormalizedMessage, str | None], None]) -> None:
+        self.resource_retry_func = func
 
     def process(
         self,
@@ -429,6 +442,31 @@ class TaskProcessingService:
             },
         )
 
+    def _notify_resource_blocked(
+        self,
+        *,
+        message: NormalizedMessage,
+        task: TaskRecord,
+        reason: str,
+        resources: list[Any],
+        attempt_count: int,
+        last_error: str | None,
+    ) -> int:
+        return self.approvals.notify_owner(
+            task=task,
+            reason=reason,
+            payload={
+                "type": reason,
+                "message_id": message.message_id,
+                "stage": "resource_download",
+                "attempt_count": attempt_count,
+                "error": _truncate_error(last_error),
+                "statuses": _resource_status_counts(resources),
+                "message": "Message resources were not ready; task session agent was not called.",
+                "dedupe_key": f"owner-resource-download:{message.message_id}:{reason}",
+            },
+        )
+
     def _run_task_router(
         self,
         *,
@@ -443,9 +481,9 @@ class TaskProcessingService:
         historical = []
         if reason == "closed_recall_router_placeholder":
             historical = self.store.get_related_closed_tasks(message, since=_minus_days(now, 7))
-        allowed_target_short_ids = {candidate.task.short_id for candidate in active_candidates} | {
-            task.short_id for task in historical
-        }
+        active_target_short_ids = {candidate.task.short_id for candidate in active_candidates}
+        historical_target_short_ids = {task.short_id for task in historical}
+        allowed_target_short_ids = active_target_short_ids | historical_target_short_ids
         self.logger.debug(
             "task_router_started",
             run_id=run_id,
@@ -548,43 +586,13 @@ class TaskProcessingService:
                 reason="task_router_schema_failed",
             )
             return ProcessingResult("owner_notification_created", action_id=action_id, reason="task_router_schema_failed")
-        invalid_watch_keys = _invalid_watch_keys(output.updated_watch_keys)
-        if invalid_watch_keys:
-            self.logger.warning(
-                "task_router_invalid_watch_keys",
-                run_id=run_id,
-                data={
-                    "message_id": message.message_id,
-                    "invalid_watch_keys": invalid_watch_keys,
-                    "route": output.route,
-                    "target_task_id": output.target_task_id,
-                },
-            )
-            self._audit_router_ambiguity(
-                message=message,
-                reason="task_router_invalid_watch_keys",
-                candidates_count=candidates_count,
-            )
-            action_id = self.approvals.notify_owner(
-                task=None,
-                reason="task_router_invalid_watch_keys",
-                payload={"message_id": message.message_id, "invalid_watch_keys": invalid_watch_keys},
-            )
-            self._mark_processing_processed(
-                message=message,
-                stage="task_router",
-                task_id=None,
-                attempt_count=outcome.attempt_count,
-            )
-            return ProcessingResult("owner_notification_created", action_id=action_id, reason="task_router_invalid_watch_keys")
-        if output.confidence < 0.6 or output.route == "ambiguous":
+        if output.route == "ambiguous":
             self.logger.warning(
                 "task_router_ambiguous",
                 run_id=run_id,
                 data={
                     "message_id": message.message_id,
                     "route": output.route,
-                    "confidence": output.confidence,
                     "reason": output.reason,
                     "candidates_count": candidates_count,
                 },
@@ -615,7 +623,6 @@ class TaskProcessingService:
                 router_called=True,
                 matched_by="task_router",
             )
-            self.store.add_task_watch_keys(task.id, output.updated_watch_keys)
             self._mark_processing_processed(
                 message=message,
                 stage="task_router",
@@ -631,7 +638,6 @@ class TaskProcessingService:
                     "route": output.route,
                     "reason": output.reason or "task_router_new",
                     "task_short_id": task.short_id,
-                    "updated_watch_keys": output.updated_watch_keys,
                 },
             )
             return RoutingResult(decision=decision, task=task)
@@ -707,9 +713,39 @@ class TaskProcessingService:
                 attempt_count=outcome.attempt_count,
             )
             return ProcessingResult("owner_notification_created", action_id=action_id, reason="task_router_invalid_target")
+        route_error = _router_target_route_error(
+            route=output.route,
+            target_task_id=output.target_task_id,
+            active_target_short_ids=active_target_short_ids,
+            historical_target_short_ids=historical_target_short_ids,
+        )
+        if route_error is not None:
+            self.logger.warning(
+                "task_router_invalid_route",
+                run_id=run_id,
+                data={
+                    "message_id": message.message_id,
+                    "route": output.route,
+                    "target_task_id": output.target_task_id,
+                    "reason": route_error,
+                },
+            )
+            action_id = self._handle_invalid_router_target(
+                message=message,
+                target_task_id=output.target_task_id,
+                candidates_count=candidates_count,
+                reason="task_router_invalid_route",
+                payload={"route": output.route, "route_error": route_error},
+            )
+            self._mark_processing_processed(
+                message=message,
+                stage="task_router",
+                task_id=None,
+                attempt_count=outcome.attempt_count,
+            )
+            return ProcessingResult("owner_notification_created", action_id=action_id, reason="task_router_invalid_route")
         if output.route in {"attach_task", "reopen_task"}:
             self.store.attach_message_to_task(target.id, message, watch_until=watch_until)
-            self.store.add_task_watch_keys(target.id, output.updated_watch_keys)
             decision = RouteDecision(
                 output.route,
                 target_task_id=target.id,
@@ -737,7 +773,6 @@ class TaskProcessingService:
                     "route": output.route,
                     "reason": output.reason or "task_router",
                     "task_short_id": target.short_id,
-                    "updated_watch_keys": output.updated_watch_keys,
                 },
             )
             return RoutingResult(decision=decision, task=self.store.get_task_by_id(target.id))
@@ -783,7 +818,52 @@ class TaskProcessingService:
     ) -> ProcessingResult:
         session_id = self.store.get_initialized_agent_session_id(task.id)
         prompt_message_ids = self._task_session_prompt_message_ids(task=task, message=message, session_id=session_id)
-        resources = self.store.list_resources_for_messages(prompt_message_ids)
+        preflight = self._resource_preflight(
+            task=task,
+            message=message,
+            prompt_message_ids=prompt_message_ids,
+            run_id=run_id,
+        )
+        resources = preflight.resources
+        if not preflight.allow:
+            self.logger.warning(
+                "task_session_resource_preflight_blocked",
+                run_id=run_id,
+                task_id=str(task.id),
+                data={
+                    "message_id": message.message_id,
+                    "task_short_id": task.short_id,
+                    "reason": preflight.reason,
+                    "attempt_count": preflight.attempt_count,
+                    "error": _truncate_error(preflight.last_error),
+                    "statuses": _resource_status_counts(resources),
+                },
+            )
+            if preflight.reason == "resource_needs_bot":
+                self._mark_processing_processed(
+                    message=message,
+                    stage="resource_download",
+                    task_id=task.id,
+                    attempt_count=preflight.attempt_count,
+                )
+            else:
+                self._mark_processing_terminal(
+                    message=message,
+                    stage="resource_download",
+                    task_id=task.id,
+                    attempt_count=preflight.attempt_count,
+                    last_error=preflight.last_error,
+                    terminal_reason=preflight.reason,
+                )
+            action_id = self._notify_resource_blocked(
+                message=message,
+                task=task,
+                reason=preflight.reason,
+                resources=resources,
+                attempt_count=preflight.attempt_count,
+                last_error=preflight.last_error,
+            )
+            return ProcessingResult("owner_notification_created", task.id, action_id=action_id, reason=preflight.reason)
         reply_target_message_ids = _reply_target_message_ids(task=task, current_message_id=message.message_id)
         self.logger.debug(
             "task_session_started",
@@ -937,12 +1017,12 @@ class TaskProcessingService:
             )
             return ProcessingResult("approval_created", task.id, approval_id=approval_id, reason="invalid_reply_target")
 
-        next_status = "closed" if output.watch_action == "close" or output.task_state == "closed" else "watching"
+        next_status = "closed" if output.watch_action == "close" else "watching"
         self.store.update_task_after_agent(
             task_id=task.id,
             task_label=output.task_label,
             status=next_status,
-            watch_until=_plus_minutes(now, output.watch_extend_minutes) if next_status == "watching" else None,
+            watch_until=watch_until if next_status == "watching" else None,
         )
         if output.answerability == "no_reply":
             self._mark_processing_processed(
@@ -958,7 +1038,6 @@ class TaskProcessingService:
                 data={
                     "message_id": message.message_id,
                     "task_short_id": task.short_id,
-                    "task_state": output.task_state,
                     "watch_action": output.watch_action,
                 },
             )
@@ -976,7 +1055,6 @@ class TaskProcessingService:
             message=message,
             output=output,
             composed=composed,
-            resources=resources,
         )
         if not gate["allow"]:
             self.logger.warning(
@@ -989,20 +1067,8 @@ class TaskProcessingService:
                     "reason": gate["reason"],
                     "identity": gate["identity"],
                     "answerability": output.answerability,
-                    "confidence": output.confidence,
-                    "risk_level": output.risk_level,
-                    "requires_resources": output.requires_resources,
                 },
             )
-            if gate["reason"] == "resource_needs_bot":
-                action_id = self.approvals.notify_owner(task=task, reason="resource_needs_bot", payload={"message_id": message.message_id})
-                self._mark_processing_processed(
-                    message=message,
-                    stage="task_session",
-                    task_id=task.id,
-                    attempt_count=outcome.attempt_count,
-                )
-                return ProcessingResult("owner_notification_created", task.id, action_id=action_id, reason=gate["reason"])
             approval_id = self.approvals.request_send_reply(
                 task=task,
                 reply_target_message_id=reply_target_id,
@@ -1049,6 +1115,76 @@ class TaskProcessingService:
         )
         return ProcessingResult("send_action_created", task.id, action_id=action_id, reason="gate_passed")
 
+    def _resource_preflight(
+        self,
+        *,
+        task: TaskRecord,
+        message: NormalizedMessage,
+        prompt_message_ids: list[str],
+        run_id: str,
+    ) -> ResourcePreflightResult:
+        resources = self.store.list_resources_for_messages(prompt_message_ids)
+        state = _resource_preflight_state(resources, message=message, prompt_message_ids=prompt_message_ids)
+        if state["allow"]:
+            return ResourcePreflightResult(True, "ok", resources)
+        attempt_count = _initial_resource_attempt_count(resources, message=message, prompt_message_ids=prompt_message_ids)
+        last_error = state["error"]
+        if state["retryable"] and self.resource_retry_func is not None and _has_current_prompt_resources(
+            message=message,
+            prompt_message_ids=prompt_message_ids,
+        ):
+            for attempt in range(attempt_count + 1, RESOURCE_MAX_ATTEMPTS + 1):
+                attempt_count = attempt
+                self.logger.debug(
+                    "resource_download_retry_started",
+                    run_id=run_id,
+                    task_id=str(task.id),
+                    data={
+                        "message_id": message.message_id,
+                        "task_short_id": task.short_id,
+                        "attempt": attempt,
+                        "reason": state["reason"],
+                    },
+                )
+                try:
+                    retry_error = None
+                    self.resource_retry_func(message, run_id)
+                except Exception as exc:
+                    retry_error = f"{type(exc).__name__}: {exc}"
+                    last_error = retry_error
+                    self.logger.warning(
+                        "resource_download_retry_exception",
+                        run_id=run_id,
+                        task_id=str(task.id),
+                        data={
+                            "message_id": message.message_id,
+                            "task_short_id": task.short_id,
+                            "attempt": attempt,
+                            "error": _truncate_error(retry_error),
+                        },
+                    )
+                resources = self.store.list_resources_for_messages(prompt_message_ids)
+                state = _resource_preflight_state(resources, message=message, prompt_message_ids=prompt_message_ids)
+                if retry_error is None and not state["allow"] and state["error"] is not None:
+                    last_error = state["error"]
+                if state["allow"]:
+                    return ResourcePreflightResult(True, "ok", resources, attempt_count=attempt_count)
+                if not state["retryable"]:
+                    break
+                if attempt < RESOURCE_MAX_ATTEMPTS:
+                    self._sleep_before_retry(attempt)
+        reason = state["reason"]
+        if state["retryable"]:
+            reason = "resource_download_failed"
+            last_error = last_error or state["error"] or _resource_status_error(resources)
+        return ResourcePreflightResult(
+            False,
+            reason,
+            resources,
+            attempt_count=attempt_count,
+            last_error=last_error or state["error"] or _resource_status_error(resources),
+        )
+
     def _reply_gate(
         self,
         *,
@@ -1056,7 +1192,6 @@ class TaskProcessingService:
         message: NormalizedMessage,
         output: TaskSessionOutput,
         composed: ComposedReply,
-        resources: list[Any],
     ) -> dict[str, Any]:
         if output.answerability != "auto_reply":
             return {"allow": False, "reason": "needs_owner", "identity": "user"}
@@ -1066,15 +1201,6 @@ class TaskProcessingService:
             return {"allow": False, "reason": "empty_proposed_reply", "identity": "user"}
         chat_type = task.chat_type or message.chat_type
         policy = self._chat_policy(task.chat_id or message.chat_id)
-        threshold = policy.confidence_threshold if chat_type == "group" else self.config.reply_policy.confidence_threshold
-        risk_max = policy.risk_level_max if chat_type == "group" else self.config.reply_policy.risk_level_max
-        if output.confidence < threshold:
-            return {"allow": False, "reason": "low_confidence", "identity": "user"}
-        if _risk_rank(output.risk_level) > _risk_rank(risk_max):
-            return {"allow": False, "reason": "risk_too_high", "identity": "user"}
-        resource_reason = _resource_gate_reason(resources, requires_resources=output.requires_resources)
-        if resource_reason is not None:
-            return {"allow": False, "reason": resource_reason, "identity": "user"}
         if chat_type == "p2p":
             if not self.config.reply_policy.p2p_auto_reply:
                 return {"allow": False, "reason": "p2p_auto_reply_disabled", "identity": "user"}
@@ -1128,15 +1254,20 @@ class TaskProcessingService:
         message: NormalizedMessage,
         target_task_id: str | None,
         candidates_count: int,
+        reason: str = "task_router_invalid_target",
+        payload: dict[str, Any] | None = None,
     ) -> int:
+        notification_payload = {"message_id": message.message_id, "target": target_task_id}
+        if payload:
+            notification_payload.update(payload)
         action_id = self.approvals.notify_owner(
             task=None,
-            reason="task_router_invalid_target",
-            payload={"message_id": message.message_id, "target": target_task_id},
+            reason=reason,
+            payload=notification_payload,
         )
         self._audit_router_ambiguity(
             message=message,
-            reason="task_router_invalid_target",
+            reason=reason,
             candidates_count=candidates_count,
         )
         return action_id
@@ -1159,8 +1290,18 @@ class TaskProcessingService:
         )
 
 
-def _risk_rank(value: str) -> int:
-    return {"low": 0, "medium": 1, "high": 2}.get(value, 2)
+def _router_target_route_error(
+    *,
+    route: str,
+    target_task_id: str | None,
+    active_target_short_ids: set[str],
+    historical_target_short_ids: set[str],
+) -> str | None:
+    if route == "attach_task" and target_task_id not in active_target_short_ids:
+        return "attach_task_requires_active_target"
+    if route == "reopen_task" and target_task_id not in historical_target_short_ids:
+        return "reopen_task_requires_historical_target"
+    return None
 
 
 def _can_directly_approve(proposed_reply: str, composed: ComposedReply) -> bool:
@@ -1183,23 +1324,109 @@ def _reply_target_message_ids(*, task: TaskRecord, current_message_id: str) -> l
     return list(dict.fromkeys(ids))
 
 
-def _invalid_watch_keys(keys: list[str]) -> list[str]:
-    return [key for key in keys if not isinstance(key, str) or WATCH_KEY_RE.fullmatch(key) is None]
-
-
-def _resource_gate_reason(resources: list[Any], *, requires_resources: bool) -> str | None:
-    if not requires_resources:
-        return None
+def _resource_preflight_state(
+    resources: list[Any],
+    *,
+    message: NormalizedMessage,
+    prompt_message_ids: list[str],
+) -> dict[str, Any]:
+    missing_current = _missing_current_prompt_resources(
+        resources,
+        message=message,
+        prompt_message_ids=prompt_message_ids,
+    )
+    if missing_current:
+        return {
+            "allow": False,
+            "reason": "resource_missing",
+            "retryable": True,
+            "error": f"missing resource records: {', '.join(missing_current)}",
+        }
+    if not resources:
+        return {"allow": True, "reason": "ok", "retryable": False, "error": None}
     statuses = {row["download_status"] for row in resources}
     if not statuses:
-        return "resource_missing"
+        return {"allow": True, "reason": "ok", "retryable": False, "error": None}
     if statuses <= {"downloaded"}:
-        return None
+        return {"allow": True, "reason": "ok", "retryable": False, "error": None}
     if statuses & {"bot_not_joined", "bot_invisible"}:
-        return "resource_needs_bot"
-    if statuses & {"failed", "missing_file"}:
-        return "resource_unavailable"
-    return "resource_unavailable"
+        return {
+            "allow": False,
+            "reason": "resource_needs_bot",
+            "retryable": False,
+            "error": _resource_status_error(resources),
+        }
+    if statuses & {"skipped"}:
+        return {
+            "allow": False,
+            "reason": "resource_download_disabled",
+            "retryable": False,
+            "error": _resource_status_error(resources),
+        }
+    return {
+        "allow": False,
+        "reason": "resource_download_failed",
+        "retryable": True,
+        "error": _resource_status_error(resources),
+    }
+
+
+def _initial_resource_attempt_count(
+    resources: list[Any],
+    *,
+    message: NormalizedMessage,
+    prompt_message_ids: list[str],
+) -> int:
+    if not _has_current_prompt_resources(message=message, prompt_message_ids=prompt_message_ids):
+        return 0
+    current_keys = {
+        (resource.message_id, resource.file_key, resource.resource_type)
+        for resource in message.resources
+    }
+    row_keys = {
+        (row["message_id"], row["file_key"], row["resource_type"])
+        for row in resources
+    }
+    return 1 if current_keys & row_keys else 0
+
+
+def _has_current_prompt_resources(*, message: NormalizedMessage, prompt_message_ids: list[str]) -> bool:
+    return message.message_id in set(prompt_message_ids) and bool(message.resources)
+
+
+def _missing_current_prompt_resources(
+    resources: list[Any],
+    *,
+    message: NormalizedMessage,
+    prompt_message_ids: list[str],
+) -> list[str]:
+    if not _has_current_prompt_resources(message=message, prompt_message_ids=prompt_message_ids):
+        return []
+    row_keys = {
+        (row["message_id"], row["file_key"], row["resource_type"])
+        for row in resources
+    }
+    missing: list[str] = []
+    for resource in message.resources:
+        key = (resource.message_id, resource.file_key, resource.resource_type)
+        if key not in row_keys:
+            missing.append(f"{resource.resource_type}:{resource.file_key}")
+    return missing
+
+
+def _resource_status_counts(resources: list[Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in resources:
+        status = str(row["download_status"])
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _resource_status_error(resources: list[Any]) -> str | None:
+    counts = _resource_status_counts(resources)
+    if not counts:
+        return None
+    return "resource statuses: " + ", ".join(f"{status}={count}" for status, count in sorted(counts.items()))
 
 
 def _agent_result_error(result: AgentRunResult) -> str:

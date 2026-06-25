@@ -148,7 +148,6 @@ class HermesConfig(StrictModel):
         return self
 
 
-RiskLevel = Literal["low", "medium", "high"]
 ToolPermissionsProfile = Literal["read_only", "guarded_write", "full_access"]
 ConfigScopeMode = Literal["isolated", "native"]
 AutoContextMode = Literal["disabled", "enabled"]
@@ -193,21 +192,11 @@ class AgentBackendConfig(StrictModel):
 class ReplyPolicyConfig(StrictModel):
     p2p_auto_reply: StrictBool = Field(
         default=True,
-        description="Whether one-to-one chats may auto-reply when risk and confidence gates pass.",
+        description="Whether one-to-one chats may auto-reply when deterministic reply gates pass.",
     )
     default_group_auto_reply: StrictBool = Field(
         default=False,
         description="Default auto-reply behavior for groups without an explicit chats entry.",
-    )
-    risk_level_max: RiskLevel = Field(
-        default="low",
-        description="Maximum risk level allowed for automatic replies: low, medium, or high.",
-    )
-    confidence_threshold: float = Field(
-        default=0.85,
-        ge=0,
-        le=1,
-        description="Minimum Hermes confidence required for automatic replies.",
     )
 
 
@@ -229,16 +218,6 @@ class ChatPolicyConfig(StrictModel):
     resource_download: StrictBool = Field(
         default=True,
         description="Whether downloadable message resources may be saved for this chat.",
-    )
-    risk_level_max: RiskLevel = Field(
-        default="low",
-        description="Chat-specific maximum risk level allowed for automatic replies.",
-    )
-    confidence_threshold: float = Field(
-        default=0.85,
-        ge=0,
-        le=1,
-        description="Chat-specific minimum Hermes confidence required for automatic replies.",
     )
 
 

@@ -270,8 +270,8 @@ reply_policy:
 含义：
 
 - 不确定、涉及承诺/隐私/写操作/权限扩大/多人责任不清：bot 私聊 owner。
-- P2P：高置信、低风险、无写操作时允许自动回复。
-- 群聊：只有 per-chat policy 开启、直接 `@我`、低风险、高置信、证据完整、全部 gate 通过时才自动回复。
+- P2P：证据完整、`answerability=auto_reply` 且确定性 gate 通过时允许自动回复。
+- 群聊：只有 per-chat policy 开启、直接 `@我`、证据完整、全部确定性 gate 通过时才自动回复。
 
 身份规则：
 
@@ -353,8 +353,6 @@ chats:
     reply_identity: bot_preferred
     allow_user_fallback: true
     resource_download: true
-    risk_level_max: low
-    confidence_threshold: 0.85
 ```
 
 未知群默认：
@@ -508,22 +506,17 @@ attachments:
 
 ## 13. Hermes 输出
 
-Task Session 每次输出都必须更新任务状态，不只是回复草稿。
+Task Session 每次输出都必须更新任务标签和 watch 行为，不只是回复草稿。
 
 示例 schema：
 
 ```json
 {
   "task_label": "分类服务启动失败，用户反馈截图显示服务启动异常并伴随 500",
-  "task_state": "needs_reply",
   "answerability": "auto_reply",
-  "confidence": 0.91,
   "proposed_reply": "建议先检查分类服务启动日志...",
   "reply_target_message_id": "om_current",
-  "watch_action": "keep_watching",
-  "watch_extend_minutes": 120,
-  "risk_level": "low",
-  "safety_notes": []
+  "watch_action": "keep_watching"
 }
 ```
 
@@ -661,9 +654,7 @@ TaskRouter 输出：
 {
   "route": "new_task|attach_task|reopen_task|close_task|ignore|ambiguous",
   "target_task_id": "t_xxx",
-  "confidence": 0.9,
-  "reason": "...",
-  "updated_watch_keys": ["user:ou_xxx", "msg:om_xxx"]
+  "reason": "..."
 }
 ```
 
