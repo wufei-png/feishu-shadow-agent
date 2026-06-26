@@ -1141,6 +1141,25 @@ class SQLiteStore:
             ).fetchall()
         return [row["message_id"] for row in rows]
 
+    def count_task_messages_by_task_ids(self, task_ids: Iterable[int]) -> dict[int, int]:
+        ids = list(dict.fromkeys(int(task_id) for task_id in task_ids))
+        if not ids:
+            return {}
+        self.migrate()
+        placeholders = ",".join("?" for _ in ids)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT task_id, COUNT(*) AS message_count
+                FROM task_messages
+                WHERE task_id IN ({placeholders})
+                GROUP BY task_id
+                """,
+                ids,
+            ).fetchall()
+        counts = {int(row["task_id"]): int(row["message_count"]) for row in rows}
+        return {task_id: counts.get(task_id, 0) for task_id in ids}
+
     def list_resources_for_messages(self, message_ids: Iterable[str]) -> list[sqlite3.Row]:
         self.migrate()
         ids = list(dict.fromkeys(message_ids))

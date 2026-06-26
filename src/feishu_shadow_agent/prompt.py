@@ -3,16 +3,34 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .types import NormalizedMessage, TaskRecord
 
 ROUTER_INSTRUCTION = (
-    "Route the incoming Feishu message. Return one strict JSON object that conforms to output_schema. "
+    "Route one incoming Feishu message to the correct task using only the provided message, "
+    "active_candidates, and historical_candidates. Do not invent task ids or watch keys. "
+    "Choose exactly one route: new_task when the message starts an independent task; attach_task only "
+    "when it clearly continues one active candidate; reopen_task only when it clearly resumes one "
+    "historical closed candidate; ignore for self/owner/admin/noise messages that should not create work; ambiguous "
+    "when evidence is weak, multiple candidates fit, or the target is unclear. "
+    "If a message clearly resolves or cancels an active task, attach it to that task; the task session "
+    "will decide whether to close it. "
+    "If context_access is present, you may use it only for read-only context lookup within query_scope. "
+    "Query only allowed_tables, use PRAGMA table_info only for allowed tables when column names are needed, "
+    "never write SQLite, and do not broaden Router lookup beyond the current message and provided candidates. "
+    "Return one strict JSON object that conforms to output_schema. "
     "Do not include Markdown or explanatory text."
 )
 TASK_SESSION_INSTRUCTION = (
-    "Handle this Feishu task. Return one strict JSON object that conforms to output_schema. "
+    "Handle this Feishu task. Use auto_reply only when the evidence is sufficient, the reply is low risk, "
+    "and no owner judgment is needed. Use needs_owner for uncertainty, commitments, privacy-sensitive content, "
+    "writes or permission expansion, unclear responsibility across people, or any case where the owner should "
+    "review. Use no_reply when no external reply is needed while still choosing whether to keep watching or close. "
+    "If context_access is present, you may use it only for read-only context lookup for the current task. "
+    "Query only allowed_tables, use PRAGMA table_info only for allowed tables when column names are needed, "
+    "never write SQLite, and do not mention SQLite, databases, or internal audit tables in external replies. "
+    "Return one strict JSON object that conforms to output_schema. "
     "Do not include Markdown, explanatory text, or @ mentions."
 )
 
@@ -24,17 +42,41 @@ class StrictModel(BaseModel):
 
 
 class TaskRouterOutput(StrictModel):
-    route: Literal["new_task", "attach_task", "reopen_task", "close_task", "ignore", "ambiguous"] = Field(
-        description="Routing decision for the incoming message."
+    route: Literal["new_task", "attach_task", "reopen_task", "ignore", "ambiguous"] = Field(
+        description=(
+            "Routing decision for the incoming message: new_task creates a new task; attach_task appends to "
+            "one active candidate; reopen_task resumes one historical closed candidate; ignore means no task work "
+            "is needed; ambiguous asks the owner because the target "
+            "or intent is unclear."
+        )
     )
-    target_task_id: str | None = Field(default=None, description="Task short id to target, or null when no target applies.")
+    target_task_id: str | None = Field(
+        default=None,
+        description=(
+            "Candidate task_id to act on. Required for attach_task and reopen_task; it must exactly "
+            "match a task_id from the provided candidates and must not be invented. Must be null for new_task, "
+            "ignore, and ambiguous."
+        ),
+    )
     reason: str = Field(default="", description="Short operator-readable reason for the decision.")
 
+    @model_validator(mode="after")
+    def validate_target_for_route(self) -> TaskRouterOutput:
+        if self.route in {"attach_task", "reopen_task"}:
+            if self.target_task_id is None or not self.target_task_id.strip():
+                raise ValueError(f"{self.route} requires a non-empty target_task_id")
+        elif self.target_task_id is not None:
+            raise ValueError(f"{self.route} requires target_task_id to be null")
+        return self
 
-class TaskSessionOutput(StrictModel):
-    task_label: str = Field(description="Short task label for operator status views.")
+
+class BaseTaskSessionOutput(StrictModel):
     answerability: Literal["auto_reply", "needs_owner", "no_reply"] = Field(
-        description="Whether the daemon may reply automatically, needs owner review, or should not reply."
+        description=(
+            "Whether the daemon may reply automatically, needs owner review, or should not reply. Use auto_reply "
+            "only for sufficient evidence and low-risk replies; use needs_owner for uncertainty, commitments, "
+            "privacy-sensitive content, writes or permission expansion, or unclear human responsibility."
+        )
     )
     proposed_reply: str = Field(default="", description="Plain reply text without Feishu @ mentions.")
     reply_target_message_id: str | None = Field(
@@ -46,20 +88,46 @@ class TaskSessionOutput(StrictModel):
         description="Whether to keep watching this task or close it.",
     )
 
+
+class InitialTaskSessionOutput(BaseTaskSessionOutput):
+    task_label: str = Field(description="Short task label for operator status views, based on the initial task.")
+
     @field_validator("task_label")
     @classmethod
     def trim_label(cls, value: str) -> str:
         return " ".join(value.split())[:100]
 
 
-def build_router_prompt(*, message: NormalizedMessage, active: list[Any], historical: list[TaskRecord]) -> str:
+class FollowupTaskSessionOutput(BaseTaskSessionOutput):
+    pass
+
+
+def build_router_prompt(
+    *,
+    message: NormalizedMessage,
+    active: list[Any],
+    historical: list[TaskRecord],
+    context_access: dict[str, Any] | None = None,
+    message_counts: dict[int, int] | None = None,
+) -> str:
     payload = {
         "instruction": ROUTER_INSTRUCTION,
         "output_schema": _schema_hint(TaskRouterOutput),
         "message": _message_card(message),
-        "active_candidates": [_candidate_card(candidate.task, candidate.matched_by) for candidate in active],
-        "historical_candidates": [_task_card(task) for task in historical],
+        "active_candidates": [
+            _candidate_card(
+                candidate.task,
+                candidate.matched_by,
+                message_count=_message_count_for(candidate.task, message_counts),
+            )
+            for candidate in active
+        ],
+        "historical_candidates": [
+            _task_card(task, message_count=_message_count_for(task, message_counts)) for task in historical
+        ],
     }
+    if context_access is not None:
+        payload["context_access"] = context_access
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
@@ -70,19 +138,27 @@ def build_task_session_prompt(
     reply_target_message_ids: list[str],
     messages: list[Any],
     resources: list[Any],
+    output_model: type[BaseModel] = InitialTaskSessionOutput,
+    context_metadata: dict[str, Any] | None = None,
+    context_access: dict[str, Any] | None = None,
 ) -> str:
+    metadata: dict[str, Any] = {
+        "current_message_id": current_message_id,
+        "root_message_id": task.root_message_id,
+        "reply_target_message_ids": reply_target_message_ids,
+    }
+    if context_metadata is not None:
+        metadata.update(context_metadata)
     payload = {
         "instruction": TASK_SESSION_INSTRUCTION,
-        "metadata": {
-            "current_message_id": current_message_id,
-            "root_message_id": task.root_message_id,
-            "reply_target_message_ids": reply_target_message_ids,
-        },
-        "output_schema": _schema_hint(TaskSessionOutput),
+        "metadata": metadata,
+        "output_schema": _schema_hint(output_model),
         "task": _task_card(task),
         "messages": [_row_message_card(row) for row in messages],
         "resources": [_resource_card(row) for row in resources],
     }
+    if context_access is not None:
+        payload["context_access"] = context_access
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
@@ -120,8 +196,8 @@ def _row_message_card(row: Any) -> dict[str, Any]:
     }
 
 
-def _task_card(task: TaskRecord) -> dict[str, Any]:
-    return {
+def _task_card(task: TaskRecord, *, message_count: int | None = None) -> dict[str, Any]:
+    card = {
         "task_id": task.short_id,
         "status": task.status,
         "chat_id": task.chat_id,
@@ -130,10 +206,19 @@ def _task_card(task: TaskRecord) -> dict[str, Any]:
         "task_label": task.task_label,
         "watch_until": task.watch_until,
     }
+    if message_count is not None:
+        card["message_count"] = message_count
+    return card
 
 
-def _candidate_card(task: TaskRecord, matched_by: str) -> dict[str, Any]:
-    return _task_card(task) | {"matched_by": matched_by}
+def _candidate_card(task: TaskRecord, matched_by: str, *, message_count: int | None = None) -> dict[str, Any]:
+    return _task_card(task, message_count=message_count) | {"matched_by": matched_by}
+
+
+def _message_count_for(task: TaskRecord, message_counts: dict[int, int] | None) -> int | None:
+    if message_counts is None:
+        return None
+    return message_counts.get(task.id)
 
 
 def _resource_card(row: Any) -> dict[str, Any]:

@@ -12,7 +12,14 @@ from pydantic import ValidationError
 from .agent_backend import AgentBackend, AgentRunResult
 from .config import AppConfig, ChatPolicyConfig
 from .jsonl import JSONLLogger
-from .prompt import TaskRouterOutput, TaskSessionOutput, build_router_prompt, build_task_session_prompt
+from .prompt import (
+    BaseTaskSessionOutput,
+    FollowupTaskSessionOutput,
+    InitialTaskSessionOutput,
+    TaskRouterOutput,
+    build_router_prompt,
+    build_task_session_prompt,
+)
 from .routing import CandidateCollector, RoutingResult
 from .store.sqlite_store import SQLiteStore
 from .types import NormalizedMessage, RouteDecision, TaskRecord
@@ -495,7 +502,17 @@ class TaskProcessingService:
                 "historical_candidates": len(historical),
             },
         )
-        prompt = build_router_prompt(message=message, active=active_candidates, historical=historical)
+        prompt = build_router_prompt(
+            message=message,
+            active=active_candidates,
+            historical=historical,
+            context_access=self._router_context_access(
+                message=message,
+                active_candidates=active_candidates,
+                historical=historical,
+            ),
+            message_counts=self._router_message_counts(active_candidates=active_candidates, historical=historical),
+        )
         outcome = self._call_agent_with_retries(
             lambda: self.agent_backend.task_router(prompt),
             run_id=run_id,
@@ -776,35 +793,6 @@ class TaskProcessingService:
                 },
             )
             return RoutingResult(decision=decision, task=self.store.get_task_by_id(target.id))
-        if output.route == "close_task":
-            self.store.update_task_after_agent(task_id=target.id, status="closed")
-            self.store.record_routing_audit(
-                message_id=message.message_id,
-                decision=RouteDecision(
-                    "close_task",
-                    target_task_id=target.id,
-                    target_task_short_id=target.short_id,
-                    reason=output.reason or "task_router_close",
-                    router_called=True,
-                ),
-            )
-            self._mark_processing_processed(
-                message=message,
-                stage="task_router",
-                task_id=target.id,
-                attempt_count=outcome.attempt_count,
-            )
-            self.logger.info(
-                "task_router_decided",
-                run_id=run_id,
-                task_id=str(target.id),
-                data={
-                    "message_id": message.message_id,
-                    "route": output.route,
-                    "reason": output.reason or "task_router_close",
-                    "task_short_id": target.short_id,
-                },
-            )
         return None
 
     def _run_task_session(
@@ -817,7 +805,13 @@ class TaskProcessingService:
         run_id: str,
     ) -> ProcessingResult:
         session_id = self.store.get_initialized_agent_session_id(task.id)
-        prompt_message_ids = self._task_session_prompt_message_ids(task=task, message=message, session_id=session_id)
+        task_message_ids = self.store.list_task_message_ids(task.id)
+        prompt_message_ids = self._task_session_prompt_message_ids(
+            task=task,
+            message=message,
+            session_id=session_id,
+            task_message_ids=task_message_ids,
+        )
         preflight = self._resource_preflight(
             task=task,
             message=message,
@@ -877,12 +871,20 @@ class TaskProcessingService:
                 "resource_count": len(resources),
             },
         )
+        output_model = InitialTaskSessionOutput if session_id is None else FollowupTaskSessionOutput
         prompt = build_task_session_prompt(
             task=task,
             current_message_id=message.message_id,
             reply_target_message_ids=reply_target_message_ids,
             messages=self.store.get_messages_by_ids(prompt_message_ids),
             resources=resources,
+            output_model=output_model,
+            context_metadata=_task_session_context_metadata(
+                session_id=session_id,
+                included_message_count=len(prompt_message_ids),
+                task_message_count=len(task_message_ids) or len(prompt_message_ids),
+            ),
+            context_access=self._task_session_context_access(message=message, task=task),
         )
         outcome = self._call_agent_with_retries(
             lambda: self.agent_backend.task_session(prompt, session_id=session_id),
@@ -936,7 +938,7 @@ class TaskProcessingService:
             )
             return ProcessingResult("owner_notification_created", task.id, action_id=action_id, reason="agent_failed")
         try:
-            output = TaskSessionOutput.model_validate(result.json_data)
+            output = output_model.model_validate(result.json_data)
         except ValidationError as exc:
             last_error = str(exc)
             self.logger.error(
@@ -1020,7 +1022,7 @@ class TaskProcessingService:
         next_status = "closed" if output.watch_action == "close" else "watching"
         self.store.update_task_after_agent(
             task_id=task.id,
-            task_label=output.task_label,
+            task_label=output.task_label if isinstance(output, InitialTaskSessionOutput) else None,
             status=next_status,
             watch_until=watch_until if next_status == "watching" else None,
         )
@@ -1190,7 +1192,7 @@ class TaskProcessingService:
         *,
         task: TaskRecord,
         message: NormalizedMessage,
-        output: TaskSessionOutput,
+        output: BaseTaskSessionOutput,
         composed: ComposedReply,
     ) -> dict[str, Any]:
         if output.answerability != "auto_reply":
@@ -1235,13 +1237,68 @@ class TaskProcessingService:
         task: TaskRecord,
         message: NormalizedMessage,
         session_id: str | None,
+        task_message_ids: list[str] | None = None,
     ) -> list[str]:
         if session_id is not None:
             # Resumed agent sessions already carry task history; sending only
             # the current message keeps follow-up prompts compact and bounded.
             return [message.message_id]
-        message_ids = self.store.list_task_message_ids(task.id)
+        message_ids = task_message_ids if task_message_ids is not None else self.store.list_task_message_ids(task.id)
         return message_ids or [message.message_id]
+
+    def _router_context_access(
+        self,
+        *,
+        message: NormalizedMessage,
+        active_candidates: list[Any],
+        historical: list[TaskRecord],
+    ) -> dict[str, Any] | None:
+        context = self._base_context_access()
+        if context is None:
+            return None
+        context["query_scope"] = {
+            "current_message_id": message.message_id,
+            "active_tasks": [_context_task_card(candidate.task) for candidate in active_candidates],
+            "historical_tasks": [_context_task_card(task) for task in historical],
+        }
+        return context
+
+    def _router_message_counts(
+        self,
+        *,
+        active_candidates: list[Any],
+        historical: list[TaskRecord],
+    ) -> dict[int, int]:
+        task_ids = [candidate.task.id for candidate in active_candidates] + [task.id for task in historical]
+        return self.store.count_task_messages_by_task_ids(task_ids)
+
+    def _task_session_context_access(
+        self,
+        *,
+        message: NormalizedMessage,
+        task: TaskRecord,
+    ) -> dict[str, Any] | None:
+        context = self._base_context_access()
+        if context is None:
+            return None
+        context["query_scope"] = {
+            "current_message_id": message.message_id,
+            "task": _context_task_card(task),
+        }
+        return context
+
+    def _base_context_access(self) -> dict[str, Any] | None:
+        if self.config.tool_permissions not in {"guarded_write", "full_access"}:
+            return None
+        path = self.store.path.expanduser()
+        if not path.exists():
+            return None
+        return {
+            "backend": "sqlite",
+            "mode": "live_read_only",
+            "read_only_uri": f"{path.resolve().as_uri()}?mode=ro",
+            "allowed_tables": ["tasks", "task_messages", "messages", "resources", "routing_audits"],
+        }
 
     def _resolve_router_target(self, target_task_id: str | None) -> TaskRecord | None:
         if not target_task_id:
@@ -1306,6 +1363,25 @@ def _router_target_route_error(
 
 def _can_directly_approve(proposed_reply: str, composed: ComposedReply) -> bool:
     return bool(proposed_reply.strip()) and bool(composed.text.strip()) and not composed.had_forbidden_mentions
+
+
+def _context_task_card(task: TaskRecord) -> dict[str, Any]:
+    return {"id": task.id, "short_id": task.short_id}
+
+
+def _task_session_context_metadata(
+    *,
+    session_id: str | None,
+    included_message_count: int,
+    task_message_count: int,
+) -> dict[str, Any]:
+    history_carried = session_id is not None
+    return {
+        "message_context_mode": "incremental_current_message" if history_carried else "full_task_messages",
+        "included_message_count": included_message_count,
+        "task_message_count": task_message_count,
+        "history_carried_by_agent_session": history_carried,
+    }
 
 
 def _escape_mention_display(value: str) -> str:

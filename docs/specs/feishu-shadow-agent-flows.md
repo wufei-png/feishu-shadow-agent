@@ -129,14 +129,13 @@ flowchart TD
   Route -->|new_task| NewTask["创建 task + watch_keys"]
   Route -->|attach_task| Attach
   Route -->|reopen_task| Reopen["reopen task"]
-  Route -->|close_task| Close["close task"]
   Route -->|ignore| Ignore["ignore 并记录 reason"]
   Route -->|ambiguous| Approval["降级 owner 审批/确认"]
 
-  Attach --> Include["task_messages 去重关联"]
+  Attach --> Include["task_messages 去重关联；结束/取消类消息也先 attach"]
   Reopen --> Include
   NewTask --> Include
-  Include --> TaskSession["进入 Hermes Task Session"]
+  Include --> TaskSession["进入 Hermes Task Session；watch_action=close 时关闭任务"]
 ```
 
 <a id="resource-download-flow"></a>
@@ -175,7 +174,7 @@ flowchart TD
   Parse -->|失败| Approval["创建 send_reply ApprovalRequest"]
   Parse -->|通过| ValidateTarget{"reply_target_message_id 在候选内"}
   ValidateTarget -->|否| Approval
-  ValidateTarget -->|是| UpdateTask["更新 task_label / watch_action"]
+  ValidateTarget -->|是| UpdateTask["初次写 task_label；按 watch_action 更新 watching/close"]
 
   UpdateTask --> Answerability{"answerability"}
   Answerability -->|auto_reply| Gates{"policy / direct mention / composer gates 通过"}

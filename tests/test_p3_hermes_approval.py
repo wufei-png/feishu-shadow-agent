@@ -22,9 +22,11 @@ class FakeHermes:
         self.router_outputs: list[dict[str, Any] | AgentRunResult | Exception] = []
         self.session_outputs: list[dict[str, Any] | AgentRunResult | Exception] = []
         self.session_ids_seen: list[str | None] = []
+        self.router_prompts: list[str] = []
         self.session_prompts: list[str] = []
 
     def task_router(self, prompt: str) -> AgentRunResult:
+        self.router_prompts.append(prompt)
         output = self.router_outputs.pop(0)
         if isinstance(output, Exception):
             raise output
@@ -115,14 +117,15 @@ def _message(
     }
 
 
-def _session_output(**overrides: Any) -> dict[str, Any]:
+def _session_output(*, include_task_label: bool = True, **overrides: Any) -> dict[str, Any]:
     base = {
-        "task_label": "label",
         "answerability": "auto_reply",
         "proposed_reply": "reply text",
         "reply_target_message_id": "om_1",
         "watch_action": "keep_watching",
     }
+    if include_task_label:
+        base["task_label"] = "label"
     return base | overrides
 
 
@@ -427,6 +430,10 @@ def test_task_router_placeholder_can_create_new_task(tmp_path: Path) -> None:
             """,
             ("om_2",),
         ).fetchone()
+        first_task = conn.execute(
+            "SELECT id, short_id FROM tasks WHERE root_message_id = ?",
+            ("om_1",),
+        ).fetchone()
         task_id = conn.execute("SELECT id FROM tasks WHERE root_message_id = ?", ("om_2",)).fetchone()["id"]
         watch_key = conn.execute(
             "SELECT key FROM task_watch_keys WHERE task_id = ? AND key = ?",
@@ -436,6 +443,15 @@ def test_task_router_placeholder_can_create_new_task(tmp_path: Path) -> None:
     assert route["router_called"] == 1
     assert route["matched_by"] == "task_router"
     assert watch_key["key"] == "user:ou_b"
+    router_prompt = json.loads(hermes.router_prompts[0])
+    assert router_prompt["active_candidates"][0]["message_count"] == 1
+    assert router_prompt["context_access"]["backend"] == "sqlite"
+    assert router_prompt["context_access"]["read_only_uri"].endswith("agent.sqlite3?mode=ro")
+    assert router_prompt["context_access"]["query_scope"] == {
+        "current_message_id": "om_2",
+        "active_tasks": [{"id": first_task["id"], "short_id": first_task["short_id"]}],
+        "historical_tasks": [],
+    }
 
 
 def test_task_router_ignore_records_audit_without_notification(tmp_path: Path) -> None:
@@ -508,7 +524,7 @@ def test_task_router_invalid_target_records_ambiguous_audit_and_notification(tmp
     assert "task_router_invalid_target" in notification["payload_json"]
 
 
-@pytest.mark.parametrize("route", ["attach_task", "reopen_task", "close_task"])
+@pytest.mark.parametrize("route", ["attach_task", "reopen_task"])
 def test_task_router_existing_non_candidate_target_is_invalid(tmp_path: Path, route: str) -> None:
     hermes = FakeHermes()
     hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
@@ -569,10 +585,104 @@ def test_task_router_existing_non_candidate_target_is_invalid(tmp_path: Path, ro
     assert notification is not None
 
 
+def test_task_router_close_task_output_is_schema_failure(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)})
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    first = service.process_raw_message(
+        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    assert first is not None and first.task is not None
+    hermes.router_outputs.append(
+        {
+            "route": "close_task",
+            "target_task_id": first.task.short_id,
+            "reason": "resolved",
+        }
+    )
+
+    service.process_raw_message(
+        _message("om_2", sender_id="ou_b", sender_name="Bob", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        route_row = conn.execute(
+            "SELECT route, route_reason, router_called FROM routing_audits WHERE message_id = ? ORDER BY id DESC LIMIT 1",
+            ("om_2",),
+        ).fetchone()
+        task_status = conn.execute("SELECT status FROM tasks WHERE id = ?", (first.task.id,)).fetchone()["status"]
+        notification = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'owner_notification' AND payload_json LIKE ?",
+            ("%task_router_schema_failed%",),
+        ).fetchone()
+    assert route_row["route"] == "ambiguous"
+    assert route_row["route_reason"] == "task_router_schema_failed"
+    assert route_row["router_called"] == 1
+    assert task_status == "watching"
+    assert notification is not None
+
+
+def test_task_router_new_task_with_target_is_schema_failure(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)})
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    first = service.process_raw_message(
+        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    assert first is not None and first.task is not None
+    hermes.router_outputs.append(
+        {
+            "route": "new_task",
+            "target_task_id": first.task.short_id,
+            "reason": "unexpected target",
+        }
+    )
+
+    service.process_raw_message(
+        _message("om_2", sender_id="ou_b", sender_name="Bob", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        route_row = conn.execute(
+            "SELECT route, route_reason, router_called FROM routing_audits WHERE message_id = ? ORDER BY id DESC LIMIT 1",
+            ("om_2",),
+        ).fetchone()
+        task_count = conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"]
+        om_2_task = conn.execute("SELECT id FROM tasks WHERE root_message_id = ?", ("om_2",)).fetchone()
+        notification = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'owner_notification' AND payload_json LIKE ?",
+            ("%task_router_schema_failed%",),
+        ).fetchone()
+    assert route_row["route"] == "ambiguous"
+    assert route_row["route_reason"] == "task_router_schema_failed"
+    assert route_row["router_called"] == 1
+    assert task_count == 1
+    assert om_2_task is None
+    assert notification is not None
+
+
 def test_task_router_can_reopen_historical_closed_recall_candidate(tmp_path: Path) -> None:
     hermes = FakeHermes()
     hermes.session_outputs.append(_session_output(_session_id="sid_1", reply_target_message_id="om_1"))
-    hermes.session_outputs.append(_session_output(_session_id="sid_1", reply_target_message_id="om_2"))
+    hermes.session_outputs.append(
+        _session_output(include_task_label=False, _session_id="sid_1", reply_target_message_id="om_2")
+    )
     store, service, _ = _service(tmp_path, hermes=hermes)
 
     created = service.process_raw_message(
@@ -626,7 +736,9 @@ def test_task_router_can_reopen_historical_closed_recall_candidate(tmp_path: Pat
 def test_task_router_cannot_attach_historical_closed_recall_candidate(tmp_path: Path) -> None:
     hermes = FakeHermes()
     hermes.session_outputs.append(_session_output(_session_id="sid_1", reply_target_message_id="om_1"))
-    hermes.session_outputs.append(_session_output(_session_id="sid_1", reply_target_message_id="om_2"))
+    hermes.session_outputs.append(
+        _session_output(include_task_label=False, _session_id="sid_1", reply_target_message_id="om_2")
+    )
     store, service, _ = _service(tmp_path, hermes=hermes)
 
     created = service.process_raw_message(
@@ -716,6 +828,99 @@ def test_task_router_failure_records_ambiguous_audit(tmp_path: Path) -> None:
 def test_task_session_followup_uses_stored_hermes_session(tmp_path: Path) -> None:
     hermes = FakeHermes()
     hermes.session_outputs.append(_session_output(_session_id="sid_1", reply_target_message_id="om_1"))
+    hermes.session_outputs.append(
+        _session_output(include_task_label=False, _session_id="sid_1", reply_target_message_id="om_2")
+    )
+    store, service, _ = _service(tmp_path, hermes=hermes)
+
+    first = service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert first is not None and first.task is not None
+    service.process_raw_message(
+        _message("om_2", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    assert hermes.session_ids_seen == [None, "sid_1"]
+    followup_prompt = json.loads(hermes.session_prompts[1])
+    assert [message["message_id"] for message in followup_prompt["messages"]] == ["om_2"]
+    assert followup_prompt["metadata"] == {
+        "current_message_id": "om_2",
+        "root_message_id": "om_1",
+        "reply_target_message_ids": ["om_2", "om_1"],
+        "message_context_mode": "incremental_current_message",
+        "included_message_count": 1,
+        "task_message_count": 2,
+        "history_carried_by_agent_session": True,
+    }
+    assert "task_label" not in followup_prompt["output_schema"]["properties"]
+    assert followup_prompt["context_access"]["backend"] == "sqlite"
+    assert followup_prompt["context_access"]["mode"] == "live_read_only"
+    assert followup_prompt["context_access"]["read_only_uri"].endswith("agent.sqlite3?mode=ro")
+    assert followup_prompt["context_access"]["allowed_tables"] == [
+        "tasks",
+        "task_messages",
+        "messages",
+        "resources",
+        "routing_audits",
+    ]
+    assert followup_prompt["context_access"]["query_scope"] == {
+        "current_message_id": "om_2",
+        "task": {"id": first.task.id, "short_id": first.task.short_id},
+    }
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"] == 2
+        audit = conn.execute(
+            """
+            SELECT input_message_ids_json, input_resource_ids_json, tool_permissions_profile
+            FROM agent_audits
+            WHERE request_type = 'task_session'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    assert json.loads(audit["input_message_ids_json"]) == ["om_2"]
+    assert json.loads(audit["input_resource_ids_json"]) == []
+    assert audit["tool_permissions_profile"] == "guarded_write"
+
+
+def test_context_access_omitted_for_read_only_tool_profile(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
+    cfg = _config(tool_permissions="read_only")
+    _, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    prompt = json.loads(hermes.session_prompts[0])
+    assert "context_access" not in prompt
+
+
+def test_context_access_omitted_when_database_file_is_missing(tmp_path: Path) -> None:
+    processor = TaskProcessingService(
+        store=SQLiteStore(tmp_path / "missing.sqlite3"),
+        config=_config(),
+        agent_backend=FakeHermes(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+    )
+
+    assert processor._base_context_access() is None
+
+
+def test_task_session_followup_rejects_task_label(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(_session_id="sid_1", reply_target_message_id="om_1"))
     hermes.session_outputs.append(_session_output(_session_id="sid_1", reply_target_message_id="om_2"))
     store, service, _ = _service(tmp_path, hermes=hermes)
 
@@ -732,28 +937,24 @@ def test_task_session_followup_uses_stored_hermes_session(tmp_path: Path) -> Non
         run_id="run_1",
     )
 
-    assert hermes.session_ids_seen == [None, "sid_1"]
-    followup_prompt = json.loads(hermes.session_prompts[1])
-    assert [message["message_id"] for message in followup_prompt["messages"]] == ["om_2"]
-    assert followup_prompt["metadata"] == {
-        "current_message_id": "om_2",
-        "root_message_id": "om_1",
-        "reply_target_message_ids": ["om_2", "om_1"],
-    }
     with store.connect() as conn:
-        assert conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"] == 2
-        audit = conn.execute(
+        processing = conn.execute(
             """
-            SELECT input_message_ids_json, input_resource_ids_json, tool_permissions_profile
-            FROM agent_audits
-            WHERE request_type = 'task_session'
-            ORDER BY id DESC
-            LIMIT 1
-            """
+            SELECT stage, status, terminal_reason
+            FROM message_processing
+            WHERE message_id = ? AND stage = 'task_session'
+            """,
+            ("om_2",),
         ).fetchone()
-    assert json.loads(audit["input_message_ids_json"]) == ["om_2"]
-    assert json.loads(audit["input_resource_ids_json"]) == []
-    assert audit["tool_permissions_profile"] == "guarded_write"
+        send_count = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
+        notification = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'owner_notification' AND payload_json LIKE ?",
+            ("%agent_schema_failed%",),
+        ).fetchone()
+    assert processing["status"] == "processing_failed_terminal"
+    assert processing["terminal_reason"] == "agent_schema_failed"
+    assert send_count == 1
+    assert notification is not None
 
 
 def test_task_session_schema_failure_does_not_persist_session_id(tmp_path: Path) -> None:

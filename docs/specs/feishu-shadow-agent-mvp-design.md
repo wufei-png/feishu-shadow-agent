@@ -454,6 +454,9 @@ system/developer 指令:
 metadata block:
   minimal JSON，只放 id、状态、策略和资源引用
 
+context_access block:
+  可选顶层 card，只在权限和本地 DB 条件允许时提供 read-only SQLite context
+
 conversation block:
   简洁自然语言消息上下文，必须带 sender 信息
 ```
@@ -506,13 +509,24 @@ attachments:
 
 ## 13. Hermes 输出
 
-Task Session 每次输出都必须更新任务标签和 watch 行为，不只是回复草稿。
+Task Session 输出负责回复草稿、回复目标和 watch 行为。`task_label` 只在首次 Task Session 输出并写入；follow-up schema 不包含也不更新 `task_label`。
 
-示例 schema：
+Initial Task Session 示例 schema：
 
 ```json
 {
   "task_label": "分类服务启动失败，用户反馈截图显示服务启动异常并伴随 500",
+  "answerability": "auto_reply",
+  "proposed_reply": "建议先检查分类服务启动日志...",
+  "reply_target_message_id": "om_current",
+  "watch_action": "keep_watching"
+}
+```
+
+Follow-up Task Session 示例 schema：
+
+```json
+{
   "answerability": "auto_reply",
   "proposed_reply": "建议先检查分类服务启动日志...",
   "reply_target_message_id": "om_current",
@@ -531,11 +545,10 @@ Python 校验 `reply_target_message_id` 必须在候选列表中。
 
 `task_label`：
 
-- 初次处理时由 Hermes 输出。
+- 初次处理时由 Hermes 输出并写入任务。
 - 限制约 100 个中文字符。
 - 失败时 fallback 为 root message 清洗截断。
-- 交互 1 轮后允许 Hermes 更新一次。
-- 后续只有同任务话题明显转向时才允许更新。
+- follow-up 不接收 `task_label` 字段，也不会更新现有任务标签。
 
 ## 14. TaskMatcher 与 watch_keys
 
@@ -584,7 +597,7 @@ IncomingMessage
   -> owner intervention check
   -> CandidateCollector 纯代码找候选 task
   -> 必要时 Hermes TaskRouter 一次无状态结构化判断
-  -> attach / reopen / new / close / ignore / ambiguous
+  -> new_task / attach_task / reopen_task / ignore / ambiguous
 ```
 
 CandidateCollector 不调用 Hermes，只做 SQLite 检索。
@@ -645,18 +658,20 @@ historical candidates：
 仅新触发事件启用
 same chat_id
 最近 7 天
-sender/watch_keys/关键词/task_label/last messages 简单匹配
+Python 内部可用 sender/watch_keys/关键词/task_label/last_user_message/last_agent_reply 等存储摘要召回
 ```
 
 TaskRouter 输出：
 
 ```json
 {
-  "route": "new_task|attach_task|reopen_task|close_task|ignore|ambiguous",
+  "route": "new_task|attach_task|reopen_task|ignore|ambiguous",
   "target_task_id": "t_xxx",
   "reason": "..."
 }
 ```
+
+结束、取消、已解决这类消息如果明确归属某个 active task，Router 仍输出 `attach_task`。任务是否关闭由后续 Task Session 的 `watch_action: "close"` 决定。
 
 每次 route 都写入 match 决策审计：
 
@@ -762,7 +777,7 @@ Group without thread_id:
 same chat_id
 最近 7 天
 sender in old watch_keys 或 mentions owner
-task_label / last_user_message / last_agent_reply 简单匹配
+task_label / last_user_message / last_agent_reply 等存储摘要轻量匹配
 reply_to 命中旧 included/agent reply message_id
 ```
 
@@ -770,11 +785,12 @@ Hermes TaskRouter 判定：
 
 ```text
 reopen_task
-attach_task
 new_task
 ignore
 ambiguous
 ```
+
+closed historical candidate 只能通过 `reopen_task` 恢复，或另开 `new_task`、`ignore`、`ambiguous`；`attach_task` 只用于 active candidate。
 
 ## 18. TaskRouter candidate card
 
@@ -783,21 +799,24 @@ candidate card 只包含摘要级短文本，不包含历史原文。
 ```json
 {
   "task_id": "t_xxx",
-  "state": "watching",
+  "status": "watching",
+  "chat_id": "oc_xxx",
+  "chat_type": "group",
   "root_message_id": "om_root",
-  "last_update_at": "...",
-  "watch_keys": ["user:ou_a", "msg:om_root"],
+  "watch_until": "...",
   "task_label": "分类服务启动失败，用户反馈截图显示服务启动异常并伴随 500",
-  "last_agent_reply": "建议先检查配置加载和错误日志...",
-  "last_user_message": "我这边也看到 500"
+  "message_count": 3,
+  "matched_by": "thread"
 }
 ```
 
 字段：
 
 - `task_label` 最多约 100 中文字符。
-- `last_agent_reply` / `last_user_message` 截断长度可配置，默认 100 中文字符。
-- `watch_keys` 只放 typed ids，不放原文；card 中最多传最近/关键 20 个，SQLite 保留完整集合。
+- `message_count` 是轻量计数，不包含历史原文，也不是 closed recall 的文本匹配依据。
+- Router candidate card 不暴露 `last_user_message` / `last_agent_reply`；需要更多只读上下文时，通过顶层 `context_access` 在 `query_scope` 内查询。
+- active candidate 可带 `matched_by`，表示命中来源；完整 watch keys 和消息关联保留在 SQLite。
+- `context_access` 如存在，是与 candidate card 并列的顶层 card，不嵌入候选项。
 
 ## 19. ApprovalRequest
 

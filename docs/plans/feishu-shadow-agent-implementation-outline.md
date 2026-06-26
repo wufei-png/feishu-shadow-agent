@@ -96,7 +96,8 @@
 
 验收：
 
-- 覆盖 TaskRouter 的 `new_task|attach_task|reopen_task|close_task|ignore|ambiguous`。
+- 覆盖 TaskRouter 的 `new_task|attach_task|reopen_task|ignore|ambiguous`；结束/取消类消息先 `attach_task` 到 active task，再由 Task Session `watch_action=close` 关闭。
+- 覆盖 Task Session schema 拆分：initial 含 `task_label`，follow-up 不含也不更新 `task_label`。
 - 覆盖 Hermes 输出 schema 失败、非法 `reply_target_message_id`、task_id shortcut 多 pending approval 冲突。
 - 覆盖 per-chat 关闭自动回复、资源缺失需要 owner 通知、Hermes 误生成 @ 时清理或降级审批。
 

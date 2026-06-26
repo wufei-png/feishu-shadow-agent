@@ -14,18 +14,20 @@ dispatcher hardening.
 
 - `HermesConfig` defaults to `mode: cli`; HTTP fields remain optional compatibility
   fields for future use.
-- New tasks start with `tasks.hermes_session_id = NULL`.
+- New tasks start with `tasks.agent_session_id = NULL`.
 - Legacy `feishu-task-*` values are treated as uninitialized and cleared by
   migration.
 - First successful Task Session saves the real Hermes stderr `session_id`.
-- Follow-up Task Sessions pass `--resume <hermes_session_id>`.
+- Follow-up Task Sessions pass `--resume <agent_session_id>`.
 - `TaskProcessingService` sits between deterministic routing and action creation.
 - P2 placeholder routes call Hermes TaskRouter, then apply
-  `new_task|attach_task|reopen_task|close_task|ignore|ambiguous`.
+  `new_task|attach_task|reopen_task|ignore|ambiguous`.
+- Resolve/cancel messages attach to the active task first; Task Session closes it
+  with `watch_action=close`.
 - TaskRouter and Task Session outputs are strict Pydantic models.
 - Invalid JSON/schema, invalid route target, or invalid `reply_target_message_id`
   becomes audited ambiguity plus approval/notification state.
-- `hermes_audits` records request type, task/session ids, input message/resource
+- `agent_audits` records request type, task/session ids, input message/resource
   ids, response JSON, error, latency, and optional full prompt.
 - Gate-passed auto replies create pending `send_reply` actions.
 - `approved` is reserved for owner approval commands.
@@ -80,9 +82,9 @@ dispatcher hardening.
 
 - Add task routing/session processing:
   - Replace P2 `router_placeholder` branches with a real stateless Hermes TaskRouter only when deterministic shortcuts fail.
-  - Validate router output against `new_task | attach_task | reopen_task | close_task | ignore | ambiguous`; reject invalid `target_task_id` into an audited `ambiguous` result plus owner notification action.
-  - After `new_task | attach_task | reopen_task`, run resource preflight first. Only after all prompt resources are downloaded, run one Hermes Task Session turn and validate `task_label`, `answerability`, `proposed_reply`, `reply_target_message_id`, and `watch_action`.
-  - Record Hermes audits in a new `hermes_audits` table with request type, task id, session id, input message/resource ids, response JSON, error, latency, and full prompt only when `debug.save_full_hermes_io` is true.
+  - Validate router output against `new_task | attach_task | reopen_task | ignore | ambiguous`; reject invalid `target_task_id` into an audited `ambiguous` result plus owner notification action. Resolve/cancel messages for an active task route as `attach_task`; closure is decided by Task Session `watch_action=close`.
+  - After `new_task | attach_task | reopen_task`, run resource preflight first. Only after all prompt resources are downloaded, run one Hermes Task Session turn. Initial Task Session validates `task_label`, `answerability`, `proposed_reply`, `reply_target_message_id`, and `watch_action`; follow-up Task Session validates the same fields except `task_label`, which is not accepted or updated.
+  - Record agent audits in `agent_audits` with request type, backend provider, task id, session id, input message/resource ids, response JSON, error, latency, and full prompt only when `debug.save_full_agent_io` is true.
 
 - Add reply gate, composer, and pending actions:
   - Gate auto-reply on `answerability=auto_reply`, per-chat policy, known group policy, direct mention, valid reply target, and no forbidden mention content.
@@ -110,6 +112,6 @@ dispatcher hardening.
 ## Assumptions
 
 - Hermes source basis: official [CLI Interface](https://hermes-agent.nousresearch.com/docs/user-guide/cli) and [CLI Commands Reference](https://hermes-agent.nousresearch.com/docs/reference/cli-commands), plus local `hermes --help` / `hermes chat --help`.
-- `hermes_session_id` in this repo will store the real Hermes CLI session id returned by Hermes; task short ids remain `t_...`.
+- `agent_session_id` in this repo will store the real AgentBackend session id returned by Hermes; task short ids remain `t_...`.
 - P3 creates pending actions only. Any real Feishu send, dry-run send validation, and readback audit stay in P4.
 - Approval inbox uses user-readable P2P with the bot open id because current `lark-cli 1.0.56` documents `--user-id` P2P resolution as user-identity only.
