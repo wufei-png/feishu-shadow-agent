@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ..types import (
+    DispatchAttemptRecord,
+    DispatchAttemptStatus,
+    DispatchClaim,
+    DispatchErrorStage,
     ActionRecord,
     ActionKind,
     ActionStatus,
@@ -21,6 +25,7 @@ from ..types import (
     RouteDecision,
     TaskRecord,
     TaskStatus,
+    new_run_id,
     utc_now_iso,
 )
 
@@ -180,79 +185,9 @@ class SQLiteStore:
 
     def upsert_message(self, message: NormalizedMessage) -> bool:
         self.migrate()
-        existing = self.get_message(message.message_id)
         now = utc_now_iso()
-        normalized_json = json.dumps(
-            {
-                "mentions": message.mentions,
-                "resources": [resource.raw for resource in message.resources],
-                "thread_id": message.thread_id,
-                "reply_to_message_id": message.reply_to_message_id,
-                "direct_mention": message.direct_mention,
-                "at_all": message.at_all,
-                "sender_name": message.sender_name,
-            },
-            ensure_ascii=False,
-            default=str,
-        )
-        raw_json = json.dumps(message.raw, ensure_ascii=False, default=str)
         with self.connect() as conn:
-            if existing is None:
-                conn.execute(
-                    """
-                    INSERT INTO messages(
-                      message_id, chat_id, chat_type, sender_id, sender_type, sent_at,
-                      normalized_json, raw_json, inserted_at, thread_id, reply_to_message_id,
-                      sender_role, direct_mention, at_all, text, sender_name
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        message.message_id,
-                        message.chat_id,
-                        message.chat_type,
-                        message.sender_id,
-                        message.sender_type,
-                        message.sent_at,
-                        normalized_json,
-                        raw_json,
-                        now,
-                        message.thread_id,
-                        message.reply_to_message_id,
-                        message.sender_role,
-                        int(message.direct_mention),
-                        int(message.at_all),
-                        message.text,
-                        message.sender_name,
-                    ),
-                )
-                return True
-            conn.execute(
-                """
-                UPDATE messages
-                SET chat_id = ?, chat_type = ?, sender_id = ?, sender_type = ?, sent_at = ?,
-                    normalized_json = ?, raw_json = ?, thread_id = ?, reply_to_message_id = ?,
-                    sender_role = ?, direct_mention = ?, at_all = ?, text = ?, sender_name = ?
-                WHERE message_id = ?
-                """,
-                (
-                    message.chat_id,
-                    message.chat_type,
-                    message.sender_id,
-                    message.sender_type,
-                    message.sent_at,
-                    normalized_json,
-                    raw_json,
-                    message.thread_id,
-                    message.reply_to_message_id,
-                    message.sender_role,
-                    int(message.direct_mention),
-                    int(message.at_all),
-                    message.text,
-                    message.sender_name,
-                    message.message_id,
-                ),
-            )
-            return False
+            return self._upsert_message_locked(conn, message, now=now)
 
     def get_message(self, message_id: str) -> sqlite3.Row | None:
         self.migrate()
@@ -963,9 +898,10 @@ class SQLiteStore:
             row = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
         return None if row is None else _action_from_row(row)
 
-    def claim_action_for_dispatch(self, action_id: int) -> ActionRecord | None:
+    def claim_action_for_dispatch(self, action_id: int, *, run_id: str | None = None) -> DispatchClaim | None:
         self.migrate()
         now = utc_now_iso()
+        claim_token = new_run_id("claim")
         with self.connect() as conn:
             cursor = conn.execute(
                 """
@@ -977,8 +913,372 @@ class SQLiteStore:
             )
             if cursor.rowcount != 1:
                 return None
+            attempt_cursor = conn.execute(
+                """
+                INSERT INTO dispatch_attempts(action_id, run_id, claim_token, status, started_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    action_id,
+                    run_id,
+                    claim_token,
+                    DispatchAttemptStatus.STARTED.value,
+                    now,
+                ),
+            )
             row = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
-        return None if row is None else _action_from_row(row)
+            attempt = conn.execute(
+                "SELECT * FROM dispatch_attempts WHERE id = ?",
+                (int(attempt_cursor.lastrowid),),
+            ).fetchone()
+        if row is None or attempt is None:
+            return None
+        return DispatchClaim(action=_action_from_row(row), attempt=_dispatch_attempt_from_row(attempt))
+
+    def list_dispatch_attempts(self, action_id: int) -> list[DispatchAttemptRecord]:
+        self.migrate()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM dispatch_attempts
+                WHERE action_id = ?
+                ORDER BY started_at, id
+                """,
+                (action_id,),
+            ).fetchall()
+        return [_dispatch_attempt_from_row(row) for row in rows]
+
+    def update_dispatch_attempt(
+        self,
+        attempt_id: int,
+        *,
+        status: str,
+        dry_run_result: dict[str, Any] | None = None,
+        send_result: dict[str, Any] | None = None,
+        readback_result: dict[str, Any] | None = None,
+        sent_message_id: str | None = None,
+        error_stage: str | None = None,
+        finish: bool = False,
+    ) -> DispatchAttemptRecord:
+        self.migrate()
+        assignments = ["status = ?"]
+        params: list[Any] = [status]
+        if dry_run_result is not None:
+            assignments.append("dry_run_result_json = ?")
+            params.append(json.dumps(dry_run_result, ensure_ascii=False, default=str))
+        if send_result is not None:
+            assignments.append("send_result_json = ?")
+            params.append(json.dumps(send_result, ensure_ascii=False, default=str))
+        if readback_result is not None:
+            assignments.append("readback_result_json = ?")
+            params.append(json.dumps(readback_result, ensure_ascii=False, default=str))
+        if sent_message_id is not None:
+            assignments.append("sent_message_id = ?")
+            params.append(sent_message_id)
+        if error_stage is not None:
+            assignments.append("error_stage = ?")
+            params.append(error_stage)
+        if finish or status in {
+            DispatchAttemptStatus.READBACK_OK.value,
+            DispatchAttemptStatus.FAILED.value,
+            DispatchAttemptStatus.UNCERTAIN.value,
+        }:
+            assignments.append("finished_at = ?")
+            params.append(utc_now_iso())
+        params.append(attempt_id)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE dispatch_attempts SET {', '.join(assignments)} WHERE id = ?",
+                params,
+            )
+            row = conn.execute("SELECT * FROM dispatch_attempts WHERE id = ?", (attempt_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"dispatch attempt not found: {attempt_id}")
+        return _dispatch_attempt_from_row(row)
+
+    def get_dispatch_inspection(self, action_id: int) -> dict[str, Any] | None:
+        self.migrate()
+        with self.connect() as conn:
+            action = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+            if action is None:
+                return None
+            attempts = conn.execute(
+                """
+                SELECT *
+                FROM dispatch_attempts
+                WHERE action_id = ?
+                ORDER BY started_at, id
+                """,
+                (action_id,),
+            ).fetchall()
+        return {
+            "action": _action_record_dict(_action_from_row(action)),
+            "attempts": [_dispatch_attempt_dict(_dispatch_attempt_from_row(row)) for row in attempts],
+        }
+
+    def find_stale_sending_actions(self, *, stale_after_seconds: int = 900, now: str | None = None) -> list[ActionRecord]:
+        self.migrate()
+        cutoff = _minus_seconds(now or utc_now_iso(), stale_after_seconds)
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM actions
+                WHERE status = 'sending'
+                  AND datetime(updated_at) <= datetime(?)
+                ORDER BY updated_at, id
+                """,
+                (cutoff,),
+            ).fetchall()
+        return [_action_from_row(row) for row in rows]
+
+    def mark_stale_sending_actions_failed_needs_review(
+        self,
+        *,
+        stale_after_seconds: int = 900,
+        now: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self.migrate()
+        effective_now = now or utc_now_iso()
+        cutoff = _minus_seconds(effective_now, stale_after_seconds)
+        recovered: list[dict[str, Any]] = []
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM actions
+                WHERE status = 'sending'
+                  AND datetime(updated_at) <= datetime(?)
+                ORDER BY updated_at, id
+                """,
+                (cutoff,),
+            ).fetchall()
+            for row in rows:
+                action_id = int(row["id"])
+                latest = _latest_dispatch_attempt_locked(conn, action_id=action_id)
+                if _attempt_proves_readback(latest):
+                    result = _stale_sent_result(row, latest)
+                    conn.execute(
+                        """
+                        UPDATE actions
+                        SET status = ?, result_json = ?, updated_at = ?
+                        WHERE id = ? AND status = 'sending'
+                        """,
+                        (
+                            ActionStatus.SENT.value,
+                            json.dumps(result, ensure_ascii=False, default=str),
+                            effective_now,
+                            action_id,
+                        ),
+                    )
+                    if latest["finished_at"] is None:
+                        conn.execute(
+                            "UPDATE dispatch_attempts SET finished_at = ? WHERE id = ?",
+                            (effective_now, latest["id"]),
+                        )
+                    recovered.append({"action_id": action_id, "status": ActionStatus.SENT.value})
+                    continue
+
+                result = _stale_needs_review_result(row, latest)
+                conn.execute(
+                    """
+                    UPDATE actions
+                    SET status = ?, result_json = ?, updated_at = ?
+                    WHERE id = ? AND status = 'sending'
+                    """,
+                    (
+                        ActionStatus.FAILED_NEEDS_REVIEW.value,
+                        json.dumps(result, ensure_ascii=False, default=str),
+                        effective_now,
+                        action_id,
+                    ),
+                )
+                if latest is None:
+                    conn.execute(
+                        """
+                        INSERT INTO dispatch_attempts(
+                          action_id, run_id, claim_token, status, error_stage, started_at, finished_at
+                        ) VALUES (?, NULL, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            action_id,
+                            new_run_id("claim"),
+                            DispatchAttemptStatus.UNCERTAIN.value,
+                            DispatchErrorStage.RECOVERY.value,
+                            effective_now,
+                            effective_now,
+                        ),
+                    )
+                elif latest["finished_at"] is None:
+                    conn.execute(
+                        """
+                        UPDATE dispatch_attempts
+                        SET status = ?, error_stage = ?, finished_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            DispatchAttemptStatus.UNCERTAIN.value,
+                            DispatchErrorStage.RECOVERY.value,
+                            effective_now,
+                            latest["id"],
+                        ),
+                    )
+                recovered.append({"action_id": action_id, "status": ActionStatus.FAILED_NEEDS_REVIEW.value})
+        return recovered
+
+    def retry_dispatch_action(self, action_id: int) -> ActionRecord:
+        self.migrate()
+        now = utc_now_iso()
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"action not found: {action_id}")
+            if row["status"] not in {ActionStatus.FAILED.value, ActionStatus.FAILED_NEEDS_REVIEW.value}:
+                raise ValueError("dispatch retry only accepts failed or failed_needs_review actions")
+            if (
+                row["kind"] == ActionKind.SEND_REPLY.value
+                and row["task_id"] is not None
+                and row["target_message_id"] is not None
+                and _has_active_send_reply_action(
+                    conn,
+                    task_id=int(row["task_id"]),
+                    target_message_id=row["target_message_id"],
+                    exclude_action_id=action_id,
+                )
+            ):
+                raise ValueError("active send action already exists for this task and reply target")
+            conn.execute(
+                """
+                UPDATE actions
+                SET status = ?, dry_run = ?, result_json = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (ActionStatus.PENDING.value, 1, now, action_id),
+            )
+            updated = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+        if updated is None:
+            raise ValueError(f"action not found: {action_id}")
+        return _action_from_row(updated)
+
+    def cancel_dispatch_action(self, action_id: int) -> ActionRecord:
+        self.migrate()
+        now = utc_now_iso()
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"action not found: {action_id}")
+            if row["status"] == ActionStatus.SENT.value:
+                raise ValueError("sent actions cannot be cancelled")
+            if row["status"] != ActionStatus.CANCELLED.value:
+                conn.execute(
+                    """
+                    UPDATE actions
+                    SET status = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (ActionStatus.CANCELLED.value, now, action_id),
+                )
+            updated = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+        if updated is None:
+            raise ValueError(f"action not found: {action_id}")
+        return _action_from_row(updated)
+
+    def mark_action_sent_after_evidence(
+        self,
+        action_id: int,
+        *,
+        sent_message_id: str,
+        result: dict[str, Any],
+        run_id: str | None = None,
+        readback_message: NormalizedMessage | None = None,
+        watch_until: str | None = None,
+    ) -> ActionRecord:
+        self.migrate()
+        if not sent_message_id:
+            raise ValueError("sent_message_id is required")
+        readback = result.get("readback")
+        if not isinstance(readback, dict) or readback.get("ok") is not True:
+            raise ValueError("readback evidence is required before marking sent")
+        now = utc_now_iso()
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"action not found: {action_id}")
+            if row["status"] == ActionStatus.CANCELLED.value:
+                raise ValueError("cancelled actions cannot be marked sent")
+            result_with_id = dict(result)
+            result_with_id["sent_message_id"] = sent_message_id
+            if readback_message is not None:
+                readback_result = dict(readback)
+                readback_result["inserted"] = self._upsert_message_locked(conn, readback_message, now=now)
+                result_with_id["readback"] = readback_result
+                readback = readback_result
+                if (
+                    row["kind"] == ActionKind.SEND_REPLY.value
+                    and row["task_id"] is not None
+                    and watch_until is not None
+                ):
+                    self._record_agent_message_for_task(
+                        conn,
+                        int(row["task_id"]),
+                        readback_message,
+                        watch_until=watch_until,
+                        now=now,
+                    )
+            latest = _latest_dispatch_attempt_locked(conn, action_id=action_id)
+            if latest is None:
+                conn.execute(
+                    """
+                    INSERT INTO dispatch_attempts(
+                      action_id, run_id, claim_token, status, readback_result_json,
+                      sent_message_id, error_stage, started_at, finished_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        action_id,
+                        run_id,
+                        new_run_id("claim"),
+                        DispatchAttemptStatus.READBACK_OK.value,
+                        json.dumps(readback, ensure_ascii=False, default=str),
+                        sent_message_id,
+                        DispatchErrorStage.RECOVERY.value,
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE dispatch_attempts
+                    SET status = ?, readback_result_json = ?, sent_message_id = ?, error_stage = NULL, finished_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        DispatchAttemptStatus.READBACK_OK.value,
+                        json.dumps(readback, ensure_ascii=False, default=str),
+                        sent_message_id,
+                        now,
+                        latest["id"],
+                    ),
+                )
+            conn.execute(
+                """
+                UPDATE actions
+                SET status = ?, result_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    ActionStatus.SENT.value,
+                    json.dumps(result_with_id, ensure_ascii=False, default=str),
+                    now,
+                    action_id,
+                ),
+            )
+            updated = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+        if updated is None:
+            raise ValueError(f"action not found: {action_id}")
+        return _action_from_row(updated)
 
     def record_action_preview(self, action_id: int, result: dict[str, Any]) -> None:
         self.migrate()
@@ -1014,6 +1314,37 @@ class SQLiteStore:
                     action_id,
                 ),
             )
+
+    def finish_claimed_action(
+        self,
+        action_id: int,
+        *,
+        attempt_id: int,
+        status: str,
+        result: dict[str, Any],
+    ) -> ActionRecord | None:
+        self.migrate()
+        with self.connect() as conn:
+            latest = _latest_dispatch_attempt_locked(conn, action_id=action_id)
+            if latest is None or int(latest["id"]) != attempt_id:
+                return None
+            cursor = conn.execute(
+                """
+                UPDATE actions
+                SET status = ?, result_json = ?, updated_at = ?
+                WHERE id = ? AND status = 'sending'
+                """,
+                (
+                    status,
+                    json.dumps(result, ensure_ascii=False, default=str),
+                    utc_now_iso(),
+                    action_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+        return None if row is None else _action_from_row(row)
 
     def expire_pending_approvals(self, *, now: str | None = None) -> int:
         self.migrate()
@@ -1083,7 +1414,7 @@ class SQLiteStore:
                 """
                 SELECT id, kind, status, task_id, target_message_id, updated_at, result_json
                 FROM actions
-                WHERE status = 'failed'
+                WHERE status IN ('failed', 'failed_needs_review')
                 ORDER BY updated_at DESC, id DESC
                 LIMIT 20
                 """
@@ -2178,6 +2509,88 @@ class SQLiteStore:
             (now, watch_until, _truncate(message.text), task_id),
         )
 
+    def _upsert_message_locked(
+        self,
+        conn: sqlite3.Connection,
+        message: NormalizedMessage,
+        *,
+        now: str,
+    ) -> bool:
+        existing = conn.execute(
+            "SELECT 1 FROM messages WHERE message_id = ?",
+            (message.message_id,),
+        ).fetchone()
+        normalized_json = json.dumps(
+            {
+                "mentions": message.mentions,
+                "resources": [resource.raw for resource in message.resources],
+                "thread_id": message.thread_id,
+                "reply_to_message_id": message.reply_to_message_id,
+                "direct_mention": message.direct_mention,
+                "at_all": message.at_all,
+                "sender_name": message.sender_name,
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+        raw_json = json.dumps(message.raw, ensure_ascii=False, default=str)
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO messages(
+                  message_id, chat_id, chat_type, sender_id, sender_type, sent_at,
+                  normalized_json, raw_json, inserted_at, thread_id, reply_to_message_id,
+                  sender_role, direct_mention, at_all, text, sender_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message.message_id,
+                    message.chat_id,
+                    message.chat_type,
+                    message.sender_id,
+                    message.sender_type,
+                    message.sent_at,
+                    normalized_json,
+                    raw_json,
+                    now,
+                    message.thread_id,
+                    message.reply_to_message_id,
+                    message.sender_role,
+                    int(message.direct_mention),
+                    int(message.at_all),
+                    message.text,
+                    message.sender_name,
+                ),
+            )
+            return True
+        conn.execute(
+            """
+            UPDATE messages
+            SET chat_id = ?, chat_type = ?, sender_id = ?, sender_type = ?, sent_at = ?,
+                normalized_json = ?, raw_json = ?, thread_id = ?, reply_to_message_id = ?,
+                sender_role = ?, direct_mention = ?, at_all = ?, text = ?, sender_name = ?
+            WHERE message_id = ?
+            """,
+            (
+                message.chat_id,
+                message.chat_type,
+                message.sender_id,
+                message.sender_type,
+                message.sent_at,
+                normalized_json,
+                raw_json,
+                message.thread_id,
+                message.reply_to_message_id,
+                message.sender_role,
+                int(message.direct_mention),
+                int(message.at_all),
+                message.text,
+                message.sender_name,
+                message.message_id,
+            ),
+        )
+        return False
+
     def _record_routing_audit(
         self,
         conn: sqlite3.Connection,
@@ -2299,6 +2712,57 @@ def _action_from_row(row: sqlite3.Row) -> ActionRecord:
     )
 
 
+def _dispatch_attempt_from_row(row: sqlite3.Row) -> DispatchAttemptRecord:
+    return DispatchAttemptRecord(
+        id=int(row["id"]),
+        action_id=int(row["action_id"]),
+        run_id=row["run_id"],
+        claim_token=row["claim_token"],
+        status=row["status"],
+        dry_run_result=_loads_json(row["dry_run_result_json"]),
+        send_result=_loads_json(row["send_result_json"]),
+        readback_result=_loads_json(row["readback_result_json"]),
+        sent_message_id=row["sent_message_id"],
+        error_stage=row["error_stage"],
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
+    )
+
+
+def _action_record_dict(action: ActionRecord) -> dict[str, Any]:
+    return {
+        "id": action.id,
+        "idempotency_key": action.idempotency_key,
+        "task_id": action.task_id,
+        "approval_id": action.approval_id,
+        "kind": action.kind,
+        "status": action.status,
+        "target_message_id": action.target_message_id,
+        "dry_run": action.dry_run,
+        "payload": action.payload,
+        "result": action.result,
+        "created_at": action.created_at,
+        "updated_at": action.updated_at,
+    }
+
+
+def _dispatch_attempt_dict(attempt: DispatchAttemptRecord) -> dict[str, Any]:
+    return {
+        "id": attempt.id,
+        "action_id": attempt.action_id,
+        "run_id": attempt.run_id,
+        "claim_token": attempt.claim_token,
+        "status": attempt.status,
+        "dry_run_result": attempt.dry_run_result,
+        "send_result": attempt.send_result,
+        "readback_result": attempt.readback_result,
+        "sent_message_id": attempt.sent_message_id,
+        "error_stage": attempt.error_stage,
+        "started_at": attempt.started_at,
+        "finished_at": attempt.finished_at,
+    }
+
+
 def _row_dict(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, Any] | None:
     if row is None:
         return None
@@ -2370,6 +2834,14 @@ def _plus_hours(value: str, hours: int) -> str:
     return (base + timedelta(hours=hours)).astimezone().isoformat(timespec="seconds")
 
 
+def _minus_seconds(value: str, seconds: int) -> str:
+    try:
+        base = datetime.fromisoformat(value)
+    except ValueError:
+        base = datetime.now().astimezone()
+    return (base - timedelta(seconds=seconds)).astimezone().isoformat(timespec="seconds")
+
+
 def _action_idempotency_key(task_id: int, target_message_id: str, payload: dict[str, Any]) -> str:
     seed = json.dumps(
         {
@@ -2437,6 +2909,63 @@ def _has_sent_send_reply_action_for_payload(
     return any(_payload_send_text(_loads_json_object(row["payload_json"])) == text for row in rows)
 
 
+def _latest_dispatch_attempt_locked(conn: sqlite3.Connection, *, action_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT *
+        FROM dispatch_attempts
+        WHERE action_id = ?
+        ORDER BY started_at DESC, id DESC
+        LIMIT 1
+        """,
+        (action_id,),
+    ).fetchone()
+
+
+def _attempt_proves_readback(attempt: sqlite3.Row | None) -> bool:
+    if attempt is None:
+        return False
+    readback = _loads_json_object(attempt["readback_result_json"])
+    return (
+        attempt["status"] == DispatchAttemptStatus.READBACK_OK.value
+        and bool(attempt["sent_message_id"])
+        and readback.get("ok") is True
+    )
+
+
+def _stale_sent_result(action: sqlite3.Row, attempt: sqlite3.Row) -> dict[str, Any]:
+    result = _loads_json_object(action["result_json"])
+    result["sent_message_id"] = attempt["sent_message_id"]
+    readback = _loads_json_object(attempt["readback_result_json"])
+    if readback:
+        result["readback"] = readback
+    warnings = _result_warnings(result)
+    if "recovered_stale_sending_from_readback" not in warnings:
+        warnings.append("recovered_stale_sending_from_readback")
+    result["warnings"] = warnings
+    return result
+
+
+def _stale_needs_review_result(action: sqlite3.Row, attempt: sqlite3.Row | None) -> dict[str, Any]:
+    result = _loads_json_object(action["result_json"])
+    result["error_stage"] = DispatchErrorStage.RECOVERY.value
+    result["recovery_reason"] = "stale_sending_uncertain"
+    if attempt is not None and attempt["sent_message_id"]:
+        result["sent_message_id"] = attempt["sent_message_id"]
+    warnings = _result_warnings(result)
+    if "stale_sending_needs_review" not in warnings:
+        warnings.append("stale_sending_needs_review")
+    result["warnings"] = warnings
+    return result
+
+
+def _result_warnings(result: dict[str, Any]) -> list[str]:
+    warnings = result.get("warnings")
+    if not isinstance(warnings, list):
+        return []
+    return [str(warning) for warning in warnings]
+
+
 def _has_active_send_reply_action(
     conn: sqlite3.Connection,
     *,
@@ -2451,7 +2980,7 @@ def _has_active_send_reply_action(
         WHERE task_id = ?
           AND target_message_id = ?
           AND kind = 'send_reply'
-          AND status IN ('pending', 'sending')
+          AND status IN ('pending', 'sending', 'failed_needs_review')
           AND id != ?
         LIMIT 1
         """,

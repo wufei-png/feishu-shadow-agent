@@ -45,6 +45,23 @@ class ActionStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class DispatchAttemptStatus(StrEnum):
+    STARTED = "started"
+    DRY_RUN_OK = "dry_run_ok"
+    SEND_OK = "send_ok"
+    READBACK_OK = "readback_ok"
+    FAILED = "failed"
+    UNCERTAIN = "uncertain"
+
+
+class DispatchErrorStage(StrEnum):
+    CLAIM = "claim"
+    DRY_RUN = "dry_run"
+    SEND = "send"
+    READBACK = "readback"
+    RECOVERY = "recovery"
+
+
 class RouteName(StrEnum):
     NEW_TASK = "new_task"
     ATTACH_TASK = "attach_task"
@@ -122,6 +139,8 @@ class StateSchemaContract:
     approval_statuses = enum_values(ApprovalStatus)
     action_kinds = enum_values(ActionKind)
     action_statuses = enum_values(ActionStatus)
+    dispatch_attempt_statuses = enum_values(DispatchAttemptStatus)
+    dispatch_error_stages = enum_values(DispatchErrorStage)
     route_names = enum_values(RouteName)
     message_processing_stages = enum_values(MessageProcessingStage)
     message_processing_statuses = enum_values(MessageProcessingStatus)
@@ -234,6 +253,28 @@ class ActionRecord:
     result: dict[str, Any]
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class DispatchAttemptRecord:
+    id: int
+    action_id: int
+    run_id: str | None
+    claim_token: str
+    status: str
+    dry_run_result: dict[str, Any] | None
+    send_result: dict[str, Any] | None
+    readback_result: dict[str, Any] | None
+    sent_message_id: str | None
+    error_stage: str | None
+    started_at: str
+    finished_at: str | None
+
+
+@dataclass(frozen=True)
+class DispatchClaim:
+    action: ActionRecord
+    attempt: DispatchAttemptRecord
 
 
 @dataclass(frozen=True)

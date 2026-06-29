@@ -182,7 +182,7 @@ lark-cli --as bot im +messages-resources-download \
 - 任务不自动回复。
 - bot 私聊 owner，提示需要把 bot 拉进群。
 - 记录待配置群。
-- MVP 不做 `/retry`。
+- MVP 不做 owner bot DM `/retry`。
 
 如果当前任务不依赖图片/文件等 bot-only 资源，bot 不在群不阻断任务处理。
 
@@ -944,6 +944,7 @@ task_messages
 task_watch_keys
 approvals
 actions
+dispatch_attempts
 resources
 checkpoints
 runs
@@ -959,6 +960,7 @@ messages.message_id unique
 tasks.short_id unique
 approvals.short_id unique
 actions.idempotency_key unique
+dispatch_attempts.claim_token unique
 checkpoints.key primary key
 task_watch_keys(task_id, key) unique
 task_messages(task_id, message_id) unique
@@ -1119,6 +1121,7 @@ reply-<short_hash>
 
 ```text
 prepare_send
+  -> create dispatch_attempt with claim_token
   -> lark-cli ... --dry-run
   -> record dry_run result
   -> actual send
@@ -1126,7 +1129,9 @@ prepare_send
   -> messages-mget 读回验证 reply_to 和 mentions
 ```
 
-同一 `task_id + reply_target_message_id` 只允许一个 `pending` / `sending` 的 `send_reply` action。自动回复、`/approve` 和 `/send` 并发命中同一目标消息时，由 SQLite 唯一约束或事务锁挡住重复发送；失败方转为 no-op 或提示已有 in-flight send。
+同一 `task_id + reply_target_message_id` 只允许一个 `pending` / `sending` / `failed_needs_review` 的 `send_reply` action。自动回复、`/approve` 和 `/send` 并发命中同一目标消息时，由 SQLite 唯一约束或事务锁挡住重复发送；失败方转为 no-op 或提示已有 in-flight send。
+
+如果 dry-run 失败或有证据证明真实发送未发生，action 进入 `failed`，可以由本地 `dispatch retry` 保留原 idempotency key 重新入队。真实发送边界之后的超时、异常、缺少 sent_message_id 或 stale `sending` 都进入 `failed_needs_review`；系统只记录证据并等待本地 `dispatch inspect|mark-sent|retry|cancel`，不自动重发。`failed_needs_review` 会继续占用 active-send 约束，直到 operator `mark-sent`、`retry` 复用原 action/idempotency key，或 `cancel` 释放约束。
 
 发送动作的幂等键、dry-run、实际发送和读回验证见 [幂等发送与读回验证](./feishu-shadow-agent-flows.md#idempotent-send-flow)。
 

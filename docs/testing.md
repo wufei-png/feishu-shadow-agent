@@ -42,8 +42,8 @@ git diff --check
 - `tests/test_p2_ingestion_routing.py`：消息 normalize、入口拉取、checkpoint、任务归属。
 - `tests/test_p3_hermes_approval.py`：Hermes 输出 schema、reply gate、审批队列、`/approve`、`/reject`、`/send`。
 - `tests/test_daemon.py`：tick 顺序、运行中 health fail-closed、approval inbox 失败保护、dispatch 行为。
-- `tests/test_dispatcher.py`：dry-run、真实发送、读回验证、失败动作复活。
-- `tests/test_store_migrations.py`：SQLite migration、约束、旧 Hermes session 清理、幂等动作。
+- `tests/test_dispatcher.py`：dry-run、真实发送、dispatch attempt、读回验证、stale sending 恢复。
+- `tests/test_store_migrations.py`：SQLite migration、约束、状态 enum 契约、幂等动作。
 - `tests/test_retention.py`：消息 raw JSON 和资源保留策略。
 
 这些测试验证代码契约，不证明当前机器的 `lark-cli` 授权、飞书权限或 Hermes 可执行文件可用；真实环境要跑下面的端到端流程。
@@ -134,10 +134,34 @@ python -m feishu_shadow_agent replay --config config.yaml --message-id <message_
 
 重点确认：
 
-- action 状态从 `pending` 变为 `sent` 或明确 `failed`。
-- 发送 action 先有 dry-run 结果，再有真实发送结果。
+- action 状态从 `pending` 变为 `sent`、明确 `failed`，或不确定时变为 `failed_needs_review`。
+- 发送 action 先有 dry-run 结果，再有真实发送结果，并在 `dispatch_attempts` 中记录本次 claim。
 - 读回验证记录了 `sent_message_id`、`reply_to_message_id` 和 mentions。
 - owner 直接在原 chat/thread 接管任务后，未发送的 `send_reply` action 会被取消，pending approval 会过期。
+
+如果 action 进入 `failed_needs_review`，先本地查看证据：
+
+```bash
+python -m feishu_shadow_agent dispatch inspect --config config.yaml --action-id <action_id>
+```
+
+确认飞书侧消息已发送且有 `message_id` 后，用读回验证标记已发送：
+
+```bash
+python -m feishu_shadow_agent dispatch mark-sent --config config.yaml --action-id <action_id> --sent-message-id <om_xxx>
+```
+
+确认未发送或愿意人工重试时，显式重新入队；该操作保留原 idempotency key：
+
+```bash
+python -m feishu_shadow_agent dispatch retry --config config.yaml --action-id <action_id>
+```
+
+不再处理的发送动作可取消，取消会释放同 task/target 的 active send 约束：
+
+```bash
+python -m feishu_shadow_agent dispatch cancel --config config.yaml --action-id <action_id>
+```
 
 ## 6. 故障复查
 
@@ -146,8 +170,11 @@ python -m feishu_shadow_agent replay --config config.yaml --message-id <message_
 ```bash
 python -m feishu_shadow_agent config show --config config.yaml --redacted
 python -m feishu_shadow_agent status --config config.yaml
+python -m feishu_shadow_agent dispatch inspect --config config.yaml --action-id <action_id>
 python -m feishu_shadow_agent replay --config config.yaml --message-id <message_id> --dry-run
 tail -n 100 logs/agent.jsonl
 ```
 
 资源下载失败时，优先看 `status` 和日志中的 `bot_not_joined`、`bot_invisible`、`resource_download_failed`。这类问题通常需要确认 bot 是否在群里，以及该群的 `bot_joined` / `resource_download` 配置。
+
+dispatch 恢复只提供本地 CLI，不提供 owner bot DM 命令；不确定真实发送是否发生时，系统不会自动重发。

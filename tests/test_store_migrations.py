@@ -18,6 +18,7 @@ EXPECTED_TABLES = {
     "task_watch_keys",
     "approvals",
     "actions",
+    "dispatch_attempts",
     "resources",
     "checkpoints",
     "runs",
@@ -111,6 +112,9 @@ def test_baseline_schema_includes_current_columns(tmp_path: Path) -> None:
         indexes = {
             row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()
         }
+        attempt_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(dispatch_attempts)").fetchall()
+        }
 
     assert {"thread_id", "reply_to_message_id", "sender_role", "direct_mention", "at_all", "text"} <= message_columns
     assert {"chat_type", "thread_id", "watch_until", "last_user_message", "last_agent_reply", "agent_session_id"} <= task_columns
@@ -118,8 +122,22 @@ def test_baseline_schema_includes_current_columns(tmp_path: Path) -> None:
     assert "expires_at" in approval_columns
     assert "sender_name" in message_columns
     assert {"backend_provider", "agent_session_id", "tool_permissions_profile"} <= audit_columns
+    assert {
+        "action_id",
+        "run_id",
+        "claim_token",
+        "status",
+        "dry_run_result_json",
+        "send_result_json",
+        "readback_result_json",
+        "sent_message_id",
+        "error_stage",
+        "started_at",
+        "finished_at",
+    } <= attempt_columns
     assert "idx_agent_audits_task" in indexes
     assert "idx_actions_active_send_reply_target" in indexes
+    assert "idx_dispatch_attempts_action" in indexes
 
 
 def test_send_reply_guard_and_failed_retry_use_current_baseline(tmp_path: Path) -> None:
@@ -168,6 +186,82 @@ def test_send_reply_guard_and_failed_retry_use_current_baseline(tmp_path: Path) 
     assert retried_action.result == {}
 
 
+def test_claim_creates_dispatch_attempt_and_retry_preserves_idempotency_key(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.migrate()
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO tasks(short_id, status, chat_id, root_message_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("t_dispatch", "watching", "oc_1", "om_1", "now", "now"),
+        )
+        task_id = int(conn.execute("SELECT id FROM tasks WHERE short_id = ?", ("t_dispatch",)).fetchone()["id"])
+
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_1",
+        payload={"text": "one", "source": "auto_reply"},
+    )
+    assert action_id is not None
+    original_key = store.get_action(action_id).idempotency_key  # type: ignore[union-attr]
+
+    claim = store.claim_action_for_dispatch(action_id, run_id="run_1")
+
+    assert claim is not None
+    assert claim.action.status == "sending"
+    assert claim.attempt.action_id == action_id
+    assert claim.attempt.status == "started"
+    assert claim.attempt.run_id == "run_1"
+    assert claim.attempt.claim_token
+
+    store.finish_action(action_id, status="failed_needs_review", result={"error_stage": "send"})
+    retried = store.retry_dispatch_action(action_id)
+
+    assert retried.status == "pending"
+    assert retried.idempotency_key == original_key
+    assert retried.result == {}
+
+
+def test_claim_aware_finish_does_not_overwrite_operator_cancel(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.migrate()
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO tasks(short_id, status, chat_id, root_message_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("t_cancel_claim", "watching", "oc_1", "om_1", "now", "now"),
+        )
+        task_id = int(conn.execute("SELECT id FROM tasks WHERE short_id = ?", ("t_cancel_claim",)).fetchone()["id"])
+
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_1",
+        payload={"text": "one", "source": "auto_reply"},
+    )
+    assert action_id is not None
+    claim = store.claim_action_for_dispatch(action_id, run_id="run_1")
+    assert claim is not None
+
+    cancelled = store.cancel_dispatch_action(action_id)
+    finished = store.finish_claimed_action(
+        action_id,
+        attempt_id=claim.attempt.id,
+        status="sent",
+        result={"sent_message_id": "om_sent"},
+    )
+
+    assert cancelled.status == "cancelled"
+    assert finished is None
+    action = store.get_action(action_id)
+    assert action is not None
+    assert action.status == "cancelled"
+    assert action.result == {}
+
+
 def test_state_schema_contract_accepts_all_enum_values(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.migrate()
@@ -213,6 +307,32 @@ def test_state_schema_contract_accepts_all_enum_values(tmp_path: Path) -> None:
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (f"action-status-{index}", "send_reply", status, "now", "now"),
+            )
+        conn.execute(
+            """
+            INSERT INTO actions(idempotency_key, kind, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("action-for-attempts", "send_reply", "pending", "now", "now"),
+        )
+        action_id = int(
+            conn.execute("SELECT id FROM actions WHERE idempotency_key = ?", ("action-for-attempts",)).fetchone()["id"]
+        )
+        for index, status in enumerate(StateSchemaContract.dispatch_attempt_statuses):
+            conn.execute(
+                """
+                INSERT INTO dispatch_attempts(action_id, claim_token, status, started_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (action_id, f"claim-status-{index}", status, "now"),
+            )
+        for index, error_stage in enumerate(StateSchemaContract.dispatch_error_stages):
+            conn.execute(
+                """
+                INSERT INTO dispatch_attempts(action_id, claim_token, status, error_stage, started_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (action_id, f"claim-stage-{index}", "failed", error_stage, "now"),
             )
         for index, status in enumerate(StateSchemaContract.resource_statuses):
             conn.execute(
@@ -309,6 +429,41 @@ def test_invalid_state_values_fail_db_check(tmp_path: Path, sql: str, params: tu
 
     with store.connect() as conn, pytest.raises(sqlite3.IntegrityError):
         conn.execute(sql, params)
+
+
+@pytest.mark.parametrize(
+    "column, value",
+    [
+        ("status", "future_status"),
+        ("error_stage", "future_stage"),
+    ],
+)
+def test_invalid_dispatch_attempt_values_fail_db_check(tmp_path: Path, column: str, value: str) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.migrate()
+
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO actions(idempotency_key, kind, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("action-for-bad-attempt", "send_reply", "pending", "now", "now"),
+        )
+        action_id = int(conn.execute("SELECT id FROM actions").fetchone()["id"])
+        sql = f"""
+            INSERT INTO dispatch_attempts(action_id, claim_token, status, error_stage, started_at)
+            VALUES (?, ?, ?, ?, ?)
+            """
+        params = (
+            action_id,
+            f"claim-bad-{column}",
+            value if column == "status" else "failed",
+            value if column == "error_stage" else None,
+            "now",
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(sql, params)
 
 
 def test_send_reply_retry_does_not_revive_failed_action_when_same_text_was_sent(tmp_path: Path) -> None:

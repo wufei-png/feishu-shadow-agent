@@ -10,9 +10,15 @@ from .feishu.client import FeishuClient
 from .ingestion import MessageNormalizer
 from .jsonl import JSONLLogger
 from .store.sqlite_store import SQLiteStore
-from .types import ActionRecord, LarkCliResult
+from .types import ActionRecord, ActionStatus, DispatchAttemptStatus, DispatchErrorStage, LarkCliResult, NormalizedMessage
 
 EXPECTED_MENTION_RE = re.compile(r"<at\s+[^>]*user_id=[\"']([^\"']+)[\"'][^>]*>", re.IGNORECASE)
+READBACK_BLOCKING_WARNINGS = {
+    "readback_reply_target_mismatch",
+    "readback_reply_target_unavailable",
+    "readback_mentions_mismatch",
+    "readback_mentions_unavailable",
+}
 
 
 @dataclass(frozen=True)
@@ -22,6 +28,13 @@ class DispatchSummary:
     previewed: int = 0
     failed: int = 0
     skipped: int = 0
+
+
+@dataclass(frozen=True)
+class ReadbackOutcome:
+    result: dict[str, Any] | None
+    warnings: list[str]
+    message: NormalizedMessage | None = None
 
 
 class Dispatcher:
@@ -49,6 +62,13 @@ class Dispatcher:
         limit: int = 50,
     ) -> DispatchSummary:
         summary = DispatchSummary()
+        recovered = self.store.mark_stale_sending_actions_failed_needs_review()
+        if recovered:
+            self.logger.warning(
+                "dispatch_stale_sending_recovered",
+                run_id=run_id,
+                data={"actions": recovered},
+            )
         actions = self.store.list_dispatchable_actions(limit=limit)
         if allow_owner_notification_actual:
             seen_action_ids = {action.id for action in actions}
@@ -77,8 +97,8 @@ class Dispatcher:
                 else False
             )
             if actual_allowed:
-                claimed = self.store.claim_action_for_dispatch(action.id)
-                if claimed is None:
+                claim = self.store.claim_action_for_dispatch(action.id, run_id=run_id)
+                if claim is None:
                     self.logger.warning(
                         "dispatch_action_claim_skipped",
                         run_id=run_id,
@@ -86,12 +106,33 @@ class Dispatcher:
                     )
                     summary = _bump(summary, skipped=1)
                     continue
-                result, sent = self._execute_actual(claimed, run_id=run_id)
-                self.store.finish_action(
+                claimed = claim.action
+                result, action_status = self._execute_actual(
+                    claimed,
+                    attempt_id=claim.attempt.id,
+                    run_id=run_id,
+                )
+                finished = self.store.finish_claimed_action(
                     claimed.id,
-                    status="sent" if sent else "failed",
+                    attempt_id=claim.attempt.id,
+                    status=action_status,
                     result=result,
                 )
+                if finished is None:
+                    self.logger.warning(
+                        "dispatch_action_finish_skipped",
+                        run_id=run_id,
+                        data={
+                            "action_id": claimed.id,
+                            "kind": claimed.kind,
+                            "attempt_id": claim.attempt.id,
+                            "attempted_status": action_status,
+                            "reason": "claim_no_longer_current",
+                        },
+                    )
+                    summary = _bump(summary, processed=1, skipped=1)
+                    continue
+                sent = action_status == ActionStatus.SENT.value
                 self.logger.emit(
                     "info" if sent else "error",
                     "dispatch_action_completed",
@@ -99,7 +140,7 @@ class Dispatcher:
                     data={
                         "action_id": claimed.id,
                         "kind": claimed.kind,
-                        "status": "sent" if sent else "failed",
+                        "status": action_status,
                         "error_stage": result.get("error_stage"),
                         "warnings": result.get("warnings", []),
                     },
@@ -171,36 +212,138 @@ class Dispatcher:
             "result": result,
         }
 
-    def _execute_actual(self, action: ActionRecord, *, run_id: str) -> tuple[dict[str, Any], bool]:
+    def mark_action_sent_after_readback(
+        self,
+        action_id: int,
+        *,
+        sent_message_id: str,
+        run_id: str,
+    ) -> dict[str, Any]:
+        action = self.store.get_action(action_id)
+        if action is None:
+            return {"status": "failed", "error": f"action not found: {action_id}"}
+        if not sent_message_id:
+            return {"status": "failed", "error": "sent_message_id is required"}
+        result = _empty_result()
+        result["sent_message_id"] = sent_message_id
+        outcome = self._readback_outcome(action, sent_message_id=sent_message_id, run_id=run_id)
+        result["readback"] = outcome.result
+        result["warnings"].extend(outcome.warnings)
+        evidence_error = _mark_sent_evidence_error(
+            action,
+            sent_message_id=sent_message_id,
+            readback=result["readback"],
+            warnings=result["warnings"],
+        )
+        if evidence_error is not None:
+            return {
+                "status": "failed",
+                "error": evidence_error,
+                "action_id": action_id,
+                "result": result,
+            }
+        try:
+            updated = self.store.mark_action_sent_after_evidence(
+                action_id,
+                sent_message_id=sent_message_id,
+                result=result,
+                run_id=run_id,
+                readback_message=outcome.message,
+                watch_until=_watch_until(self.config.lifecycle.watch_minutes) if outcome.message is not None else None,
+            )
+        except ValueError as exc:
+            return {
+                "status": "failed",
+                "error": str(exc),
+                "action_id": action_id,
+                "result": result,
+            }
+        return {
+            "status": "sent",
+            "action_id": updated.id,
+            "sent_message_id": sent_message_id,
+            "result": updated.result,
+        }
+
+    def _execute_actual(self, action: ActionRecord, *, attempt_id: int, run_id: str) -> tuple[dict[str, Any], str]:
         result = _empty_result()
         try:
             dry_run = self._dry_run(action)
         except Exception as exc:
             result["dry_run"] = _exception_command_result(action, "dry_run", exc)
             result["error_stage"] = "dry_run"
-            return result, False
+            self.store.update_dispatch_attempt(
+                attempt_id,
+                status=DispatchAttemptStatus.FAILED.value,
+                dry_run_result=result["dry_run"],
+                error_stage=DispatchErrorStage.DRY_RUN.value,
+            )
+            return result, ActionStatus.FAILED.value
         result["dry_run"] = _command_result(dry_run)
         if not dry_run.ok:
             result["error_stage"] = "dry_run"
-            return result, False
+            self.store.update_dispatch_attempt(
+                attempt_id,
+                status=DispatchAttemptStatus.FAILED.value,
+                dry_run_result=result["dry_run"],
+                error_stage=DispatchErrorStage.DRY_RUN.value,
+            )
+            return result, ActionStatus.FAILED.value
+        self.store.update_dispatch_attempt(
+            attempt_id,
+            status=DispatchAttemptStatus.DRY_RUN_OK.value,
+            dry_run_result=result["dry_run"],
+        )
 
         try:
             send = self._send(action)
         except Exception as exc:
             result["send"] = _exception_command_result(action, "send", exc)
             result["error_stage"] = "send"
-            return result, False
+            self.store.update_dispatch_attempt(
+                attempt_id,
+                status=DispatchAttemptStatus.UNCERTAIN.value,
+                send_result=result["send"],
+                error_stage=DispatchErrorStage.SEND.value,
+            )
+            return result, ActionStatus.FAILED_NEEDS_REVIEW.value
         result["send"] = _command_result(send)
         if not send.ok:
             result["error_stage"] = "send"
-            return result, False
+            attempt_status = _send_failure_attempt_status(send)
+            action_status = (
+                ActionStatus.FAILED_NEEDS_REVIEW.value
+                if attempt_status == DispatchAttemptStatus.UNCERTAIN.value
+                else ActionStatus.FAILED.value
+            )
+            self.store.update_dispatch_attempt(
+                attempt_id,
+                status=attempt_status,
+                send_result=result["send"],
+                error_stage=DispatchErrorStage.SEND.value,
+            )
+            return result, action_status
 
         target_message_id = _target_message_id(action)
         sent_message_id = _extract_message_id(send.json_data, exclude=target_message_id)
         if sent_message_id is None:
             result["warnings"].append("sent_message_id_missing")
+            result["error_stage"] = "send"
+            self.store.update_dispatch_attempt(
+                attempt_id,
+                status=DispatchAttemptStatus.UNCERTAIN.value,
+                send_result=result["send"],
+                error_stage=DispatchErrorStage.SEND.value,
+            )
+            return result, ActionStatus.FAILED_NEEDS_REVIEW.value
         else:
             result["sent_message_id"] = sent_message_id
+        self.store.update_dispatch_attempt(
+            attempt_id,
+            status=DispatchAttemptStatus.SEND_OK.value,
+            send_result=result["send"],
+            sent_message_id=sent_message_id,
+        )
         try:
             readback = self._readback(action, sent_message_id=sent_message_id, run_id=run_id)
         except Exception as exc:
@@ -219,7 +362,16 @@ class Dispatcher:
         else:
             result["readback"] = readback["result"]
             result["warnings"].extend(readback["warnings"])
-        return result, True
+        readback_ok = _readback_attempt_verified(action, readback=result["readback"], warnings=result["warnings"])
+        self.store.update_dispatch_attempt(
+            attempt_id,
+            status=DispatchAttemptStatus.READBACK_OK.value if readback_ok else DispatchAttemptStatus.SEND_OK.value,
+            readback_result=result["readback"] if isinstance(result["readback"], dict) else None,
+            sent_message_id=sent_message_id,
+            error_stage=None if readback_ok else DispatchErrorStage.READBACK.value,
+            finish=True,
+        )
+        return result, ActionStatus.SENT.value
 
     def _execute_preview(self, action: ActionRecord) -> dict[str, Any]:
         result = _empty_result()
@@ -269,13 +421,27 @@ class Dispatcher:
         return _local_error(action, f"unsupported action kind: {action.kind}")
 
     def _readback(self, action: ActionRecord, *, sent_message_id: str | None, run_id: str) -> dict[str, Any]:
+        outcome = self._readback_outcome(action, sent_message_id=sent_message_id, run_id=run_id)
+        if outcome.message is not None:
+            result = dict(outcome.result or {})
+            result["inserted"] = self._persist_readback_message(action, outcome.message)
+            return {"result": result, "warnings": outcome.warnings}
+        return {"result": outcome.result, "warnings": outcome.warnings}
+
+    def _readback_outcome(
+        self,
+        action: ActionRecord,
+        *,
+        sent_message_id: str | None,
+        run_id: str,
+    ) -> ReadbackOutcome:
         if sent_message_id is None:
             self.logger.warning(
                 "dispatch_readback_skipped",
                 run_id=run_id,
                 data={"action_id": action.id, "kind": action.kind, "reason": "sent_message_id_missing"},
             )
-            return {"result": None, "warnings": ["readback_skipped_no_sent_message_id"]}
+            return ReadbackOutcome(result=None, warnings=["readback_skipped_no_sent_message_id"])
         identity = _payload_identity(action) if action.kind == "send_reply" else "bot"
         warnings: list[str] = []
         try:
@@ -291,10 +457,10 @@ class Dispatcher:
                     "error": str(exc),
                 },
             )
-            return {
-                "result": {"ok": False, "error": str(exc), "message_id": sent_message_id},
-                "warnings": ["readback_failed"],
-            }
+            return ReadbackOutcome(
+                result={"ok": False, "error": str(exc), "message_id": sent_message_id},
+                warnings=["readback_failed"],
+            )
         item = _find_message(page.items, sent_message_id)
         if item is None:
             self.logger.warning(
@@ -302,20 +468,13 @@ class Dispatcher:
                 run_id=run_id,
                 data={"action_id": action.id, "kind": action.kind, "sent_message_id": sent_message_id},
             )
-            return {
-                "result": {"ok": False, "message_id": sent_message_id, "raw": page.raw},
-                "warnings": ["readback_message_missing"],
-            }
+            return ReadbackOutcome(
+                result={"ok": False, "message_id": sent_message_id, "raw": page.raw},
+                warnings=["readback_message_missing"],
+            )
         raw = dict(item)
         raw["sent_by_agent"] = True
         message = self.normalizer.normalize(raw)
-        inserted = self.store.upsert_message(message)
-        if action.kind == "send_reply" and action.task_id is not None:
-            self.store.record_agent_message_for_task(
-                action.task_id,
-                message,
-                watch_until=_watch_until(self.config.lifecycle.watch_minutes),
-            )
         if action.kind == "send_reply":
             target = _target_message_id(action)
             if message.reply_to_message_id and target and message.reply_to_message_id != target:
@@ -327,17 +486,29 @@ class Dispatcher:
                 warnings.append("readback_mentions_unavailable")
             elif expected_mentions and not expected_mentions <= set(message.mentions):
                 warnings.append("readback_mentions_mismatch")
-        return {
-            "result": {
+        return ReadbackOutcome(
+            result={
                 "ok": True,
                 "message_id": sent_message_id,
-                "inserted": inserted,
+                "inserted": False,
                 "reply_to_message_id": message.reply_to_message_id,
                 "mentions": message.mentions,
+                "text": message.text,
                 "raw": page.raw,
             },
-            "warnings": warnings,
-        }
+            warnings=warnings,
+            message=message,
+        )
+
+    def _persist_readback_message(self, action: ActionRecord, message: NormalizedMessage) -> bool:
+        inserted = self.store.upsert_message(message)
+        if action.kind == "send_reply" and action.task_id is not None:
+            self.store.record_agent_message_for_task(
+                action.task_id,
+                message,
+                watch_until=_watch_until(self.config.lifecycle.watch_minutes),
+            )
+        return inserted
 
 
 def _empty_result() -> dict[str, Any]:
@@ -385,6 +556,66 @@ def _exception_readback_result(sent_message_id: str | None, exc: Exception) -> d
         "error": str(exc),
         "exception_type": type(exc).__name__,
     }
+
+
+def _send_failure_attempt_status(result: LarkCliResult) -> str:
+    if _send_failure_proves_not_sent(result):
+        return DispatchAttemptStatus.FAILED.value
+    return DispatchAttemptStatus.UNCERTAIN.value
+
+
+def _send_failure_proves_not_sent(result: LarkCliResult) -> bool:
+    if result.argv[:1] == ["dispatch"]:
+        return True
+    if not isinstance(result.error, str):
+        return False
+    error = result.error.strip().lower()
+    return error == "send rejected" or error.startswith("api rejected") or error.startswith("feishu api rejected")
+
+
+def _mark_sent_evidence_error(
+    action: ActionRecord,
+    *,
+    sent_message_id: str,
+    readback: Any,
+    warnings: list[str],
+) -> str | None:
+    if not isinstance(readback, dict) or readback.get("ok") is not True:
+        return "readback did not verify sent message"
+    if readback.get("message_id") != sent_message_id:
+        return "readback message_id did not match sent_message_id"
+    if action.kind != "send_reply":
+        return _mark_sent_text_evidence_error(expected=_owner_notification_text(action.payload), readback=readback)
+    target_message_id = _target_message_id(action)
+    if not target_message_id or readback.get("reply_to_message_id") != target_message_id:
+        return "readback reply_to_message_id did not match action target"
+    blocking_warnings = {"readback_mentions_mismatch", "readback_mentions_unavailable"}
+    if blocking_warnings & set(warnings):
+        return "readback mentions did not match action text"
+    text_error = _mark_sent_text_evidence_error(expected=_payload_text(action), readback=readback)
+    if text_error is not None:
+        return text_error
+    return None
+
+
+def _mark_sent_text_evidence_error(*, expected: str, readback: dict[str, Any]) -> str | None:
+    expected_text = _evidence_text(expected)
+    actual_text = _evidence_text(readback.get("text") if isinstance(readback.get("text"), str) else "")
+    if expected_text and actual_text != expected_text:
+        return "readback text did not match action payload"
+    return None
+
+
+def _evidence_text(value: str) -> str:
+    return " ".join(EXPECTED_MENTION_RE.sub("", value).split())
+
+
+def _readback_attempt_verified(action: ActionRecord, *, readback: Any, warnings: list[str]) -> bool:
+    if not isinstance(readback, dict) or readback.get("ok") is not True:
+        return False
+    if action.kind == "send_reply" and READBACK_BLOCKING_WARNINGS & set(warnings):
+        return False
+    return True
 
 
 def _local_error(action: ActionRecord, message: str) -> LarkCliResult:

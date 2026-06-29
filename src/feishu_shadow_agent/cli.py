@@ -90,6 +90,26 @@ def build_parser() -> argparse.ArgumentParser:
     retention_prune.add_argument("--dry-run", action="store_true", help="preview retention cleanup")
     retention_prune.set_defaults(handler=_handle_retention_prune)
 
+    dispatch = subparsers.add_parser("dispatch", help="dispatch recovery helpers")
+    dispatch_subparsers = dispatch.add_subparsers(dest="dispatch_command")
+    dispatch_inspect = dispatch_subparsers.add_parser("inspect", help="inspect an action and dispatch attempts")
+    _add_config_arg(dispatch_inspect)
+    dispatch_inspect.add_argument("--action-id", type=int, required=True)
+    dispatch_inspect.set_defaults(handler=_handle_dispatch_inspect)
+    dispatch_mark_sent = dispatch_subparsers.add_parser("mark-sent", help="verify readback and mark an action sent")
+    _add_config_arg(dispatch_mark_sent)
+    dispatch_mark_sent.add_argument("--action-id", type=int, required=True)
+    dispatch_mark_sent.add_argument("--sent-message-id", required=True)
+    dispatch_mark_sent.set_defaults(handler=_handle_dispatch_mark_sent)
+    dispatch_retry = dispatch_subparsers.add_parser("retry", help="requeue a failed dispatch action")
+    _add_config_arg(dispatch_retry)
+    dispatch_retry.add_argument("--action-id", type=int, required=True)
+    dispatch_retry.set_defaults(handler=_handle_dispatch_retry)
+    dispatch_cancel = dispatch_subparsers.add_parser("cancel", help="cancel a dispatch action")
+    _add_config_arg(dispatch_cancel)
+    dispatch_cancel.add_argument("--action-id", type=int, required=True)
+    dispatch_cancel.set_defaults(handler=_handle_dispatch_cancel)
+
     approve = subparsers.add_parser("approve", help="approve a pending approval")
     _add_config_arg(approve)
     approve.add_argument("approval_id")
@@ -303,6 +323,79 @@ def _handle_retention_prune(args: argparse.Namespace) -> int:
     ).prune(run_id=new_run_id("retention"), dry_run=args.dry_run)
     print(yaml.safe_dump(summary.as_dict(), allow_unicode=True, sort_keys=False), end="")
     return 0
+
+
+def _handle_dispatch_inspect(args: argparse.Namespace) -> int:
+    _, store, _ = _load_runtime(args.config)
+    inspection = store.get_dispatch_inspection(args.action_id)
+    if inspection is None:
+        print(f"action not found: {args.action_id}", file=sys.stderr)
+        return 2
+    print(yaml.safe_dump(inspection, allow_unicode=True, sort_keys=False), end="")
+    return 0
+
+
+def _handle_dispatch_mark_sent(args: argparse.Namespace) -> int:
+    loaded, store, logger = _load_runtime(args.config)
+    client = LarkCliClient(
+        path=loaded.config.lark_cli.path,
+        timeout_seconds=loaded.config.lark_cli.timeout_seconds,
+        cwd=loaded.base_dir,
+    )
+    dispatcher = Dispatcher(
+        store=store,
+        feishu_client=client,
+        config=loaded.config,
+        logger=logger,
+    )
+    result = dispatcher.mark_action_sent_after_readback(
+        args.action_id,
+        sent_message_id=args.sent_message_id,
+        run_id=new_run_id("dispatch_recovery"),
+    )
+    print(yaml.safe_dump(result, allow_unicode=True, sort_keys=False), end="")
+    return 0 if result.get("status") == "sent" else 2
+
+
+def _handle_dispatch_retry(args: argparse.Namespace) -> int:
+    _, store, _ = _load_runtime(args.config)
+    try:
+        action = store.retry_dispatch_action(args.action_id)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(
+        yaml.safe_dump(
+            {"status": "requeued", "action": _action_output(action)},
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        end="",
+    )
+    return 0
+
+
+def _handle_dispatch_cancel(args: argparse.Namespace) -> int:
+    _, store, _ = _load_runtime(args.config)
+    try:
+        action = store.cancel_dispatch_action(args.action_id)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(
+        yaml.safe_dump(
+            {"status": "cancelled", "action": _action_output(action)},
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        end="",
+    )
+    return 0
+
+
+def _action_output(action: object) -> dict[str, object]:
+    data = getattr(action, "__dict__", {}).copy()
+    return data if isinstance(data, dict) else {}
 
 
 def _load_runtime(config_path: str | None) -> tuple[LoadedConfig, SQLiteStore, JSONLLogger]:

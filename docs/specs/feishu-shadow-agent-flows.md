@@ -217,20 +217,24 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  PendingSend["pending send action"] --> InFlight{"同 task_id + reply_target<br/>已有 pending/sending?"}
+  PendingSend["pending send action"] --> InFlight{"同 task_id + reply_target<br/>已有 pending/sending/failed_needs_review?"}
   InFlight -->|是| Noop["no-op / 提示已有 in-flight send"]
   InFlight -->|否| BuildText["SendComposer 生成 text / mention"]
   BuildText --> Idempotency["生成 reply-<short_hash> idempotency key"]
-  Idempotency --> DryRun["lark-cli messages-reply --dry-run"]
+  Idempotency --> Claim["claim action + dispatch_attempt.started"]
+  Claim --> DryRun["lark-cli messages-reply --dry-run"]
   DryRun --> DryRunOK{"dry-run ok"}
-  DryRunOK -->|否| Failed["action failed + 记录原因"]
+  DryRunOK -->|否| Failed["attempt failed<br/>action failed"]
   DryRunOK -->|是| ActualSend["actual messages-reply"]
   ActualSend --> SendOK{"发送成功"}
-  SendOK -->|否| Failed
+  SendOK -->|明确未发送| Failed
+  SendOK -->|结果不确定| NeedsReview["attempt uncertain<br/>action failed_needs_review"]
   SendOK -->|是| RecordSent["记录 sent_message_id"]
   RecordSent --> ReadBack["messages-mget 读回验证"]
   ReadBack --> Verify{"reply_to 和 mentions 符合预期"}
-  Verify -->|否| VerifyWarn["记录 warning / 人工审计"]
+  Verify -->|否| VerifyWarn["attempt send_ok<br/>记录 warning / 人工审计"]
   Verify -->|是| Done["action sent"]
   VerifyWarn --> Done
 ```
+
+stale `sending` 不自动重发；下次 dispatch 检测到超时 in-flight action 时，将 action 标记为 `failed_needs_review`，并保留原 idempotency key 供本地恢复 CLI 人工处理。`failed_needs_review` 继续占用 active-send 约束，直到 operator `mark-sent`、`retry` 复用原 action/idempotency key，或 `cancel` 释放约束。

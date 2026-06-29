@@ -91,6 +91,24 @@ CREATE TABLE IF NOT EXISTS actions (
   FOREIGN KEY (approval_id) REFERENCES approvals(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS dispatch_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  action_id INTEGER NOT NULL,
+  run_id TEXT,
+  claim_token TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL
+    CHECK (status IN ('started', 'dry_run_ok', 'send_ok', 'readback_ok', 'failed', 'uncertain')),
+  dry_run_result_json TEXT,
+  send_result_json TEXT,
+  readback_result_json TEXT,
+  sent_message_id TEXT,
+  error_stage TEXT
+    CHECK (error_stage IS NULL OR error_stage IN ('claim', 'dry_run', 'send', 'readback', 'recovery')),
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  FOREIGN KEY (action_id) REFERENCES actions(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS resources (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   message_id TEXT NOT NULL,
@@ -227,9 +245,11 @@ CREATE INDEX IF NOT EXISTS idx_agent_audits_task ON agent_audits(task_id, create
 CREATE INDEX IF NOT EXISTS idx_approval_commands_status ON approval_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_message_processing_status ON message_processing(status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_message_processing_message ON message_processing(message_id, stage);
+CREATE INDEX IF NOT EXISTS idx_dispatch_attempts_action ON dispatch_attempts(action_id, started_at, id);
+CREATE INDEX IF NOT EXISTS idx_dispatch_attempts_status ON dispatch_attempts(status, finished_at);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_active_send_reply_target
 ON actions(task_id, target_message_id)
 WHERE kind = 'send_reply'
-  AND status IN ('pending', 'sending')
+  AND status IN ('pending', 'sending', 'failed_needs_review')
   AND target_message_id IS NOT NULL;
