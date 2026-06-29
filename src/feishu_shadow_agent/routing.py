@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .store.sqlite_store import SQLiteStore
-from .types import NormalizedMessage, RouteDecision, TaskCandidate, TaskRecord
+from .types import LifecycleStatePolicy, NormalizedMessage, RouteDecision, TaskCandidate, TaskRecord
 
 TRIGGER_SOURCES = {"group_at_me", "p2p"}
 ROUTER_PLACEHOLDER_REASONS = {"router_placeholder", "closed_recall_router_placeholder"}
@@ -58,9 +58,16 @@ class CandidateCollector:
 
 
 class MessageRouter:
-    def __init__(self, *, store: SQLiteStore, collector: CandidateCollector | None = None):
+    def __init__(
+        self,
+        *,
+        store: SQLiteStore,
+        collector: CandidateCollector | None = None,
+        closed_recall_days: int = 7,
+    ):
         self.store = store
         self.collector = collector or CandidateCollector(store)
+        self.closed_recall_days = closed_recall_days
 
     def route(
         self,
@@ -133,7 +140,7 @@ class MessageRouter:
         if not candidates and source in TRIGGER_SOURCES and message.chat_id:
             historical = self.store.get_related_closed_tasks(
                 message,
-                since=_minus_days(now, 7),
+                since=_minus_days(now, self.closed_recall_days),
             )
             if historical:
                 return self._audit(
@@ -230,7 +237,7 @@ class MessageRouter:
 
 
 def _is_active(task: TaskRecord, *, now: str) -> bool:
-    return task.status in {"watching", "waiting_approval"} and (
+    return LifecycleStatePolicy.is_active_task_status(task.status) and (
         task.watch_until is None or task.watch_until > now
     )
 

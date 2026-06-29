@@ -23,7 +23,7 @@ from .prompt import (
 )
 from .routing import CandidateCollector, RoutingResult
 from .store.sqlite_store import SQLiteStore
-from .types import NormalizedMessage, RouteDecision, TaskRecord
+from .types import LifecycleStatePolicy, MessageProcessingStatus, NormalizedMessage, RouteDecision, TaskRecord
 
 AGENT_MAX_ATTEMPTS = 3
 RESOURCE_MAX_ATTEMPTS = 3
@@ -143,6 +143,7 @@ class ApprovalService:
             preview=proposed_reply,
             payload=payload,
             notify_payload=notify,
+            approval_timeout_hours=self.config.lifecycle.approval_timeout_hours,
         )
 
     def notify_owner(self, *, task: TaskRecord | None, reason: str, payload: dict[str, Any] | None = None) -> int:
@@ -427,6 +428,26 @@ class TaskProcessingService:
             terminal_reason=terminal_reason,
         )
 
+    def _mark_processing_blocked_external(
+        self,
+        *,
+        message: NormalizedMessage,
+        stage: str,
+        task_id: int | None,
+        attempt_count: int,
+        last_error: str | None,
+        reason: str,
+    ) -> None:
+        self.store.record_message_processing(
+            message_id=message.message_id,
+            task_id=task_id,
+            stage=stage,
+            status=MessageProcessingStatus.BLOCKED_WAITING_EXTERNAL.value,
+            attempt_count=attempt_count,
+            last_error=_truncate_error(last_error),
+            terminal_reason=reason,
+        )
+
     def _notify_processing_failed(
         self,
         *,
@@ -489,7 +510,10 @@ class TaskProcessingService:
         active_candidates = self.collector.collect(message, now=now)
         historical = []
         if reason == "closed_recall_router_placeholder":
-            historical = self.store.get_related_closed_tasks(message, since=_minus_days(now, 7))
+            historical = self.store.get_related_closed_tasks(
+                message,
+                since=_minus_days(now, self.config.lifecycle.closed_recall_days),
+            )
         active_target_short_ids = {candidate.task.short_id for candidate in active_candidates}
         historical_target_short_ids = {task.short_id for task in historical}
         allowed_target_short_ids = active_target_short_ids | historical_target_short_ids
@@ -835,12 +859,15 @@ class TaskProcessingService:
                     "statuses": _resource_status_counts(resources),
                 },
             )
-            if preflight.reason == "resource_needs_bot":
-                self._mark_processing_processed(
+            processing_status = LifecycleStatePolicy.resource_blocker_status(preflight.reason)
+            if processing_status == MessageProcessingStatus.BLOCKED_WAITING_EXTERNAL.value:
+                self._mark_processing_blocked_external(
                     message=message,
                     stage="resource_download",
                     task_id=task.id,
                     attempt_count=preflight.attempt_count,
+                    last_error=preflight.last_error,
+                    reason=preflight.reason,
                 )
             else:
                 self._mark_processing_terminal(
@@ -1005,6 +1032,12 @@ class TaskProcessingService:
                 reply_target=fallback_target,
                 chat_type=task.chat_type or message.chat_type,
             )
+            self.store.update_task_after_agent(
+                task_id=task.id,
+                task_label=output.task_label if isinstance(output, InitialTaskSessionOutput) else None,
+                status="watching",
+                watch_until=watch_until,
+            )
             approval_id = self.approvals.request_send_reply(
                 task=task,
                 reply_target_message_id=message.message_id,
@@ -1021,14 +1054,14 @@ class TaskProcessingService:
             )
             return ProcessingResult("approval_created", task.id, approval_id=approval_id, reason="invalid_reply_target")
 
-        next_status = "closed" if output.watch_action == "close" else "watching"
-        self.store.update_task_after_agent(
-            task_id=task.id,
-            task_label=output.task_label if isinstance(output, InitialTaskSessionOutput) else None,
-            status=next_status,
-            watch_until=watch_until if next_status == "watching" else None,
-        )
         if output.answerability == "no_reply":
+            next_status = "closed" if output.watch_action == "close" else "watching"
+            self.store.update_task_after_agent(
+                task_id=task.id,
+                task_label=output.task_label if isinstance(output, InitialTaskSessionOutput) else None,
+                status=next_status,
+                watch_until=watch_until if next_status == "watching" else None,
+            )
             self._mark_processing_processed(
                 message=message,
                 stage="task_session",
@@ -1074,6 +1107,12 @@ class TaskProcessingService:
                     "answerability": output.answerability,
                 },
             )
+            self.store.update_task_after_agent(
+                task_id=task.id,
+                task_label=output.task_label if isinstance(output, InitialTaskSessionOutput) else None,
+                status="watching",
+                watch_until=watch_until,
+            )
             approval_id = self.approvals.request_send_reply(
                 task=task,
                 reply_target_message_id=reply_target_id,
@@ -1096,6 +1135,13 @@ class TaskProcessingService:
             "source": "auto_reply",
             "policy_source": gate["policy_source"],
         }
+        next_status = "closed" if output.watch_action == "close" else "watching"
+        self.store.update_task_after_agent(
+            task_id=task.id,
+            task_label=output.task_label if isinstance(output, InitialTaskSessionOutput) else None,
+            status=next_status,
+            watch_until=watch_until if next_status == "watching" else None,
+        )
         action_id = self.store.create_send_reply_action(
             task_id=task.id,
             target_message_id=reply_target_id,
@@ -1420,6 +1466,20 @@ def _resource_preflight_state(
         return {
             "allow": False,
             "reason": "resource_download_disabled",
+            "retryable": False,
+            "error": _resource_status_error(resources),
+        }
+    if statuses & {"too_large"}:
+        return {
+            "allow": False,
+            "reason": "resource_too_large",
+            "retryable": False,
+            "error": _resource_status_error(resources),
+        }
+    if statuses & {"quota_exceeded"}:
+        return {
+            "allow": False,
+            "reason": "resource_quota_exceeded",
             "retryable": False,
             "error": _resource_status_error(resources),
         }

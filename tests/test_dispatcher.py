@@ -3,7 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from feishu_shadow_agent.config import AppConfig, OwnerConfig
+from feishu_shadow_agent import dispatcher as dispatcher_module
+from feishu_shadow_agent.config import AppConfig, LifecycleConfig, OwnerConfig
 from feishu_shadow_agent.dispatcher import Dispatcher
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
@@ -44,11 +45,15 @@ class FakeFeishu:
         return MessagePage([])
 
 
-def _config() -> AppConfig:
-    return AppConfig(owner=OwnerConfig(open_id="ou_owner", name="Owner"))
+def _config(**kwargs: Any) -> AppConfig:
+    return AppConfig(owner=OwnerConfig(open_id="ou_owner", name="Owner"), **kwargs)
 
 
-def _dispatcher(tmp_path: Path, fake: FakeFeishu | None = None) -> tuple[SQLiteStore, Dispatcher, FakeFeishu]:
+def _dispatcher(
+    tmp_path: Path,
+    fake: FakeFeishu | None = None,
+    config: AppConfig | None = None,
+) -> tuple[SQLiteStore, Dispatcher, FakeFeishu]:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     client = fake or FakeFeishu()
     return (
@@ -56,7 +61,7 @@ def _dispatcher(tmp_path: Path, fake: FakeFeishu | None = None) -> tuple[SQLiteS
         Dispatcher(
             store=store,
             feishu_client=client,  # type: ignore[arg-type]
-            config=_config(),
+            config=config or _config(),
             logger=JSONLLogger(tmp_path / "agent.jsonl"),
         ),
         client,
@@ -177,8 +182,20 @@ def test_actual_dispatch_send_exception_marks_failed_without_stuck_sending(tmp_p
     assert action.result["send"]["error"] == "send exploded"
 
 
-def test_actual_dispatch_records_sent_id_and_associates_readback(tmp_path: Path) -> None:
-    store, dispatcher, fake = _dispatcher(tmp_path)
+def test_actual_dispatch_records_sent_id_and_associates_readback(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    watch_minutes_seen: list[int] = []
+    monkeypatch.setattr(
+        dispatcher_module,
+        "_watch_until",
+        lambda watch_minutes: watch_minutes_seen.append(watch_minutes) or "custom-watch-until",
+    )
+    store, dispatcher, fake = _dispatcher(
+        tmp_path,
+        config=_config(lifecycle=LifecycleConfig(watch_minutes=5)),
+    )
     task_id = _insert_task(store)
     action_id = store.create_send_reply_action(
         task_id=task_id,
@@ -232,8 +249,11 @@ def test_actual_dispatch_records_sent_id_and_associates_readback(tmp_path: Path)
             "SELECT role FROM task_messages WHERE task_id = ? AND message_id = ?",
             (task_id, "om_sent"),
         ).fetchone()
+        task = conn.execute("SELECT watch_until FROM tasks WHERE id = ?", (task_id,)).fetchone()
     assert message["sender_role"] == "agent_message"
     assert task_message["role"] == "agent_reply"
+    assert task["watch_until"] == "custom-watch-until"
+    assert watch_minutes_seen == [5]
     assert [call["dry_run"] for call in fake.reply_calls] == [True, False]
     assert fake.mget_calls == [{"as_identity": "bot", "message_ids": ["om_sent"]}]
 

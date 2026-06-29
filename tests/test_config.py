@@ -24,6 +24,9 @@ def test_load_minimal_config() -> None:
     assert loaded.config.tool_permissions == "guarded_write"
     assert loaded.config.chats["oc_test"].auto_reply is True
     assert loaded.config.reply_policy.unknown_group_auto_reply is False
+    assert loaded.config.lifecycle.watch_minutes == 120
+    assert loaded.config.lifecycle.closed_recall_days == 7
+    assert loaded.config.lifecycle.approval_timeout_hours == 24
     assert loaded.config.agent_backend.provider == "hermes"
     assert loaded.config.agent_backend.config_scope == "isolated"
     assert loaded.config.agent_backend.auto_context == "disabled"
@@ -195,6 +198,23 @@ reply_policy:
 
     with pytest.raises(ConfigError, match="default_group_auto_reply"):
         ConfigService().load(config_path)
+
+
+def test_approval_timeout_can_be_null(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+lifecycle:
+  approval_timeout_hours: null
+""",
+        encoding="utf-8",
+    )
+
+    loaded = ConfigService().load(config_path)
+
+    assert loaded.config.lifecycle.approval_timeout_hours is None
 
 
 def test_resource_dir_must_be_safe_relative_path(tmp_path: Path) -> None:

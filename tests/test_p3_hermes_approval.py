@@ -7,12 +7,13 @@ from typing import Any
 import pytest
 
 from feishu_shadow_agent.agent_backend import AgentRunResult
-from feishu_shadow_agent.config import AppConfig, ChatPolicyConfig, OwnerConfig, ReplyPolicyConfig
+from feishu_shadow_agent.config import AppConfig, ChatPolicyConfig, LifecycleConfig, OwnerConfig, ReplyPolicyConfig
 from feishu_shadow_agent.ingestion import IngestionService
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.processing import ApprovalService, SendComposer, TaskProcessingService
+from feishu_shadow_agent.routing import RoutingResult
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
-from feishu_shadow_agent.types import LarkCliResult, MessagePage, NormalizedMessage
+from feishu_shadow_agent.types import LarkCliResult, MessagePage, NormalizedMessage, ResourceRef
 
 
 class FakeHermes:
@@ -117,6 +118,34 @@ def _message(
     }
 
 
+def _resource_message(message_id: str, *, file_key: str = "img_1") -> NormalizedMessage:
+    raw = _message(message_id, mentions=[{"open_id": "ou_owner"}], image_key=file_key)
+    resource = ResourceRef(
+        message_id=message_id,
+        file_key=file_key,
+        resource_type="image",
+        raw={"image_key": file_key},
+    )
+    return NormalizedMessage(
+        message_id=message_id,
+        chat_id="oc_1",
+        chat_type="group",
+        sender_id="ou_ext",
+        sender_name="Ext",
+        sender_type="user",
+        sender_role="external_user_message",
+        sent_at="2026-06-22T10:00:00+08:00",
+        thread_id=None,
+        reply_to_message_id=None,
+        text="hello",
+        direct_mention=True,
+        at_all=False,
+        mentions=["ou_owner"],
+        resources=[resource],
+        raw=raw,
+    )
+
+
 def _session_output(*, include_task_label: bool = True, **overrides: Any) -> dict[str, Any]:
     base = {
         "answerability": "auto_reply",
@@ -177,7 +206,7 @@ def test_gate_passed_p2p_creates_pending_send_and_persists_session(tmp_path: Pat
 
 def test_group_auto_reply_disabled_downgrades_to_approval(tmp_path: Path) -> None:
     hermes = FakeHermes()
-    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1", watch_action="close"))
     store, service, _ = _service(tmp_path, hermes=hermes)
 
     service.process_raw_message(
@@ -192,6 +221,7 @@ def test_group_auto_reply_disabled_downgrades_to_approval(tmp_path: Path) -> Non
         notification = conn.execute(
             "SELECT kind, status, payload_json FROM actions WHERE kind = 'owner_notification'"
         ).fetchone()
+        task = conn.execute("SELECT status, closed_at FROM tasks").fetchone()
         send_count = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
     payload = json.loads(approval["payload_json"])
     notify_payload = json.loads(notification["payload_json"])
@@ -199,6 +229,8 @@ def test_group_auto_reply_disabled_downgrades_to_approval(tmp_path: Path) -> Non
     assert approval["preview"] == "reply text"
     assert payload["text"] == '<at user_id="ou_ext">Ext</at> reply text'
     assert notification["status"] == "pending"
+    assert task["status"] == "watching"
+    assert task["closed_at"] is None
     assert notify_payload["approval_id"] == approval["short_id"]
     assert notify_payload["commands"] == [
         f"/approve {approval['short_id']}",
@@ -378,9 +410,114 @@ def test_resource_dependent_bot_not_joined_creates_owner_notification(tmp_path: 
     assert notification["kind"] == "owner_notification"
     assert "resource_needs_bot" in notification["payload_json"]
     assert processing["stage"] == "resource_download"
-    assert processing["status"] == "processed"
-    assert processing["terminal_reason"] is None
+    assert processing["status"] == "blocked_waiting_external"
+    assert processing["terminal_reason"] == "resource_needs_bot"
     assert approvals == 0
+    assert hermes.session_prompts == []
+
+
+@pytest.mark.parametrize(
+    ("download_status", "expected_reason"),
+    [
+        ("skipped", "resource_download_disabled"),
+        ("too_large", "resource_too_large"),
+        ("quota_exceeded", "resource_quota_exceeded"),
+    ],
+)
+def test_resource_blockers_record_blocked_waiting_external(
+    tmp_path: Path,
+    download_status: str,
+    expected_reason: str,
+) -> None:
+    hermes = FakeHermes()
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)})
+    processor = TaskProcessingService(
+        store=store,
+        config=cfg,
+        agent_backend=hermes,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        agent_retry_delays_seconds=(0.0, 0.0),
+    )
+    message = _resource_message("om_1")
+    store.upsert_message(message)
+    task, decision = store.create_task_for_message_and_audit(
+        message,
+        watch_until="2026-06-22T12:10:00+08:00",
+    )
+    store.upsert_resource(
+        message.resources[0],
+        download_status=download_status,
+        raw={"reason": expected_reason},
+    )
+
+    result = processor.process(
+        message=message,
+        routing=RoutingResult(decision=decision, task=task),
+        source="group_at_me",
+        now="2026-06-22T10:10:00+08:00",
+        watch_until="2026-06-22T12:10:00+08:00",
+        run_id="run_1",
+    )
+
+    assert result is not None
+    assert result.status == "owner_notification_created"
+    assert result.reason == expected_reason
+    with store.connect() as conn:
+        processing = conn.execute(
+            "SELECT stage, status, terminal_reason FROM message_processing"
+        ).fetchone()
+        notification = conn.execute(
+            "SELECT kind, payload_json FROM actions WHERE kind = 'owner_notification'"
+        ).fetchone()
+        send_count = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
+    assert processing["stage"] == "resource_download"
+    assert processing["status"] == "blocked_waiting_external"
+    assert processing["terminal_reason"] == expected_reason
+    assert notification["kind"] == "owner_notification"
+    assert expected_reason in notification["payload_json"]
+    assert send_count == 0
+    assert hermes.session_prompts == []
+
+
+def test_duplicate_ingest_with_blocked_resource_does_not_rerun_task_session(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    cfg = _config(
+        chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True, resource_download=False)}
+    )
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+    raw = _message("om_1", mentions=[{"open_id": "ou_owner"}], image_key="img_1")
+
+    first = service.process_raw_message(
+        raw,
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    second = service.process_raw_message(
+        raw,
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_2",
+    )
+
+    assert first is not None and first.decision.route == "new_task"
+    assert second is not None
+    assert second.decision.route == "ignore"
+    assert second.decision.reason == "duplicate_message"
+    with store.connect() as conn:
+        processing_rows = conn.execute(
+            "SELECT stage, status, terminal_reason FROM message_processing ORDER BY id"
+        ).fetchall()
+        notifications = conn.execute(
+            "SELECT COUNT(*) AS c FROM actions WHERE kind = 'owner_notification'"
+        ).fetchone()["c"]
+        resources = conn.execute("SELECT COUNT(*) AS c FROM resources").fetchone()["c"]
+    assert [(row["stage"], row["status"], row["terminal_reason"]) for row in processing_rows] == [
+        ("resource_download", "blocked_waiting_external", "resource_download_disabled")
+    ]
+    assert notifications == 1
+    assert resources == 1
     assert hermes.session_prompts == []
 
 
@@ -1561,7 +1698,7 @@ def test_approval_command_with_extra_text_fails_without_consuming_approval(tmp_p
             (f"om_{verb}_extra",),
         ).fetchone()
     assert approval["status"] == "pending"
-    assert task["status"] == "waiting_approval"
+    assert task["status"] == "watching"
     assert action_count == 0
     assert command["status"] == "failed"
 
@@ -1606,6 +1743,330 @@ def test_approval_creation_rolls_back_when_owner_notification_fails(tmp_path: Pa
         task = conn.execute("SELECT status FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
     assert approval_count == 0
     assert task["status"] == "watching"
+
+
+def test_approval_request_keeps_task_watching_and_sets_expiry(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config()
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_root", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+
+    ApprovalService(store=store, config=cfg).request_send_reply(
+        task=created.task,
+        reply_target_message_id="om_root",
+        proposed_reply="manual reply",
+        reason="test",
+    )
+
+    with store.connect() as conn:
+        task = conn.execute("SELECT status, closed_at FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
+        approval = conn.execute("SELECT status, expires_at FROM approvals").fetchone()
+    assert task["status"] == "watching"
+    assert task["closed_at"] is None
+    assert approval["status"] == "pending"
+    assert approval["expires_at"] is not None
+
+
+def test_approval_timeout_null_leaves_expires_at_null(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config(lifecycle=LifecycleConfig(approval_timeout_hours=None))
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_root", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+
+    ApprovalService(store=store, config=cfg).request_send_reply(
+        task=created.task,
+        reply_target_message_id="om_root",
+        proposed_reply="manual reply",
+        reason="test",
+    )
+
+    with store.connect() as conn:
+        approval = conn.execute("SELECT expires_at FROM approvals").fetchone()
+    assert approval["expires_at"] is None
+
+
+def test_approval_expiry_cancels_related_pending_send_and_keeps_task_watching(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config(lifecycle=LifecycleConfig(approval_timeout_hours=1))
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_root", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    approval_id = ApprovalService(store=store, config=cfg).request_send_reply(
+        task=created.task,
+        reply_target_message_id="om_root",
+        proposed_reply="manual reply",
+        reason="test",
+    )
+    action_id = store.create_send_reply_action(
+        task_id=created.task.id,
+        target_message_id="om_root",
+        payload={"reply_target_message_id": "om_root", "text": "manual reply", "identity": "user"},
+        approval_id=approval_id,
+    )
+    assert action_id is not None
+    with store.connect() as conn:
+        conn.execute("UPDATE approvals SET expires_at = ? WHERE id = ?", ("2026-06-22T09:00:00+08:00", approval_id))
+
+    expired = store.expire_pending_approvals(now="2026-06-22T10:30:00+08:00")
+
+    with store.connect() as conn:
+        task = conn.execute("SELECT status, closed_at FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
+        approval = conn.execute("SELECT status, resolved_at FROM approvals WHERE id = ?", (approval_id,)).fetchone()
+        action = conn.execute("SELECT status FROM actions WHERE id = ?", (action_id,)).fetchone()
+    assert expired == 1
+    assert approval["status"] == "expired"
+    assert approval["resolved_at"] == "2026-06-22T10:30:00+08:00"
+    assert action["status"] == "cancelled"
+    assert task["status"] == "watching"
+    assert task["closed_at"] is None
+
+
+def test_approval_expiry_cancels_related_owner_notification(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config(lifecycle=LifecycleConfig(approval_timeout_hours=1))
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_root", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    approval_id = ApprovalService(store=store, config=cfg).request_send_reply(
+        task=created.task,
+        reply_target_message_id="om_root",
+        proposed_reply="manual reply",
+        reason="test",
+    )
+    with store.connect() as conn:
+        notification = conn.execute(
+            "SELECT id, approval_id, status FROM actions WHERE kind = 'owner_notification'"
+        ).fetchone()
+        conn.execute("UPDATE approvals SET expires_at = ? WHERE id = ?", ("2026-06-22T09:00:00+08:00", approval_id))
+    assert notification["approval_id"] == approval_id
+    assert notification["status"] == "pending"
+
+    dispatchable = store.list_dispatchable_actions()
+
+    with store.connect() as conn:
+        approval = conn.execute("SELECT status, resolved_at FROM approvals WHERE id = ?", (approval_id,)).fetchone()
+        notification_after = conn.execute(
+            "SELECT status FROM actions WHERE id = ?",
+            (notification["id"],),
+        ).fetchone()
+    assert approval["status"] == "expired"
+    assert approval["resolved_at"] is not None
+    assert notification_after["status"] == "cancelled"
+    assert notification["id"] not in {action.id for action in dispatchable}
+
+
+def test_approval_expiry_keeps_pending_send_for_other_approved_approval(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config(lifecycle=LifecycleConfig(approval_timeout_hours=1))
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_root", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    approval_service = ApprovalService(store=store, config=cfg)
+    first_approval_id = approval_service.request_send_reply(
+        task=created.task,
+        reply_target_message_id="om_root",
+        proposed_reply="first reply",
+        reason="test",
+    )
+    second_approval_id = approval_service.request_send_reply(
+        task=created.task,
+        reply_target_message_id="om_root",
+        proposed_reply="second reply",
+        reason="test",
+    )
+    with store.connect() as conn:
+        first_short_id = conn.execute(
+            "SELECT short_id FROM approvals WHERE id = ?",
+            (first_approval_id,),
+        ).fetchone()["short_id"]
+
+    approved = store.apply_approval_command(
+        message_id="om_approve_first_before_other_expiry",
+        command=f"/approve {first_short_id}",
+        verb="approve",
+        target_id=first_short_id,
+    )
+    assert approved["status"] == "applied"
+    with store.connect() as conn:
+        send_action = conn.execute(
+            "SELECT id, status, approval_id FROM actions WHERE kind = 'send_reply'"
+        ).fetchone()
+        conn.execute(
+            "UPDATE approvals SET expires_at = ? WHERE id = ?",
+            ("2026-06-22T09:00:00+08:00", second_approval_id),
+        )
+    assert send_action["status"] == "pending"
+    assert send_action["approval_id"] == first_approval_id
+
+    expired = store.expire_pending_approvals(now="2026-06-22T10:30:00+08:00")
+
+    with store.connect() as conn:
+        approvals = {
+            row["id"]: (row["status"], row["resolved_at"])
+            for row in conn.execute("SELECT id, status, resolved_at FROM approvals").fetchall()
+        }
+        action = conn.execute("SELECT status FROM actions WHERE id = ?", (send_action["id"],)).fetchone()
+        task = conn.execute("SELECT status, closed_at FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
+    assert expired == 1
+    assert approvals[first_approval_id][0] == "approved"
+    assert approvals[second_approval_id] == ("expired", "2026-06-22T10:30:00+08:00")
+    assert action["status"] == "pending"
+    assert task["status"] == "watching"
+    assert task["closed_at"] is None
+
+
+def test_concrete_reject_closes_task_and_prevents_other_pending_approval_revival(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config()
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_root", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    approval_service = ApprovalService(store=store, config=cfg)
+    first_approval_id = approval_service.request_send_reply(
+        task=created.task,
+        reply_target_message_id="om_root",
+        proposed_reply="first reply",
+        reason="test",
+    )
+    second_approval_id = approval_service.request_send_reply(
+        task=created.task,
+        reply_target_message_id="om_root",
+        proposed_reply="second reply",
+        reason="test",
+    )
+    pending_action_id = store.create_send_reply_action(
+        task_id=created.task.id,
+        target_message_id="om_followup",
+        payload={"reply_target_message_id": "om_followup", "text": "pending reply", "identity": "user"},
+        approval_id=second_approval_id,
+    )
+    assert pending_action_id is not None
+    with store.connect() as conn:
+        first_short_id = conn.execute(
+            "SELECT short_id FROM approvals WHERE id = ?",
+            (first_approval_id,),
+        ).fetchone()["short_id"]
+        second_short_id = conn.execute(
+            "SELECT short_id FROM approvals WHERE id = ?",
+            (second_approval_id,),
+        ).fetchone()["short_id"]
+
+    rejected = store.apply_approval_command(
+        message_id="om_reject_first",
+        command=f"/reject {first_short_id}",
+        verb="reject",
+        target_id=first_short_id,
+    )
+
+    assert rejected["status"] == "applied"
+    with store.connect() as conn:
+        task = conn.execute("SELECT status, closed_at FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
+        approvals = {
+            row["id"]: row["status"]
+            for row in conn.execute("SELECT id, status FROM approvals ORDER BY id").fetchall()
+        }
+        pending_action = conn.execute("SELECT status FROM actions WHERE id = ?", (pending_action_id,)).fetchone()
+        pending_approvals = conn.execute("SELECT COUNT(*) AS c FROM approvals WHERE status = 'pending'").fetchone()["c"]
+    assert task["status"] == "closed"
+    assert task["closed_at"] is not None
+    assert approvals[first_approval_id] == "rejected"
+    assert approvals[second_approval_id] == "expired"
+    assert pending_action["status"] == "cancelled"
+    assert pending_approvals == 0
+
+    approved = store.apply_approval_command(
+        message_id="om_approve_second_after_reject",
+        command=f"/approve {second_short_id}",
+        verb="approve",
+        target_id=second_short_id,
+    )
+    sent = store.apply_approval_command(
+        message_id="om_send_after_reject",
+        command=f"/send {created.task.short_id} late reply",
+        verb="send",
+        target_id=created.task.short_id,
+        final_reply="late reply",
+    )
+
+    assert approved["status"] == "failed"
+    assert sent["status"] == "failed"
+    assert "not watching" in sent["result"]["error"]
+    with store.connect() as conn:
+        task_after = conn.execute("SELECT status, closed_at FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
+        send_actions = conn.execute(
+            "SELECT status FROM actions WHERE kind = 'send_reply' ORDER BY id"
+        ).fetchall()
+    assert task_after["status"] == "closed"
+    assert task_after["closed_at"] is not None
+    assert [row["status"] for row in send_actions] == ["cancelled"]
 
 
 def _task_with_two_pending_approvals(tmp_path: Path) -> tuple[SQLiteStore, str]:
@@ -1699,7 +2160,7 @@ def test_reject_task_shortcut_multiple_pending_approvals_creates_owner_notificat
         ).fetchone()
     payload = json.loads(notification["payload_json"])
     assert pending == 2
-    assert task["status"] == "waiting_approval"
+    assert task["status"] == "watching"
     assert command["status"] == "failed"
     assert payload["reason"] == "multiple_pending_approvals"
     assert payload["task_id"] == task_short_id
@@ -2012,7 +2473,7 @@ def test_send_command_active_action_conflict_rolls_back_temporary_approval(tmp_p
     assert command["status"] == "failed"
 
 
-def test_send_command_active_action_conflict_keeps_waiting_approval_status(tmp_path: Path) -> None:
+def test_send_command_active_action_conflict_keeps_task_watching(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     cfg = _config()
     service = IngestionService(
@@ -2058,7 +2519,7 @@ def test_send_command_active_action_conflict_keeps_waiting_approval_status(tmp_p
         task = conn.execute("SELECT status FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
         send_actions = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
     assert approval["status"] == "pending"
-    assert task["status"] == "waiting_approval"
+    assert task["status"] == "watching"
     assert send_actions == 1
 
 

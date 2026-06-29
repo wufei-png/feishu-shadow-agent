@@ -248,15 +248,6 @@ def _handle_local_approval_command(
 
 def _handle_replay(args: argparse.Namespace) -> int:
     loaded, store, _ = _load_runtime(args.config)
-    summary = store.replay_summary(args.message_id)
-    if summary is None:
-        print(f"message not found: {args.message_id}", file=sys.stderr)
-        return 2
-    related_pending_action_ids = [
-        action["id"]
-        for action in summary["actions"]
-        if action.get("status") == "pending" and action.get("kind") in {"send_reply", "owner_notification"}
-    ]
     client = LarkCliClient(
         path=loaded.config.lark_cli.path,
         timeout_seconds=loaded.config.lark_cli.timeout_seconds,
@@ -269,6 +260,15 @@ def _handle_replay(args: argparse.Namespace) -> int:
             shutil.copy2(store.path, temp_db)
         temp_store = SQLiteStore(temp_db)
         temp_store.migrate()
+        summary = temp_store.replay_summary(args.message_id)
+        if summary is None:
+            print(f"message not found: {args.message_id}", file=sys.stderr)
+            return 2
+        related_pending_action_ids = [
+            action["id"]
+            for action in summary["actions"]
+            if action.get("status") == "pending" and action.get("kind") in {"send_reply", "owner_notification"}
+        ]
         dispatcher = Dispatcher(
             store=temp_store,
             feishu_client=client,

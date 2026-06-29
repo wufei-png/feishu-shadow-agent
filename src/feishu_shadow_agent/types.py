@@ -2,23 +2,132 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
 
 ChatType = Literal["group", "p2p"]
 HealthSeverity = Literal["critical", "warning"]
 HealthStatus = Literal["ok", "warning", "failed"]
-RouteName = Literal[
-    "new_task",
-    "attach_task",
-    "reopen_task",
-    "close_task",
-    "ignore",
-    "ambiguous",
-    "human_taken_over",
-]
 SenderRole = Literal["external_user_message", "owner_message", "bot_message", "agent_message"]
-TaskStatus = Literal["watching", "waiting_approval", "closed", "closed_by_owner", "human_taken_over"]
+
+
+class TaskStatus(StrEnum):
+    WATCHING = "watching"
+    CLOSED = "closed"
+    CLOSED_BY_OWNER = "closed_by_owner"
+    HUMAN_TAKEN_OVER = "human_taken_over"
+
+
+class ApprovalKind(StrEnum):
+    SEND_REPLY = "send_reply"
+    TOOL_ACTION = "tool_action"
+
+
+class ApprovalStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
+class ActionKind(StrEnum):
+    SEND_REPLY = "send_reply"
+    OWNER_NOTIFICATION = "owner_notification"
+
+
+class ActionStatus(StrEnum):
+    PENDING = "pending"
+    SENDING = "sending"
+    SENT = "sent"
+    FAILED = "failed"
+    FAILED_NEEDS_REVIEW = "failed_needs_review"
+    CANCELLED = "cancelled"
+
+
+class RouteName(StrEnum):
+    NEW_TASK = "new_task"
+    ATTACH_TASK = "attach_task"
+    REOPEN_TASK = "reopen_task"
+    CLOSE_TASK = "close_task"
+    IGNORE = "ignore"
+    AMBIGUOUS = "ambiguous"
+    HUMAN_TAKEN_OVER = "human_taken_over"
+
+
+class MessageProcessingStage(StrEnum):
+    TASK_ROUTER = "task_router"
+    TASK_SESSION = "task_session"
+    RESOURCE_DOWNLOAD = "resource_download"
+
+
+class MessageProcessingStatus(StrEnum):
+    PROCESSED = "processed"
+    PROCESSING_FAILED_TERMINAL = "processing_failed_terminal"
+    BLOCKED_WAITING_EXTERNAL = "blocked_waiting_external"
+
+
+class ResourceStatus(StrEnum):
+    DOWNLOADED = "downloaded"
+    SKIPPED = "skipped"
+    BOT_NOT_JOINED = "bot_not_joined"
+    BOT_INVISIBLE = "bot_invisible"
+    FAILED = "failed"
+    MISSING_FILE = "missing_file"
+    TOO_LARGE = "too_large"
+    QUOTA_EXCEEDED = "quota_exceeded"
+    EXPIRED = "expired"
+
+
+CHAT_TYPES = ("group", "p2p")
+SENDER_ROLES = ("external_user_message", "owner_message", "bot_message", "agent_message")
+
+
+def enum_values(enum_type: type[StrEnum]) -> tuple[str, ...]:
+    return tuple(member.value for member in enum_type)
+
+
+class LifecycleStatePolicy:
+    @staticmethod
+    def is_active_task_status(status: str) -> bool:
+        return status == TaskStatus.WATCHING.value
+
+    @staticmethod
+    def task_status_closes_at(status: str) -> bool:
+        return status != TaskStatus.WATCHING.value
+
+    @staticmethod
+    def message_processing_blocks_duplicate(status: str) -> bool:
+        return status in {
+            MessageProcessingStatus.PROCESSED.value,
+            MessageProcessingStatus.PROCESSING_FAILED_TERMINAL.value,
+            MessageProcessingStatus.BLOCKED_WAITING_EXTERNAL.value,
+        }
+
+    @staticmethod
+    def resource_blocker_status(reason: str) -> str:
+        if reason in {
+            "resource_needs_bot",
+            "resource_download_disabled",
+            "resource_too_large",
+            "resource_quota_exceeded",
+        }:
+            return MessageProcessingStatus.BLOCKED_WAITING_EXTERNAL.value
+        return MessageProcessingStatus.PROCESSING_FAILED_TERMINAL.value
+
+
+class StateSchemaContract:
+    task_statuses = enum_values(TaskStatus)
+    approval_kinds = enum_values(ApprovalKind)
+    approval_statuses = enum_values(ApprovalStatus)
+    action_kinds = enum_values(ActionKind)
+    action_statuses = enum_values(ActionStatus)
+    route_names = enum_values(RouteName)
+    message_processing_stages = enum_values(MessageProcessingStage)
+    message_processing_statuses = enum_values(MessageProcessingStatus)
+    resource_statuses = enum_values(ResourceStatus)
+    chat_types = CHAT_TYPES
+    sender_roles = SENDER_ROLES
 
 
 def utc_now_iso() -> str:

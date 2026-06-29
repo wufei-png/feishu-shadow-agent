@@ -641,7 +641,7 @@ human_taken_over:
 - 记录 owner_intervention / route audit。
 - 取消该 task 尚未发送的 `send_reply` action。
 - 过期该 task 仍 pending 的 `send_reply` approval。
-- 将 task 标记为 `closed_by_owner` 或 `human_taken_over`。
+- 将 task 标记为 `human_taken_over`。
 - 不再让 agent 自动回复这轮任务。
 
 无法确定关联 task 的 owner 群消息只入库和审计，不创建任务、不调用 TaskRouter。
@@ -659,7 +659,7 @@ historical candidates：
 ```text
 仅新触发事件启用
 same chat_id
-最近 7 天
+最近 `lifecycle.closed_recall_days` 天，默认 7 天
 Python 内部可用 sender/watch_keys/关键词/task_label/last_user_message/last_agent_reply 等存储摘要召回
 ```
 
@@ -720,17 +720,18 @@ P2P single-active 只进入语义候选；普通 follow-up 必须经 TaskRouter 
 默认 watch：
 
 ```text
-agent/user 回复后 2 小时
+agent/user 回复后 `lifecycle.watch_minutes` 分钟，默认 120 分钟
 ```
 
 延长：
 
 ```text
 same_task follow-up:
-  延长 2 小时
+  延长 `lifecycle.watch_minutes` 分钟
 
-waiting_approval:
-  最长保留 24 小时
+pending approval:
+  approval 作为 blocker 保存在 approvals，不改变 task lifecycle；
+  默认 `lifecycle.approval_timeout_hours=24` 小时后过期，null 表示永不过期。
 ```
 
 提前关闭：
@@ -745,7 +746,7 @@ active watch 拉取：
 ```text
 source:
   从 tasks 表查 active tasks：
-    state in (watching, waiting_approval)
+    status = watching
     watch_until > now
 
 grouping:
@@ -778,7 +779,7 @@ Group without thread_id:
 
 ```text
 same chat_id
-最近 7 天
+最近 `lifecycle.closed_recall_days` 天，默认 7 天
 sender in old watch_keys 或 mentions owner
 task_label / last_user_message / last_agent_reply 等存储摘要轻量匹配
 reply_to 命中旧 included/agent reply message_id
@@ -834,7 +835,10 @@ ApprovalRequest
   preview
   payload_json
   created_at
+  expires_at
 ```
+
+`pending` approval 是 blocker；`approved`、`rejected`、`expired` 都是历史状态。`expired` 不关闭 task，不向 task-session agent 注入合成事件，只在 status/replay/operator 视图中可见。
 
 ID：
 

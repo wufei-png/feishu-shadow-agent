@@ -64,5 +64,10 @@ retention:
   raw_message_days: 30
   resource_days: 30
 
+lifecycle:
+  watch_minutes: 120
+  closed_recall_days: 7
+  approval_timeout_hours: 24
+
 debug:
   save_full_agent_io: false

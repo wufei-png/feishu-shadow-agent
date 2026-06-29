@@ -4,8 +4,10 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
-from feishu_shadow_agent.types import HealthCheckResult
+from feishu_shadow_agent.types import HealthCheckResult, StateSchemaContract
 
 
 EXPECTED_TABLES = {
@@ -89,7 +91,7 @@ def test_checkpoint_and_run_health_roundtrip(tmp_path: Path) -> None:
     assert health["check_name"] == "config_schema"
 
 
-def test_p2_migration_adds_routing_columns(tmp_path: Path) -> None:
+def test_baseline_schema_includes_current_columns(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.migrate()
 
@@ -100,13 +102,27 @@ def test_p2_migration_adds_routing_columns(tmp_path: Path) -> None:
         task_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
         }
+        approval_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(approvals)").fetchall()
+        }
+        audit_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(agent_audits)").fetchall()
+        }
+        indexes = {
+            row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()
+        }
 
     assert {"thread_id", "reply_to_message_id", "sender_role", "direct_mention", "at_all", "text"} <= message_columns
-    assert {"chat_type", "thread_id", "watch_until", "last_user_message", "last_agent_reply"} <= task_columns
+    assert {"chat_type", "thread_id", "watch_until", "last_user_message", "last_agent_reply", "agent_session_id"} <= task_columns
+    assert "hermes_session_id" not in task_columns
+    assert "expires_at" in approval_columns
     assert "sender_name" in message_columns
+    assert {"backend_provider", "agent_session_id", "tool_permissions_profile"} <= audit_columns
+    assert "idx_agent_audits_task" in indexes
+    assert "idx_actions_active_send_reply_target" in indexes
 
 
-def test_p3_migration_clears_legacy_fake_hermes_session_and_send_reply_guard(tmp_path: Path) -> None:
+def test_send_reply_guard_and_failed_retry_use_current_baseline(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.migrate()
 
@@ -116,12 +132,12 @@ def test_p3_migration_clears_legacy_fake_hermes_session_and_send_reply_guard(tmp
             INSERT INTO tasks(short_id, status, chat_id, root_message_id, task_label, agent_session_id, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            ("t_legacy", "watching", "oc_1", "om_1", "label", "feishu-task-t_legacy", "now", "now"),
+            ("t_current", "watching", "oc_1", "om_1", "label", "sid_current", "now", "now"),
         )
-        task_id = conn.execute("SELECT id FROM tasks WHERE short_id = ?", ("t_legacy",)).fetchone()["id"]
+        task_id = conn.execute("SELECT id FROM tasks WHERE short_id = ?", ("t_current",)).fetchone()["id"]
     store.migrate()
 
-    assert store.get_initialized_agent_session_id(task_id) is None
+    assert store.get_initialized_agent_session_id(task_id) == "sid_current"
     first = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_1",
@@ -152,101 +168,147 @@ def test_p3_migration_clears_legacy_fake_hermes_session_and_send_reply_guard(tmp
     assert retried_action.result == {}
 
 
-def test_agent_audits_include_tool_permissions_profile(tmp_path: Path) -> None:
+def test_state_schema_contract_accepts_all_enum_values(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.migrate()
 
     with store.connect() as conn:
-        columns = {
-            row["name"] for row in conn.execute("PRAGMA table_info(agent_audits)").fetchall()
-        }
+        for index, status in enumerate(StateSchemaContract.task_statuses):
+            conn.execute(
+                "INSERT INTO tasks(short_id, status, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (f"t_status_{index}", status, "now", "now"),
+            )
+        for index, chat_type in enumerate(StateSchemaContract.chat_types):
+            conn.execute(
+                "INSERT INTO messages(message_id, chat_type, raw_json, inserted_at) VALUES (?, ?, ?, ?)",
+                (f"om_chat_{index}", chat_type, "{}", "now"),
+            )
+        for index, sender_role in enumerate(StateSchemaContract.sender_roles):
+            conn.execute(
+                "INSERT INTO messages(message_id, sender_role, raw_json, inserted_at) VALUES (?, ?, ?, ?)",
+                (f"om_sender_{index}", sender_role, "{}", "now"),
+            )
+        for index, kind in enumerate(StateSchemaContract.approval_kinds):
+            conn.execute(
+                "INSERT INTO approvals(short_id, kind, status, created_at) VALUES (?, ?, ?, ?)",
+                (f"a_kind_{index}", kind, "pending", "now"),
+            )
+        for index, status in enumerate(StateSchemaContract.approval_statuses):
+            conn.execute(
+                "INSERT INTO approvals(short_id, kind, status, created_at) VALUES (?, ?, ?, ?)",
+                (f"a_status_{index}", "send_reply", status, "now"),
+            )
+        for index, kind in enumerate(StateSchemaContract.action_kinds):
+            conn.execute(
+                """
+                INSERT INTO actions(idempotency_key, kind, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (f"action-kind-{index}", kind, "pending", "now", "now"),
+            )
+        for index, status in enumerate(StateSchemaContract.action_statuses):
+            conn.execute(
+                """
+                INSERT INTO actions(idempotency_key, kind, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (f"action-status-{index}", "send_reply", status, "now", "now"),
+            )
+        for index, status in enumerate(StateSchemaContract.resource_statuses):
+            conn.execute(
+                """
+                INSERT INTO resources(message_id, file_key, resource_type, download_status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (f"om_res_{index}", f"file_{index}", "file", status, "now", "now"),
+            )
+        for index, route in enumerate(StateSchemaContract.route_names):
+            conn.execute(
+                "INSERT INTO routing_audits(message_id, route, created_at) VALUES (?, ?, ?)",
+                (f"om_route_{index}", route, "now"),
+            )
+        for index, stage in enumerate(StateSchemaContract.message_processing_stages):
+            conn.execute(
+                """
+                INSERT INTO message_processing(message_id, stage, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (f"om_stage_{index}", stage, "processed", "now", "now"),
+            )
+        for index, status in enumerate(StateSchemaContract.message_processing_statuses):
+            conn.execute(
+                """
+                INSERT INTO message_processing(message_id, stage, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (f"om_mp_status_{index}", "task_router", status, "now", "now"),
+            )
 
-    assert "tool_permissions_profile" in columns
 
-
-def test_agent_backend_rename_migrates_existing_hermes_schema(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "sql, params",
+    [
+        (
+            "INSERT INTO tasks(short_id, status, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            ("t_bad", "waiting_approval", "now", "now"),
+        ),
+        (
+            "INSERT INTO approvals(short_id, kind, status, created_at) VALUES (?, ?, ?, ?)",
+            ("a_bad_kind", "future_kind", "pending", "now"),
+        ),
+        (
+            "INSERT INTO approvals(short_id, kind, status, created_at) VALUES (?, ?, ?, ?)",
+            ("a_bad_status", "send_reply", "future_status", "now"),
+        ),
+        (
+            "INSERT INTO actions(idempotency_key, kind, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            ("action-bad-kind", "future_kind", "pending", "now", "now"),
+        ),
+        (
+            "INSERT INTO actions(idempotency_key, kind, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            ("action-bad-status", "send_reply", "future_status", "now", "now"),
+        ),
+        (
+            """
+            INSERT INTO resources(message_id, file_key, resource_type, download_status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("om_bad_resource", "file_bad", "file", "future_status", "now", "now"),
+        ),
+        (
+            "INSERT INTO routing_audits(message_id, route, created_at) VALUES (?, ?, ?)",
+            ("om_bad_route", "future_route", "now"),
+        ),
+        (
+            """
+            INSERT INTO message_processing(message_id, stage, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("om_bad_stage", "future_stage", "processed", "now", "now"),
+        ),
+        (
+            """
+            INSERT INTO message_processing(message_id, stage, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("om_bad_mp_status", "task_router", "future_status", "now", "now"),
+        ),
+        (
+            "INSERT INTO messages(message_id, chat_type, raw_json, inserted_at) VALUES (?, ?, ?, ?)",
+            ("om_bad_chat", "future_chat", "{}", "now"),
+        ),
+        (
+            "INSERT INTO messages(message_id, sender_role, raw_json, inserted_at) VALUES (?, ?, ?, ?)",
+            ("om_bad_sender", "future_sender", "{}", "now"),
+        ),
+    ],
+)
+def test_invalid_state_values_fail_db_check(tmp_path: Path, sql: str, params: tuple[object, ...]) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    with store.connect() as conn:
-        conn.executescript(
-            """
-            CREATE TABLE schema_migrations (
-              version TEXT PRIMARY KEY,
-              applied_at TEXT NOT NULL
-            );
-            CREATE TABLE tasks (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              short_id TEXT NOT NULL UNIQUE,
-              status TEXT NOT NULL,
-              hermes_session_id TEXT,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-            CREATE TABLE hermes_audits (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              request_type TEXT NOT NULL,
-              task_id INTEGER,
-              hermes_session_id TEXT,
-              input_message_ids_json TEXT NOT NULL DEFAULT '[]',
-              input_resource_ids_json TEXT NOT NULL DEFAULT '[]',
-              response_json TEXT,
-              error TEXT,
-              latency_ms INTEGER,
-              prompt_json TEXT,
-              created_at TEXT NOT NULL,
-              tool_permissions_profile TEXT
-            );
-            CREATE INDEX idx_hermes_audits_task ON hermes_audits(task_id, created_at);
-            INSERT INTO schema_migrations(version, applied_at) VALUES
-              ('0001_foundation', 'now'),
-              ('0002_ingestion_routing', 'now'),
-              ('0003_hermes_approval', 'now'),
-              ('0004_message_processing', 'now'),
-              ('0005_hermes_tool_permissions', 'now');
-            INSERT INTO tasks(short_id, status, hermes_session_id, created_at, updated_at) VALUES
-              ('t_real', 'watching', 'sid_old', 'now', 'now'),
-              ('t_fake', 'watching', 'feishu-task-t_fake', 'now', 'now');
-            INSERT INTO hermes_audits(
-              request_type, task_id, hermes_session_id, input_message_ids_json,
-              input_resource_ids_json, created_at, tool_permissions_profile
-            ) VALUES ('task_session', 1, 'sid_old', '[]', '[]', 'now', 'guarded_write');
-            """
-        )
-
     store.migrate()
 
-    with store.connect() as conn:
-        task_columns = {
-            row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
-        }
-        audit_columns = {
-            row["name"] for row in conn.execute("PRAGMA table_info(agent_audits)").fetchall()
-        }
-        tables = {
-            row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
-        }
-        indexes = {
-            row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()
-        }
-        real_task = conn.execute("SELECT agent_session_id FROM tasks WHERE short_id = 't_real'").fetchone()
-        fake_task = conn.execute("SELECT agent_session_id FROM tasks WHERE short_id = 't_fake'").fetchone()
-        audit = conn.execute(
-            "SELECT backend_provider, agent_session_id, tool_permissions_profile FROM agent_audits"
-        ).fetchone()
-
-    assert "agent_session_id" in task_columns
-    assert "hermes_session_id" not in task_columns
-    assert "agent_audits" in tables
-    assert "hermes_audits" not in tables
-    assert {"backend_provider", "agent_session_id", "tool_permissions_profile"} <= audit_columns
-    assert "idx_agent_audits_task" in indexes
-    assert "idx_hermes_audits_task" not in indexes
-    assert real_task["agent_session_id"] == "sid_old"
-    assert fake_task["agent_session_id"] is None
-    assert dict(audit) == {
-        "backend_provider": "hermes",
-        "agent_session_id": "sid_old",
-        "tool_permissions_profile": "guarded_write",
-    }
+    with store.connect() as conn, pytest.raises(sqlite3.IntegrityError):
+        conn.execute(sql, params)
 
 
 def test_send_reply_retry_does_not_revive_failed_action_when_same_text_was_sent(tmp_path: Path) -> None:

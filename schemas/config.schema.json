@@ -303,6 +303,41 @@
       "title": "LarkCliConfig",
       "type": "object"
     },
+    "LifecycleConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "watch_minutes": {
+          "default": 120,
+          "description": "Minutes to keep watching a task after activity.",
+          "exclusiveMinimum": 0,
+          "title": "Watch Minutes",
+          "type": "integer"
+        },
+        "closed_recall_days": {
+          "default": 7,
+          "description": "Days to consider closed tasks for explicit recall.",
+          "minimum": 1,
+          "title": "Closed Recall Days",
+          "type": "integer"
+        },
+        "approval_timeout_hours": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 24,
+          "description": "Hours before pending approvals expire; null means approvals never expire.",
+          "title": "Approval Timeout Hours"
+        }
+      },
+      "title": "LifecycleConfig",
+      "type": "object"
+    },
     "LoggingConfig": {
       "additionalProperties": false,
       "properties": {
@@ -485,6 +520,10 @@
     "retention": {
       "$ref": "#/$defs/RetentionConfig",
       "description": "Local data retention settings."
+    },
+    "lifecycle": {
+      "$ref": "#/$defs/LifecycleConfig",
+      "description": "Global task lifecycle settings."
     },
     "debug": {
       "$ref": "#/$defs/DebugConfig",

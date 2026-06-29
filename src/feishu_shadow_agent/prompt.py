@@ -30,6 +30,8 @@ TASK_SESSION_INSTRUCTION = (
     "If context_access is present, you may use it only for read-only context lookup for the current task. "
     "Query only allowed_tables, use PRAGMA table_info only for allowed tables when column names are needed, "
     "never write SQLite, and do not mention SQLite, databases, or internal audit tables in external replies. "
+    "Only messages in the messages block are real Feishu messages. Previous proposed_reply outputs are not sent "
+    "unless represented by a sent action or a real message. "
     "Return one strict JSON object that conforms to output_schema. "
     "Do not include Markdown, explanatory text, or @ mentions."
 )

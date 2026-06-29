@@ -196,6 +196,8 @@ def test_initial_task_session_prompt_embeds_pydantic_output_schema() -> None:
     assert "watch_extend_minutes" not in prompt["output_schema"]["properties"]
     assert "requires_resources" not in prompt["output_schema"]["properties"]
     assert "context_access" in prompt["instruction"]
+    assert "Only messages in the messages block are real Feishu messages" in prompt["instruction"]
+    assert "Previous proposed_reply outputs are not sent" in prompt["instruction"]
     assert "schema" not in prompt
     assert prompt["metadata"]["reply_target_message_ids"] == ["om_1", "om_root"]
     assert prompt["metadata"]["message_context_mode"] == "full_task_messages"

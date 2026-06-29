@@ -201,7 +201,7 @@ def _insert_task(store: SQLiteStore, short_id: str, status: str, root_message_id
                 "label",
                 OLD,
                 OLD,
-                None if status in {"watching", "waiting_approval"} else OLD,
+                None if status == "watching" else OLD,
             ),
         )
     return int(cursor.lastrowid)

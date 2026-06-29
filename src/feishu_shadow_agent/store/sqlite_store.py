@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timedelta
 from hashlib import sha256
 from importlib import resources
 from pathlib import Path
@@ -9,11 +10,17 @@ from typing import Any, Iterable
 
 from ..types import (
     ActionRecord,
+    ActionKind,
+    ActionStatus,
+    ApprovalKind,
+    ApprovalStatus,
     HealthCheckResult,
+    LifecycleStatePolicy,
     NormalizedMessage,
     ResourceRef,
     RouteDecision,
     TaskRecord,
+    TaskStatus,
     utc_now_iso,
 )
 
@@ -324,7 +331,7 @@ class SQLiteStore:
                 FROM message_processing
                 WHERE message_id = ?
                   AND stage = ?
-                  AND status IN ('processed', 'processing_failed_terminal')
+                  AND status IN ('processed', 'processing_failed_terminal', 'blocked_waiting_external')
                 LIMIT 1
                 """,
                 (message_id, stage),
@@ -454,7 +461,7 @@ class SQLiteStore:
                     FROM tasks t
                     LEFT JOIN task_messages tm ON tm.task_id = t.id
                     WHERE (t.root_message_id = r.message_id OR tm.message_id = r.message_id)
-                      AND t.status IN ('watching', 'waiting_approval')
+                      AND t.status = 'watching'
                   )
                   AND NOT EXISTS (
                     SELECT 1
@@ -619,7 +626,7 @@ class SQLiteStore:
                 """
                 SELECT * FROM tasks
                 WHERE chat_id = ?
-                  AND status IN ('watching', 'waiting_approval')
+                  AND status = 'watching'
                   AND (watch_until IS NULL OR watch_until > ?)
                 ORDER BY updated_at DESC, id DESC
                 """,
@@ -643,7 +650,7 @@ class SQLiteStore:
                 JOIN task_watch_keys wk ON wk.task_id = t.id
                 WHERE t.chat_id = ?
                   AND wk.key = ?
-                  AND t.status IN ('watching', 'waiting_approval')
+                  AND t.status = 'watching'
                   AND (t.watch_until IS NULL OR t.watch_until > ?)
                 ORDER BY t.updated_at DESC, t.id DESC
                 """,
@@ -659,7 +666,7 @@ class SQLiteStore:
                 SELECT *
                 FROM tasks
                 WHERE chat_id = ?
-                  AND status NOT IN ('watching', 'waiting_approval')
+                  AND status != 'watching'
                 ORDER BY updated_at DESC, id DESC
                 LIMIT ?
                 """,
@@ -740,7 +747,7 @@ class SQLiteStore:
                 SELECT *
                 FROM tasks t
                 WHERE t.chat_id = ?
-                  AND t.status NOT IN ('watching', 'waiting_approval')
+                  AND t.status != 'watching'
                   AND datetime(t.updated_at) >= datetime(?)
                   AND ({where_related})
                 ORDER BY t.updated_at DESC, t.id DESC
@@ -832,7 +839,7 @@ class SQLiteStore:
                   substr(wk.key, ?) AS thread_id
                 FROM tasks t
                 JOIN task_watch_keys wk ON wk.task_id = t.id
-                WHERE t.status IN ('watching', 'waiting_approval')
+                WHERE t.status = 'watching'
                   AND (t.watch_until IS NULL OR t.watch_until > ?)
                   AND t.chat_id IS NOT NULL
                   AND wk.key LIKE 'thread:%'
@@ -843,7 +850,7 @@ class SQLiteStore:
                   t.chat_type AS chat_type,
                   NULL AS thread_id
                 FROM tasks t
-                WHERE t.status IN ('watching', 'waiting_approval')
+                WHERE t.status = 'watching'
                   AND (t.watch_until IS NULL OR t.watch_until > ?)
                   AND t.chat_id IS NOT NULL
                   AND NOT EXISTS (
@@ -912,6 +919,7 @@ class SQLiteStore:
         return False
 
     def count_pending_actions(self) -> int:
+        self.expire_pending_approvals()
         self.migrate()
         with self.connect() as conn:
             row = conn.execute(
@@ -920,6 +928,7 @@ class SQLiteStore:
         return int(row["count"])
 
     def list_dispatchable_actions(self, *, limit: int = 50, kind: str | None = None) -> list[ActionRecord]:
+        self.expire_pending_approvals()
         self.migrate()
         with self.connect() as conn:
             if kind is None:
@@ -1006,19 +1015,38 @@ class SQLiteStore:
                 ),
             )
 
-    def status_snapshot(self, *, stale_after_seconds: int = 900) -> dict[str, Any]:
+    def expire_pending_approvals(self, *, now: str | None = None) -> int:
         self.migrate()
+        effective_now = now or utc_now_iso()
+        with self.connect() as conn:
+            return self._expire_pending_approvals_locked(conn, now=effective_now)
+
+    def status_snapshot(self, *, stale_after_seconds: int = 900) -> dict[str, Any]:
+        self.expire_pending_approvals()
+        self.migrate()
+        now = utc_now_iso()
         with self.connect() as conn:
             last_run = conn.execute(
                 "SELECT * FROM runs ORDER BY started_at DESC LIMIT 1"
             ).fetchone()
             pending_approvals = conn.execute(
                 """
-                SELECT a.short_id, a.task_id, t.short_id AS task_short_id, a.kind, a.preview, a.created_at
+                SELECT a.short_id, a.task_id, t.short_id AS task_short_id, a.kind, a.preview, a.created_at, a.expires_at
                 FROM approvals a
                 LEFT JOIN tasks t ON t.id = a.task_id
                 WHERE a.status = 'pending'
                 ORDER BY a.created_at DESC, a.id DESC
+                LIMIT 20
+                """
+            ).fetchall()
+            recent_expired_approvals = conn.execute(
+                """
+                SELECT a.short_id, a.task_id, t.short_id AS task_short_id, a.kind, a.preview,
+                       a.created_at, a.expires_at, a.resolved_at
+                FROM approvals a
+                LEFT JOIN tasks t ON t.id = a.task_id
+                WHERE a.status = 'expired'
+                ORDER BY a.resolved_at DESC, a.id DESC
                 LIMIT 20
                 """
             ).fetchall()
@@ -1035,10 +1063,12 @@ class SQLiteStore:
                 """
                 SELECT id, short_id, status, chat_id, task_label, updated_at, watch_until
                 FROM tasks
-                WHERE status IN ('watching', 'waiting_approval')
+                WHERE status = 'watching'
+                  AND (watch_until IS NULL OR watch_until > ?)
                 ORDER BY updated_at DESC, id DESC
                 LIMIT 20
-                """
+                """,
+                (now,),
             ).fetchall()
             pending_actions = conn.execute(
                 """
@@ -1081,6 +1111,7 @@ class SQLiteStore:
         return {
             "last_run": _row_dict(last_run),
             "pending_approvals": [_row_dict(row) for row in pending_approvals],
+            "recent_expired_approvals": [_row_dict(row) for row in recent_expired_approvals],
             "failed_approval_commands": [_json_row_dict(row, "result_json") for row in failed_commands],
             "active_tasks": [_row_dict(row) for row in active_tasks],
             "pending_actions": [_json_row_dict(row, "result_json") for row in pending_actions],
@@ -1090,6 +1121,7 @@ class SQLiteStore:
         }
 
     def replay_summary(self, message_id: str) -> dict[str, Any] | None:
+        self.expire_pending_approvals()
         self.migrate()
         with self.connect() as conn:
             message = conn.execute(
@@ -1125,10 +1157,23 @@ class SQLiteStore:
                 """,
                 (message_id, message_id),
             ).fetchall()
+            approvals = conn.execute(
+                """
+                SELECT id, short_id, task_id, kind, status, preview, payload_json,
+                       created_at, expires_at, resolved_at
+                FROM approvals
+                WHERE task_id IN (
+                    SELECT task_id FROM task_messages WHERE message_id = ?
+                )
+                ORDER BY created_at, id
+                """,
+                (message_id,),
+            ).fetchall()
         return {
             "message": _row_dict(message),
             "routing_audits": [_row_dict(row) for row in audits],
             "task_ids": task_ids,
+            "approvals": [_json_row_dict(row, "payload_json") for row in approvals],
             "actions": [_json_row_dict(row, "payload_json", "result_json") for row in actions],
         }
 
@@ -1187,7 +1232,7 @@ class SQLiteStore:
         if row is None:
             return None
         session_id = row["agent_session_id"]
-        if not session_id or str(session_id).startswith("feishu-task-"):
+        if not session_id:
             return None
         return str(session_id)
 
@@ -1220,7 +1265,7 @@ class SQLiteStore:
         if status is not None:
             assignments.append("status = ?")
             params.append(status)
-            if status in {"watching", "waiting_approval"}:
+            if not LifecycleStatePolicy.task_status_closes_at(status):
                 assignments.append("closed_at = NULL")
             else:
                 assignments.append("closed_at = ?")
@@ -1319,39 +1364,35 @@ class SQLiteStore:
         preview: str,
         payload: dict[str, Any],
         notify_payload: dict[str, Any] | None = None,
+        approval_timeout_hours: int | None = 24,
     ) -> int:
         self.migrate()
         now = utc_now_iso()
+        expires_at = None if approval_timeout_hours is None else _plus_hours(now, approval_timeout_hours)
         with self.connect() as conn:
             short_id = self._unique_short_id_in_table(conn, "approvals", "a", f"{task_id}:{preview}:{now}")
             cursor = conn.execute(
                 """
-                INSERT INTO approvals(short_id, task_id, kind, status, payload_json, preview, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO approvals(short_id, task_id, kind, status, payload_json, preview, created_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     short_id,
                     task_id,
-                    "send_reply",
-                    "pending",
+                    ApprovalKind.SEND_REPLY.value,
+                    ApprovalStatus.PENDING.value,
                     json.dumps(payload, ensure_ascii=False, default=str),
                     preview,
                     now,
+                    expires_at,
                 ),
             )
             approval_id = int(cursor.lastrowid)
-            conn.execute(
-                """
-                UPDATE tasks
-                SET status = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                ("waiting_approval", now, task_id),
-            )
             if notify_payload is not None:
                 self._create_owner_notification_action_locked(
                     conn,
                     task_id=task_id,
+                    approval_id=approval_id,
                     payload=_approval_notification_payload(
                         notify_payload,
                         approval_short_id=short_id,
@@ -1373,6 +1414,7 @@ class SQLiteStore:
         self.migrate()
         now = utc_now_iso()
         with self.connect() as conn:
+            self._expire_pending_approvals_locked(conn, now=now)
             existing = conn.execute(
                 "SELECT status, result_json FROM approval_commands WHERE message_id = ?",
                 (message_id,),
@@ -1415,6 +1457,34 @@ class SQLiteStore:
             )
         return {"status": status, "result": result}
 
+    def _expire_pending_approvals_locked(self, conn: sqlite3.Connection, *, now: str) -> int:
+        rows = conn.execute(
+            """
+            SELECT id
+            FROM approvals
+            WHERE status = 'pending'
+              AND expires_at IS NOT NULL
+              AND datetime(expires_at) < datetime(?)
+            ORDER BY expires_at, id
+            """,
+            (now,),
+        ).fetchall()
+        expired = 0
+        for row in rows:
+            cursor = conn.execute(
+                """
+                UPDATE approvals
+                SET status = ?, resolved_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (ApprovalStatus.EXPIRED.value, now, row["id"]),
+            )
+            if cursor.rowcount != 1:
+                continue
+            expired += 1
+            self._cancel_pending_actions_for_approvals_locked(conn, approval_ids=[int(row["id"])], now=now)
+        return expired
+
     def _apply_approval_command_locked(
         self,
         conn: sqlite3.Connection,
@@ -1444,7 +1514,12 @@ class SQLiteStore:
             approval = self._resolve_pending_approval_locked(conn, target_id)
             if approval is None:
                 raise ValueError(f"pending approval not found or ambiguous: {target_id}")
-            resolved_status = "approved" if verb == "approve" else "rejected"
+            resolved_status = ApprovalStatus.APPROVED.value if verb == "approve" else ApprovalStatus.REJECTED.value
+            task = None
+            if approval["task_id"] is not None:
+                task = conn.execute("SELECT * FROM tasks WHERE id = ?", (approval["task_id"],)).fetchone()
+            if verb == "approve" and not _task_is_watching(task):
+                raise ValueError("approval task is not watching")
             conn.execute(
                 """
                 UPDATE approvals
@@ -1454,14 +1529,13 @@ class SQLiteStore:
                 (resolved_status, now, approval["id"]),
             )
             if verb == "reject":
-                conn.execute(
-                    """
-                    UPDATE tasks
-                    SET status = ?, updated_at = ?, closed_at = ?
-                    WHERE id = ?
-                    """,
-                    ("closed", now, now, approval["task_id"]),
-                )
+                if approval["task_id"] is not None:
+                    self._close_task_after_reject_locked(
+                        conn,
+                        task_id=int(approval["task_id"]),
+                        rejected_approval_id=int(approval["id"]),
+                        now=now,
+                    )
                 return {"approval_id": approval["short_id"], "task_id": approval["task_id"], "action_id": None}
             payload = json.loads(approval["payload_json"] or "{}")
             if payload.get("approvable") is False:
@@ -1494,6 +1568,8 @@ class SQLiteStore:
             ).fetchone()
             if task is None:
                 raise ValueError(f"task not found: {target_id}")
+            if not _task_is_watching(task):
+                raise ValueError(f"task is not watching: {target_id}")
             reply_text = final_reply or ""
             if not reply_text.strip():
                 raise ValueError("/send requires final reply text")
@@ -1535,7 +1611,7 @@ class SQLiteStore:
                     WHERE id = ?
                     """,
                     (
-                        "approved",
+                        ApprovalStatus.APPROVED.value,
                         now,
                         json.dumps(payload, ensure_ascii=False, default=str),
                         reply_text,
@@ -1552,8 +1628,8 @@ class SQLiteStore:
                     (
                         approval_short_id,
                         int(task["id"]),
-                        "send_reply",
-                        "approved",
+                        ApprovalKind.SEND_REPLY.value,
+                        ApprovalStatus.APPROVED.value,
                         json.dumps(payload, ensure_ascii=False, default=str),
                         reply_text,
                         now,
@@ -1576,6 +1652,89 @@ class SQLiteStore:
 
         raise ValueError(f"unsupported command: {verb}")
 
+    def _cancel_pending_actions_for_approvals_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        approval_ids: Iterable[int],
+        now: str,
+    ) -> int:
+        ids = list(dict.fromkeys(int(approval_id) for approval_id in approval_ids))
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        cursor = conn.execute(
+            f"""
+            UPDATE actions
+            SET status = ?, updated_at = ?
+            WHERE approval_id IN ({placeholders})
+              AND kind IN (?, ?)
+              AND status = ?
+            """,
+            [
+                ActionStatus.CANCELLED.value,
+                now,
+                *ids,
+                ActionKind.SEND_REPLY.value,
+                ActionKind.OWNER_NOTIFICATION.value,
+                ActionStatus.PENDING.value,
+            ],
+        )
+        return int(cursor.rowcount)
+
+    def _close_task_after_reject_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        task_id: int,
+        rejected_approval_id: int,
+        now: str,
+    ) -> None:
+        pending_rows = conn.execute(
+            """
+            SELECT id
+            FROM approvals
+            WHERE task_id = ? AND status = 'pending'
+            """,
+            (task_id,),
+        ).fetchall()
+        pending_approval_ids = [int(row["id"]) for row in pending_rows]
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = ?, updated_at = ?, closed_at = ?
+            WHERE id = ?
+            """,
+            (TaskStatus.CLOSED.value, now, now, task_id),
+        )
+        conn.execute(
+            """
+            UPDATE approvals
+            SET status = ?, resolved_at = ?
+            WHERE task_id = ? AND status = 'pending'
+            """,
+            (ApprovalStatus.EXPIRED.value, now, task_id),
+        )
+        conn.execute(
+            """
+            UPDATE actions
+            SET status = ?, updated_at = ?
+            WHERE task_id = ? AND kind = ? AND status = ?
+            """,
+            (
+                ActionStatus.CANCELLED.value,
+                now,
+                task_id,
+                ActionKind.SEND_REPLY.value,
+                ActionStatus.PENDING.value,
+            ),
+        )
+        self._cancel_pending_actions_for_approvals_locked(
+            conn,
+            approval_ids=[rejected_approval_id, *pending_approval_ids],
+            now=now,
+        )
+
     def _mark_task_watching_after_send_locked(
         self,
         conn: sqlite3.Connection,
@@ -1589,7 +1748,7 @@ class SQLiteStore:
             SET status = ?, updated_at = ?, closed_at = NULL
             WHERE id = ?
             """,
-            ("watching", now, task_id),
+            (TaskStatus.WATCHING.value, now, task_id),
         )
 
     def _list_pending_approvals_locked(
@@ -1738,8 +1897,8 @@ class SQLiteStore:
                     idempotency_key,
                     task_id,
                     approval_id,
-                    "send_reply",
-                    "pending",
+                    ActionKind.SEND_REPLY.value,
+                    ActionStatus.PENDING.value,
                     target_message_id,
                     1,
                     json.dumps(payload, ensure_ascii=False, default=str),
@@ -1756,7 +1915,7 @@ class SQLiteStore:
                 """,
                 (idempotency_key,),
             ).fetchone()
-            if row is None or row["status"] != "failed":
+            if row is None or row["status"] != ActionStatus.FAILED.value:
                 return None
             if _has_active_send_reply_action(
                 conn,
@@ -1783,6 +1942,7 @@ class SQLiteStore:
         *,
         task_id: int | None,
         payload: dict[str, Any],
+        approval_id: int | None = None,
         now: str,
     ) -> int:
         dedupe_key = payload.get("dedupe_key")
@@ -1795,14 +1955,15 @@ class SQLiteStore:
         cursor = conn.execute(
             """
             INSERT OR IGNORE INTO actions(
-              idempotency_key, task_id, kind, status, dry_run, payload_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              idempotency_key, task_id, approval_id, kind, status, dry_run, payload_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 idempotency_key,
                 task_id,
-                "owner_notification",
-                "pending",
+                approval_id,
+                ActionKind.OWNER_NOTIFICATION.value,
+                ActionStatus.PENDING.value,
                 1,
                 json.dumps(payload, ensure_ascii=False, default=str),
                 now,
@@ -1817,11 +1978,12 @@ class SQLiteStore:
         ).fetchone()
         if row is None:
             raise RuntimeError("owner notification action was not inserted and no existing action was found")
-        if row["status"] == "failed":
+        if row["status"] == ActionStatus.FAILED.value:
             conn.execute(
                 """
                 UPDATE actions
                 SET status = ?,
+                    approval_id = COALESCE(?, approval_id),
                     dry_run = ?,
                     payload_json = ?,
                     result_json = NULL,
@@ -1829,7 +1991,8 @@ class SQLiteStore:
                 WHERE id = ? AND status = 'failed'
                 """,
                 (
-                    "pending",
+                    ActionStatus.PENDING.value,
+                    approval_id,
                     1,
                     json.dumps(payload, ensure_ascii=False, default=str),
                     now,
@@ -1879,10 +2042,10 @@ class SQLiteStore:
         with self.connect() as conn:
             conn.execute(
                 """
-                INSERT INTO approvals(short_id, task_id, kind, status, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO approvals(short_id, task_id, kind, status, created_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (short_id, task_id, kind, status, utc_now_iso()),
+                (short_id, task_id, kind, status, utc_now_iso(), None),
             )
 
     def _get_task_by_id(self, conn: sqlite3.Connection, task_id: int) -> TaskRecord:
@@ -1911,7 +2074,7 @@ class SQLiteStore:
             """,
             (
                 short_id,
-                "watching",
+                TaskStatus.WATCHING.value,
                 message.chat_id,
                 message.message_id,
                 label,
@@ -1956,13 +2119,22 @@ class SQLiteStore:
         *,
         now: str,
     ) -> None:
+        pending_rows = conn.execute(
+            """
+            SELECT id
+            FROM approvals
+            WHERE task_id = ? AND status = 'pending'
+            """,
+            (task_id,),
+        ).fetchall()
+        pending_approval_ids = [int(row["id"]) for row in pending_rows]
         conn.execute(
             """
             UPDATE tasks
             SET status = ?, updated_at = ?, closed_at = ?
             WHERE id = ?
             """,
-            ("human_taken_over", now, now, task_id),
+            (TaskStatus.HUMAN_TAKEN_OVER.value, now, now, task_id),
         )
         conn.execute(
             """
@@ -1970,15 +2142,20 @@ class SQLiteStore:
             SET status = ?, updated_at = ?
             WHERE task_id = ? AND kind = ? AND status IN ('pending', 'sending')
             """,
-            ("cancelled", now, task_id, "send_reply"),
+            (ActionStatus.CANCELLED.value, now, task_id, ActionKind.SEND_REPLY.value),
         )
         conn.execute(
             """
             UPDATE approvals
             SET status = ?, resolved_at = ?
-            WHERE task_id = ? AND kind = ? AND status = 'pending'
+            WHERE task_id = ? AND status = 'pending'
             """,
-            ("expired", now, task_id, "send_reply"),
+            (ApprovalStatus.EXPIRED.value, now, task_id),
+        )
+        self._cancel_pending_actions_for_approvals_locked(
+            conn,
+            approval_ids=pending_approval_ids,
+            now=now,
         )
 
     def _record_agent_message_for_task(
@@ -2179,6 +2356,18 @@ def _truncate(text: str, limit: int = 100) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return f"{cleaned[:limit - 3]}..."
+
+
+def _task_is_watching(row: sqlite3.Row | None) -> bool:
+    return row is not None and row["status"] == TaskStatus.WATCHING.value
+
+
+def _plus_hours(value: str, hours: int) -> str:
+    try:
+        base = datetime.fromisoformat(value)
+    except ValueError:
+        base = datetime.now().astimezone()
+    return (base + timedelta(hours=hours)).astimezone().isoformat(timespec="seconds")
 
 
 def _action_idempotency_key(task_id: int, target_message_id: str, payload: dict[str, Any]) -> str:

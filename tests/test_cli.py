@@ -160,6 +160,86 @@ def test_status_includes_failed_approval_commands(tmp_path: Path, capsys) -> Non
     assert output["failed_approval_commands"][0]["command"] == "/reject a_missing"
 
 
+def test_status_active_tasks_excludes_expired_watch_windows(tmp_path: Path, capsys) -> None:
+    config = _write_config(tmp_path)
+    store = _store(tmp_path)
+    _insert_task(store, "t_expired", "om_expired")
+    _insert_task(store, "t_active", "om_active")
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE tasks SET watch_until = ? WHERE short_id = ?",
+            ("2000-01-01T00:00:00+00:00", "t_expired"),
+        )
+        conn.execute(
+            "UPDATE tasks SET watch_until = ? WHERE short_id = ?",
+            ("2999-01-01T00:00:00+00:00", "t_active"),
+        )
+
+    assert main(["status", "--config", str(config)]) == 0
+
+    output = yaml.safe_load(capsys.readouterr().out)
+    active_task_ids = {task["short_id"] for task in output["active_tasks"]}
+    assert "t_active" in active_task_ids
+    assert "t_expired" not in active_task_ids
+
+
+def test_status_shows_pending_and_expires_overdue_approvals_in_real_db(tmp_path: Path, capsys) -> None:
+    config = _write_config(tmp_path)
+    store = _store(tmp_path)
+    pending_task_id = _insert_task(store, "t_pending", "om_pending")
+    expired_task_id = _insert_task(store, "t_overdue", "om_overdue")
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO approvals(short_id, task_id, kind, status, payload_json, preview, created_at, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "a_pending",
+                pending_task_id,
+                "send_reply",
+                "pending",
+                json.dumps({"reply_target_message_id": "om_pending", "text": "pending reply"}),
+                "pending reply",
+                "2026-06-22T08:00:00+08:00",
+                "2999-01-01T00:00:00+00:00",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO approvals(short_id, task_id, kind, status, payload_json, preview, created_at, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "a_overdue",
+                expired_task_id,
+                "send_reply",
+                "pending",
+                json.dumps({"reply_target_message_id": "om_overdue", "text": "overdue reply"}),
+                "overdue reply",
+                "2026-06-22T08:00:00+08:00",
+                "2000-01-01T00:00:00+00:00",
+            ),
+        )
+
+    assert main(["status", "--config", str(config)]) == 0
+
+    output = yaml.safe_load(capsys.readouterr().out)
+    assert {approval["short_id"] for approval in output["pending_approvals"]} == {"a_pending"}
+    assert "a_overdue" in {approval["short_id"] for approval in output["recent_expired_approvals"]}
+    with store.connect() as conn:
+        rows = {
+            row["short_id"]: row
+            for row in conn.execute(
+                "SELECT short_id, status, resolved_at FROM approvals ORDER BY short_id"
+            ).fetchall()
+        }
+    assert rows["a_pending"]["status"] == "pending"
+    assert rows["a_pending"]["resolved_at"] is None
+    assert rows["a_overdue"]["status"] == "expired"
+    assert rows["a_overdue"]["resolved_at"] is not None
+
+
 def test_replay_explains_current_state_without_real_db_mutation(tmp_path: Path, capsys) -> None:
     config = _write_config(tmp_path)
     store = _store(tmp_path)
@@ -173,6 +253,48 @@ def test_replay_explains_current_state_without_real_db_mutation(tmp_path: Path, 
     with store.connect() as conn:
         action_count = conn.execute("SELECT COUNT(*) AS c FROM actions").fetchone()["c"]
     assert action_count == 0
+
+
+def test_replay_expires_pending_approvals_only_in_temp_db(tmp_path: Path, capsys) -> None:
+    config = _write_config(tmp_path)
+    store = _store(tmp_path)
+    _insert_message(store, "om_expired")
+    task_id = _insert_task(store, "t_expired", "om_expired")
+    with store.connect() as conn:
+        conn.execute(
+            "INSERT INTO task_messages(task_id, message_id, role, created_at) VALUES (?, ?, ?, ?)",
+            (task_id, "om_expired", "root", "2026-06-22T08:00:00+08:00"),
+        )
+        conn.execute(
+            """
+            INSERT INTO approvals(
+              short_id, task_id, kind, status, payload_json, preview, created_at, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "a_expired",
+                task_id,
+                "send_reply",
+                "pending",
+                json.dumps({"reply_target_message_id": "om_expired", "text": "reply"}),
+                "reply",
+                "2026-06-22T08:00:00+08:00",
+                "2026-06-22T09:00:00+08:00",
+            ),
+        )
+
+    assert main(["replay", "--config", str(config), "--message-id", "om_expired", "--dry-run"]) == 0
+
+    output = yaml.safe_load(capsys.readouterr().out)
+    assert output["mutated_real_db"] is False
+    assert output["state"]["approvals"][0]["status"] == "expired"
+    with store.connect() as conn:
+        approval = conn.execute(
+            "SELECT status, resolved_at FROM approvals WHERE short_id = ?",
+            ("a_expired",),
+        ).fetchone()
+    assert approval["status"] == "pending"
+    assert approval["resolved_at"] is None
 
 
 def test_replay_previews_only_related_pending_actions(tmp_path: Path, capsys, monkeypatch) -> None:

@@ -27,6 +27,7 @@ python -m feishu_shadow_agent config schema
 | `chats` | map | `{}` | 按 Feishu `chat_id` 配置群级策略覆盖，例如 `oc_xxx`。 |
 | `tool_permissions` | enum | `guarded_write` | Agent backend 工具权限档位：`read_only`、`guarded_write`、`full_access`。当前仅 Hermes backend 实现映射。 |
 | `retention` | object | 见下表 | 本地数据保留时间。 |
+| `lifecycle` | object | 见下表 | 全局任务生命周期和审批过期设置。 |
 | `debug` | object | 见下表 | 调试用持久化开关。 |
 
 未知字段会被拒绝。兼容旧配置时，顶层 `hermes` 会在读入时迁移为 `agent_backend.hermes`，`debug.save_full_hermes_io` 会作为 `debug.save_full_agent_io` 的旧别名读入；新配置应使用表中的新字段。真实密钥不要写入 `config.yaml`，只允许写环境变量名，例如 `agent_backend.hermes.api_key_env`。
@@ -74,6 +75,9 @@ python -m feishu_shadow_agent config schema
 | `chats.<chat_id>.resource_download` | bool | `true` | 是否允许保存该群消息中的可下载资源。 |
 | `retention.raw_message_days` | int `>= 1` | `30` | 原始消息 payload 保留天数。 |
 | `retention.resource_days` | int `>= 1` | `30` | 下载资源文件保留天数。 |
+| `lifecycle.watch_minutes` | int `> 0` | `120` | 新消息、follow-up 或 agent 回复后继续监听任务的分钟数。 |
+| `lifecycle.closed_recall_days` | int `>= 1` | `7` | 新触发事件可召回 closed task 的天数窗口。 |
+| `lifecycle.approval_timeout_hours` | int `>= 1`/null | `24` | pending approval 的过期小时数；`null` 表示永不过期。过期不关闭 task。 |
 | `debug.save_full_agent_io` | bool | `false` | 是否保存完整 agent 输入输出；常规运行应保持关闭。 |
 
 ## Agent Backend 上下文语义

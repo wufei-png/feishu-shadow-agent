@@ -5,7 +5,14 @@ from typing import Any
 
 import pytest
 
-from feishu_shadow_agent.config import AppConfig, ChatPolicyConfig, DaemonConfig, OwnerConfig, ReplyPolicyConfig
+from feishu_shadow_agent.config import (
+    AppConfig,
+    ChatPolicyConfig,
+    DaemonConfig,
+    LifecycleConfig,
+    OwnerConfig,
+    ReplyPolicyConfig,
+)
 from feishu_shadow_agent.daemon import Daemon
 from feishu_shadow_agent.ingestion import IngestionService, MessageNormalizer
 from feishu_shadow_agent.jsonl import JSONLLogger
@@ -597,6 +604,88 @@ def test_owner_takeover_closes_task_and_cancels_pending_work(tmp_path: Path) -> 
     assert approval["status"] == "expired"
 
 
+def test_owner_takeover_cancels_pending_approval_notification(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    approval_id = store.create_send_reply_approval(
+        task_id=created.task.id,
+        preview="manual reply",
+        payload={"reply_target_message_id": "om_1", "text": "manual reply"},
+        notify_payload={"reason": "needs_owner_approval"},
+    )
+    with store.connect() as conn:
+        notification = conn.execute(
+            "SELECT id, status, approval_id FROM actions WHERE kind = 'owner_notification'"
+        ).fetchone()
+    assert notification["status"] == "pending"
+    assert notification["approval_id"] == approval_id
+
+    takeover = service.process_raw_message(
+        _message("om_owner", chat_id="ou_chat", chat_type="p2p", sender_id="ou_owner", reply_to="om_1"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    assert takeover is not None and takeover.decision.route == "human_taken_over"
+    dispatchable_ids = {action.id for action in store.list_dispatchable_actions()}
+    with store.connect() as conn:
+        approval = conn.execute("SELECT status FROM approvals WHERE id = ?", (approval_id,)).fetchone()
+        notification_after = conn.execute(
+            "SELECT status FROM actions WHERE id = ?",
+            (notification["id"],),
+        ).fetchone()
+    assert approval["status"] == "expired"
+    assert notification_after["status"] == "cancelled"
+    assert notification["id"] not in dispatchable_ids
+
+
+def test_owner_takeover_expires_tool_action_pending_approval(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    store.insert_approval_for_test(short_id="a_tool", task_id=created.task.id, kind="tool_action")
+
+    takeover = service.process_raw_message(
+        _message("om_owner", chat_id="ou_chat", chat_type="p2p", sender_id="ou_owner", reply_to="om_1"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    assert takeover is not None and takeover.decision.route == "human_taken_over"
+    with store.connect() as conn:
+        task = conn.execute("SELECT status FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
+        approval = conn.execute("SELECT status FROM approvals WHERE short_id = ?", ("a_tool",)).fetchone()
+    assert task["status"] == "human_taken_over"
+    assert approval["status"] == "expired"
+
+
 def test_p2p_owner_message_without_structural_match_does_not_take_over(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     service = IngestionService(
@@ -793,6 +882,65 @@ def test_closed_recall_records_router_placeholder(tmp_path: Path) -> None:
     assert recalled.decision.reason == "closed_recall_router_placeholder"
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 1
+
+
+def test_lifecycle_watch_minutes_controls_new_task_watch_until(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(lifecycle=LifecycleConfig(watch_minutes=5)),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+
+    created = service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    assert created is not None and created.task is not None
+    with store.connect() as conn:
+        task = conn.execute("SELECT watch_until FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
+    assert task["watch_until"] == "2026-06-22T10:15:00+08:00"
+
+
+def test_lifecycle_closed_recall_days_bounds_historical_candidates(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(lifecycle=LifecycleConfig(closed_recall_days=1)),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    store.close_task_for_owner_takeover(created.task.id)
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE tasks SET updated_at = ? WHERE id = ?",
+            ("2026-06-20T10:10:00+08:00", created.task.id),
+        )
+
+    routed = service.process_raw_message(
+        _message("om_2", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    assert routed is not None
+    assert routed.decision.route == "new_task"
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 2
 
 
 def test_unrelated_closed_task_does_not_block_new_group_task(tmp_path: Path) -> None:

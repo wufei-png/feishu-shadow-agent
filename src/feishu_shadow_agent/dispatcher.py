@@ -12,7 +12,6 @@ from .jsonl import JSONLLogger
 from .store.sqlite_store import SQLiteStore
 from .types import ActionRecord, LarkCliResult
 
-WATCH_EXTEND_MINUTES = 120
 EXPECTED_MENTION_RE = re.compile(r"<at\s+[^>]*user_id=[\"']([^\"']+)[\"'][^>]*>", re.IGNORECASE)
 
 
@@ -315,7 +314,7 @@ class Dispatcher:
             self.store.record_agent_message_for_task(
                 action.task_id,
                 message,
-                watch_until=_watch_until(),
+                watch_until=_watch_until(self.config.lifecycle.watch_minutes),
             )
         if action.kind == "send_reply":
             target = _target_message_id(action)
@@ -461,8 +460,8 @@ def _expected_mentions(text: str) -> set[str]:
     return set(EXPECTED_MENTION_RE.findall(text))
 
 
-def _watch_until() -> str:
-    return (datetime.now().astimezone() + timedelta(minutes=WATCH_EXTEND_MINUTES)).isoformat(timespec="seconds")
+def _watch_until(watch_minutes: int) -> str:
+    return (datetime.now().astimezone() + timedelta(minutes=watch_minutes)).isoformat(timespec="seconds")
 
 
 def _bump(

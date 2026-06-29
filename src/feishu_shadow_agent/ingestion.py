@@ -18,7 +18,6 @@ from .store.sqlite_store import SQLiteStore
 from .types import MessagePage, NormalizedMessage, ResourceRef, utc_now_iso
 
 PAGE_SIZE = 50
-WATCH_EXTEND_MINUTES = 120
 IMAGE_KEY_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])(img_[A-Za-z0-9_-]+)(?![A-Za-z0-9_-])")
 FILE_KEY_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])(file_[A-Za-z0-9_-]+)(?![A-Za-z0-9_-])")
 AT_USER_ID_PATTERN = re.compile(r"<at\s+[^>]*user_id=[\"']([^\"']+)[\"'][^>]*>", re.IGNORECASE)
@@ -300,7 +299,7 @@ class IngestionService:
         self.config = config
         self.logger = logger
         self.normalizer = MessageNormalizer(owner_open_id=config.owner.open_id)
-        self.router = router or MessageRouter(store=store)
+        self.router = router or MessageRouter(store=store, closed_recall_days=config.lifecycle.closed_recall_days)
         self.task_processor = task_processor
         self.approval_service = approval_service or (task_processor.approvals if task_processor is not None else None)
         self.resources = ResourceProcessor(
@@ -542,7 +541,7 @@ class IngestionService:
                 )
             return None
         now = self.clock()
-        watch_until = _plus_minutes(now, WATCH_EXTEND_MINUTES)
+        watch_until = _plus_minutes(now, self.config.lifecycle.watch_minutes)
         result = self.router.route(
             message,
             source=source,

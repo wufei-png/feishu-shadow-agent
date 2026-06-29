@@ -226,6 +226,16 @@ class RetentionConfig(StrictModel):
     resource_days: int = Field(default=30, ge=1, description="Days to retain downloaded resource files.")
 
 
+class LifecycleConfig(StrictModel):
+    watch_minutes: int = Field(default=120, gt=0, description="Minutes to keep watching a task after activity.")
+    closed_recall_days: int = Field(default=7, ge=1, description="Days to consider closed tasks for explicit recall.")
+    approval_timeout_hours: int | None = Field(
+        default=24,
+        ge=1,
+        description="Hours before pending approvals expire; null means approvals never expire.",
+    )
+
+
 class DebugConfig(StrictModel):
     save_full_agent_io: StrictBool = Field(
         default=False,
@@ -258,6 +268,7 @@ class AppConfig(StrictModel):
         description="Agent backend tool permission profile: read_only, guarded_write, or full_access.",
     )
     retention: RetentionConfig = Field(default_factory=RetentionConfig, description="Local data retention settings.")
+    lifecycle: LifecycleConfig = Field(default_factory=LifecycleConfig, description="Global task lifecycle settings.")
     debug: DebugConfig = Field(default_factory=DebugConfig, description="Debug-only persistence settings.")
 
     @model_validator(mode="before")
