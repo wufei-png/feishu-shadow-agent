@@ -141,7 +141,16 @@ CREATE TABLE IF NOT EXISTS runs (
   dry_run INTEGER NOT NULL DEFAULT 1,
   git_commit TEXT,
   git_dirty INTEGER,
-  health_summary_json TEXT NOT NULL DEFAULT '{}'
+  health_summary_json TEXT NOT NULL DEFAULT '{}',
+  last_heartbeat_at TEXT,
+  last_tick_started_at TEXT,
+  last_tick_finished_at TEXT,
+  last_tick_status TEXT
+    CHECK (
+      last_tick_status IS NULL
+      OR last_tick_status IN ('running', 'ok', 'partial_failed', 'failed')
+    ),
+  last_tick_summary_json TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS health_checks (

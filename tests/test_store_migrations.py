@@ -63,6 +63,15 @@ def test_unique_constraints_are_enforced(tmp_path: Path) -> None:
             raise AssertionError("messages.message_id unique constraint did not fire")
 
 
+def test_sqlite_connections_apply_busy_timeout(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+
+    with store.connect() as conn:
+        busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+
+    assert busy_timeout == 5000
+
+
 def test_checkpoint_and_run_health_roundtrip(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
 
@@ -115,6 +124,9 @@ def test_baseline_schema_includes_current_columns(tmp_path: Path) -> None:
         attempt_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(dispatch_attempts)").fetchall()
         }
+        run_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(runs)").fetchall()
+        }
 
     assert {"thread_id", "reply_to_message_id", "sender_role", "direct_mention", "at_all", "text"} <= message_columns
     assert {"chat_type", "thread_id", "watch_until", "last_user_message", "last_agent_reply", "agent_session_id"} <= task_columns
@@ -135,6 +147,13 @@ def test_baseline_schema_includes_current_columns(tmp_path: Path) -> None:
         "started_at",
         "finished_at",
     } <= attempt_columns
+    assert {
+        "last_heartbeat_at",
+        "last_tick_started_at",
+        "last_tick_finished_at",
+        "last_tick_status",
+        "last_tick_summary_json",
+    } <= run_columns
     assert "idx_agent_audits_task" in indexes
     assert "idx_actions_active_send_reply_target" in indexes
     assert "idx_dispatch_attempts_action" in indexes
@@ -342,6 +361,14 @@ def test_state_schema_contract_accepts_all_enum_values(tmp_path: Path) -> None:
                 """,
                 (f"om_res_{index}", f"file_{index}", "file", status, "now", "now"),
             )
+        for index, status in enumerate(StateSchemaContract.run_tick_statuses):
+            conn.execute(
+                """
+                INSERT INTO runs(run_id, started_at, status, dry_run, last_tick_status)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (f"run_tick_{index}", "now", "running", 1, status),
+            )
         for index, route in enumerate(StateSchemaContract.route_names):
             conn.execute(
                 "INSERT INTO routing_audits(message_id, route, created_at) VALUES (?, ?, ?)",
@@ -420,6 +447,10 @@ def test_state_schema_contract_accepts_all_enum_values(tmp_path: Path) -> None:
         (
             "INSERT INTO messages(message_id, sender_role, raw_json, inserted_at) VALUES (?, ?, ?, ?)",
             ("om_bad_sender", "future_sender", "{}", "now"),
+        ),
+        (
+            "INSERT INTO runs(run_id, started_at, status, dry_run, last_tick_status) VALUES (?, ?, ?, ?, ?)",
+            ("run_bad_tick", "now", "running", 1, "future_tick"),
         ),
     ],
 )

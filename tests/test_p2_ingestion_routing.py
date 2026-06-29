@@ -12,6 +12,7 @@ from feishu_shadow_agent.config import (
     LifecycleConfig,
     OwnerConfig,
     ReplyPolicyConfig,
+    StorageConfig,
 )
 from feishu_shadow_agent.daemon import Daemon
 from feishu_shadow_agent.ingestion import IngestionService, MessageNormalizer
@@ -1166,6 +1167,134 @@ def test_resource_download_success_without_file_records_missing_file(tmp_path: P
         ).fetchone()
     assert resource["download_status"] == "missing_file"
     assert Path(resource["path"]).parent.exists()
+
+
+def test_oversized_resource_download_is_deleted_and_marked_too_large(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake = FakeFeishuClient()
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(
+            storage=StorageConfig(max_resource_bytes=4),
+            chats={"oc_1": ChatPolicyConfig(bot_joined=True)},
+        ),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+
+    service.process_raw_message(
+        _message("om_too_large", mentions=[{"open_id": "ou_owner"}], image_key="img_large"),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        resource = conn.execute(
+            "SELECT download_status, path, raw_json FROM resources WHERE file_key = ?",
+            ("img_large",),
+        ).fetchone()
+    assert fake.downloads[0]["file_key"] == "img_large"
+    assert resource["download_status"] == "too_large"
+    assert resource["path"] is None
+    assert "resource_too_large" in resource["raw_json"]
+    assert not list((tmp_path / "data/resources").rglob("*.bin"))
+
+
+def test_resource_dir_quota_deletes_download_and_blocks_following_resources(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake = FakeFeishuClient()
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(
+            storage=StorageConfig(max_resource_dir_bytes=4),
+            chats={"oc_1": ChatPolicyConfig(bot_joined=True)},
+        ),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    raw = _message("om_quota", mentions=[{"open_id": "ou_owner"}], image_key="img_quota")
+    raw["content"]["file_key"] = "file_quota"
+
+    service.process_raw_message(
+        raw,
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        resources = conn.execute(
+            "SELECT file_key, download_status, path, raw_json FROM resources ORDER BY file_key"
+        ).fetchall()
+    assert len(fake.downloads) == 1
+    assert {row["file_key"]: row["download_status"] for row in resources} == {
+        "file_quota": "quota_exceeded",
+        "img_quota": "quota_exceeded",
+    }
+    assert all(row["path"] is None for row in resources)
+    assert any("blocked_after_prior_quota" in row["raw_json"] for row in resources)
+    assert not list((tmp_path / "data/resources").rglob("*.bin"))
+
+
+def test_resource_dir_quota_blocks_following_message_in_same_service(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake = FakeFeishuClient()
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(
+            storage=StorageConfig(max_resource_dir_bytes=4),
+            chats={"oc_1": ChatPolicyConfig(bot_joined=True)},
+        ),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+
+    service.process_raw_message(
+        _message("om_quota_first", mentions=[{"open_id": "ou_owner"}], image_key="img_quota_first"),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    service.process_raw_message(
+        _message("om_quota_second", mentions=[{"open_id": "ou_owner"}], image_key="img_quota_second"),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        resources = conn.execute(
+            """
+            SELECT message_id, file_key, download_status, path, raw_json
+            FROM resources
+            ORDER BY message_id
+            """
+        ).fetchall()
+    assert [download["file_key"] for download in fake.downloads] == ["img_quota_first"]
+    assert {row["file_key"]: row["download_status"] for row in resources} == {
+        "img_quota_first": "quota_exceeded",
+        "img_quota_second": "quota_exceeded",
+    }
+    assert all(row["path"] is None for row in resources)
+    second = next(row for row in resources if row["file_key"] == "img_quota_second")
+    assert "blocked_after_prior_quota" in second["raw_json"]
+    assert not list((tmp_path / "data/resources").rglob("*.bin"))
 
 
 def test_active_watch_ignores_unmatched_resource_message_without_download(

@@ -14,6 +14,8 @@ health:
 storage:
   sqlite_path: data/test.sqlite3
   resource_dir: data/resources
+  max_resource_bytes: 52428800
+  max_resource_dir_bytes: 2147483648
 
 logging:
   jsonl_path: logs/test.jsonl

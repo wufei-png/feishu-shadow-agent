@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,7 @@ class SequenceHealthSuite:
 class FakeFeishu:
     def __init__(self):
         self.fail_approval_inbox = False
+        self.fail_reply_actual = False
         self.reply_calls: list[dict[str, Any]] = []
         self.owner_calls: list[dict[str, Any]] = []
         self.calls: list[str] = []
@@ -74,6 +76,8 @@ class FakeFeishu:
         self.reply_calls.append(kwargs)
         if kwargs.get("dry_run"):
             return LarkCliResult(["lark-cli", "im", "+messages-reply"], 0, json_data={"api": []})
+        if self.fail_reply_actual:
+            return LarkCliResult(["lark-cli", "im", "+messages-reply"], 1, stderr="reply failed")
         self.sent_counter += 1
         return LarkCliResult(
             ["lark-cli", "im", "+messages-reply"],
@@ -179,6 +183,37 @@ def test_noop_tick_is_logged(tmp_path: Path) -> None:
     assert "daemon_tick_noop" in (tmp_path / "agent.jsonl").read_text(encoding="utf-8")
 
 
+def test_tick_heartbeat_records_start_finish_and_summary(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    logger = JSONLLogger(tmp_path / "agent.jsonl")
+    suite = FakeHealthSuite([HealthCheckResult("config_schema", "critical", "ok", "ok")])
+    daemon = Daemon(
+        store=store,
+        logger=logger,
+        health_suite=suite,  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=True,
+    )
+
+    daemon.run_one_tick(run_id="run_1")
+
+    with store.connect() as conn:
+        row = conn.execute(
+            """
+            SELECT last_heartbeat_at, last_tick_started_at, last_tick_finished_at,
+                   last_tick_status, last_tick_summary_json
+            FROM runs WHERE run_id = ?
+            """,
+            ("run_1",),
+        ).fetchone()
+    summary = json.loads(row["last_tick_summary_json"])
+    assert row["last_heartbeat_at"] is not None
+    assert row["last_tick_started_at"] is not None
+    assert row["last_tick_finished_at"] is not None
+    assert row["last_tick_status"] == "ok"
+    assert summary["stages"] == [{"name": "noop", "ok": True, "processed": 0, "error": None}]
+
+
 def test_keyboard_interrupt_finishes_run(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     logger = JSONLLogger(tmp_path / "agent.jsonl")
@@ -239,6 +274,92 @@ def test_runtime_critical_health_failure_blocks_ingestion_and_all_sends(tmp_path
     with store.connect() as conn:
         statuses = [row["status"] for row in conn.execute("SELECT status FROM actions ORDER BY id").fetchall()]
     assert statuses == ["pending", "pending"]
+    with store.connect() as conn:
+        run = conn.execute(
+            "SELECT last_tick_status, last_tick_summary_json FROM runs WHERE run_id = ?",
+            ("run_1",),
+        ).fetchone()
+    assert run["last_tick_status"] == "failed"
+    assert json.loads(run["last_tick_summary_json"])["stages"][0]["name"] == "runtime_health"
+
+
+def test_status_snapshot_flags_stale_running_daemon(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.migrate()
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO runs(
+              run_id, started_at, status, dry_run, last_heartbeat_at,
+              last_tick_started_at, last_tick_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "run_stale",
+                "2026-06-22T10:00:00+08:00",
+                "running",
+                1,
+                "2026-06-22T10:00:00+08:00",
+                "2026-06-22T10:00:00+08:00",
+                "running",
+            ),
+        )
+
+    snapshot = store.status_snapshot(
+        daemon_stale_after_seconds=60,
+        now="2026-06-22T10:02:01+08:00",
+    )
+
+    assert snapshot["daemon_liveness"]["status"] == "stale"
+    assert snapshot["daemon_liveness"]["heartbeat_age_seconds"] == 121
+
+
+def test_status_snapshot_daemon_liveness_ignores_newer_doctor_run(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.migrate()
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO runs(
+              run_id, started_at, status, dry_run, last_heartbeat_at,
+              last_tick_started_at, last_tick_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "run_stale_daemon",
+                "2026-06-22T10:00:00+08:00",
+                "running",
+                1,
+                "2026-06-22T10:00:00+08:00",
+                "2026-06-22T10:00:00+08:00",
+                "running",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO runs(
+              run_id, started_at, finished_at, status, dry_run, last_heartbeat_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "doctor_newer",
+                "2026-06-22T10:01:00+08:00",
+                "2026-06-22T10:01:05+08:00",
+                "ok",
+                1,
+                "2026-06-22T10:01:00+08:00",
+            ),
+        )
+
+    snapshot = store.status_snapshot(
+        daemon_stale_after_seconds=60,
+        now="2026-06-22T10:02:01+08:00",
+    )
+
+    assert snapshot["last_run"]["run_id"] == "doctor_newer"
+    assert snapshot["daemon_liveness"]["run_id"] == "run_stale_daemon"
+    assert snapshot["daemon_liveness"]["status"] == "stale"
+    assert snapshot["daemon_liveness"]["heartbeat_age_seconds"] == 121
 
 
 def test_runtime_health_failure_rechecks_on_retry_interval_and_recovers(
@@ -380,10 +501,16 @@ def test_approval_inbox_failure_blocks_send_reply_but_allows_owner_notification(
     with store.connect() as conn:
         send = conn.execute("SELECT status, result_json FROM actions WHERE id = ?", (send_action,)).fetchone()
         owner = conn.execute("SELECT status, result_json FROM actions WHERE id = ?", (owner_action,)).fetchone()
+        run = conn.execute(
+            "SELECT last_tick_status, last_tick_summary_json FROM runs WHERE run_id = ?",
+            ("run_1",),
+        ).fetchone()
     assert send["status"] == "pending"
     assert owner["status"] == "sent"
     assert "approval_inbox_failed" in send["result_json"]
     assert "approval_inbox_failed" not in (owner["result_json"] or "")
+    assert run["last_tick_status"] == "partial_failed"
+    assert json.loads(run["last_tick_summary_json"])["failed"] == 1
 
 
 def test_approval_inbox_failure_without_pending_send_reply_is_visible_in_status(
@@ -500,6 +627,55 @@ def test_fake_feishu_hermes_tick_runs_ordered_ingest_watch_and_dispatch(tmp_path
     with store.connect() as conn:
         sent_actions = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE status = 'sent'").fetchone()["c"]
     assert sent_actions == 2
+
+
+def test_dispatch_failure_is_reflected_in_tick_heartbeat_summary(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    logger = JSONLLogger(tmp_path / "agent.jsonl")
+    suite = FakeHealthSuite([HealthCheckResult("config_schema", "critical", "ok", "ok")])
+    fake = FakeFeishu()
+    fake.fail_reply_actual = True
+    fake.search_items[("group", True)] = [
+        _raw_message("om_group", chat_id="oc_group", chat_type="group", mentions=[{"open_id": "ou_owner"}])
+    ]
+    config = AppConfig(
+        owner=OwnerConfig(open_id="ou_owner"),
+        chats={"oc_group": ChatPolicyConfig(auto_reply=True, bot_joined=True)},
+    )
+    processor = TaskProcessingService(
+        store=store,
+        config=config,
+        agent_backend=FakeAgentBackend(),
+        logger=logger,
+        agent_retry_delays_seconds=(0.0, 0.0),
+    )
+    daemon = Daemon(
+        store=store,
+        logger=logger,
+        health_suite=suite,  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=False,
+        app_config=config,
+        feishu_client=fake,  # type: ignore[arg-type]
+        task_processor=processor,
+        runtime_health_interval_seconds=0,
+    )
+
+    results = daemon.run_one_tick(run_id="run_1")
+
+    dispatch_result = next(result for result in results if result.name == "dispatch")
+    assert dispatch_result.ok is False
+    assert dispatch_result.error == "1 dispatch action(s) failed"
+    with store.connect() as conn:
+        run = conn.execute(
+            "SELECT last_tick_status, last_tick_summary_json FROM runs WHERE run_id = ?",
+            ("run_1",),
+        ).fetchone()
+    summary = json.loads(run["last_tick_summary_json"])
+    dispatch_stage = next(stage for stage in summary["stages"] if stage["name"] == "dispatch")
+    assert run["last_tick_status"] == "partial_failed"
+    assert dispatch_stage["ok"] is False
+    assert dispatch_stage["error"] == "1 dispatch action(s) failed"
 
 
 def _insert_task(store: SQLiteStore) -> int:

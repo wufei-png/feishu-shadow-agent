@@ -64,6 +64,16 @@ class StorageConfig(StrictModel):
         default="data/resources",
         description="Safe relative directory for downloaded message resources; absolute paths and '..' are rejected.",
     )
+    max_resource_bytes: int = Field(
+        default=52_428_800,
+        ge=1,
+        description="Maximum bytes allowed for one downloaded message resource.",
+    )
+    max_resource_dir_bytes: int = Field(
+        default=2_147_483_648,
+        ge=1,
+        description="Maximum total bytes allowed under the downloaded resource directory.",
+    )
 
     @field_validator("resource_dir")
     @classmethod

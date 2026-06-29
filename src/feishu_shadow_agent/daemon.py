@@ -18,7 +18,7 @@ from .retention import (
     record_daemon_retention_checkpoint,
 )
 from .store.sqlite_store import SQLiteStore
-from .types import HealthCheckResult, new_run_id
+from .types import HealthCheckResult, RunTickStatus, new_run_id
 
 
 class Daemon:
@@ -68,6 +68,8 @@ class Daemon:
         )
 
     def run_one_tick(self, *, run_id: str) -> list[StageResult]:
+        heartbeat = HeartbeatRecorder(store=self.store, run_id=run_id, dry_run=self.dry_run)
+        heartbeat.start()
         self.logger.debug(
             "daemon_tick_started",
             run_id=run_id,
@@ -78,107 +80,134 @@ class Daemon:
                 "send_owner_notifications": self.send_owner_notifications,
             },
         )
-        if self.app_config is None or self.feishu_client is None:
-            self.run_one_noop_tick(run_id=run_id)
-            return [StageResult("noop", ok=True)]
-        if not self._runtime_health_ok_for_tick(run_id=run_id):
-            self.logger.emit(
-                "error",
-                "daemon_runtime_health_failed",
-                run_id=run_id,
-                data={"actual_sends_blocked": True},
-            )
-            return [StageResult("runtime_health", ok=False, error="runtime critical health failed")]
-        service = IngestionService(
-            store=self.store,
-            feishu_client=self.feishu_client,
-            config=self.app_config,
-            logger=self.logger,
-            task_processor=self.task_processor,
-            config_base_dir=self.config_base_dir,
-        )
-        stages = [
-            service.run_approval_inbox,
-            service.ingest_group_at_me,
-            service.ingest_p2p,
-            service.run_active_watch,
-        ]
         results: list[StageResult] = []
-        for stage in stages:
-            try:
-                result = stage(run_id=run_id)
-            except Exception as exc:
-                result = StageResult(_stage_name(stage), ok=False, error=str(exc))
-                if result.name == "approval_inbox":
-                    self.store.record_health_results(
-                        run_id=run_id,
-                        results=[
-                            HealthCheckResult(
-                                "approval_inbox",
-                                "warning",
-                                "failed",
-                                f"approval_inbox failed: {result.error}",
-                                {"stage": result.name, "error": result.error},
-                            )
-                        ],
-                    )
+        try:
+            if self.app_config is None or self.feishu_client is None:
+                self.run_one_noop_tick(run_id=run_id)
+                result = StageResult("noop", ok=True)
+                results.append(result)
+                heartbeat.record(result)
+                heartbeat.finish()
+                return results
+            if not self._runtime_health_ok_for_tick(run_id=run_id):
                 self.logger.emit(
                     "error",
-                    "daemon_stage_failed",
+                    "daemon_runtime_health_failed",
                     run_id=run_id,
-                    data={"stage": result.name, "error": result.error},
+                    data={"actual_sends_blocked": True},
                 )
-            else:
-                self.logger.emit(
-                    "info",
-                    "daemon_stage_completed",
-                    run_id=run_id,
-                    data={
-                        "stage": result.name,
-                        "processed": result.processed,
-                        "send_owner_notifications": self.send_owner_notifications,
-                    },
-                )
-            results.append(result)
-        approval_failed = any(result.name == "approval_inbox" and not result.ok for result in results)
-        if approval_failed and not self.dry_run:
-            self.logger.warning(
-                "daemon_dispatch_send_reply_blocked",
-                run_id=run_id,
-                data={"reason": "approval_inbox_failed", "owner_notifications_allowed": True},
+                result = StageResult("runtime_health", ok=False, error="runtime critical health failed")
+                results.append(result)
+                heartbeat.record(result)
+                heartbeat.finish()
+                return results
+            service = IngestionService(
+                store=self.store,
+                feishu_client=self.feishu_client,
+                config=self.app_config,
+                logger=self.logger,
+                task_processor=self.task_processor,
+                config_base_dir=self.config_base_dir,
             )
-        dispatcher = Dispatcher(
-            store=self.store,
-            feishu_client=self.feishu_client,
-            config=self.app_config,
-            logger=self.logger,
-        )
-        # Owner commands are the safety valve for outgoing replies. If the inbox is
-        # unhealthy, external send_reply actions stay preview-only while owner
-        # notifications can still surface the failure.
-        dispatch = dispatcher.dispatch(
-            run_id=run_id,
-            allow_send_reply_actual=not self.dry_run and not approval_failed,
-            allow_owner_notification_actual=not self.dry_run or self.send_owner_notifications,
-            blocked_send_reply_reason="approval_inbox_failed" if approval_failed and not self.dry_run else None,
-        )
-        self.logger.emit(
-            "info",
-            "daemon_stage_completed",
-            run_id=run_id,
-            data={
-                "stage": "dispatch",
-                "processed": dispatch.processed,
-                "sent": dispatch.sent,
-                "previewed": dispatch.previewed,
-                "failed": dispatch.failed,
-                "approval_inbox_failed": approval_failed,
-                "send_owner_notifications": self.send_owner_notifications,
-            },
-        )
-        results.append(StageResult("dispatch", ok=True, processed=dispatch.processed))
-        results.append(self._run_retention_stage(run_id=run_id))
-        return results
+            stages = [
+                service.run_approval_inbox,
+                service.ingest_group_at_me,
+                service.ingest_p2p,
+                service.run_active_watch,
+            ]
+            for stage in stages:
+                try:
+                    result = stage(run_id=run_id)
+                except Exception as exc:
+                    result = StageResult(_stage_name(stage), ok=False, error=str(exc))
+                    if result.name == "approval_inbox":
+                        self.store.record_health_results(
+                            run_id=run_id,
+                            results=[
+                                HealthCheckResult(
+                                    "approval_inbox",
+                                    "warning",
+                                    "failed",
+                                    f"approval_inbox failed: {result.error}",
+                                    {"stage": result.name, "error": result.error},
+                                )
+                            ],
+                        )
+                    self.logger.emit(
+                        "error",
+                        "daemon_stage_failed",
+                        run_id=run_id,
+                        data={"stage": result.name, "error": result.error},
+                    )
+                else:
+                    self.logger.emit(
+                        "info",
+                        "daemon_stage_completed",
+                        run_id=run_id,
+                        data={
+                            "stage": result.name,
+                            "processed": result.processed,
+                            "send_owner_notifications": self.send_owner_notifications,
+                        },
+                    )
+                results.append(result)
+                heartbeat.record(result)
+            approval_failed = any(result.name == "approval_inbox" and not result.ok for result in results)
+            if approval_failed and not self.dry_run:
+                self.logger.warning(
+                    "daemon_dispatch_send_reply_blocked",
+                    run_id=run_id,
+                    data={"reason": "approval_inbox_failed", "owner_notifications_allowed": True},
+                )
+            dispatcher = Dispatcher(
+                store=self.store,
+                feishu_client=self.feishu_client,
+                config=self.app_config,
+                logger=self.logger,
+            )
+            # Owner commands are the safety valve for outgoing replies. If the inbox is
+            # unhealthy, external send_reply actions stay preview-only while owner
+            # notifications can still surface the failure.
+            dispatch = dispatcher.dispatch(
+                run_id=run_id,
+                allow_send_reply_actual=not self.dry_run and not approval_failed,
+                allow_owner_notification_actual=not self.dry_run or self.send_owner_notifications,
+                blocked_send_reply_reason="approval_inbox_failed" if approval_failed and not self.dry_run else None,
+            )
+            self.logger.emit(
+                "info",
+                "daemon_stage_completed",
+                run_id=run_id,
+                data={
+                    "stage": "dispatch",
+                    "processed": dispatch.processed,
+                    "sent": dispatch.sent,
+                    "previewed": dispatch.previewed,
+                    "failed": dispatch.failed,
+                    "approval_inbox_failed": approval_failed,
+                    "send_owner_notifications": self.send_owner_notifications,
+                },
+            )
+            dispatch_error = f"{dispatch.failed} dispatch action(s) failed" if dispatch.failed > 0 else None
+            dispatch_result = StageResult(
+                "dispatch",
+                ok=dispatch.failed == 0,
+                processed=dispatch.processed,
+                error=dispatch_error,
+            )
+            results.append(dispatch_result)
+            heartbeat.record(dispatch_result)
+            retention_result = self._run_retention_stage(run_id=run_id)
+            results.append(retention_result)
+            heartbeat.record(retention_result)
+            heartbeat.finish()
+            return results
+        except Exception as exc:
+            result = StageResult("tick", ok=False, error=str(exc))
+            results.append(result)
+            heartbeat.record(result)
+            heartbeat.finish()
+            raise
 
     def run_forever(self) -> int:
         run_id = self.health_suite.run_id or new_run_id("run")
@@ -304,6 +333,44 @@ class Daemon:
         )
 
 
+class HeartbeatRecorder:
+    def __init__(self, *, store: SQLiteStore, run_id: str, dry_run: bool):
+        self.store = store
+        self.run_id = run_id
+        self.dry_run = dry_run
+        self.results: list[StageResult] = []
+
+    def start(self) -> None:
+        self.store.record_run_tick_started(run_id=self.run_id, dry_run=self.dry_run)
+
+    def record(self, result: StageResult) -> None:
+        self.results.append(result)
+        self.store.record_run_tick_progress(run_id=self.run_id, summary=self.summary())
+
+    def finish(self) -> None:
+        self.store.record_run_tick_finished(
+            run_id=self.run_id,
+            status=_run_tick_status(self.results),
+            summary=self.summary(),
+        )
+
+    def summary(self) -> dict[str, Any]:
+        failed = [result for result in self.results if not result.ok]
+        return {
+            "stages": [
+                {
+                    "name": result.name,
+                    "ok": result.ok,
+                    "processed": result.processed,
+                    "error": result.error,
+                }
+                for result in self.results
+            ],
+            "processed": sum(result.processed for result in self.results),
+            "failed": len(failed),
+        }
+
+
 def _stage_name(stage: Callable[..., StageResult]) -> str:
     name = getattr(stage, "__name__", "stage")
     if name == "run_approval_inbox":
@@ -315,3 +382,13 @@ def _stage_name(stage: Callable[..., StageResult]) -> str:
     if name == "run_active_watch":
         return "active_watch"
     return name
+
+
+def _run_tick_status(results: list[StageResult]) -> str:
+    if not results:
+        return RunTickStatus.OK.value
+    if all(result.ok for result in results):
+        return RunTickStatus.OK.value
+    if any(result.ok for result in results):
+        return RunTickStatus.PARTIAL_FAILED.value
+    return RunTickStatus.FAILED.value

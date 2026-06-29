@@ -458,6 +458,20 @@
           "description": "Safe relative directory for downloaded message resources; absolute paths and '..' are rejected.",
           "title": "Resource Dir",
           "type": "string"
+        },
+        "max_resource_bytes": {
+          "default": 52428800,
+          "description": "Maximum bytes allowed for one downloaded message resource.",
+          "minimum": 1,
+          "title": "Max Resource Bytes",
+          "type": "integer"
+        },
+        "max_resource_dir_bytes": {
+          "default": 2147483648,
+          "description": "Maximum total bytes allowed under the downloaded resource directory.",
+          "minimum": 1,
+          "title": "Max Resource Dir Bytes",
+          "type": "integer"
         }
       },
       "title": "StorageConfig",

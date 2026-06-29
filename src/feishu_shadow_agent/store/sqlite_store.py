@@ -9,25 +9,29 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ..types import (
-    DispatchAttemptRecord,
-    DispatchAttemptStatus,
-    DispatchClaim,
-    DispatchErrorStage,
     ActionRecord,
     ActionKind,
     ActionStatus,
     ApprovalKind,
     ApprovalStatus,
+    DispatchAttemptRecord,
+    DispatchAttemptStatus,
+    DispatchClaim,
+    DispatchErrorStage,
     HealthCheckResult,
     LifecycleStatePolicy,
     NormalizedMessage,
     ResourceRef,
     RouteDecision,
+    RunTickStatus,
     TaskRecord,
     TaskStatus,
     new_run_id,
     utc_now_iso,
 )
+
+SQLITE_BUSY_TIMEOUT_MS = 5000
+RUN_HEARTBEAT_STALE_AFTER_SECONDS = 300
 
 
 class SQLiteStore:
@@ -39,6 +43,7 @@ class SQLiteStore:
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
         return conn
 
     def migrate(self) -> None:
@@ -82,20 +87,23 @@ class SQLiteStore:
         git_dirty: bool | None = None,
     ) -> None:
         self.migrate()
+        now = utc_now_iso()
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO runs(
-                  run_id, started_at, finished_at, status, dry_run, git_commit, git_dirty
-                ) VALUES (?, ?, NULL, ?, ?, ?, ?)
+                  run_id, started_at, finished_at, status, dry_run, git_commit, git_dirty,
+                  last_heartbeat_at
+                ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
-                    utc_now_iso(),
+                    now,
                     "running",
                     int(dry_run),
                     git_commit,
                     None if git_dirty is None else int(git_dirty),
+                    now,
                 ),
             )
 
@@ -118,6 +126,88 @@ class SQLiteStore:
                     utc_now_iso(),
                     status,
                     json.dumps(health_summary or {}, ensure_ascii=False, default=str),
+                    run_id,
+                ),
+            )
+
+    def record_run_tick_started(self, *, run_id: str, dry_run: bool) -> None:
+        self.migrate()
+        now = utc_now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO runs(
+                  run_id, started_at, finished_at, status, dry_run, last_heartbeat_at,
+                  last_tick_started_at, last_tick_finished_at, last_tick_status,
+                  last_tick_summary_json
+                ) VALUES (?, ?, NULL, ?, ?, ?, ?, NULL, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                  status = 'running',
+                  dry_run = excluded.dry_run,
+                  last_heartbeat_at = excluded.last_heartbeat_at,
+                  last_tick_started_at = excluded.last_tick_started_at,
+                  last_tick_finished_at = NULL,
+                  last_tick_status = excluded.last_tick_status,
+                  last_tick_summary_json = excluded.last_tick_summary_json
+                """,
+                (
+                    run_id,
+                    now,
+                    "running",
+                    int(dry_run),
+                    now,
+                    now,
+                    RunTickStatus.RUNNING.value,
+                    "{}",
+                ),
+            )
+
+    def record_run_tick_progress(
+        self,
+        *,
+        run_id: str,
+        summary: dict[str, Any],
+    ) -> None:
+        self.migrate()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE runs
+                SET last_heartbeat_at = ?,
+                    last_tick_summary_json = ?
+                WHERE run_id = ?
+                """,
+                (
+                    utc_now_iso(),
+                    json.dumps(summary, ensure_ascii=False, default=str),
+                    run_id,
+                ),
+            )
+
+    def record_run_tick_finished(
+        self,
+        *,
+        run_id: str,
+        status: str,
+        summary: dict[str, Any],
+    ) -> None:
+        self.migrate()
+        now = utc_now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE runs
+                SET last_heartbeat_at = ?,
+                    last_tick_finished_at = ?,
+                    last_tick_status = ?,
+                    last_tick_summary_json = ?
+                WHERE run_id = ?
+                """,
+                (
+                    now,
+                    now,
+                    status,
+                    json.dumps(summary, ensure_ascii=False, default=str),
                     run_id,
                 ),
             )
@@ -1352,13 +1442,28 @@ class SQLiteStore:
         with self.connect() as conn:
             return self._expire_pending_approvals_locked(conn, now=effective_now)
 
-    def status_snapshot(self, *, stale_after_seconds: int = 900) -> dict[str, Any]:
+    def status_snapshot(
+        self,
+        *,
+        stale_after_seconds: int = 900,
+        daemon_stale_after_seconds: int = RUN_HEARTBEAT_STALE_AFTER_SECONDS,
+        now: str | None = None,
+    ) -> dict[str, Any]:
         self.expire_pending_approvals()
         self.migrate()
-        now = utc_now_iso()
+        effective_now = now or utc_now_iso()
         with self.connect() as conn:
             last_run = conn.execute(
                 "SELECT * FROM runs ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+            latest_daemon_run = conn.execute(
+                """
+                SELECT *
+                FROM runs
+                WHERE last_tick_started_at IS NOT NULL
+                ORDER BY last_tick_started_at DESC, started_at DESC
+                LIMIT 1
+                """
             ).fetchone()
             pending_approvals = conn.execute(
                 """
@@ -1399,7 +1504,7 @@ class SQLiteStore:
                 ORDER BY updated_at DESC, id DESC
                 LIMIT 20
                 """,
-                (now,),
+                (effective_now,),
             ).fetchall()
             pending_actions = conn.execute(
                 """
@@ -1439,8 +1544,19 @@ class SQLiteStore:
                 """,
                 (f"-{stale_after_seconds} seconds",),
             ).fetchall()
+        last_run_data = _json_row_dict(last_run, "health_summary_json", "last_tick_summary_json") if last_run else None
+        daemon_run_data = (
+            _json_row_dict(latest_daemon_run, "health_summary_json", "last_tick_summary_json")
+            if latest_daemon_run
+            else None
+        )
         return {
-            "last_run": _row_dict(last_run),
+            "daemon_liveness": _daemon_liveness(
+                daemon_run_data,
+                now=effective_now,
+                stale_after_seconds=daemon_stale_after_seconds,
+            ),
+            "last_run": last_run_data,
             "pending_approvals": [_row_dict(row) for row in pending_approvals],
             "recent_expired_approvals": [_row_dict(row) for row in recent_expired_approvals],
             "failed_approval_commands": [_json_row_dict(row, "result_json") for row in failed_commands],
@@ -2793,6 +2909,49 @@ def _loads_json(value: Any) -> Any:
 def _loads_json_object(value: Any) -> dict[str, Any]:
     loaded = _loads_json(value)
     return loaded if isinstance(loaded, dict) else {}
+
+
+def _daemon_liveness(
+    last_run: dict[str, Any] | None,
+    *,
+    now: str,
+    stale_after_seconds: int,
+) -> dict[str, Any]:
+    base: dict[str, Any] = {"stale_after_seconds": stale_after_seconds}
+    if last_run is None:
+        return base | {"status": "not_started", "stale": False}
+    run_status = last_run.get("status")
+    heartbeat = last_run.get("last_heartbeat_at")
+    base |= {
+        "run_id": last_run.get("run_id"),
+        "run_status": run_status,
+        "last_heartbeat_at": heartbeat,
+    }
+    if run_status != "running":
+        return base | {"status": "stopped", "stale": False}
+    heartbeat_dt = _parse_datetime_or_none(heartbeat)
+    now_dt = _parse_datetime_or_none(now)
+    if heartbeat_dt is None or now_dt is None:
+        return base | {"status": "stale", "stale": True, "reason": "missing_or_invalid_heartbeat"}
+    age_seconds = max(0, int((now_dt - heartbeat_dt).total_seconds()))
+    stale = age_seconds > stale_after_seconds
+    return base | {
+        "status": "stale" if stale else "live",
+        "stale": stale,
+        "heartbeat_age_seconds": age_seconds,
+    }
+
+
+def _parse_datetime_or_none(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.astimezone()
+    return parsed.astimezone()
 
 
 def _watch_keys_for_message(message: NormalizedMessage) -> set[str]:

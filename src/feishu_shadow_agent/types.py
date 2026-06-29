@@ -62,6 +62,13 @@ class DispatchErrorStage(StrEnum):
     RECOVERY = "recovery"
 
 
+class RunTickStatus(StrEnum):
+    RUNNING = "running"
+    OK = "ok"
+    PARTIAL_FAILED = "partial_failed"
+    FAILED = "failed"
+
+
 class RouteName(StrEnum):
     NEW_TASK = "new_task"
     ATTACH_TASK = "attach_task"
@@ -141,6 +148,7 @@ class StateSchemaContract:
     action_statuses = enum_values(ActionStatus)
     dispatch_attempt_statuses = enum_values(DispatchAttemptStatus)
     dispatch_error_stages = enum_values(DispatchErrorStage)
+    run_tick_statuses = enum_values(RunTickStatus)
     route_names = enum_values(RouteName)
     message_processing_stages = enum_values(MessageProcessingStage)
     message_processing_statuses = enum_values(MessageProcessingStatus)

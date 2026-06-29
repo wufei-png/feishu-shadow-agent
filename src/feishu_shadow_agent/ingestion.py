@@ -15,7 +15,7 @@ from .policy import PolicyResolver
 from .processing import ApprovalService, TaskProcessingService
 from .routing import MessageRouter, RoutingResult
 from .store.sqlite_store import SQLiteStore
-from .types import MessagePage, NormalizedMessage, ResourceRef, utc_now_iso
+from .types import MessagePage, NormalizedMessage, ResourceRef, ResourceStatus, utc_now_iso
 
 PAGE_SIZE = 50
 IMAGE_KEY_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])(img_[A-Za-z0-9_-]+)(?![A-Za-z0-9_-])")
@@ -29,6 +29,13 @@ class StageResult:
     ok: bool
     processed: int = 0
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class ResourceQuotaDecision:
+    allow: bool
+    status: str | None = None
+    raw: dict[str, Any] | None = None
 
 
 class MessageNormalizer:
@@ -140,6 +147,8 @@ class ResourceProcessor:
         self.logger = logger
         self.config_base_dir = Path(config_base_dir or Path.cwd()).expanduser().resolve()
         self.policy = PolicyResolver(config)
+        self.quota = ResourceQuotaGuard(config=config, base_dir=self.config_base_dir)
+        self._quota_downloads_blocked = False
 
     def process(self, message: NormalizedMessage, *, run_id: str | None = None) -> None:
         if not message.resources:
@@ -191,8 +200,27 @@ class ResourceProcessor:
                     },
                 )
                 continue
+            if self._quota_downloads_blocked:
+                self._record_quota_blocked(
+                    resource,
+                    run_id=run_id,
+                    decision=ResourceQuotaDecision(
+                        allow=False,
+                        status=ResourceStatus.QUOTA_EXCEEDED.value,
+                        raw={
+                            "reason": "resource_quota_exceeded",
+                            "blocked_after_prior_quota": True,
+                        },
+                    ),
+                )
+                continue
             output = _resource_output(resource, self.config.storage.resource_dir)
             local_output = self.config_base_dir / output
+            quota_preflight = self.quota.before_download()
+            if not quota_preflight.allow:
+                self._record_quota_blocked(resource, run_id=run_id, decision=quota_preflight)
+                self._quota_downloads_blocked = True
+                continue
             self.logger.debug(
                 "resource_download_started",
                 run_id=run_id,
@@ -225,6 +253,26 @@ class ResourceProcessor:
                 )
                 continue
             if result.ok:
+                if not local_output.exists() or not local_output.is_file():
+                    self.store.upsert_resource(
+                        resource,
+                        download_status="missing_file",
+                        path=output,
+                        raw={"result": result.json_data, "error": "download output file missing"},
+                    )
+                    self.logger.warning(
+                        "resource_download_missing_file",
+                        run_id=run_id,
+                        data={"message_id": resource.message_id, "file_key": resource.file_key, "path": output},
+                    )
+                    continue
+                quota_result = self.quota.after_download(local_output, attempted_path=output)
+                if not quota_result.allow:
+                    raw = {"result": result.json_data} | (quota_result.raw or {})
+                    self._record_quota_blocked(resource, run_id=run_id, decision=quota_result, raw=raw)
+                    if quota_result.status == ResourceStatus.QUOTA_EXCEEDED.value:
+                        self._quota_downloads_blocked = True
+                    continue
                 sha256_hex = _sha256_if_exists(local_output)
                 if sha256_hex is None:
                     self.store.upsert_resource(
@@ -278,6 +326,115 @@ class ResourceProcessor:
                         "timed_out": result.timed_out,
                     },
                 )
+
+    def _record_quota_blocked(
+        self,
+        resource: ResourceRef,
+        *,
+        run_id: str | None,
+        decision: ResourceQuotaDecision,
+        raw: dict[str, Any] | None = None,
+    ) -> None:
+        status = decision.status or ResourceStatus.QUOTA_EXCEEDED.value
+        payload = (decision.raw or {}) | (raw or {})
+        self.store.upsert_resource(
+            resource,
+            download_status=status,
+            path=None,
+            raw=payload,
+        )
+        self.logger.warning(
+            "resource_download_blocked_by_quota",
+            run_id=run_id,
+            data={
+                "message_id": resource.message_id,
+                "file_key": resource.file_key,
+                "resource_type": resource.resource_type,
+                "status": status,
+                "details": payload,
+            },
+        )
+
+
+class ResourceQuotaGuard:
+    def __init__(self, *, config: AppConfig, base_dir: Path):
+        self.config = config
+        self.base_dir = base_dir
+        self.resource_root = (base_dir / config.storage.resource_dir).resolve(strict=False)
+
+    def before_download(self) -> ResourceQuotaDecision:
+        usage = self.resource_dir_usage_bytes()
+        if usage >= self.config.storage.max_resource_dir_bytes:
+            return ResourceQuotaDecision(
+                allow=False,
+                status=ResourceStatus.QUOTA_EXCEEDED.value,
+                raw={
+                    "reason": "resource_quota_exceeded",
+                    "resource_dir_bytes": usage,
+                    "max_resource_dir_bytes": self.config.storage.max_resource_dir_bytes,
+                },
+            )
+        return ResourceQuotaDecision(allow=True)
+
+    def after_download(self, path: Path, *, attempted_path: str) -> ResourceQuotaDecision:
+        size = path.stat().st_size
+        if size > self.config.storage.max_resource_bytes:
+            delete_error = self.delete_downloaded_file(path)
+            raw = {
+                "reason": "resource_too_large",
+                "attempted_path": attempted_path,
+                "size_bytes": size,
+                "max_resource_bytes": self.config.storage.max_resource_bytes,
+            }
+            if delete_error:
+                raw["delete_error"] = delete_error
+            return ResourceQuotaDecision(
+                allow=False,
+                status=ResourceStatus.TOO_LARGE.value,
+                raw=raw,
+            )
+        usage = self.resource_dir_usage_bytes()
+        if usage > self.config.storage.max_resource_dir_bytes:
+            delete_error = self.delete_downloaded_file(path)
+            raw = {
+                "reason": "resource_quota_exceeded",
+                "attempted_path": attempted_path,
+                "size_bytes": size,
+                "resource_dir_bytes": usage,
+                "max_resource_dir_bytes": self.config.storage.max_resource_dir_bytes,
+            }
+            if delete_error:
+                raw["delete_error"] = delete_error
+            return ResourceQuotaDecision(
+                allow=False,
+                status=ResourceStatus.QUOTA_EXCEEDED.value,
+                raw=raw,
+            )
+        return ResourceQuotaDecision(allow=True)
+
+    def resource_dir_usage_bytes(self) -> int:
+        if not self.resource_root.exists():
+            return 0
+        total = 0
+        for path in self.resource_root.rglob("*"):
+            try:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                total += path.stat().st_size
+            except OSError:
+                continue
+        return total
+
+    def delete_downloaded_file(self, path: Path) -> str | None:
+        try:
+            path.resolve(strict=False).relative_to(self.resource_root)
+        except ValueError:
+            return "outside_resource_dir"
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            return str(exc)
+        return None
 
 
 class IngestionService:

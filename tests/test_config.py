@@ -18,6 +18,8 @@ def test_load_minimal_config() -> None:
 
     assert loaded.config.owner.open_id == "ou_owner"
     assert loaded.config.storage.resource_dir == "data/resources"
+    assert loaded.config.storage.max_resource_bytes == 52_428_800
+    assert loaded.config.storage.max_resource_dir_bytes == 2_147_483_648
     assert loaded.config.logging.level == "info"
     assert loaded.config.logging.console is False
     assert loaded.config.logging.text_path == "logs/test.log"
@@ -230,6 +232,22 @@ storage:
     )
 
     with pytest.raises(ConfigError, match="resource_dir"):
+        ConfigService().load(config_path)
+
+
+def test_resource_quota_values_must_be_positive(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+storage:
+  max_resource_bytes: 0
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="max_resource_bytes"):
         ConfigService().load(config_path)
 
 

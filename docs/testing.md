@@ -37,13 +37,13 @@ git diff --check
 
 当前测试大多使用 fake client 或本地 SQLite 临时库：
 
-- `tests/test_config.py`：配置 schema、严格布尔值、路径安全、脱敏输出。
+- `tests/test_config.py`：配置 schema、严格布尔值、路径安全、资源限额默认值、脱敏输出。
 - `tests/test_lark_cli.py`：`lark-cli` 命令构造、JSON 解析、dry-run banner、资源下载身份。
-- `tests/test_p2_ingestion_routing.py`：消息 normalize、入口拉取、checkpoint、任务归属。
+- `tests/test_p2_ingestion_routing.py`：消息 normalize、入口拉取、checkpoint、任务归属、资源下载限额。
 - `tests/test_p3_hermes_approval.py`：Hermes 输出 schema、reply gate、审批队列、`/approve`、`/reject`、`/send`。
-- `tests/test_daemon.py`：tick 顺序、运行中 health fail-closed、approval inbox 失败保护、dispatch 行为。
+- `tests/test_daemon.py`：tick 顺序、heartbeat、运行中 health fail-closed、approval inbox 失败保护、dispatch 行为。
 - `tests/test_dispatcher.py`：dry-run、真实发送、dispatch attempt、读回验证、stale sending 恢复。
-- `tests/test_store_migrations.py`：SQLite migration、约束、状态 enum 契约、幂等动作。
+- `tests/test_store_migrations.py`：SQLite migration、busy timeout、约束、状态 enum 契约、幂等动作。
 - `tests/test_retention.py`：消息 raw JSON 和资源保留策略。
 
 这些测试验证代码契约，不证明当前机器的 `lark-cli` 授权、飞书权限或 Hermes 可执行文件可用；真实环境要跑下面的端到端流程。
@@ -176,5 +176,7 @@ tail -n 100 logs/agent.jsonl
 ```
 
 资源下载失败时，优先看 `status` 和日志中的 `bot_not_joined`、`bot_invisible`、`resource_download_failed`。这类问题通常需要确认 bot 是否在群里，以及该群的 `bot_joined` / `resource_download` 配置。
+
+资源被本地磁盘安全策略挡住时，会看到 `too_large` 或 `quota_exceeded`。这两类状态表示文件已被删除、`resources.path` 已置空，并且 task session agent 默认不会被调用；先调整 `storage.max_resource_bytes` / `storage.max_resource_dir_bytes` 或清理 `storage.resource_dir`，再人工决定是否重放相关消息。
 
 dispatch 恢复只提供本地 CLI，不提供 owner bot DM 命令；不确定真实发送是否发生时，系统不会自动重发。
