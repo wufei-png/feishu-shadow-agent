@@ -9,38 +9,26 @@ from typing import Any, Callable
 
 from pydantic import ValidationError
 
-from .agent_backend import AgentBackend, AgentRunResult
+from .agent_backend import AgentBackend
+from .agent_invocation import AGENT_MAX_ATTEMPTS, AgentAttemptOutcome, AgentInvoker, agent_result_error, truncate_error
 from .config import AppConfig
+from .context_access import ContextAccessBuilder
 from .jsonl import JSONLLogger
 from .policy import PolicyResolver
 from .prompt import (
     BaseTaskSessionOutput,
-    FollowupTaskSessionOutput,
     InitialTaskSessionOutput,
     TaskRouterOutput,
     build_router_prompt,
-    build_task_session_prompt,
 )
+from .resource_preflight import ResourcePreflight, ResourcePreflightResult, resource_status_counts
 from .routing import CandidateCollector, RoutingResult
 from .store.sqlite_store import SQLiteStore
+from .task_session_runner import TaskSessionRunner
 from .types import LifecycleStatePolicy, MessageProcessingStatus, NormalizedMessage, RouteDecision, TaskRecord
 
-AGENT_MAX_ATTEMPTS = 3
-RESOURCE_MAX_ATTEMPTS = 3
 AGENT_AT_SPAN_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE | re.DOTALL)
 FORBIDDEN_MENTION_RE = re.compile(r"<at\b[^>]*>|</at>|@所有人|@_all|@all", re.IGNORECASE)
-TERMINAL_AGENT_ERROR_MARKERS = (
-    "no such file",
-    "not found",
-    "permission denied",
-    "unknown option",
-    "invalid option",
-    "missing required",
-    "configuration",
-    "config",
-    "auth",
-    "permission",
-)
 
 
 @dataclass(frozen=True)
@@ -56,22 +44,6 @@ class ProcessingResult:
 class ComposedReply:
     text: str
     had_forbidden_mentions: bool
-
-
-@dataclass(frozen=True)
-class AgentAttemptOutcome:
-    result: AgentRunResult | None
-    attempt_count: int
-    last_error: str | None = None
-
-
-@dataclass(frozen=True)
-class ResourcePreflightResult:
-    allow: bool
-    reason: str
-    resources: list[Any]
-    attempt_count: int = 0
-    last_error: str | None = None
 
 
 class SendComposer:
@@ -205,13 +177,28 @@ class TaskProcessingService:
         self.approvals = ApprovalService(store=store, config=config)
         self.composer = SendComposer(owner_open_id=config.owner.open_id)
         self.policy = PolicyResolver(config)
-        self.agent_max_attempts = max(1, agent_max_attempts)
-        self.agent_retry_delays_seconds = agent_retry_delays_seconds
-        self.sleep_func = sleep_func
-        self.resource_retry_func: Callable[[NormalizedMessage, str | None], None] | None = None
+        self.agent_invoker = AgentInvoker(
+            logger=logger,
+            max_attempts=agent_max_attempts,
+            retry_delays_seconds=agent_retry_delays_seconds,
+            sleep_func=sleep_func,
+        )
+        self.context_access = ContextAccessBuilder(store=store, config=config)
+        self.resource_preflight = ResourcePreflight(
+            store=store,
+            logger=logger,
+            retry_delays_seconds=agent_retry_delays_seconds,
+            sleep_func=sleep_func,
+        )
+        self.task_sessions = TaskSessionRunner(
+            store=store,
+            agent_backend=agent_backend,
+            agent_invoker=self.agent_invoker,
+            context_access=self.context_access,
+        )
 
     def set_resource_retry_func(self, func: Callable[[NormalizedMessage, str | None], None]) -> None:
-        self.resource_retry_func = func
+        self.resource_preflight.set_retry_func(func)
 
     def process(
         self,
@@ -275,122 +262,20 @@ class TaskProcessingService:
 
     def _call_agent_with_retries(
         self,
-        call: Callable[[], AgentRunResult],
+        call: Callable[[], Any],
         *,
         run_id: str | None,
         stage: str,
         message_id: str,
         task_id: int | None = None,
     ) -> AgentAttemptOutcome:
-        last_result: AgentRunResult | None = None
-        last_error: str | None = None
-        attempts = 0
-        for attempt in range(1, self.agent_max_attempts + 1):
-            attempts = attempt
-            self.logger.debug(
-                "agent_call_attempt_started",
-                run_id=run_id,
-                task_id=None if task_id is None else str(task_id),
-                data={"stage": stage, "message_id": message_id, "attempt": attempt},
-            )
-            try:
-                result = call()
-            except Exception as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
-                if attempt < self.agent_max_attempts:
-                    self.logger.warning(
-                        "agent_call_retrying",
-                        run_id=run_id,
-                        task_id=None if task_id is None else str(task_id),
-                        data={
-                            "stage": stage,
-                            "message_id": message_id,
-                            "attempt": attempt,
-                            "error": last_error,
-                        },
-                    )
-                    self._sleep_before_retry(attempt)
-                else:
-                    self.logger.error(
-                        "agent_call_exception",
-                        run_id=run_id,
-                        task_id=None if task_id is None else str(task_id),
-                        data={
-                            "stage": stage,
-                            "message_id": message_id,
-                            "attempt": attempt,
-                            "error": last_error,
-                        },
-                    )
-                continue
-            last_result = result
-            if result.ok:
-                self.logger.debug(
-                    "agent_call_succeeded",
-                    run_id=run_id,
-                    task_id=None if task_id is None else str(task_id),
-                    data={
-                        "stage": stage,
-                        "message_id": message_id,
-                        "attempt": attempt,
-                        "latency_ms": result.latency_ms,
-                    },
-                )
-                return AgentAttemptOutcome(result=result, attempt_count=attempt)
-            last_error = _agent_result_error(result)
-            if not _is_retryable_agent_result(result):
-                self.logger.error(
-                    "agent_call_failed_terminal",
-                    run_id=run_id,
-                    task_id=None if task_id is None else str(task_id),
-                    data={
-                        "stage": stage,
-                        "message_id": message_id,
-                        "attempt": attempt,
-                        "error": last_error,
-                        "exit_code": result.exit_code,
-                        "timed_out": result.timed_out,
-                    },
-                )
-                return AgentAttemptOutcome(result=result, attempt_count=attempt, last_error=last_error)
-            if attempt < self.agent_max_attempts:
-                self.logger.warning(
-                    "agent_call_retrying",
-                    run_id=run_id,
-                    task_id=None if task_id is None else str(task_id),
-                    data={
-                        "stage": stage,
-                        "message_id": message_id,
-                        "attempt": attempt,
-                        "error": last_error,
-                        "exit_code": result.exit_code,
-                        "timed_out": result.timed_out,
-                    },
-                )
-                self._sleep_before_retry(attempt)
-            else:
-                self.logger.error(
-                    "agent_call_failed",
-                    run_id=run_id,
-                    task_id=None if task_id is None else str(task_id),
-                    data={
-                        "stage": stage,
-                        "message_id": message_id,
-                        "attempt": attempt,
-                        "error": last_error,
-                        "exit_code": result.exit_code,
-                        "timed_out": result.timed_out,
-                    },
-                )
-        return AgentAttemptOutcome(result=last_result, attempt_count=attempts, last_error=last_error)
-
-    def _sleep_before_retry(self, attempt: int) -> None:
-        if attempt <= 0 or not self.agent_retry_delays_seconds:
-            return
-        index = min(attempt - 1, len(self.agent_retry_delays_seconds) - 1)
-        delay = self.agent_retry_delays_seconds[index]
-        if delay > 0:
-            self.sleep_func(delay)
+        return self.agent_invoker.call_with_retries(
+            call,
+            run_id=run_id,
+            stage=stage,
+            message_id=message_id,
+            task_id=task_id,
+        )
 
     def _mark_processing_processed(
         self,
@@ -424,7 +309,7 @@ class TaskProcessingService:
             stage=stage,
             status="processing_failed_terminal",
             attempt_count=attempt_count,
-            last_error=_truncate_error(last_error),
+            last_error=truncate_error(last_error),
             terminal_reason=terminal_reason,
         )
 
@@ -444,7 +329,7 @@ class TaskProcessingService:
             stage=stage,
             status=MessageProcessingStatus.BLOCKED_WAITING_EXTERNAL.value,
             attempt_count=attempt_count,
-            last_error=_truncate_error(last_error),
+            last_error=truncate_error(last_error),
             terminal_reason=reason,
         )
 
@@ -466,7 +351,7 @@ class TaskProcessingService:
                 "message_id": message.message_id,
                 "stage": stage,
                 "attempt_count": attempt_count,
-                "error": _truncate_error(last_error),
+                "error": truncate_error(last_error),
                 "message": "Agent processing failed; no reply was generated.",
                 "dedupe_key": f"owner-processing-failed:{message.message_id}:{stage}",
             },
@@ -490,8 +375,8 @@ class TaskProcessingService:
                 "message_id": message.message_id,
                 "stage": "resource_download",
                 "attempt_count": attempt_count,
-                "error": _truncate_error(last_error),
-                "statuses": _resource_status_counts(resources),
+                "error": truncate_error(last_error),
+                "statuses": resource_status_counts(resources),
                 "message": "Message resources were not ready; task session agent was not called.",
                 "dedupe_key": f"owner-resource-download:{message.message_id}:{reason}",
             },
@@ -561,7 +446,7 @@ class TaskProcessingService:
         )
         candidates_count = len(active_candidates) + len(historical)
         if result is None or not result.ok or not isinstance(result.json_data, dict):
-            last_error = outcome.last_error or (None if result is None else _agent_result_error(result))
+            last_error = outcome.last_error or (None if result is None else agent_result_error(result))
             self.logger.error(
                 "task_router_failed",
                 run_id=run_id,
@@ -569,7 +454,7 @@ class TaskProcessingService:
                     "message_id": message.message_id,
                     "attempt_count": outcome.attempt_count,
                     "candidates_count": candidates_count,
-                    "error": _truncate_error(last_error),
+                    "error": truncate_error(last_error),
                 },
             )
             self._mark_processing_terminal(
@@ -604,7 +489,7 @@ class TaskProcessingService:
                 data={
                     "message_id": message.message_id,
                     "attempt_count": outcome.attempt_count,
-                    "error": _truncate_error(last_error),
+                    "error": truncate_error(last_error),
                 },
             )
             self._mark_processing_terminal(
@@ -830,18 +715,11 @@ class TaskProcessingService:
         watch_until: str,
         run_id: str,
     ) -> ProcessingResult:
-        session_id = self.store.get_initialized_agent_session_id(task.id)
-        task_message_ids = self.store.list_task_message_ids(task.id)
-        prompt_message_ids = self._task_session_prompt_message_ids(
-            task=task,
-            message=message,
-            session_id=session_id,
-            task_message_ids=task_message_ids,
-        )
+        session_plan = self.task_sessions.build_plan(task=task, message=message)
         preflight = self._resource_preflight(
             task=task,
             message=message,
-            prompt_message_ids=prompt_message_ids,
+            prompt_message_ids=session_plan.prompt_message_ids,
             run_id=run_id,
         )
         resources = preflight.resources
@@ -855,8 +733,8 @@ class TaskProcessingService:
                     "task_short_id": task.short_id,
                     "reason": preflight.reason,
                     "attempt_count": preflight.attempt_count,
-                    "error": _truncate_error(preflight.last_error),
-                    "statuses": _resource_status_counts(resources),
+                    "error": truncate_error(preflight.last_error),
+                    "statuses": resource_status_counts(resources),
                 },
             )
             processing_status = LifecycleStatePolicy.resource_blocker_status(preflight.reason)
@@ -887,7 +765,6 @@ class TaskProcessingService:
                 last_error=preflight.last_error,
             )
             return ProcessingResult("owner_notification_created", task.id, action_id=action_id, reason=preflight.reason)
-        reply_target_message_ids = _reply_target_message_ids(task=task, current_message_id=message.message_id)
         self.logger.debug(
             "task_session_started",
             run_id=run_id,
@@ -895,49 +772,35 @@ class TaskProcessingService:
             data={
                 "message_id": message.message_id,
                 "task_short_id": task.short_id,
-                "resuming_session": session_id is not None,
-                "prompt_message_count": len(prompt_message_ids),
+                "resuming_session": session_plan.session_id is not None,
+                "prompt_message_count": len(session_plan.prompt_message_ids),
                 "resource_count": len(resources),
             },
         )
-        output_model = InitialTaskSessionOutput if session_id is None else FollowupTaskSessionOutput
-        prompt = build_task_session_prompt(
+        session_run = self.task_sessions.run(
             task=task,
-            current_message_id=message.message_id,
-            reply_target_message_ids=reply_target_message_ids,
-            messages=self.store.get_messages_by_ids(prompt_message_ids),
+            message=message,
+            plan=session_plan,
             resources=resources,
-            output_model=output_model,
-            context_metadata=_task_session_context_metadata(
-                session_id=session_id,
-                included_message_count=len(prompt_message_ids),
-                task_message_count=len(task_message_ids) or len(prompt_message_ids),
-            ),
-            context_access=self._task_session_context_access(message=message, task=task),
-        )
-        outcome = self._call_agent_with_retries(
-            lambda: self.agent_backend.task_session(prompt, session_id=session_id),
             run_id=run_id,
-            stage="task_session",
-            message_id=message.message_id,
-            task_id=task.id,
         )
+        outcome = session_run.outcome
         result = outcome.result
         self.store.record_agent_audit(
             backend_provider=self.agent_backend.provider,
             request_type="task_session",
             task_id=task.id,
-            agent_session_id=session_id if result is None else result.session_id or session_id,
-            input_message_ids=prompt_message_ids,
+            agent_session_id=session_plan.session_id if result is None else result.session_id or session_plan.session_id,
+            input_message_ids=session_plan.prompt_message_ids,
             input_resource_ids=[row["file_key"] for row in resources],
             response=result.json_data if result is not None and isinstance(result.json_data, dict) else None,
             error=outcome.last_error if result is None else result.error,
             latency_ms=None if result is None else result.latency_ms,
-            prompt={"text": prompt} if self.config.debug.save_full_agent_io else None,
+            prompt={"text": session_run.prompt} if self.config.debug.save_full_agent_io else None,
             tool_permissions_profile=self.config.tool_permissions,
         )
         if result is None or not result.ok or not isinstance(result.json_data, dict):
-            last_error = outcome.last_error or (None if result is None else _agent_result_error(result))
+            last_error = outcome.last_error or (None if result is None else agent_result_error(result))
             self.logger.error(
                 "task_session_failed",
                 run_id=run_id,
@@ -946,7 +809,7 @@ class TaskProcessingService:
                     "message_id": message.message_id,
                     "task_short_id": task.short_id,
                     "attempt_count": outcome.attempt_count,
-                    "error": _truncate_error(last_error),
+                    "error": truncate_error(last_error),
                 },
             )
             self._mark_processing_terminal(
@@ -966,9 +829,8 @@ class TaskProcessingService:
                 reason="agent_task_session_failed",
             )
             return ProcessingResult("owner_notification_created", task.id, action_id=action_id, reason="agent_failed")
-        try:
-            output = output_model.model_validate(result.json_data)
-        except ValidationError as exc:
+        if session_run.validation_error is not None:
+            exc = session_run.validation_error
             last_error = str(exc)
             self.logger.error(
                 "task_session_schema_failed",
@@ -978,7 +840,7 @@ class TaskProcessingService:
                     "message_id": message.message_id,
                     "task_short_id": task.short_id,
                     "attempt_count": outcome.attempt_count,
-                    "error": _truncate_error(last_error),
+                    "error": truncate_error(last_error),
                 },
             )
             self._mark_processing_terminal(
@@ -998,7 +860,10 @@ class TaskProcessingService:
                 reason=f"agent_schema_failed: {exc.errors()[0]['msg']}",
             )
             return ProcessingResult("owner_notification_created", task.id, action_id=action_id, reason="schema_failed")
-        if result.session_id and result.session_id != session_id:
+        output = session_run.output
+        if output is None:
+            raise RuntimeError("task session runner returned no output after successful validation")
+        if result.session_id and result.session_id != session_plan.session_id:
             self.store.set_task_agent_session_id(task.id, result.session_id)
             self.logger.debug(
                 "task_session_id_updated",
@@ -1007,13 +872,11 @@ class TaskProcessingService:
                 data={
                     "message_id": message.message_id,
                     "task_short_id": task.short_id,
-                    "had_previous_session": session_id is not None,
+                    "had_previous_session": session_plan.session_id is not None,
                 },
             )
 
-        target_ids = {message.message_id}
-        if task.root_message_id:
-            target_ids.add(task.root_message_id)
+        target_ids = set(session_plan.reply_target_message_ids)
         if output.reply_target_message_id and output.reply_target_message_id not in target_ids:
             self.logger.warning(
                 "task_session_invalid_reply_target",
@@ -1176,66 +1039,11 @@ class TaskProcessingService:
         prompt_message_ids: list[str],
         run_id: str,
     ) -> ResourcePreflightResult:
-        resources = self.store.list_resources_for_messages(prompt_message_ids)
-        state = _resource_preflight_state(resources, message=message, prompt_message_ids=prompt_message_ids)
-        if state["allow"]:
-            return ResourcePreflightResult(True, "ok", resources)
-        attempt_count = _initial_resource_attempt_count(resources, message=message, prompt_message_ids=prompt_message_ids)
-        last_error = state["error"]
-        if state["retryable"] and self.resource_retry_func is not None and _has_current_prompt_resources(
+        return self.resource_preflight.check(
+            task=task,
             message=message,
             prompt_message_ids=prompt_message_ids,
-        ):
-            for attempt in range(attempt_count + 1, RESOURCE_MAX_ATTEMPTS + 1):
-                attempt_count = attempt
-                self.logger.debug(
-                    "resource_download_retry_started",
-                    run_id=run_id,
-                    task_id=str(task.id),
-                    data={
-                        "message_id": message.message_id,
-                        "task_short_id": task.short_id,
-                        "attempt": attempt,
-                        "reason": state["reason"],
-                    },
-                )
-                try:
-                    retry_error = None
-                    self.resource_retry_func(message, run_id)
-                except Exception as exc:
-                    retry_error = f"{type(exc).__name__}: {exc}"
-                    last_error = retry_error
-                    self.logger.warning(
-                        "resource_download_retry_exception",
-                        run_id=run_id,
-                        task_id=str(task.id),
-                        data={
-                            "message_id": message.message_id,
-                            "task_short_id": task.short_id,
-                            "attempt": attempt,
-                            "error": _truncate_error(retry_error),
-                        },
-                    )
-                resources = self.store.list_resources_for_messages(prompt_message_ids)
-                state = _resource_preflight_state(resources, message=message, prompt_message_ids=prompt_message_ids)
-                if retry_error is None and not state["allow"] and state["error"] is not None:
-                    last_error = state["error"]
-                if state["allow"]:
-                    return ResourcePreflightResult(True, "ok", resources, attempt_count=attempt_count)
-                if not state["retryable"]:
-                    break
-                if attempt < RESOURCE_MAX_ATTEMPTS:
-                    self._sleep_before_retry(attempt)
-        reason = state["reason"]
-        if state["retryable"]:
-            reason = "resource_download_failed"
-            last_error = last_error or state["error"] or _resource_status_error(resources)
-        return ResourcePreflightResult(
-            False,
-            reason,
-            resources,
-            attempt_count=attempt_count,
-            last_error=last_error or state["error"] or _resource_status_error(resources),
+            run_id=run_id,
         )
 
     def _reply_gate(
@@ -1261,21 +1069,6 @@ class TaskProcessingService:
             "policy_source": decision.policy_source,
         }
 
-    def _task_session_prompt_message_ids(
-        self,
-        *,
-        task: TaskRecord,
-        message: NormalizedMessage,
-        session_id: str | None,
-        task_message_ids: list[str] | None = None,
-    ) -> list[str]:
-        if session_id is not None:
-            # Resumed agent sessions already carry task history; sending only
-            # the current message keeps follow-up prompts compact and bounded.
-            return [message.message_id]
-        message_ids = task_message_ids if task_message_ids is not None else self.store.list_task_message_ids(task.id)
-        return message_ids or [message.message_id]
-
     def _router_context_access(
         self,
         *,
@@ -1283,15 +1076,11 @@ class TaskProcessingService:
         active_candidates: list[Any],
         historical: list[TaskRecord],
     ) -> dict[str, Any] | None:
-        context = self._base_context_access()
-        if context is None:
-            return None
-        context["query_scope"] = {
-            "current_message_id": message.message_id,
-            "active_tasks": [_context_task_card(candidate.task) for candidate in active_candidates],
-            "historical_tasks": [_context_task_card(task) for task in historical],
-        }
-        return context
+        return self.context_access.router_context_access(
+            message=message,
+            active_candidates=active_candidates,
+            historical=historical,
+        )
 
     def _router_message_counts(
         self,
@@ -1299,36 +1088,13 @@ class TaskProcessingService:
         active_candidates: list[Any],
         historical: list[TaskRecord],
     ) -> dict[int, int]:
-        task_ids = [candidate.task.id for candidate in active_candidates] + [task.id for task in historical]
-        return self.store.count_task_messages_by_task_ids(task_ids)
-
-    def _task_session_context_access(
-        self,
-        *,
-        message: NormalizedMessage,
-        task: TaskRecord,
-    ) -> dict[str, Any] | None:
-        context = self._base_context_access()
-        if context is None:
-            return None
-        context["query_scope"] = {
-            "current_message_id": message.message_id,
-            "task": _context_task_card(task),
-        }
-        return context
+        return self.context_access.router_message_counts(
+            active_candidates=active_candidates,
+            historical=historical,
+        )
 
     def _base_context_access(self) -> dict[str, Any] | None:
-        if self.config.tool_permissions not in {"guarded_write", "full_access"}:
-            return None
-        path = self.store.path.expanduser()
-        if not path.exists():
-            return None
-        return {
-            "backend": "sqlite",
-            "mode": "live_read_only",
-            "read_only_uri": f"{path.resolve().as_uri()}?mode=ro",
-            "allowed_tables": ["tasks", "task_messages", "messages", "resources", "routing_audits"],
-        }
+        return self.context_access.base_context_access()
 
     def _resolve_router_target(self, target_task_id: str | None) -> TaskRecord | None:
         if not target_task_id:
@@ -1395,25 +1161,6 @@ def _can_directly_approve(proposed_reply: str, composed: ComposedReply) -> bool:
     return bool(proposed_reply.strip()) and bool(composed.text.strip()) and not composed.had_forbidden_mentions
 
 
-def _context_task_card(task: TaskRecord) -> dict[str, Any]:
-    return {"id": task.id, "short_id": task.short_id}
-
-
-def _task_session_context_metadata(
-    *,
-    session_id: str | None,
-    included_message_count: int,
-    task_message_count: int,
-) -> dict[str, Any]:
-    history_carried = session_id is not None
-    return {
-        "message_context_mode": "incremental_current_message" if history_carried else "full_task_messages",
-        "included_message_count": included_message_count,
-        "task_message_count": task_message_count,
-        "history_carried_by_agent_session": history_carried,
-    }
-
-
 def _escape_mention_display(value: str) -> str:
     escaped = escape(value, quote=False)
     return (
@@ -1421,165 +1168,6 @@ def _escape_mention_display(value: str) -> str:
         .replace("@_all", "&#64;_all")
         .replace("@all", "&#64;all")
     )
-
-
-def _reply_target_message_ids(*, task: TaskRecord, current_message_id: str) -> list[str]:
-    ids = [current_message_id]
-    if task.root_message_id:
-        ids.append(task.root_message_id)
-    return list(dict.fromkeys(ids))
-
-
-def _resource_preflight_state(
-    resources: list[Any],
-    *,
-    message: NormalizedMessage,
-    prompt_message_ids: list[str],
-) -> dict[str, Any]:
-    missing_current = _missing_current_prompt_resources(
-        resources,
-        message=message,
-        prompt_message_ids=prompt_message_ids,
-    )
-    if missing_current:
-        return {
-            "allow": False,
-            "reason": "resource_missing",
-            "retryable": True,
-            "error": f"missing resource records: {', '.join(missing_current)}",
-        }
-    if not resources:
-        return {"allow": True, "reason": "ok", "retryable": False, "error": None}
-    statuses = {row["download_status"] for row in resources}
-    if not statuses:
-        return {"allow": True, "reason": "ok", "retryable": False, "error": None}
-    if statuses <= {"downloaded"}:
-        return {"allow": True, "reason": "ok", "retryable": False, "error": None}
-    if statuses & {"bot_not_joined", "bot_invisible"}:
-        return {
-            "allow": False,
-            "reason": "resource_needs_bot",
-            "retryable": False,
-            "error": _resource_status_error(resources),
-        }
-    if statuses & {"skipped"}:
-        return {
-            "allow": False,
-            "reason": "resource_download_disabled",
-            "retryable": False,
-            "error": _resource_status_error(resources),
-        }
-    if statuses & {"too_large"}:
-        return {
-            "allow": False,
-            "reason": "resource_too_large",
-            "retryable": False,
-            "error": _resource_status_error(resources),
-        }
-    if statuses & {"quota_exceeded"}:
-        return {
-            "allow": False,
-            "reason": "resource_quota_exceeded",
-            "retryable": False,
-            "error": _resource_status_error(resources),
-        }
-    return {
-        "allow": False,
-        "reason": "resource_download_failed",
-        "retryable": True,
-        "error": _resource_status_error(resources),
-    }
-
-
-def _initial_resource_attempt_count(
-    resources: list[Any],
-    *,
-    message: NormalizedMessage,
-    prompt_message_ids: list[str],
-) -> int:
-    if not _has_current_prompt_resources(message=message, prompt_message_ids=prompt_message_ids):
-        return 0
-    current_keys = {
-        (resource.message_id, resource.file_key, resource.resource_type)
-        for resource in message.resources
-    }
-    row_keys = {
-        (row["message_id"], row["file_key"], row["resource_type"])
-        for row in resources
-    }
-    return 1 if current_keys & row_keys else 0
-
-
-def _has_current_prompt_resources(*, message: NormalizedMessage, prompt_message_ids: list[str]) -> bool:
-    return message.message_id in set(prompt_message_ids) and bool(message.resources)
-
-
-def _missing_current_prompt_resources(
-    resources: list[Any],
-    *,
-    message: NormalizedMessage,
-    prompt_message_ids: list[str],
-) -> list[str]:
-    if not _has_current_prompt_resources(message=message, prompt_message_ids=prompt_message_ids):
-        return []
-    row_keys = {
-        (row["message_id"], row["file_key"], row["resource_type"])
-        for row in resources
-    }
-    missing: list[str] = []
-    for resource in message.resources:
-        key = (resource.message_id, resource.file_key, resource.resource_type)
-        if key not in row_keys:
-            missing.append(f"{resource.resource_type}:{resource.file_key}")
-    return missing
-
-
-def _resource_status_counts(resources: list[Any]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for row in resources:
-        status = str(row["download_status"])
-        counts[status] = counts.get(status, 0) + 1
-    return counts
-
-
-def _resource_status_error(resources: list[Any]) -> str | None:
-    counts = _resource_status_counts(resources)
-    if not counts:
-        return None
-    return "resource statuses: " + ", ".join(f"{status}={count}" for status, count in sorted(counts.items()))
-
-
-def _agent_result_error(result: AgentRunResult) -> str:
-    parts = [
-        result.error,
-        result.stderr,
-        result.stdout,
-        f"exit_code={result.exit_code}" if result.exit_code is not None else None,
-        "timed_out=True" if result.timed_out else None,
-    ]
-    return " ".join(str(part).strip() for part in parts if part).strip() or "Agent backend call failed"
-
-
-def _is_retryable_agent_result(result: AgentRunResult) -> bool:
-    error_text = _agent_result_error(result).lower()
-    if result.timed_out:
-        return True
-    if any(marker in error_text for marker in TERMINAL_AGENT_ERROR_MARKERS):
-        return False
-    if "stdout was not valid json" in error_text:
-        return True
-    if result.exit_code is None:
-        return True
-    return result.exit_code != 0
-
-
-def _truncate_error(value: str | None, *, limit: int = 1000) -> str | None:
-    if value is None:
-        return None
-    cleaned = " ".join(str(value).split())
-    if len(cleaned) <= limit:
-        return cleaned
-    return f"{cleaned[:limit - 3]}..."
 
 
 def _plus_minutes(value: str, minutes: int) -> str:
