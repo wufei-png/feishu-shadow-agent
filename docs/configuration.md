@@ -64,8 +64,8 @@ python -m feishu_shadow_agent config schema
 | `agent_backend.hermes.timeout_seconds` | int `> 0` | `60` | Hermes 子进程或 health 调用超时。 |
 | `agent_backend.hermes.health_url` | string/null | `null` | `agent_backend.hermes.mode: http` 时追加使用；必须以 `http://` 或 `https://` 开头，HTTP 模式下必填。典型值为 `http://127.0.0.1:8642/health`。**不用于 chat/路由/会话调用**。 |
 | `agent_backend.hermes.api_key_env` | string/null | `HERMES_API_KEY` | `agent_backend.hermes.mode: http` 时可选 Bearer token 环境变量名。Hermes 官方 API server 常用 `API_SERVER_KEY`；`/health` 端点通常无需认证，此字段主要留给需要鉴权的 health URL。 |
-| `reply_policy.p2p_auto_reply` | bool | `true` | P2P 私聊在确定性 gate 通过时是否允许自动回复。 |
-| `reply_policy.default_group_auto_reply` | bool | `false` | 未在 `chats` 显式配置的群是否默认允许自动回复。 |
+| `reply_policy.p2p_auto_reply` | bool | `true` | P2P 私聊在回复 gate 通过时是否允许自动回复。 |
+| `reply_policy.unknown_group_auto_reply` | bool | `false` | 未在 `chats` 显式配置的群是否允许自动回复；不影响资源下载、bot 是否入群或 user fallback。 |
 | `chats.<chat_id>.name` | string | `""` | 方便 operator 识别的群名，不作为 chat_id。 |
 | `chats.<chat_id>.auto_reply` | bool | `false` | 该群在所有 gate 通过时是否允许自动回复。 |
 | `chats.<chat_id>.bot_joined` | bool | `false` | bot 是否已进群；影响 bot 回复和资源访问能力判断。 |

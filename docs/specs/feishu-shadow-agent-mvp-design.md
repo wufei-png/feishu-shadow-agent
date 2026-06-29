@@ -264,14 +264,15 @@ daemon 单轮执行顺序见 [Daemon tick 流程](./feishu-shadow-agent-flows.md
 
 ```yaml
 reply_policy:
-  mode: balanced
+  p2p_auto_reply: true
+  unknown_group_auto_reply: false
 ```
 
 含义：
 
 - 不确定、涉及承诺/隐私/写操作/权限扩大/多人责任不清：bot 私聊 owner。
-- P2P：证据完整、`answerability=auto_reply` 且确定性 gate 通过时允许自动回复。
-- 群聊：只有 per-chat policy 开启、直接 `@我`、证据完整、全部确定性 gate 通过时才自动回复。
+- P2P：证据完整、`answerability=auto_reply` 且回复 gate 通过时允许自动回复；single-active-task 只作为语义候选，不作为确定性 attach。
+- 群聊：显式 per-chat policy 开启，或未知群 `unknown_group_auto_reply` 开启时，直接 `@我`、证据完整、全部确定性 gate 通过才自动回复。
 
 身份规则：
 
@@ -358,7 +359,7 @@ chats:
 未知群默认：
 
 ```text
-处理但不自动回复。
+处理但不自动回复；资源下载、bot_joined 和 user fallback 使用 ChatPolicyConfig 默认值。
 ```
 
 P2P MVP 使用默认策略，不做 per-user 配置，但预留 `UserPolicyStore`。
@@ -630,8 +631,9 @@ owner_message:
 human_taken_over:
   owner_message 确定关联 active task
   例如 reply_to 命中 task_messages/agent reply，
-  或 thread:<thread_id> 唯一命中 active task，
-  或同一 P2P chat 在 watch_until 内唯一 active task
+  或 thread:<thread_id> 唯一命中 active task。
+  P2P owner takeover 也必须有 reply_to 或 thread 结构性证据；
+  同一 P2P chat 单 active task 不单独触发 takeover。
 ```
 
 命中 `human_taken_over` 后：
@@ -689,9 +691,6 @@ target_task_id
 可跳过 TaskRouter 的确定性 shortcut：
 
 ```text
-P2P:
-  同一 P2P chat 内只有一个 active task，且在 watch_until 内。
-
 群聊有 thread_id:
   thread:<thread_id> 唯一命中 active task。
 
@@ -699,8 +698,12 @@ P2P:
   reply_to 的 msg key 唯一命中 active task。
 ```
 
+P2P single-active 只进入语义候选；普通 follow-up 必须经 TaskRouter 判断
+`attach_task` 或 `new_task`。
+
 其他情况走 TaskRouter，特别是：
 
+- P2P single-active 候选。
 - 群聊无 thread 普通消息，仅 sender 在 watch_keys。
 - 群聊再次 @ owner。
 - 多个 active candidates。

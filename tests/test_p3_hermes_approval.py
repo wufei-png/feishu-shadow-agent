@@ -267,7 +267,7 @@ def test_explicit_group_auto_reply_false_overrides_global_default(tmp_path: Path
     hermes = FakeHermes()
     hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
     cfg = _config(
-        reply_policy=ReplyPolicyConfig(default_group_auto_reply=True),
+        reply_policy=ReplyPolicyConfig(unknown_group_auto_reply=True),
         chats={"oc_1": ChatPolicyConfig(auto_reply=False, bot_joined=True)},
     )
     store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
@@ -287,10 +287,10 @@ def test_explicit_group_auto_reply_false_overrides_global_default(tmp_path: Path
     assert send_count == 0
 
 
-def test_unknown_group_does_not_auto_reply_even_when_global_default_enabled(tmp_path: Path) -> None:
+def test_unknown_group_auto_reply_disabled_downgrades_to_approval(tmp_path: Path) -> None:
     hermes = FakeHermes()
     hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
-    cfg = _config(reply_policy=ReplyPolicyConfig(default_group_auto_reply=True))
+    cfg = _config(reply_policy=ReplyPolicyConfig(unknown_group_auto_reply=False))
     store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
 
     service.process_raw_message(
@@ -310,6 +310,30 @@ def test_unknown_group_does_not_auto_reply_even_when_global_default_enabled(tmp_
     assert notification["kind"] == "owner_notification"
     assert notification["status"] == "pending"
     assert send_count == 0
+
+
+def test_unknown_group_auto_reply_enabled_can_use_user_fallback(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
+    cfg = _config(reply_policy=ReplyPolicyConfig(unknown_group_auto_reply=True))
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    service.process_raw_message(
+        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        action = conn.execute("SELECT kind, status, payload_json FROM actions WHERE kind = 'send_reply'").fetchone()
+        approval_count = conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()["c"]
+    payload = json.loads(action["payload_json"])
+    assert action["kind"] == "send_reply"
+    assert action["status"] == "pending"
+    assert payload["identity"] == "user"
+    assert payload["policy_source"] == "unknown_group"
+    assert approval_count == 0
 
 
 def test_explicit_bot_identity_requires_bot_joined(tmp_path: Path) -> None:
@@ -452,6 +476,87 @@ def test_task_router_placeholder_can_create_new_task(tmp_path: Path) -> None:
         "active_tasks": [{"id": first_task["id"], "short_id": first_task["short_id"]}],
         "historical_tasks": [],
     }
+
+
+def test_p2p_single_active_same_task_can_attach_through_task_router(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(_session_id="sid_1", reply_target_message_id="om_1"))
+    hermes.session_outputs.append(
+        _session_output(include_task_label=False, _session_id="sid_1", reply_target_message_id="om_2")
+    )
+    store, service, _ = _service(tmp_path, hermes=hermes)
+
+    created = service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    hermes.router_outputs.append(
+        {
+            "route": "attach_task",
+            "target_task_id": created.task.short_id,
+            "reason": "same task",
+        }
+    )
+
+    service.process_raw_message(
+        _message("om_2", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        route = conn.execute(
+            "SELECT route, route_reason, router_called, matched_by FROM routing_audits WHERE message_id = ? ORDER BY id DESC LIMIT 1",
+            ("om_2",),
+        ).fetchone()
+        task_messages = conn.execute(
+            "SELECT COUNT(*) AS c FROM task_messages WHERE task_id = ?",
+            (created.task.id,),
+        ).fetchone()["c"]
+    assert route["route"] == "attach_task"
+    assert route["route_reason"] == "same task"
+    assert route["router_called"] == 1
+    assert route["matched_by"] == "task_router"
+    assert task_messages == 2
+
+
+def test_p2p_single_active_unrelated_topic_can_create_new_task_through_task_router(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(_session_id="sid_1", reply_target_message_id="om_1"))
+    hermes.router_outputs.append({"route": "new_task", "target_task_id": None, "reason": "new topic"})
+    hermes.session_outputs.append(_session_output(_session_id="sid_2", reply_target_message_id="om_2"))
+    store, service, _ = _service(tmp_path, hermes=hermes)
+
+    first = service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    second = service.process_raw_message(
+        _message("om_2", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    assert first is not None and first.task is not None
+    assert second is not None
+    with store.connect() as conn:
+        tasks = conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"]
+        route = conn.execute(
+            "SELECT route, route_reason, router_called, matched_by FROM routing_audits WHERE message_id = ? ORDER BY id DESC LIMIT 1",
+            ("om_2",),
+        ).fetchone()
+    assert tasks == 2
+    assert route["route"] == "new_task"
+    assert route["route_reason"] == "new topic"
+    assert route["router_called"] == 1
+    assert route["matched_by"] == "task_router"
 
 
 def test_task_router_ignore_records_audit_without_notification(tmp_path: Path) -> None:
@@ -840,6 +945,13 @@ def test_task_session_followup_uses_stored_hermes_session(tmp_path: Path) -> Non
         run_id="run_1",
     )
     assert first is not None and first.task is not None
+    hermes.router_outputs.append(
+        {
+            "route": "attach_task",
+            "target_task_id": first.task.short_id,
+            "reason": "same task",
+        }
+    )
     service.process_raw_message(
         _message("om_2", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
         source="p2p",
@@ -924,11 +1036,19 @@ def test_task_session_followup_rejects_task_label(tmp_path: Path) -> None:
     hermes.session_outputs.append(_session_output(_session_id="sid_1", reply_target_message_id="om_2"))
     store, service, _ = _service(tmp_path, hermes=hermes)
 
-    service.process_raw_message(
+    first = service.process_raw_message(
         _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
         source="p2p",
         default_chat_type="p2p",
         run_id="run_1",
+    )
+    assert first is not None and first.task is not None
+    hermes.router_outputs.append(
+        {
+            "route": "attach_task",
+            "target_task_id": first.task.short_id,
+            "reason": "same task",
+        }
     )
     service.process_raw_message(
         _message("om_2", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),

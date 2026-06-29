@@ -23,6 +23,7 @@ def test_load_minimal_config() -> None:
     assert loaded.config.logging.text_path == "logs/test.log"
     assert loaded.config.tool_permissions == "guarded_write"
     assert loaded.config.chats["oc_test"].auto_reply is True
+    assert loaded.config.reply_policy.unknown_group_auto_reply is False
     assert loaded.config.agent_backend.provider == "hermes"
     assert loaded.config.agent_backend.config_scope == "isolated"
     assert loaded.config.agent_backend.auto_context == "disabled"
@@ -177,6 +178,22 @@ chats:
     )
 
     with pytest.raises(ConfigError, match="auto_reply"):
+        ConfigService().load(config_path)
+
+
+def test_legacy_default_group_auto_reply_is_rejected(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+reply_policy:
+  default_group_auto_reply: true
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="default_group_auto_reply"):
         ConfigService().load(config_path)
 
 

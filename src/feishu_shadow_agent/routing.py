@@ -119,7 +119,7 @@ class MessageRouter:
             return self._audit(message, RouteDecision("ignore", reason="non_direct_mention"))
 
         candidates = self.collector.collect(message, now=now)
-        deterministic = self._deterministic_match(message, candidates, now=now)
+        deterministic = self._deterministic_match(message, candidates)
         if deterministic is not None:
             decision = self.store.attach_message_to_task_and_audit(
                 deterministic.task,
@@ -202,25 +202,15 @@ class MessageRouter:
             )
             if len(active) == 1:
                 return active[0]
-        if message.chat_type == "p2p":
-            active = self.store.get_active_tasks_for_chat(message.chat_id, now=now)
-            if len(active) == 1:
-                return active[0]
         return None
 
     def _deterministic_match(
         self,
         message: NormalizedMessage,
         candidates: list[TaskCandidate],
-        *,
-        now: str,
     ) -> TaskCandidate | None:
         if not message.chat_id:
             return None
-        if message.chat_type == "p2p":
-            active = self.store.get_active_tasks_for_chat(message.chat_id, now=now)
-            if len(active) == 1:
-                return TaskCandidate(active[0], "p2p_single_active")
         reply_matches = [candidate for candidate in candidates if candidate.matched_by == "reply_to_msg"]
         if len(reply_matches) == 1:
             return reply_matches[0]

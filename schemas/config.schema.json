@@ -374,14 +374,14 @@
       "properties": {
         "p2p_auto_reply": {
           "default": true,
-          "description": "Whether one-to-one chats may auto-reply when deterministic reply gates pass.",
+          "description": "Whether one-to-one chats may auto-reply when reply gates pass.",
           "title": "P2P Auto Reply",
           "type": "boolean"
         },
-        "default_group_auto_reply": {
+        "unknown_group_auto_reply": {
           "default": false,
-          "description": "Default auto-reply behavior for groups without an explicit chats entry.",
-          "title": "Default Group Auto Reply",
+          "description": "Whether groups without an explicit chats entry may auto-reply when all gates pass.",
+          "title": "Unknown Group Auto Reply",
           "type": "boolean"
         }
       },

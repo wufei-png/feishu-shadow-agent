@@ -115,7 +115,6 @@ flowchart TD
 
   CandidateCollector --> MatchAudit["写 candidates_count / shortcut_hit"]
   MatchAudit --> Deterministic{"确定性 shortcut 命中"}
-  Deterministic -->|P2P 单 active task| Attach["attach_task"]
   Deterministic -->|thread_id 唯一命中| Attach
   Deterministic -->|reply_to msg 唯一命中| Attach
 

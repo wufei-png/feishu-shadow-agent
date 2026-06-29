@@ -10,8 +10,9 @@ from typing import Any, Callable
 from pydantic import ValidationError
 
 from .agent_backend import AgentBackend, AgentRunResult
-from .config import AppConfig, ChatPolicyConfig
+from .config import AppConfig
 from .jsonl import JSONLLogger
+from .policy import PolicyResolver
 from .prompt import (
     BaseTaskSessionOutput,
     FollowupTaskSessionOutput,
@@ -202,6 +203,7 @@ class TaskProcessingService:
         self.collector = CandidateCollector(store)
         self.approvals = ApprovalService(store=store, config=config)
         self.composer = SendComposer(owner_open_id=config.owner.open_id)
+        self.policy = PolicyResolver(config)
         self.agent_max_attempts = max(1, agent_max_attempts)
         self.agent_retry_delays_seconds = agent_retry_delays_seconds
         self.sleep_func = sleep_func
@@ -1068,6 +1070,7 @@ class TaskProcessingService:
                     "task_short_id": task.short_id,
                     "reason": gate["reason"],
                     "identity": gate["identity"],
+                    "policy_source": gate["policy_source"],
                     "answerability": output.answerability,
                 },
             )
@@ -1091,6 +1094,7 @@ class TaskProcessingService:
             "text": composed.text,
             "identity": gate["identity"],
             "source": "auto_reply",
+            "policy_source": gate["policy_source"],
         }
         action_id = self.store.create_send_reply_action(
             task_id=task.id,
@@ -1113,6 +1117,7 @@ class TaskProcessingService:
                 "action_id": action_id,
                 "reply_target_message_id": reply_target_id,
                 "identity": gate["identity"],
+                "policy_source": gate["policy_source"],
             },
         )
         return ProcessingResult("send_action_created", task.id, action_id=action_id, reason="gate_passed")
@@ -1195,41 +1200,20 @@ class TaskProcessingService:
         output: BaseTaskSessionOutput,
         composed: ComposedReply,
     ) -> dict[str, Any]:
-        if output.answerability != "auto_reply":
-            return {"allow": False, "reason": "needs_owner", "identity": "user"}
-        if composed.had_forbidden_mentions:
-            return {"allow": False, "reason": "forbidden_mentions", "identity": "user"}
-        if not output.proposed_reply.strip() or not composed.text.strip():
-            return {"allow": False, "reason": "empty_proposed_reply", "identity": "user"}
-        chat_type = task.chat_type or message.chat_type
-        policy = self._chat_policy(task.chat_id or message.chat_id)
-        if chat_type == "p2p":
-            if not self.config.reply_policy.p2p_auto_reply:
-                return {"allow": False, "reason": "p2p_auto_reply_disabled", "identity": "user"}
-            return {"allow": True, "reason": "ok", "identity": "user"}
-        if chat_type == "group":
-            if not message.direct_mention:
-                return {"allow": False, "reason": "group_not_direct_mention", "identity": "user"}
-            chat_configured = bool((task.chat_id or message.chat_id) in self.config.chats)
-            if not chat_configured:
-                # Unknown groups are still processed for owner visibility, but
-                # never auto-replied until a per-chat policy exists.
-                return {"allow": False, "reason": "unknown_group_auto_reply_disabled", "identity": "user"}
-            if not policy.auto_reply:
-                return {"allow": False, "reason": "group_auto_reply_disabled", "identity": "user"}
-            if policy.reply_identity in {"bot", "bot_preferred"} and policy.bot_joined:
-                return {"allow": True, "reason": "ok", "identity": "bot"}
-            if policy.reply_identity == "user":
-                return {"allow": True, "reason": "ok", "identity": "user"}
-            if policy.reply_identity == "bot_preferred" and policy.allow_user_fallback:
-                return {"allow": True, "reason": "ok", "identity": "user"}
-            return {"allow": False, "reason": "bot_not_joined", "identity": "bot"}
-        return {"allow": False, "reason": "unknown_chat_type", "identity": "user"}
-
-    def _chat_policy(self, chat_id: str | None) -> ChatPolicyConfig:
-        if chat_id and chat_id in self.config.chats:
-            return self.config.chats[chat_id]
-        return ChatPolicyConfig()
+        decision = self.policy.resolve_reply_policy(
+            task=task,
+            message=message,
+            answerability=output.answerability,
+            had_forbidden_mentions=composed.had_forbidden_mentions,
+            proposed_reply=output.proposed_reply,
+            final_reply=composed.text,
+        )
+        return {
+            "allow": decision.allow,
+            "reason": decision.reason,
+            "identity": decision.identity,
+            "policy_source": decision.policy_source,
+        }
 
     def _task_session_prompt_message_ids(
         self,

@@ -8,9 +8,10 @@ from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
-from .config import AppConfig, ChatPolicyConfig
+from .config import AppConfig
 from .feishu.client import FeishuClient
 from .jsonl import JSONLLogger
+from .policy import PolicyResolver
 from .processing import ApprovalService, TaskProcessingService
 from .routing import MessageRouter, RoutingResult
 from .store.sqlite_store import SQLiteStore
@@ -139,14 +140,22 @@ class ResourceProcessor:
         self.config = config
         self.logger = logger
         self.config_base_dir = Path(config_base_dir or Path.cwd()).expanduser().resolve()
+        self.policy = PolicyResolver(config)
 
     def process(self, message: NormalizedMessage, *, run_id: str | None = None) -> None:
         if not message.resources:
             return
-        policy = self._chat_policy(message.chat_id)
+        resource_policy = self.policy.can_download_resources(message)
         for resource in message.resources:
-            if not policy.resource_download:
-                self.store.upsert_resource(resource, download_status="skipped")
+            if not resource_policy.allow and resource_policy.reason == "disabled_by_chat_policy":
+                self.store.upsert_resource(
+                    resource,
+                    download_status="skipped",
+                    raw={
+                        "reason": "disabled_by_chat_policy",
+                        "policy_source": resource_policy.policy_source,
+                    },
+                )
                 self.logger.info(
                     "resource_download_skipped",
                     run_id=run_id,
@@ -155,17 +164,21 @@ class ResourceProcessor:
                         "file_key": resource.file_key,
                         "resource_type": resource.resource_type,
                         "reason": "disabled_by_chat_policy",
+                        "policy_source": resource_policy.policy_source,
                     },
                 )
                 continue
-            if not policy.bot_joined:
+            if not resource_policy.allow and resource_policy.reason == "bot_not_joined":
                 # Resource download is bot-only for user messages. Recording the
                 # gate here avoids repeated 234040/234002 calls and lets reply
                 # policy decide whether the task can proceed without the asset.
                 self.store.upsert_resource(
                     resource,
                     download_status="bot_not_joined",
-                    raw={"reason": "chat_policy_bot_joined_false"},
+                    raw={
+                        "reason": "chat_policy_bot_joined_false",
+                        "policy_source": resource_policy.policy_source,
+                    },
                 )
                 self.logger.warning(
                     "resource_download_skipped",
@@ -175,6 +188,7 @@ class ResourceProcessor:
                         "file_key": resource.file_key,
                         "resource_type": resource.resource_type,
                         "reason": "bot_not_joined",
+                        "policy_source": resource_policy.policy_source,
                     },
                 )
                 continue
@@ -265,11 +279,6 @@ class ResourceProcessor:
                         "timed_out": result.timed_out,
                     },
                 )
-
-    def _chat_policy(self, chat_id: str | None) -> ChatPolicyConfig:
-        if chat_id and chat_id in self.config.chats:
-            return self.config.chats[chat_id]
-        return ChatPolicyConfig()
 
 
 class IngestionService:

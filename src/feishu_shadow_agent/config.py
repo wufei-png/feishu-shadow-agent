@@ -192,11 +192,11 @@ class AgentBackendConfig(StrictModel):
 class ReplyPolicyConfig(StrictModel):
     p2p_auto_reply: StrictBool = Field(
         default=True,
-        description="Whether one-to-one chats may auto-reply when deterministic reply gates pass.",
+        description="Whether one-to-one chats may auto-reply when reply gates pass.",
     )
-    default_group_auto_reply: StrictBool = Field(
+    unknown_group_auto_reply: StrictBool = Field(
         default=False,
-        description="Default auto-reply behavior for groups without an explicit chats entry.",
+        description="Whether groups without an explicit chats entry may auto-reply when all gates pass.",
     )
 
 

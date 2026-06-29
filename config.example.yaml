@@ -47,7 +47,7 @@ agent_backend:
 
 reply_policy:
   p2p_auto_reply: true
-  default_group_auto_reply: false
+  unknown_group_auto_reply: false
 
 chats:
   oc_xxx:
