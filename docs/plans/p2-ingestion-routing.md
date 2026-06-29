@@ -115,7 +115,7 @@
     - `ingest.p2p`
     - `active_watch.chat.<chat_id>`
     - `active_watch.thread.<thread_id>`
-  - task 状态至少覆盖：`watching`、`waiting_approval`、`closed`、`closed_by_owner`、`human_taken_over`。
+  - task 状态至少覆盖：`watching`、`closed`、`closed_by_owner`、`human_taken_over`；pending approval 作为 blocker 从 `approvals` 派生，不写入 `tasks.status`。
   - routing audit 可通过 `actions` 或新增专用轻表记录，必须能支持后续 `status/replay` 查看 `route_reason`、`candidates_count`、`shortcut_hit`、`router_called=false`、`matched_by`、`target_task_id`。
 
 ## Test Plan

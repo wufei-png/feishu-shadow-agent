@@ -95,7 +95,7 @@ dispatcher hardening.
 
 - Add approvals and owner commands:
   - Extend approvals with preview/notification metadata and add an `approval_commands` table keyed by `message_id` to make inbox command processing idempotent.
-  - `ApprovalService` creates `send_reply` approvals when gates fail or Hermes schema/target validation fails, marks task `waiting_approval`, and creates a pending `owner_notification` action with copyable `/approve`, `/send`, and `/reject` commands.
+  - `ApprovalService` creates `send_reply` approvals when gates fail or Hermes schema/target validation fails, leaves `tasks.status` unchanged, exposes the pending approval as a blocker for status/replay/operator views, and creates a pending `owner_notification` action with copyable `/approve`, `/send`, and `/reject` commands.
   - Replace `run_approval_inbox_placeholder` with real inbox ingestion. Resolve bot open id from `lark-cli auth status --json --verify`, then read owner-bot P2P using user identity: `+chat-messages-list --as user --user-id <bot_open_id>`.
   - Parse only owner-sent commands in that P2P: `/approve <a_id|t_id>`, `/reject <a_id|t_id>`, `/send <task_id> <final reply>`. Task-id shortcut works only when exactly one pending approval exists for the task; multiple pending approvals produce an owner notification asking for the concrete `a_...`.
   - `/approve` marks approval approved and creates one pending send action. `/reject` marks approval rejected and closes the task. `/send` creates an approved manual `send_reply` approval and pending send action, using the sole pending approval target when available, otherwise the task root message.
