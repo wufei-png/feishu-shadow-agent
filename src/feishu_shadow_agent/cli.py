@@ -18,6 +18,7 @@ from .feishu.lark_cli import LarkCliClient
 from .health import HealthSuite, has_critical_failure, summarize_results
 from .hermes import HermesCliClient
 from .jsonl import JSONLLogger
+from .operator_commands import CommandResult, OperatorCommandService, command_exit_code
 from .operator_query import OperatorQueryService
 from .paths import resolve_agent_skill_path, resolve_relative_path
 from .processing import TaskProcessingService
@@ -281,16 +282,14 @@ def _handle_local_approval_command(
     final_reply: str | None = None,
 ) -> int:
     _, store, _ = _load_runtime(config_path)
-    command = f"/{verb} {target_id}" if final_reply is None else f"/{verb} {target_id} {final_reply}"
-    result = store.apply_approval_command(
-        message_id=new_run_id(f"local_{verb}"),
-        command=command,
-        verb=verb,
-        target_id=target_id,
-        final_reply=final_reply,
-    )
-    print(yaml.safe_dump(result, allow_unicode=True, sort_keys=False), end="")
-    return 0 if result.get("status") == "applied" else 2
+    service = OperatorCommandService(store)
+    if verb == "approve":
+        result = service.approve(target_id, actor="local_cli")
+    elif verb == "reject":
+        result = service.reject(target_id, actor="local_cli")
+    else:
+        result = service.send(target_id, final_reply or "", actor="local_cli")
+    return _emit_command_result(result)
 
 
 def _handle_replay(args: argparse.Namespace) -> int:
@@ -354,9 +353,8 @@ def _handle_retention_prune(args: argparse.Namespace) -> int:
 
 def _handle_maintenance_expire_approvals(args: argparse.Namespace) -> int:
     _, store, _ = _load_runtime(args.config)
-    expired = store.expire_pending_approvals()
-    print(yaml.safe_dump({"expired_approvals": expired}, allow_unicode=True, sort_keys=False), end="")
-    return 0
+    result = OperatorCommandService(store).expire_approvals(actor="local_cli")
+    return _emit_command_result(result)
 
 
 def _handle_policy_import_config(args: argparse.Namespace) -> int:
@@ -372,12 +370,8 @@ def _handle_policy_import_config(args: argparse.Namespace) -> int:
 
 def _handle_dispatch_inspect(args: argparse.Namespace) -> int:
     _, store, _ = _load_runtime(args.config)
-    inspection = store.get_dispatch_inspection(args.action_id)
-    if inspection is None:
-        print(f"action not found: {args.action_id}", file=sys.stderr)
-        return 2
-    print(yaml.safe_dump(inspection, allow_unicode=True, sort_keys=False), end="")
-    return 0
+    result = OperatorCommandService(store).inspect_dispatch_action(args.action_id, actor="local_cli")
+    return _emit_command_result(result)
 
 
 def _handle_dispatch_mark_sent(args: argparse.Namespace) -> int:
@@ -393,54 +387,29 @@ def _handle_dispatch_mark_sent(args: argparse.Namespace) -> int:
         config=loaded.config,
         logger=logger,
     )
-    result = dispatcher.mark_action_sent_after_readback(
+    result = OperatorCommandService(store, readback_marker=dispatcher).mark_dispatch_sent(
         args.action_id,
         sent_message_id=args.sent_message_id,
-        run_id=new_run_id("dispatch_recovery"),
+        actor="local_cli",
     )
-    print(yaml.safe_dump(result, allow_unicode=True, sort_keys=False), end="")
-    return 0 if result.get("status") == "sent" else 2
+    return _emit_command_result(result)
 
 
 def _handle_dispatch_retry(args: argparse.Namespace) -> int:
     _, store, _ = _load_runtime(args.config)
-    try:
-        action = store.retry_dispatch_action(args.action_id)
-    except ValueError as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
-    print(
-        yaml.safe_dump(
-            {"status": "requeued", "action": _action_output(action)},
-            allow_unicode=True,
-            sort_keys=False,
-        ),
-        end="",
-    )
-    return 0
+    result = OperatorCommandService(store).retry_dispatch_action(args.action_id, actor="local_cli")
+    return _emit_command_result(result)
 
 
 def _handle_dispatch_cancel(args: argparse.Namespace) -> int:
     _, store, _ = _load_runtime(args.config)
-    try:
-        action = store.cancel_dispatch_action(args.action_id)
-    except ValueError as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
-    print(
-        yaml.safe_dump(
-            {"status": "cancelled", "action": _action_output(action)},
-            allow_unicode=True,
-            sort_keys=False,
-        ),
-        end="",
-    )
-    return 0
+    result = OperatorCommandService(store).cancel_dispatch_action(args.action_id, actor="local_cli")
+    return _emit_command_result(result)
 
 
-def _action_output(action: object) -> dict[str, object]:
-    data = getattr(action, "__dict__", {}).copy()
-    return data if isinstance(data, dict) else {}
+def _emit_command_result(result: CommandResult) -> int:
+    print(yaml.safe_dump(result.as_dict(), allow_unicode=True, sort_keys=False), end="")
+    return command_exit_code(result)
 
 
 def _load_runtime(config_path: str | None) -> tuple[LoadedConfig, SQLiteStore, JSONLLogger]:

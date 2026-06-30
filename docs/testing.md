@@ -145,6 +145,8 @@ python -m feishu_shadow_agent daemon --config config.yaml
 
 `status` 通过只读 OperatorQueryService 输出 daemon liveness、Product Policy 状态、pending approvals、active tasks、dispatch actions 和最近错误；`replay` 只读取本地状态并预览相关 dispatch。两者都不推进审批过期。超过 `expires_at` 但尚未被显式推进的 approval 仍显示为 `pending`，并通过 `is_overdue`、`overdue_seconds` 和 `recommended_action: expire` 提示 operator。
 
+本地 operator mutation 命令通过 OperatorCommandService 输出统一 YAML 结果，顶层字段包括 `status`、`command`、`actor`、`target`、`changed`、`result`、`warnings` 和 `next_actions`。`approve` / `reject` / `send`、dispatch recovery 和 maintenance expiry 都使用这个结构；`status: applied` 或 `no_change` 返回退出码 0，其余失败类状态返回退出码 2。
+
 如需显式推进 overdue approval 过期：
 
 ```bash

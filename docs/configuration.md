@@ -102,6 +102,8 @@ Product Policy Store 是运行时 Product Policy 真相来源，包含全局 `pr
 python -m feishu_shadow_agent maintenance expire-approvals --config config.yaml
 ```
 
+`approve`、`reject`、`send`、`dispatch inspect`、`dispatch mark-sent`、`dispatch retry`、`dispatch cancel` 和 `maintenance expire-approvals` 都通过 OperatorCommandService 返回同一类 YAML 命令结果。`changed` 表示目标 operator 动作是否实际推进，具体业务结果在 `result` 中；`dispatch inspect` 成功时是 `status: no_change`，因为它只读取恢复证据。
+
 资源下载先通过 chat policy，再受本地限额保护。单文件超过 `storage.max_resource_bytes` 时，刚下载的文件会被删除，`resources.download_status` 置为 `too_large`，`path` 置空，并把尝试路径和大小写入 `raw_json`。`resource_dir` 用量超过 `storage.max_resource_dir_bytes` 时，刚下载文件会被删除，当前和后续资源标记为 `quota_exceeded` 且 `path` 置空。`too_large` / `quota_exceeded` 会阻塞 task session agent，并创建 owner notification；第一版不让 agent 在缺少资源的情况下语义降级回答。
 
 ## Agent Backend 上下文语义

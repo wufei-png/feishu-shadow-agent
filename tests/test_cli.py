@@ -101,6 +101,70 @@ def test_send_can_read_exact_text_from_stdin(tmp_path: Path, monkeypatch) -> Non
     assert payload["text"] == "line 1\n    line 2\n"
 
 
+def test_approve_and_reject_emit_operator_command_result(tmp_path: Path, capsys) -> None:
+    config = _write_config(tmp_path)
+    store = _store(tmp_path)
+    approve_task_id = _insert_task(store, "t_approve", "om_approve_root")
+    reject_task_id = _insert_task(store, "t_reject", "om_reject_root")
+    approve_id = store.create_send_reply_approval(
+        task_id=approve_task_id,
+        preview="approved reply",
+        payload={
+            "reply_target_message_id": "om_approve_root",
+            "text": "approved reply",
+            "identity": "user",
+            "source": "approval_request",
+        },
+        approval_timeout_hours=None,
+    )
+    reject_id = store.create_send_reply_approval(
+        task_id=reject_task_id,
+        preview="rejected reply",
+        payload={
+            "reply_target_message_id": "om_reject_root",
+            "text": "rejected reply",
+            "identity": "user",
+            "source": "approval_request",
+        },
+        approval_timeout_hours=None,
+    )
+    with store.connect() as conn:
+        approve_short_id = conn.execute("SELECT short_id FROM approvals WHERE id = ?", (approve_id,)).fetchone()["short_id"]
+        reject_short_id = conn.execute("SELECT short_id FROM approvals WHERE id = ?", (reject_id,)).fetchone()["short_id"]
+
+    assert main(["approve", "--config", str(config), approve_short_id]) == 0
+    approve_output = yaml.safe_load(capsys.readouterr().out)
+    assert approve_output["status"] == "applied"
+    assert approve_output["command"] == "approval.approve"
+    assert approve_output["actor"] == "local_cli"
+    assert approve_output["target"] == {"type": "approval_or_task", "id": approve_short_id}
+    assert approve_output["changed"] is True
+    assert approve_output["result"]["approval_command_status"] == "applied"
+    assert approve_output["next_actions"][0]["command"] == "dispatch.inspect"
+
+    assert main(["reject", "--config", str(config), reject_short_id]) == 0
+    reject_output = yaml.safe_load(capsys.readouterr().out)
+    assert reject_output["status"] == "applied"
+    assert reject_output["command"] == "approval.reject"
+    assert reject_output["actor"] == "local_cli"
+    assert reject_output["target"] == {"type": "approval_or_task", "id": reject_short_id}
+    assert reject_output["changed"] is True
+    assert reject_output["result"]["approval_command_status"] == "applied"
+    assert reject_output["next_actions"] == []
+
+    with store.connect() as conn:
+        approvals = {
+            row["id"]: row["status"]
+            for row in conn.execute("SELECT id, status FROM approvals WHERE id IN (?, ?)", (approve_id, reject_id))
+        }
+        approved_actions = conn.execute(
+            "SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply' AND approval_id = ?",
+            (approve_id,),
+        ).fetchone()["c"]
+    assert approvals == {approve_id: "approved", reject_id: "rejected"}
+    assert approved_actions == 1
+
+
 def test_daemon_send_owner_notifications_help_describes_dry_run_send(capsys) -> None:
     with pytest.raises(SystemExit) as exc:
         main(["daemon", "--help"])
@@ -449,7 +513,11 @@ def test_maintenance_expire_approvals_expires_overdue_and_reports_count(tmp_path
     assert main(["maintenance", "expire-approvals", "--config", str(config)]) == 0
 
     output = yaml.safe_load(capsys.readouterr().out)
-    assert output == {"expired_approvals": 1}
+    assert output["status"] == "applied"
+    assert output["command"] == "maintenance.expire_approvals"
+    assert output["actor"] == "local_cli"
+    assert output["changed"] is True
+    assert output["result"] == {"expired_approvals": 1}
     with store.connect() as conn:
         approval = conn.execute(
             "SELECT status, resolved_at FROM approvals WHERE id = ?",
@@ -539,9 +607,12 @@ def test_dispatch_inspect_is_read_only_and_shows_attempts(tmp_path: Path, capsys
     assert main(["dispatch", "inspect", "--config", str(config), "--action-id", str(action_id)]) == 0
 
     output = yaml.safe_load(capsys.readouterr().out)
-    assert output["action"]["id"] == action_id
-    assert output["action"]["status"] == "sending"
-    assert output["attempts"][0]["status"] == "started"
+    assert output["status"] == "no_change"
+    assert output["command"] == "dispatch.inspect"
+    assert output["changed"] is False
+    assert output["result"]["action"]["id"] == action_id
+    assert output["result"]["action"]["status"] == "sending"
+    assert output["result"]["attempts"][0]["status"] == "started"
     action = store.get_action(action_id)
     assert action is not None
     assert action.status == "sending"
@@ -571,7 +642,13 @@ def test_dispatch_retry_requeues_failed_actions_and_preserves_idempotency(tmp_pa
 
     output = yaml.safe_load(capsys.readouterr().out)
     action = store.get_action(action_id)
-    assert output["status"] == "requeued"
+    assert output["status"] == "applied"
+    assert output["command"] == "dispatch.retry"
+    assert output["changed"] is True
+    assert output["result"]["action"]["status"] == "pending"
+    assert output["next_actions"] == [
+        {"command": "dispatch.inspect", "target": {"type": "dispatch_action", "action_id": action_id}}
+    ]
     assert action is not None
     assert action.status == "pending"
     assert action.idempotency_key == original_key
@@ -592,7 +669,9 @@ def test_dispatch_retry_rejects_sending_actions(tmp_path: Path, capsys) -> None:
 
     assert main(["dispatch", "retry", "--config", str(config), "--action-id", str(action_id)]) == 2
 
-    assert "only accepts failed or failed_needs_review" in capsys.readouterr().err
+    output = yaml.safe_load(capsys.readouterr().out)
+    assert output["status"] == "validation_failed"
+    assert "only accepts failed or failed_needs_review" in output["result"]["error"]
     action = store.get_action(action_id)
     assert action is not None
     assert action.status == "sending"
@@ -613,7 +692,10 @@ def test_dispatch_cancel_releases_active_send_target(tmp_path: Path, capsys) -> 
     assert main(["dispatch", "cancel", "--config", str(config), "--action-id", str(action_id)]) == 0
 
     output = yaml.safe_load(capsys.readouterr().out)
-    assert output["status"] == "cancelled"
+    assert output["status"] == "applied"
+    assert output["command"] == "dispatch.cancel"
+    assert output["changed"] is True
+    assert output["result"]["action"]["status"] == "cancelled"
     action = store.get_action(action_id)
     assert action is not None
     assert action.status == "cancelled"
@@ -682,7 +764,11 @@ def test_dispatch_mark_sent_requires_readback_evidence(tmp_path: Path, capsys, m
     output = yaml.safe_load(capsys.readouterr().out)
     action = store.get_action(action_id)
     attempts = store.list_dispatch_attempts(action_id)
-    assert output["status"] == "sent"
+    assert output["status"] == "applied"
+    assert output["command"] == "dispatch.mark_sent"
+    assert output["changed"] is True
+    assert output["result"]["status"] == "sent"
+    assert output["result"]["sent_message_id"] == "om_sent"
     assert action is not None
     assert action.status == "sent"
     assert action.result["sent_message_id"] == "om_sent"
@@ -778,7 +864,8 @@ def test_dispatch_mark_sent_rejects_unverified_send_reply_evidence(
     output = yaml.safe_load(capsys.readouterr().out)
     action = store.get_action(action_id)
     attempts = store.list_dispatch_attempts(action_id)
-    assert expected_error in output["error"]
+    assert output["status"] == "validation_failed"
+    assert expected_error in output["result"]["error"]
     assert action is not None
     assert action.status == "failed_needs_review"
     assert attempts[-1].status == "uncertain"
@@ -862,7 +949,8 @@ def test_dispatch_mark_sent_cancel_race_does_not_persist_readback_context(
 
     output = yaml.safe_load(capsys.readouterr().out)
     action = store.get_action(action_id)
-    assert "cancelled actions cannot be marked sent" in output["error"]
+    assert output["status"] == "conflict"
+    assert "cancelled actions cannot be marked sent" in output["result"]["error"]
     assert action is not None
     assert action.status == "cancelled"
     with store.connect() as conn:
