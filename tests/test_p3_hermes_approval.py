@@ -1809,6 +1809,101 @@ def test_approval_timeout_null_leaves_expires_at_null(tmp_path: Path) -> None:
     assert approval["expires_at"] is None
 
 
+def test_approval_command_expires_overdue_before_resolving_command(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config(lifecycle=LifecycleConfig(approval_timeout_hours=1))
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_root", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    approval_id = ApprovalService(store=store, config=cfg).request_send_reply(
+        task=created.task,
+        reply_target_message_id="om_root",
+        proposed_reply="manual reply",
+        reason="test",
+    )
+    with store.connect() as conn:
+        approval_short_id = conn.execute(
+            "SELECT short_id FROM approvals WHERE id = ?",
+            (approval_id,),
+        ).fetchone()["short_id"]
+        conn.execute("UPDATE approvals SET expires_at = ? WHERE id = ?", ("2000-01-01T00:00:00+00:00", approval_id))
+
+    result = store.apply_approval_command(
+        message_id="om_approve_overdue",
+        command=f"/approve {approval_short_id}",
+        verb="approve",
+        target_id=approval_short_id,
+    )
+
+    assert result["status"] == "failed"
+    assert "pending approval not found" in result["result"]["error"]
+    with store.connect() as conn:
+        approval = conn.execute("SELECT status, resolved_at FROM approvals WHERE id = ?", (approval_id,)).fetchone()
+        action_count = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
+    assert approval["status"] == "expired"
+    assert approval["resolved_at"] is not None
+    assert action_count == 0
+
+
+def test_dispatchable_action_reads_do_not_expire_overdue_approval(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config(lifecycle=LifecycleConfig(approval_timeout_hours=1))
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_root", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    store.insert_approval_for_test(short_id="a_overdue", task_id=created.task.id)
+    with store.connect() as conn:
+        approval_id = conn.execute(
+            "SELECT id FROM approvals WHERE short_id = ?",
+            ("a_overdue",),
+        ).fetchone()["id"]
+        conn.execute(
+            "UPDATE approvals SET expires_at = ? WHERE id = ?",
+            ("2000-01-01T00:00:00+00:00", approval_id),
+        )
+    action_id = store.create_send_reply_action(
+        task_id=created.task.id,
+        target_message_id="om_root",
+        payload={"reply_target_message_id": "om_root", "text": "manual reply", "identity": "user"},
+        approval_id=approval_id,
+    )
+    assert action_id is not None
+
+    pending_count = store.count_pending_actions()
+    dispatchable = store.list_dispatchable_actions()
+
+    with store.connect() as conn:
+        approval = conn.execute("SELECT status, resolved_at FROM approvals WHERE id = ?", (approval_id,)).fetchone()
+        action = conn.execute("SELECT status FROM actions WHERE id = ?", (action_id,)).fetchone()
+    assert pending_count == 1
+    assert [action.id for action in dispatchable] == [action_id]
+    assert approval["status"] == "pending"
+    assert approval["resolved_at"] is None
+    assert action["status"] == "pending"
+
+
 def test_approval_expiry_cancels_related_pending_send_and_keeps_task_watching(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     cfg = _config(lifecycle=LifecycleConfig(approval_timeout_hours=1))
@@ -1887,6 +1982,7 @@ def test_approval_expiry_cancels_related_owner_notification(tmp_path: Path) -> N
     assert notification["approval_id"] == approval_id
     assert notification["status"] == "pending"
 
+    expired = store.expire_pending_approvals(now="2026-06-22T10:30:00+08:00")
     dispatchable = store.list_dispatchable_actions()
 
     with store.connect() as conn:
@@ -1895,8 +1991,9 @@ def test_approval_expiry_cancels_related_owner_notification(tmp_path: Path) -> N
             "SELECT status FROM actions WHERE id = ?",
             (notification["id"],),
         ).fetchone()
+    assert expired == 1
     assert approval["status"] == "expired"
-    assert approval["resolved_at"] is not None
+    assert approval["resolved_at"] == "2026-06-22T10:30:00+08:00"
     assert notification_after["status"] == "cancelled"
     assert notification["id"] not in {action.id for action in dispatchable}
 

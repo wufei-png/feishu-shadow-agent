@@ -125,6 +125,14 @@ python -m feishu_shadow_agent daemon --config config.yaml
 /reject <a_or_t_id>
 ```
 
+`status` 和 `replay` 只读取本地状态，不推进审批过期。超过 `expires_at` 但尚未被显式推进的 approval 仍显示为 `pending`，并通过 `is_overdue`、`overdue_seconds` 和 `recommended_action: expire` 提示 operator。
+
+如需显式推进 overdue approval 过期：
+
+```bash
+python -m feishu_shadow_agent maintenance expire-approvals --config config.yaml
+```
+
 发送后检查：
 
 ```bash

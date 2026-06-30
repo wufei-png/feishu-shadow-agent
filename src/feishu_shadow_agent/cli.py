@@ -90,6 +90,15 @@ def build_parser() -> argparse.ArgumentParser:
     retention_prune.add_argument("--dry-run", action="store_true", help="preview retention cleanup")
     retention_prune.set_defaults(handler=_handle_retention_prune)
 
+    maintenance = subparsers.add_parser("maintenance", help="explicit maintenance helpers")
+    maintenance_subparsers = maintenance.add_subparsers(dest="maintenance_command")
+    maintenance_expire_approvals = maintenance_subparsers.add_parser(
+        "expire-approvals",
+        help="expire overdue pending approvals",
+    )
+    _add_config_arg(maintenance_expire_approvals)
+    maintenance_expire_approvals.set_defaults(handler=_handle_maintenance_expire_approvals)
+
     dispatch = subparsers.add_parser("dispatch", help="dispatch recovery helpers")
     dispatch_subparsers = dispatch.add_subparsers(dest="dispatch_command")
     dispatch_inspect = dispatch_subparsers.add_parser("inspect", help="inspect an action and dispatch attempts")
@@ -322,6 +331,13 @@ def _handle_retention_prune(args: argparse.Namespace) -> int:
         logger=logger,
     ).prune(run_id=new_run_id("retention"), dry_run=args.dry_run)
     print(yaml.safe_dump(summary.as_dict(), allow_unicode=True, sort_keys=False), end="")
+    return 0
+
+
+def _handle_maintenance_expire_approvals(args: argparse.Namespace) -> int:
+    _, store, _ = _load_runtime(args.config)
+    expired = store.expire_pending_approvals()
+    print(yaml.safe_dump({"expired_approvals": expired}, allow_unicode=True, sort_keys=False), end="")
     return 0
 
 

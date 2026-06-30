@@ -214,6 +214,74 @@ def test_tick_heartbeat_records_start_finish_and_summary(tmp_path: Path) -> None
     assert summary["stages"] == [{"name": "noop", "ok": True, "processed": 0, "error": None}]
 
 
+def test_daemon_tick_expires_overdue_approvals_before_approval_inbox(tmp_path: Path) -> None:
+    events: list[str] = []
+
+    class TrackingStore(SQLiteStore):
+        def expire_pending_approvals(self, *, now: str | None = None) -> int:
+            events.append("expire")
+            return super().expire_pending_approvals(now=now)
+
+    class TrackingFeishu(FakeFeishu):
+        def list_p2p_messages(self, **kwargs: Any) -> MessagePage:
+            events.append("approval_inbox")
+            return super().list_p2p_messages(**kwargs)
+
+    store = TrackingStore(tmp_path / "agent.sqlite3")
+    logger = JSONLLogger(tmp_path / "agent.jsonl")
+    task_id = _insert_task(store)
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO approvals(
+              short_id, task_id, kind, status, payload_json, preview, created_at, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "a_overdue",
+                task_id,
+                "send_reply",
+                "pending",
+                json.dumps({"reply_target_message_id": "om_target", "text": "reply"}),
+                "reply",
+                "2026-06-22T08:00:00+08:00",
+                "2000-01-01T00:00:00+00:00",
+            ),
+        )
+    suite = FakeHealthSuite([HealthCheckResult("config_schema", "critical", "ok", "ok")])
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    processor = TaskProcessingService(
+        store=store,
+        config=config,
+        agent_backend=FakeAgentBackend(),
+        logger=logger,
+        agent_retry_delays_seconds=(0.0, 0.0),
+    )
+    daemon = Daemon(
+        store=store,
+        logger=logger,
+        health_suite=suite,  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=True,
+        app_config=config,
+        feishu_client=TrackingFeishu(),  # type: ignore[arg-type]
+        task_processor=processor,
+        runtime_health_interval_seconds=0,
+    )
+
+    daemon.run_one_tick(run_id="run_1")
+
+    assert events[0] == "expire"
+    assert events.index("expire") < events.index("approval_inbox")
+    with store.connect() as conn:
+        approval = conn.execute(
+            "SELECT status, resolved_at FROM approvals WHERE short_id = ?",
+            ("a_overdue",),
+        ).fetchone()
+    assert approval["status"] == "expired"
+    assert approval["resolved_at"] is not None
+
+
 def test_keyboard_interrupt_finishes_run(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     logger = JSONLLogger(tmp_path / "agent.jsonl")

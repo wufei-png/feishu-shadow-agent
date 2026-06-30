@@ -79,7 +79,7 @@ python -m feishu_shadow_agent config schema
 | `retention.resource_days` | int `>= 1` | `30` | 下载资源文件保留天数。 |
 | `lifecycle.watch_minutes` | int `> 0` | `120` | 新消息、follow-up 或 agent 回复后继续监听任务的分钟数。 |
 | `lifecycle.closed_recall_days` | int `>= 1` | `7` | 新触发事件可召回 closed task 的天数窗口。 |
-| `lifecycle.approval_timeout_hours` | int `>= 1`/null | `24` | pending approval 的过期小时数；`null` 表示永不过期。过期不关闭 task。 |
+| `lifecycle.approval_timeout_hours` | int `>= 1`/null | `24` | pending approval 的过期小时数；`null` 表示永不过期。过期不关闭 task；过期写入只由 daemon tick、审批命令前置处理或显式 maintenance 命令推进。 |
 | `debug.save_full_agent_io` | bool | `false` | 是否保存完整 agent 输入输出；常规运行应保持关闭。 |
 
 ## 运行时存储安全
@@ -89,6 +89,12 @@ python -m feishu_shadow_agent config schema
 P8 暂不启用 `PRAGMA journal_mode=WAL`。当前部署形态以本地单文件 SQLite、手工复制/回放和简单清理为主；WAL 会额外生成 `-wal`/`-shm` 文件，容易让 operator 复制数据库或清理 `data/` 时漏文件。现阶段先用 busy timeout 改善短暂写锁等待，后续如果需要更高并发再单独评估 WAL。
 
 `status` 输出中的 `daemon_liveness` 来自最新有 daemon tick 的 run（例如 `last_tick_started_at IS NOT NULL`）的 heartbeat；`last_run` 仍保留最新任意 run，包括 doctor 等非 daemon run。该 daemon run 仍是 `running` 且 `last_heartbeat_at` 超过固定阈值未更新时，会显示为 `stale`；这表示上一次 daemon 可能卡住或崩溃，需要结合 JSONL 日志和进程状态确认。`runs.last_tick_summary_json` 只保留最近一个 tick 的阶段摘要，详细历史仍以 JSONL 为准。
+
+`status`、`replay` 和 `dispatch inspect` 是 operator 读路径，不会把 overdue approval 写成 `expired`。超过 `expires_at` 但尚未被显式推进的 approval 仍是 `status: pending`，读模型额外显示 `is_overdue`、`overdue_seconds` 和 `recommended_action`。需要立即推进过期时运行：
+
+```bash
+python -m feishu_shadow_agent maintenance expire-approvals --config config.yaml
+```
 
 资源下载先通过 chat policy，再受本地限额保护。单文件超过 `storage.max_resource_bytes` 时，刚下载的文件会被删除，`resources.download_status` 置为 `too_large`，`path` 置空，并把尝试路径和大小写入 `raw_json`。`resource_dir` 用量超过 `storage.max_resource_dir_bytes` 时，刚下载文件会被删除，当前和后续资源标记为 `quota_exceeded` 且 `path` 置空。`too_large` / `quota_exceeded` 会阻塞 task session agent，并创建 owner notification；第一版不让 agent 在缺少资源的情况下语义降级回答。
 

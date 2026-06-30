@@ -944,7 +944,6 @@ class SQLiteStore:
         return False
 
     def count_pending_actions(self) -> int:
-        self.expire_pending_approvals()
         self.migrate()
         with self.connect() as conn:
             row = conn.execute(
@@ -953,7 +952,6 @@ class SQLiteStore:
         return int(row["count"])
 
     def list_dispatchable_actions(self, *, limit: int = 50, kind: str | None = None) -> list[ActionRecord]:
-        self.expire_pending_approvals()
         self.migrate()
         with self.connect() as conn:
             if kind is None:
@@ -1449,7 +1447,6 @@ class SQLiteStore:
         daemon_stale_after_seconds: int = RUN_HEARTBEAT_STALE_AFTER_SECONDS,
         now: str | None = None,
     ) -> dict[str, Any]:
-        self.expire_pending_approvals()
         self.migrate()
         effective_now = now or utc_now_iso()
         with self.connect() as conn:
@@ -1467,7 +1464,8 @@ class SQLiteStore:
             ).fetchone()
             pending_approvals = conn.execute(
                 """
-                SELECT a.short_id, a.task_id, t.short_id AS task_short_id, a.kind, a.preview, a.created_at, a.expires_at
+                SELECT a.short_id, a.task_id, t.short_id AS task_short_id, a.kind, a.status,
+                       a.preview, a.created_at, a.expires_at
                 FROM approvals a
                 LEFT JOIN tasks t ON t.id = a.task_id
                 WHERE a.status = 'pending'
@@ -1557,7 +1555,9 @@ class SQLiteStore:
                 stale_after_seconds=daemon_stale_after_seconds,
             ),
             "last_run": last_run_data,
-            "pending_approvals": [_row_dict(row) for row in pending_approvals],
+            "pending_approvals": [
+                _approval_read_model(row, now=effective_now) for row in pending_approvals
+            ],
             "recent_expired_approvals": [_row_dict(row) for row in recent_expired_approvals],
             "failed_approval_commands": [_json_row_dict(row, "result_json") for row in failed_commands],
             "active_tasks": [_row_dict(row) for row in active_tasks],
@@ -1567,9 +1567,9 @@ class SQLiteStore:
             "recent_health_warnings": [_row_dict(row) for row in recent_health],
         }
 
-    def replay_summary(self, message_id: str) -> dict[str, Any] | None:
-        self.expire_pending_approvals()
+    def replay_summary(self, message_id: str, *, now: str | None = None) -> dict[str, Any] | None:
         self.migrate()
+        effective_now = now or utc_now_iso()
         with self.connect() as conn:
             message = conn.execute(
                 """
@@ -1620,7 +1620,10 @@ class SQLiteStore:
             "message": _row_dict(message),
             "routing_audits": [_row_dict(row) for row in audits],
             "task_ids": task_ids,
-            "approvals": [_json_row_dict(row, "payload_json") for row in approvals],
+            "approvals": [
+                _approval_read_model(row, now=effective_now, json_columns=("payload_json",))
+                for row in approvals
+            ],
             "actions": [_json_row_dict(row, "payload_json", "result_json") for row in actions],
         }
 
@@ -2893,6 +2896,29 @@ def _json_row_dict(row: sqlite3.Row | dict[str, Any], *columns: str) -> dict[str
         if column in data:
             data[column] = _loads_json(data[column])
     return data
+
+
+def _approval_read_model(
+    row: sqlite3.Row | dict[str, Any],
+    *,
+    now: str,
+    json_columns: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    data = _json_row_dict(row, *json_columns) if json_columns else (_row_dict(row) or {})
+    if data.get("status") == ApprovalStatus.PENDING.value:
+        overdue_seconds = _approval_overdue_seconds(data.get("expires_at"), now=now)
+        data["is_overdue"] = overdue_seconds > 0
+        data["overdue_seconds"] = overdue_seconds
+        data["recommended_action"] = "expire" if overdue_seconds > 0 else "review"
+    return data
+
+
+def _approval_overdue_seconds(expires_at: Any, *, now: str) -> int:
+    expires_at_dt = _parse_datetime_or_none(expires_at)
+    now_dt = _parse_datetime_or_none(now)
+    if expires_at_dt is None or now_dt is None:
+        return 0
+    return max(0, int((now_dt - expires_at_dt).total_seconds()))
 
 
 def _loads_json(value: Any) -> Any:

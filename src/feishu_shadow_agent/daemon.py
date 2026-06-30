@@ -82,6 +82,14 @@ class Daemon:
         )
         results: list[StageResult] = []
         try:
+            expired_approvals = self.store.expire_pending_approvals()
+            if expired_approvals:
+                self.logger.emit(
+                    "info",
+                    "approval_expiry_advanced",
+                    run_id=run_id,
+                    data={"expired_approvals": expired_approvals},
+                )
             if self.app_config is None or self.feishu_client is None:
                 self.run_one_noop_tick(run_id=run_id)
                 result = StageResult("noop", ok=True)
