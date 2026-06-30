@@ -1,0 +1,991 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from collections.abc import Callable, Iterable
+from datetime import datetime, timedelta
+from typing import Any
+from urllib.parse import quote
+
+from .config import AppConfig, ChatPolicyConfig
+from .policy import PolicyResolver, ProductPolicyInvalidError, ProductPolicyMissingError
+from .store.sqlite_store import PRODUCT_POLICY_KEY, RUN_HEARTBEAT_STALE_AFTER_SECONDS, SQLiteStore
+from .types import ActionStatus, ApprovalStatus, utc_now_iso
+
+
+_CORE_TABLES = frozenset(
+    {
+        "messages",
+        "tasks",
+        "task_messages",
+        "approvals",
+        "actions",
+        "dispatch_attempts",
+        "runs",
+        "health_checks",
+        "chat_policies",
+        "product_policies",
+        "policy_audits",
+        "approval_commands",
+    }
+)
+
+
+class _ReadStoreUnavailable(RuntimeError):
+    pass
+
+
+class OperatorQueryService:
+    """Read-only DTO boundary for operator status and detail views."""
+
+    def __init__(
+        self,
+        store: SQLiteStore,
+        *,
+        policy_import_source: AppConfig | None = None,
+        now: Callable[[], str] | None = None,
+    ):
+        self.store = store
+        self.policy_import_source = policy_import_source
+        self._now = now or utc_now_iso
+        self.policy_resolver = PolicyResolver(_ReadOnlyProductPolicyRepository(self))
+
+    def dashboard_snapshot(
+        self,
+        *,
+        limit: int = 20,
+        stale_after_seconds: int = 900,
+        daemon_stale_after_seconds: int = RUN_HEARTBEAT_STALE_AFTER_SECONDS,
+    ) -> dict[str, Any]:
+        now = self._now()
+        try:
+            with self._connect() as conn:
+                last_run = conn.execute("SELECT * FROM runs ORDER BY started_at DESC LIMIT 1").fetchone()
+                daemon_run = conn.execute(
+                    """
+                    SELECT *
+                    FROM runs
+                    WHERE last_tick_started_at IS NOT NULL
+                    ORDER BY last_tick_started_at DESC, started_at DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+        except _ReadStoreUnavailable:
+            last_run = None
+            daemon_run = None
+        failed_or_needs_review = self.list_dispatch_actions(
+            statuses=(ActionStatus.FAILED.value, ActionStatus.FAILED_NEEDS_REVIEW.value),
+            limit=limit,
+        )
+        failed_commands = self._failed_approval_commands(limit=limit)
+        return {
+            "daemon_liveness": _daemon_liveness(
+                _json_row_dict(daemon_run, "health_summary_json", "last_tick_summary_json") if daemon_run else None,
+                now=now,
+                stale_after_seconds=daemon_stale_after_seconds,
+            ),
+            "policy_status": self.policy_status(),
+            "pending_approvals": self.list_approvals(status=ApprovalStatus.PENDING.value, limit=limit),
+            "active_tasks": self.list_tasks(status="watching", active_only=True, limit=limit),
+            "pending_actions": self.list_dispatch_actions(
+                statuses=(ActionStatus.PENDING.value, ActionStatus.SENDING.value),
+                limit=limit,
+            ),
+            "failed_or_needs_review_actions": failed_or_needs_review,
+            "recent_health_warnings": self._recent_health_warnings(limit=limit),
+            "recent_errors": _recent_errors(failed_commands, failed_or_needs_review),
+            "last_run": _json_row_dict(last_run, "health_summary_json", "last_tick_summary_json") if last_run else None,
+            # Compatibility for current CLI users while status moves to the operator DTO boundary.
+            "recent_expired_approvals": self.list_approvals(status=ApprovalStatus.EXPIRED.value, limit=limit),
+            "failed_approval_commands": failed_commands,
+            "stale_sending_actions": self._stale_sending_actions(
+                stale_after_seconds=stale_after_seconds,
+                limit=limit,
+            ),
+            "recent_failed_actions": failed_or_needs_review,
+        }
+
+    def list_approvals(
+        self,
+        *,
+        status: str | None = None,
+        task_id: int | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        where = []
+        params: list[Any] = []
+        if status is not None:
+            where.append("a.status = ?")
+            params.append(status)
+        if task_id is not None:
+            where.append("a.task_id = ?")
+            params.append(task_id)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        params.extend([_coerce_limit(limit), _coerce_offset(offset)])
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT a.id, a.short_id, a.task_id, t.short_id AS task_short_id, a.kind, a.status,
+                           a.payload_json, a.preview, a.created_at, a.expires_at, a.resolved_at
+                    FROM approvals a
+                    LEFT JOIN tasks t ON t.id = a.task_id
+                    {where_sql}
+                    ORDER BY a.created_at DESC, a.id DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    params,
+                ).fetchall()
+        except _ReadStoreUnavailable:
+            return []
+        now = self._now()
+        return [_approval_dto(row, now=now) for row in rows]
+
+    def approval_detail(self, approval_id: int | str) -> dict[str, Any] | None:
+        where_sql, params = _id_lookup("a", approval_id)
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    f"""
+                    SELECT a.id, a.short_id, a.task_id, t.short_id AS task_short_id, a.kind, a.status,
+                           a.payload_json, a.preview, a.created_at, a.expires_at, a.resolved_at
+                    FROM approvals a
+                    LEFT JOIN tasks t ON t.id = a.task_id
+                    WHERE {where_sql}
+                    """,
+                    params,
+                ).fetchone()
+        except _ReadStoreUnavailable:
+            return None
+        if row is None:
+            return None
+        return _approval_dto(row, now=self._now(), include_payload=True)
+
+    def list_tasks(
+        self,
+        *,
+        status: str | None = None,
+        chat_id: str | None = None,
+        active_only: bool = False,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        now = self._now()
+        where = []
+        params: list[Any] = []
+        if status is not None:
+            where.append("t.status = ?")
+            params.append(status)
+        if chat_id is not None:
+            where.append("t.chat_id = ?")
+            params.append(chat_id)
+        if active_only:
+            where.append("(t.watch_until IS NULL OR t.watch_until > ?)")
+            params.append(now)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        params.extend([_coerce_limit(limit), _coerce_offset(offset)])
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT t.id, t.short_id, t.status, t.chat_id, t.chat_type, t.thread_id,
+                           t.root_message_id, t.task_label, t.watch_until, t.updated_at,
+                           COUNT(tm.message_id) AS message_count
+                    FROM tasks t
+                    LEFT JOIN task_messages tm ON tm.task_id = t.id
+                    {where_sql}
+                    GROUP BY t.id
+                    ORDER BY t.updated_at DESC, t.id DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    params,
+                ).fetchall()
+        except _ReadStoreUnavailable:
+            return []
+        return [_task_summary_dto(row) for row in rows]
+
+    def task_detail(self, task_id: int | str, *, limit: int = 20) -> dict[str, Any] | None:
+        where_sql, params = _id_lookup("t", task_id)
+        try:
+            with self._connect() as conn:
+                task = conn.execute(
+                    f"""
+                    SELECT t.*, COUNT(tm.message_id) AS message_count
+                    FROM tasks t
+                    LEFT JOIN task_messages tm ON tm.task_id = t.id
+                    WHERE {where_sql}
+                    GROUP BY t.id
+                    """,
+                    params,
+                ).fetchone()
+                if task is None:
+                    return None
+                messages = conn.execute(
+                    """
+                    SELECT m.message_id, tm.role, m.sender_role, m.sent_at, m.text, tm.created_at
+                    FROM task_messages tm
+                    JOIN messages m ON m.message_id = tm.message_id
+                    WHERE tm.task_id = ?
+                    ORDER BY tm.created_at DESC, m.message_id DESC
+                    LIMIT ?
+                    """,
+                    (int(task["id"]), _coerce_limit(limit)),
+                ).fetchall()
+        except _ReadStoreUnavailable:
+            return None
+        task_summary = _task_summary_dto(task)
+        pending_approvals = self.list_approvals(
+            status=ApprovalStatus.PENDING.value,
+            task_id=int(task["id"]),
+            limit=limit,
+        )
+        actions = self.list_dispatch_actions(task_id=int(task["id"]), limit=limit)
+        return {
+            **task_summary,
+            "recent_messages": [_message_dto(row) for row in reversed(messages)],
+            "pending_approvals": pending_approvals,
+            "actions": actions,
+            "effective_policy": self.effective_policy_summary(task["chat_id"], task["chat_type"]),
+            "recommended_actions": _task_recommended_actions(pending_approvals, actions),
+        }
+
+    def list_dispatch_actions(
+        self,
+        *,
+        statuses: Iterable[str] | None = None,
+        task_id: int | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        where = []
+        params: list[Any] = []
+        if statuses is not None:
+            status_values = tuple(statuses)
+            if status_values:
+                where.append(f"a.status IN ({','.join('?' for _ in status_values)})")
+                params.extend(status_values)
+        if task_id is not None:
+            where.append("a.task_id = ?")
+            params.append(task_id)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        params.extend([_coerce_limit(limit), _coerce_offset(offset)])
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT a.*, t.short_id AS task_short_id
+                    FROM actions a
+                    LEFT JOIN tasks t ON t.id = a.task_id
+                    {where_sql}
+                    ORDER BY a.updated_at DESC, a.id DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    params,
+                ).fetchall()
+        except _ReadStoreUnavailable:
+            return []
+        return [_action_dto(row, include_payload=False) for row in rows]
+
+    def dispatch_action_detail(self, action_id: int) -> dict[str, Any] | None:
+        try:
+            with self._connect() as conn:
+                action = conn.execute(
+                    """
+                    SELECT a.*, t.short_id AS task_short_id
+                    FROM actions a
+                    LEFT JOIN tasks t ON t.id = a.task_id
+                    WHERE a.id = ?
+                    """,
+                    (action_id,),
+                ).fetchone()
+                if action is None:
+                    return None
+                attempts = conn.execute(
+                    """
+                    SELECT *
+                    FROM dispatch_attempts
+                    WHERE action_id = ?
+                    ORDER BY started_at, id
+                    """,
+                    (action_id,),
+                ).fetchall()
+        except _ReadStoreUnavailable:
+            return None
+        attempt_dtos = [_attempt_dto(row) for row in attempts]
+        action_dto = _action_dto(action, include_payload=True)
+        return {
+            "action": action_dto,
+            "attempts": attempt_dtos,
+            "readback_summary": _readback_summary(attempt_dtos),
+            "recommended_actions": _dispatch_recommended_actions(action_dto),
+        }
+
+    def policy_status(self) -> dict[str, Any]:
+        try:
+            with self._connect() as conn:
+                global_policy = conn.execute(
+                    "SELECT policy_json, updated_at FROM product_policies WHERE key = ?",
+                    (PRODUCT_POLICY_KEY,),
+                ).fetchone()
+                chat_count = conn.execute("SELECT COUNT(*) AS count FROM chat_policies").fetchone()
+                diff = self._policy_import_diff(conn)
+        except _ReadStoreUnavailable:
+            return {
+                "initialized": False,
+                "global_policy_updated_at": None,
+                "chat_policy_count": 0,
+                "policy_import_diff": self._missing_store_policy_import_diff(),
+            }
+        return {
+            "initialized": global_policy is not None,
+            "global_policy_updated_at": None if global_policy is None else global_policy["updated_at"],
+            "chat_policy_count": 0 if chat_count is None else int(chat_count["count"]),
+            "policy_import_diff": diff,
+        }
+
+    def effective_policy_summary(self, chat_id: str | None, chat_type: str | None) -> dict[str, Any]:
+        if not chat_id:
+            return _empty_effective_policy("unknown_chat")
+        try:
+            policy = self.policy_resolver.resolve_chat_policy(chat_id, chat_type)
+        except ProductPolicyMissingError as exc:
+            return _empty_effective_policy("uninitialized", error=str(exc))
+        except ProductPolicyInvalidError as exc:
+            return _empty_effective_policy("invalid", error=str(exc))
+        return {
+            "policy_source": policy.policy_source,
+            "auto_reply": policy.auto_reply,
+            "bot_joined": policy.bot_joined,
+            "reply_identity": policy.reply_identity,
+            "allow_user_fallback": policy.allow_user_fallback,
+            "resource_download": policy.resource_download,
+        }
+
+    def policy_audit_history(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        scope: str | None = None,
+        policy_key: str | None = None,
+        since: str | None = None,
+    ) -> list[dict[str, Any]]:
+        where = []
+        params: list[Any] = []
+        if scope is not None:
+            where.append("scope = ?")
+            params.append(scope)
+        if policy_key is not None:
+            where.append("policy_key = ?")
+            params.append(policy_key)
+        if since is not None:
+            where.append("created_at >= ?")
+            params.append(since)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        params.extend([_coerce_limit(limit), _coerce_offset(offset)])
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT id, scope, policy_key, actor, reason, created_at, old_json, new_json
+                    FROM policy_audits
+                    {where_sql}
+                    ORDER BY id DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    params,
+                ).fetchall()
+        except _ReadStoreUnavailable:
+            return []
+        return [_policy_audit_dto(row) for row in rows]
+
+    def _failed_approval_commands(self, *, limit: int) -> list[dict[str, Any]]:
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT message_id, command, status, result_json, updated_at
+                    FROM approval_commands
+                    WHERE status != 'applied' AND status != 'duplicate'
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (_coerce_limit(limit),),
+                ).fetchall()
+        except _ReadStoreUnavailable:
+            return []
+        return [_json_row_dict(row, "result_json") for row in rows]
+
+    def _recent_health_warnings(self, *, limit: int) -> list[dict[str, Any]]:
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT check_name, severity, status, message, checked_at
+                    FROM health_checks
+                    WHERE status != 'ok'
+                    ORDER BY checked_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (_coerce_limit(limit),),
+                ).fetchall()
+        except _ReadStoreUnavailable:
+            return []
+        return [_row_dict(row) for row in rows]
+
+    def _stale_sending_actions(self, *, stale_after_seconds: int, limit: int) -> list[dict[str, Any]]:
+        cutoff = _minus_seconds(self._now(), stale_after_seconds)
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT a.*, t.short_id AS task_short_id
+                    FROM actions a
+                    LEFT JOIN tasks t ON t.id = a.task_id
+                    WHERE a.status = 'sending'
+                      AND datetime(a.updated_at) <= datetime(?)
+                    ORDER BY a.updated_at, a.id
+                    LIMIT ?
+                    """,
+                    (cutoff, _coerce_limit(limit)),
+                ).fetchall()
+        except _ReadStoreUnavailable:
+            return []
+        return [_action_dto(row, include_payload=False) for row in rows]
+
+    def _get_product_policy(self) -> dict[str, Any] | None:
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT policy_json FROM product_policies WHERE key = ?",
+                    (PRODUCT_POLICY_KEY,),
+                ).fetchone()
+        except _ReadStoreUnavailable:
+            return None
+        return None if row is None else _loads_json_object(row["policy_json"])
+
+    def _get_chat_product_policy(self, chat_id: str) -> dict[str, Any] | None:
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT chat_id, name, auto_reply, bot_joined, reply_identity,
+                           allow_user_fallback, resource_download
+                    FROM chat_policies
+                    WHERE chat_id = ?
+                    """,
+                    (chat_id,),
+                ).fetchone()
+        except _ReadStoreUnavailable:
+            return None
+        return None if row is None else _chat_policy_from_row(row)
+
+    def _policy_import_diff(self, conn: sqlite3.Connection) -> dict[str, Any]:
+        if self.policy_import_source is None:
+            return {
+                "status": "unknown",
+                "message": "No Policy Import Source was provided for comparison.",
+            }
+        source_global = _global_policy_from_import_source(self.policy_import_source)
+        global_row = conn.execute(
+            "SELECT policy_json FROM product_policies WHERE key = ?",
+            (PRODUCT_POLICY_KEY,),
+        ).fetchone()
+        missing_global = global_row is None
+        changed_global = False
+        if global_row is not None:
+            changed_global = _loads_json_object(global_row["policy_json"]) != source_global
+
+        missing_chats: list[str] = []
+        changed_chats: list[str] = []
+        for chat_id, chat_config in sorted(self.policy_import_source.chats.items()):
+            source_chat = _chat_policy_from_import_source(chat_id, chat_config)
+            row = conn.execute(
+                """
+                SELECT chat_id, name, auto_reply, bot_joined, reply_identity,
+                       allow_user_fallback, resource_download
+                FROM chat_policies
+                WHERE chat_id = ?
+                """,
+                (chat_id,),
+            ).fetchone()
+            if row is None:
+                missing_chats.append(chat_id)
+            elif _chat_policy_from_row(row) != source_chat:
+                changed_chats.append(chat_id)
+
+        if not missing_global and not changed_global and not missing_chats and not changed_chats:
+            return {
+                "status": "matches",
+                "message": "Policy Import Source matches Product Policy Store for global policy and config-listed chats.",
+                "missing_global": False,
+                "changed_global": False,
+                "missing_chats": [],
+                "changed_chats": [],
+            }
+        return {
+            "status": "differs",
+            "message": (
+                "Policy Import Source differs from Product Policy Store; import-config would insert missing "
+                "rows and import-config --replace would update changed rows."
+            ),
+            "missing_global": missing_global,
+            "changed_global": changed_global,
+            "missing_chats": missing_chats,
+            "changed_chats": changed_chats,
+        }
+
+    def _missing_store_policy_import_diff(self) -> dict[str, Any]:
+        if self.policy_import_source is None:
+            return {
+                "status": "unknown",
+                "message": "No Policy Import Source was provided for comparison.",
+            }
+        return {
+            "status": "differs",
+            "message": (
+                "Policy Import Source differs from Product Policy Store because no initialized store "
+                "is available to compare."
+            ),
+            "missing_global": True,
+            "changed_global": False,
+            "missing_chats": sorted(self.policy_import_source.chats),
+            "changed_chats": [],
+        }
+
+    def _connect(self) -> sqlite3.Connection:
+        if not self.store.path.exists():
+            raise _ReadStoreUnavailable("SQLite store does not exist.")
+        uri = f"file:{quote(str(self.store.path.resolve()), safe='/')}?mode=ro"
+        try:
+            conn = sqlite3.connect(uri, uri=True)
+        except sqlite3.OperationalError as exc:
+            raise _ReadStoreUnavailable(str(exc)) from exc
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        if not _has_core_schema(conn):
+            conn.close()
+            raise _ReadStoreUnavailable("SQLite store schema is not initialized.")
+        return conn
+
+
+class _ReadOnlyProductPolicyRepository:
+    def __init__(self, service: OperatorQueryService):
+        self.service = service
+
+    def get_product_policy(self) -> dict[str, Any] | None:
+        return self.service._get_product_policy()
+
+    def get_chat_product_policy(self, chat_id: str) -> dict[str, Any] | None:
+        return self.service._get_chat_product_policy(chat_id)
+
+
+def _approval_dto(row: sqlite3.Row, *, now: str, include_payload: bool = False) -> dict[str, Any]:
+    data = _row_dict(row)
+    short_id = str(data["short_id"])
+    overdue_seconds = _approval_overdue_seconds(data.get("expires_at"), now=now)
+    is_pending = data["status"] == ApprovalStatus.PENDING.value
+    dto: dict[str, Any] = {
+        "id": data["id"],
+        "approval_id": short_id,
+        "short_id": short_id,
+        "task_id": data["task_id"],
+        "task_short_id": data["task_short_id"],
+        "kind": data["kind"],
+        "status": data["status"],
+        "preview": data["preview"],
+        "created_at": data["created_at"],
+        "expires_at": data["expires_at"],
+        "resolved_at": data.get("resolved_at"),
+        "is_overdue": bool(is_pending and overdue_seconds > 0),
+        "overdue_seconds": overdue_seconds if is_pending else 0,
+        "recommended_action": _approval_recommended_action(data["status"], overdue_seconds),
+        "available_commands": _approval_available_commands(
+            data["status"],
+            short_id,
+            data["task_short_id"],
+            overdue_seconds=overdue_seconds,
+            payload=_loads_json_object(data.get("payload_json")),
+        ),
+    }
+    if include_payload:
+        dto["payload"] = _loads_json_object(data.get("payload_json"))
+    return dto
+
+
+def _approval_recommended_action(status: str, overdue_seconds: int) -> str:
+    if status != ApprovalStatus.PENDING.value:
+        return "none"
+    return "expire" if overdue_seconds > 0 else "review"
+
+
+def _approval_available_commands(
+    status: str,
+    approval_id: str,
+    task_short_id: str | None,
+    *,
+    overdue_seconds: int,
+    payload: dict[str, Any],
+) -> list[str]:
+    if status != ApprovalStatus.PENDING.value:
+        return []
+    if overdue_seconds > 0:
+        return ["maintenance expire-approvals"]
+    commands = []
+    if payload.get("approvable") is not False:
+        commands.append(f"approve {approval_id}")
+    commands.append(f"reject {approval_id}")
+    if task_short_id:
+        commands.append(f"send {task_short_id} <final_reply>")
+    return commands
+
+
+def _approval_overdue_seconds(expires_at: Any, *, now: str) -> int:
+    expires_at_dt = _parse_datetime_or_none(expires_at)
+    now_dt = _parse_datetime_or_none(now)
+    if expires_at_dt is None or now_dt is None:
+        return 0
+    return max(0, int((now_dt - expires_at_dt).total_seconds()))
+
+
+def _task_summary_dto(row: sqlite3.Row) -> dict[str, Any]:
+    data = _row_dict(row)
+    short_id = str(data["short_id"])
+    return {
+        "id": data["id"],
+        "task_id": short_id,
+        "task_short_id": short_id,
+        "short_id": short_id,
+        "status": data["status"],
+        "chat_id": data["chat_id"],
+        "chat_type": data["chat_type"],
+        "thread_id": data.get("thread_id"),
+        "root_message_id": data.get("root_message_id"),
+        "task_label": data.get("task_label"),
+        "watch_until": data.get("watch_until"),
+        "updated_at": data.get("updated_at"),
+        "message_count": int(data.get("message_count") or 0),
+    }
+
+
+def _message_dto(row: sqlite3.Row) -> dict[str, Any]:
+    data = _row_dict(row)
+    return {
+        "message_id": data["message_id"],
+        "role": data["role"],
+        "sender_role": data["sender_role"],
+        "sent_at": data["sent_at"],
+        "text": data["text"],
+        "created_at": data["created_at"],
+    }
+
+
+def _action_dto(row: sqlite3.Row, *, include_payload: bool) -> dict[str, Any]:
+    data = _row_dict(row)
+    dto: dict[str, Any] = {
+        "id": data["id"],
+        "action_id": data["id"],
+        "kind": data["kind"],
+        "status": data["status"],
+        "task_id": data["task_id"],
+        "task_short_id": data.get("task_short_id"),
+        "approval_id": data.get("approval_id"),
+        "target_message_id": data["target_message_id"],
+        "dry_run": bool(data["dry_run"]),
+        "created_at": data["created_at"],
+        "updated_at": data["updated_at"],
+        "result_summary": _result_summary(_loads_json_object(data.get("result_json"))),
+    }
+    if include_payload:
+        dto["idempotency_key"] = data["idempotency_key"]
+        dto["payload"] = _loads_json_object(data.get("payload_json"))
+        dto["result"] = _loads_json_object(data.get("result_json"))
+    return dto
+
+
+def _attempt_dto(row: sqlite3.Row) -> dict[str, Any]:
+    data = _row_dict(row)
+    return {
+        "id": data["id"],
+        "action_id": data["action_id"],
+        "run_id": data["run_id"],
+        "status": data["status"],
+        "dry_run_result": _loads_json(data["dry_run_result_json"]),
+        "send_result": _loads_json(data["send_result_json"]),
+        "readback_result": _loads_json(data["readback_result_json"]),
+        "sent_message_id": data["sent_message_id"],
+        "error_stage": data["error_stage"],
+        "started_at": data["started_at"],
+        "finished_at": data["finished_at"],
+    }
+
+
+def _readback_summary(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    latest = attempts[-1] if attempts else None
+    readback = latest.get("readback_result") if latest else None
+    readback_data = readback if isinstance(readback, dict) else {}
+    return {
+        "attempt_count": len(attempts),
+        "latest_status": None if latest is None else latest["status"],
+        "sent_message_id": None if latest is None else latest["sent_message_id"],
+        "error_stage": None if latest is None else latest["error_stage"],
+        "readback_ok": readback_data.get("ok") is True,
+        "readback_message_id": readback_data.get("message_id"),
+    }
+
+
+def _policy_audit_dto(row: sqlite3.Row) -> dict[str, Any]:
+    data = _row_dict(row)
+    return {
+        "id": data["id"],
+        "scope": data["scope"],
+        "policy_key": data["policy_key"],
+        "actor": data["actor"],
+        "reason": data["reason"],
+        "created_at": data["created_at"],
+        "old_summary": _policy_summary(_loads_json_object(data["old_json"])),
+        "new_summary": _policy_summary(_loads_json_object(data["new_json"])),
+    }
+
+
+def _policy_summary(policy: dict[str, Any]) -> dict[str, Any]:
+    if not policy:
+        return {}
+    allowed = (
+        "chat_id",
+        "name",
+        "auto_reply",
+        "bot_joined",
+        "reply_identity",
+        "allow_user_fallback",
+        "resource_download",
+        "reply_policy",
+        "default_chat_policy",
+    )
+    return {key: policy[key] for key in allowed if key in policy}
+
+
+def _task_recommended_actions(
+    pending_approvals: list[dict[str, Any]],
+    actions: list[dict[str, Any]],
+) -> list[str]:
+    recommendations = []
+    if any(approval["is_overdue"] for approval in pending_approvals):
+        recommendations.append("expire_overdue_approvals")
+    elif pending_approvals:
+        recommendations.append("review_pending_approvals")
+    if any(action["status"] == ActionStatus.FAILED_NEEDS_REVIEW.value for action in actions):
+        recommendations.append("inspect_failed_needs_review_actions")
+    elif any(action["status"] == ActionStatus.FAILED.value for action in actions):
+        recommendations.append("retry_or_cancel_failed_actions")
+    return recommendations
+
+
+def _dispatch_recommended_actions(action: dict[str, Any]) -> list[str]:
+    action_id = action["action_id"]
+    if action["status"] == ActionStatus.FAILED_NEEDS_REVIEW.value:
+        return [
+            f"dispatch inspect --action-id {action_id}",
+            f"dispatch mark-sent --action-id {action_id} --sent-message-id <message_id>",
+            f"dispatch retry --action-id {action_id}",
+            f"dispatch cancel --action-id {action_id}",
+        ]
+    if action["status"] == ActionStatus.FAILED.value:
+        return [
+            f"dispatch retry --action-id {action_id}",
+            f"dispatch cancel --action-id {action_id}",
+        ]
+    return []
+
+
+def _empty_effective_policy(policy_source: str, *, error: str | None = None) -> dict[str, Any]:
+    dto: dict[str, Any] = {
+        "policy_source": policy_source,
+        "auto_reply": None,
+        "bot_joined": None,
+        "reply_identity": None,
+        "allow_user_fallback": None,
+        "resource_download": None,
+    }
+    if error is not None:
+        dto["error"] = error
+    return dto
+
+
+def _recent_errors(
+    failed_commands: list[dict[str, Any]],
+    failed_actions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    errors: list[dict[str, Any]] = []
+    for command in failed_commands:
+        errors.append(
+            {
+                "type": "approval_command",
+                "status": command["status"],
+                "message": command["command"],
+                "updated_at": command["updated_at"],
+            }
+        )
+    for action in failed_actions:
+        errors.append(
+            {
+                "type": "dispatch_action",
+                "status": action["status"],
+                "message": f"{action['kind']} action {action['action_id']}",
+                "updated_at": action["updated_at"],
+            }
+        )
+    return sorted(errors, key=lambda item: str(item["updated_at"]), reverse=True)
+
+
+def _daemon_liveness(
+    last_run: dict[str, Any] | None,
+    *,
+    now: str,
+    stale_after_seconds: int,
+) -> dict[str, Any]:
+    base: dict[str, Any] = {"stale_after_seconds": stale_after_seconds}
+    if last_run is None:
+        return base | {"status": "not_started", "stale": False}
+    run_status = last_run.get("status")
+    heartbeat = last_run.get("last_heartbeat_at")
+    base |= {
+        "run_id": last_run.get("run_id"),
+        "run_status": run_status,
+        "last_heartbeat_at": heartbeat,
+    }
+    if run_status != "running":
+        return base | {"status": "stopped", "stale": False}
+    heartbeat_dt = _parse_datetime_or_none(heartbeat)
+    now_dt = _parse_datetime_or_none(now)
+    if heartbeat_dt is None or now_dt is None:
+        return base | {"status": "stale", "stale": True, "reason": "missing_or_invalid_heartbeat"}
+    age_seconds = max(0, int((now_dt - heartbeat_dt).total_seconds()))
+    stale = age_seconds > stale_after_seconds
+    return base | {
+        "status": "stale" if stale else "live",
+        "stale": stale,
+        "heartbeat_age_seconds": age_seconds,
+    }
+
+
+def _global_policy_from_import_source(config: AppConfig) -> dict[str, Any]:
+    default_chat_policy = ChatPolicyConfig().model_dump(mode="json")
+    return {
+        "reply_policy": config.reply_policy.model_dump(mode="json"),
+        "default_chat_policy": {
+            key: default_chat_policy[key]
+            for key in (
+                "bot_joined",
+                "reply_identity",
+                "allow_user_fallback",
+                "resource_download",
+            )
+        },
+    }
+
+
+def _chat_policy_from_import_source(chat_id: str, config: ChatPolicyConfig) -> dict[str, Any]:
+    data = config.model_dump(mode="json")
+    return {"chat_id": chat_id, **data}
+
+
+def _chat_policy_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "chat_id": row["chat_id"],
+        "name": row["name"] or "",
+        "auto_reply": bool(row["auto_reply"]),
+        "bot_joined": bool(row["bot_joined"]),
+        "reply_identity": row["reply_identity"],
+        "allow_user_fallback": bool(row["allow_user_fallback"]),
+        "resource_download": bool(row["resource_download"]),
+    }
+
+
+def _result_summary(result: dict[str, Any]) -> dict[str, Any]:
+    if not result:
+        return {}
+    return {
+        key: result[key]
+        for key in ("error_stage", "recovery_reason", "sent_message_id", "warnings")
+        if key in result
+    }
+
+
+def _id_lookup(alias: str, value: int | str) -> tuple[str, list[Any]]:
+    if isinstance(value, int):
+        return f"{alias}.id = ?", [value]
+    text = str(value)
+    if text.isdigit():
+        return f"{alias}.id = ?", [int(text)]
+    return f"{alias}.short_id = ?", [text]
+
+
+def _coerce_limit(limit: int) -> int:
+    return max(1, min(int(limit), 100))
+
+
+def _coerce_offset(offset: int) -> int:
+    return max(0, int(offset))
+
+
+def _has_core_schema(conn: sqlite3.Connection) -> bool:
+    rows = conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name IN ({})
+        """.format(",".join("?" for _ in _CORE_TABLES)),
+        tuple(sorted(_CORE_TABLES)),
+    ).fetchall()
+    return {row["name"] for row in rows} == _CORE_TABLES
+
+
+def _row_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {key: row[key] for key in row.keys()}
+
+
+def _json_row_dict(row: sqlite3.Row, *columns: str) -> dict[str, Any]:
+    data = _row_dict(row)
+    for column in columns:
+        if column in data:
+            data[column] = _loads_json(data[column])
+    return data
+
+
+def _loads_json(value: Any) -> Any:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def _loads_json_object(value: Any) -> dict[str, Any]:
+    loaded = _loads_json(value)
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _parse_datetime_or_none(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.astimezone()
+    return parsed.astimezone()
+
+
+def _minus_seconds(value: str, seconds: int) -> str:
+    try:
+        base = datetime.fromisoformat(value)
+    except ValueError:
+        base = datetime.now().astimezone()
+    return (base - timedelta(seconds=seconds)).astimezone().isoformat(timespec="seconds")

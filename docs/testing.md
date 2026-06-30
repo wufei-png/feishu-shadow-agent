@@ -27,6 +27,7 @@ python -m pytest -q tests/test_daemon.py tests/test_dispatcher.py tests/test_cli
 python -m pytest -q tests/test_store_migrations.py tests/test_retention.py
 python -m pytest -q tests/test_product_policy_store.py
 python -m pytest -q tests/test_policy_runtime.py
+python -m pytest -q tests/test_operator_query.py
 ```
 
 提交前做基础格式卫生检查：
@@ -48,6 +49,7 @@ git diff --check
 - `tests/test_store_migrations.py`：SQLite migration、busy timeout、约束、状态 enum 契约、幂等动作。
 - `tests/test_product_policy_store.py`：Product Policy Store 初始化探针、config import/replace、chat policy skip、audit old/new。
 - `tests/test_policy_runtime.py`：runtime resolver 从 Product Policy Store 读取、缺失全局策略 fail closed、DB policy 覆盖 YAML import source。
+- `tests/test_operator_query.py`：OperatorQueryService 只读 dashboard/detail DTO、overdue 派生、effective policy、Policy Import Diff 和 audit history。
 - `tests/test_retention.py`：消息 raw JSON 和资源保留策略。
 
 这些测试验证代码契约，不证明当前机器的 `lark-cli` 授权、飞书权限或 Hermes 可执行文件可用；真实环境要跑下面的端到端流程。
@@ -141,7 +143,7 @@ python -m feishu_shadow_agent daemon --config config.yaml
 /reject <a_or_t_id>
 ```
 
-`status` 和 `replay` 只读取本地状态，不推进审批过期。超过 `expires_at` 但尚未被显式推进的 approval 仍显示为 `pending`，并通过 `is_overdue`、`overdue_seconds` 和 `recommended_action: expire` 提示 operator。
+`status` 通过只读 OperatorQueryService 输出 daemon liveness、Product Policy 状态、pending approvals、active tasks、dispatch actions 和最近错误；`replay` 只读取本地状态并预览相关 dispatch。两者都不推进审批过期。超过 `expires_at` 但尚未被显式推进的 approval 仍显示为 `pending`，并通过 `is_overdue`、`overdue_seconds` 和 `recommended_action: expire` 提示 operator。
 
 如需显式推进 overdue approval 过期：
 

@@ -18,6 +18,7 @@ from .feishu.lark_cli import LarkCliClient
 from .health import HealthSuite, has_critical_failure, summarize_results
 from .hermes import HermesCliClient
 from .jsonl import JSONLLogger
+from .operator_query import OperatorQueryService
 from .paths import resolve_agent_skill_path, resolve_relative_path
 from .processing import TaskProcessingService
 from .retention import RetentionService
@@ -243,8 +244,11 @@ def _handle_config_validate(args: argparse.Namespace) -> int:
 
 
 def _handle_status(args: argparse.Namespace) -> int:
-    _, store, _ = _load_runtime(args.config)
-    print(yaml.safe_dump(store.status_snapshot(), allow_unicode=True, sort_keys=False), end="")
+    loaded = ConfigService().load(args.config)
+    sqlite_path = resolve_relative_path(loaded.config.storage.sqlite_path, loaded.base_dir)
+    store = SQLiteStore(sqlite_path)
+    snapshot = OperatorQueryService(store, policy_import_source=loaded.config).dashboard_snapshot()
+    print(yaml.safe_dump(snapshot, allow_unicode=True, sort_keys=False), end="")
     return 0
 
 

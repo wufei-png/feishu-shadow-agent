@@ -1089,11 +1089,13 @@ MVP 只支持本地已有 `messages.raw_json` 的 message_id。
 python -m feishu_shadow_agent status
 ```
 
-显示：
+`status` 使用只读 OperatorQueryService 组装面向 operator/UI 的稳定 read model，不直接暴露 SQLite helper 输出，也不推进 approval expiry 或 dispatch recovery。显示：
 
 - daemon 最近 run 状态。
+- Product Policy Store 初始化状态，以及 Policy Import Source 与 Product Policy Store 的 Policy Import Diff。
 - pending approvals。
 - active tasks。
+- pending / failed / failed_needs_review dispatch actions。
 - paused health reason。
 - 最近错误。
 

@@ -158,6 +158,34 @@ def test_status_includes_failed_approval_commands(tmp_path: Path, capsys) -> Non
     output = yaml.safe_load(capsys.readouterr().out)
     assert output["failed_approval_commands"][0]["status"] == "failed"
     assert output["failed_approval_commands"][0]["command"] == "/reject a_missing"
+    assert output["policy_status"]["initialized"] is False
+    assert output["policy_status"]["policy_import_diff"]["status"] == "differs"
+    assert "policy_audits" not in output
+
+
+def test_status_does_not_create_missing_store_or_log_files(tmp_path: Path, capsys) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        """
+owner:
+  open_id: ou_owner
+  name: Owner
+storage:
+  sqlite_path: data/missing.sqlite3
+logging:
+  jsonl_path: logs/agent.jsonl
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    assert main(["status", "--config", str(config)]) == 0
+
+    output = yaml.safe_load(capsys.readouterr().out)
+    assert output["daemon_liveness"]["status"] == "not_started"
+    assert output["policy_status"]["initialized"] is False
+    assert output["policy_status"]["policy_import_diff"]["status"] == "differs"
+    assert not (tmp_path / "data" / "missing.sqlite3").exists()
+    assert not (tmp_path / "logs" / "agent.jsonl").exists()
 
 
 def test_status_active_tasks_excludes_expired_watch_windows(tmp_path: Path, capsys) -> None:
