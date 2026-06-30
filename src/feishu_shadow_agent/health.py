@@ -144,6 +144,7 @@ class HealthSuite:
         results: list[HealthCheckResult] = [
             self._check_config_schema(),
             self._check_sqlite_writable(),
+            self._check_product_policy_initialized(),
             self._check_lark_cli_version(),
         ]
         auth_result = self._check_auth_status()
@@ -166,6 +167,7 @@ class HealthSuite:
         results: list[HealthCheckResult] = [
             self._check_config_schema(),
             self._check_sqlite_writable(),
+            self._check_product_policy_initialized(),
             self._check_lark_cli_version(),
         ]
         auth_result = self._check_auth_status()
@@ -208,6 +210,33 @@ class HealthSuite:
             "critical",
             "ok",
             "SQLite is writable",
+            {"path": str(self.store.path)},
+        )
+
+    def _check_product_policy_initialized(self) -> HealthCheckResult:
+        try:
+            probe = self.store.product_policy_initialization_probe()
+        except Exception as exc:  # pragma: no cover - platform-specific detail
+            return HealthCheckResult(
+                "product_policy_initialized",
+                "critical",
+                "failed",
+                "Product Policy Store initialization check failed",
+                {"error": str(exc), "path": str(self.store.path)},
+            )
+        if not probe["initialized"]:
+            return HealthCheckResult(
+                "product_policy_initialized",
+                "critical",
+                "failed",
+                "Product Policy Store global policy is not initialized; run `policy import-config`.",
+                {"missing": probe["missing"], "path": str(self.store.path)},
+            )
+        return HealthCheckResult(
+            "product_policy_initialized",
+            "critical",
+            "ok",
+            "Product Policy Store global policy is initialized",
             {"path": str(self.store.path)},
         )
 
@@ -384,6 +413,7 @@ def _health_result_list(result: HealthCheckResult | list[HealthCheckResult]) -> 
 def summarize_results(results: list[HealthCheckResult]) -> dict[str, object]:
     return {
         "critical_failed": [result.name for result in results if result.is_critical_failure],
+        "critical_messages": {result.name: result.message for result in results if result.is_critical_failure},
         "warnings": [result.name for result in results if result.severity == "warning" and result.status != "ok"],
     }
 

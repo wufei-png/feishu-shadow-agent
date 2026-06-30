@@ -8,8 +8,9 @@ import yaml
 
 from feishu_shadow_agent.agent_backend import AgentRunResult
 from feishu_shadow_agent.cli import main
-from feishu_shadow_agent.config import AppConfig, ChatPolicyConfig, OwnerConfig
+from feishu_shadow_agent.config import AppConfig, ChatPolicyConfig, LoadedConfig, OwnerConfig
 from feishu_shadow_agent.daemon import Daemon
+from feishu_shadow_agent.health import REQUIRED_USER_SCOPES, HealthSuite
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.processing import TaskProcessingService
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
@@ -63,7 +64,12 @@ class FakeFeishu:
         return LarkCliResult(
             ["lark-cli", "auth", "status", "--json", "--verify"],
             0,
-            json_data={"identities": {"bot": {"openId": "ou_bot", "available": True, "status": "ready"}}},
+            json_data={
+                "identities": {
+                    "user": {"scope": " ".join(sorted(REQUIRED_USER_SCOPES))},
+                    "bot": {"openId": "ou_bot", "available": True, "status": "ready"},
+                }
+            },
         )
 
     def owner_message(self, **kwargs: Any) -> LarkCliResult:
@@ -149,6 +155,10 @@ class FakeAgentBackend:
         )
 
 
+def _seed_policy(store: SQLiteStore, config: AppConfig) -> None:
+    store.import_product_policy_from_config(config)
+
+
 def test_startup_critical_failure_does_not_enter_loop(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     logger = JSONLLogger(tmp_path / "agent.jsonl")
@@ -164,6 +174,41 @@ def test_startup_critical_failure_does_not_enter_loop(tmp_path: Path) -> None:
     assert daemon.run_forever() == 2
 
     assert "daemon_startup_health_failed" in (tmp_path / "agent.jsonl").read_text(encoding="utf-8")
+
+
+def test_startup_missing_product_policy_fails_closed_with_import_hint(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    logger = JSONLLogger(tmp_path / "agent.jsonl")
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    loaded = LoadedConfig(config=config, path=tmp_path / "config.yaml", base_dir=tmp_path, raw={})
+
+    def ok_hermes(_loaded: LoadedConfig) -> HealthCheckResult:
+        return HealthCheckResult("hermes_reachable", "critical", "ok", "ok")
+
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=store,
+        feishu_client=FakeFeishu(),  # type: ignore[arg-type]
+        hermes_checker=ok_hermes,
+        run_id="run_1",
+    )
+    daemon = Daemon(
+        store=store,
+        logger=logger,
+        health_suite=suite,
+        tick_interval_seconds=1,
+        dry_run=False,
+        app_config=config,
+        feishu_client=FakeFeishu(),  # type: ignore[arg-type]
+    )
+
+    assert daemon.run_forever() == 2
+
+    log = (tmp_path / "agent.jsonl").read_text(encoding="utf-8")
+    assert "daemon_startup_health_failed" in log
+    assert "product_policy_initialized" in log
+    assert "policy import-config" in log
+    assert "daemon_started" not in log
 
 
 def test_noop_tick_is_logged(tmp_path: Path) -> None:
@@ -250,6 +295,7 @@ def test_daemon_tick_expires_overdue_approvals_before_approval_inbox(tmp_path: P
         )
     suite = FakeHealthSuite([HealthCheckResult("config_schema", "critical", "ok", "ok")])
     config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    _seed_policy(store, config)
     processor = TaskProcessingService(
         store=store,
         config=config,
@@ -323,13 +369,15 @@ def test_runtime_critical_health_failure_blocks_ingestion_and_all_sends(tmp_path
     store.create_owner_notification_action(task_id=task_id, payload={"type": "notify"})
     suite = FakeHealthSuite([HealthCheckResult("lark_auth_verify", "critical", "failed", "bad")])
     fake = FakeFeishu()
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    _seed_policy(store, config)
     daemon = Daemon(
         store=store,
         logger=logger,
         health_suite=suite,  # type: ignore[arg-type]
         tick_interval_seconds=1,
         dry_run=False,
-        app_config=AppConfig(owner=OwnerConfig(open_id="ou_owner")),
+        app_config=config,
         feishu_client=fake,  # type: ignore[arg-type]
         runtime_health_interval_seconds=0,
     )
@@ -453,6 +501,7 @@ def test_runtime_health_failure_rechecks_on_retry_interval_and_recovers(
         ]
     )
     fake = FakeFeishu()
+    _seed_policy(store, config)
     daemon = Daemon(
         store=store,
         logger=logger,
@@ -501,6 +550,7 @@ def test_runtime_health_ok_uses_interval_seconds_before_next_refresh(
             [HealthCheckResult("lark_auth_verify", "critical", "ok", "ok")],
         ]
     )
+    _seed_policy(store, config)
     daemon = Daemon(
         store=store,
         logger=logger,
@@ -520,6 +570,75 @@ def test_runtime_health_ok_uses_interval_seconds_before_next_refresh(
     assert suite.calls == 2
 
 
+def test_product_policy_missing_blocks_tick_even_when_runtime_health_is_cached(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    now = 0.0
+    monkeypatch.setattr("feishu_shadow_agent.daemon.time.monotonic", lambda: now)
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    logger = JSONLLogger(tmp_path / "agent.jsonl")
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    _seed_policy(store, config)
+    suite = SequenceHealthSuite(
+        [
+            [HealthCheckResult("lark_auth_verify", "critical", "ok", "ok")],
+            [HealthCheckResult("lark_auth_verify", "critical", "ok", "ok")],
+        ]
+    )
+    fake = FakeFeishu()
+    daemon = Daemon(
+        store=store,
+        logger=logger,
+        health_suite=suite,  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=False,
+        app_config=config,
+        feishu_client=fake,  # type: ignore[arg-type]
+    )
+    first = daemon.run_one_tick(run_id="run_1")
+    fake.calls.clear()
+    task_id = _insert_task(store)
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={"reply_target_message_id": "om_target", "text": "hello", "identity": "user"},
+    )
+    assert action_id is not None
+    with store.connect() as conn:
+        conn.execute("DELETE FROM product_policies WHERE key = ?", ("reply_policy",))
+    now = 1.0
+
+    second = daemon.run_one_tick(run_id="run_1")
+
+    assert [result.name for result in first] == [
+        "approval_inbox",
+        "group_at_me",
+        "p2p",
+        "active_watch",
+        "dispatch",
+        "retention",
+    ]
+    assert [result.name for result in second] == ["runtime_health"]
+    assert suite.calls == 1
+    assert fake.calls == []
+    assert fake.reply_calls == []
+    with store.connect() as conn:
+        action = conn.execute("SELECT status FROM actions WHERE id = ?", (action_id,)).fetchone()
+        health = conn.execute(
+            """
+            SELECT check_name, status, message
+            FROM health_checks
+            WHERE check_name = 'product_policy_initialized'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    assert action["status"] == "pending"
+    assert health["status"] == "failed"
+    assert "policy import-config" in health["message"]
+
+
 def test_approval_inbox_failure_blocks_send_reply_but_allows_owner_notification(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     logger = JSONLLogger(tmp_path / "agent.jsonl")
@@ -535,6 +654,7 @@ def test_approval_inbox_failure_blocks_send_reply_but_allows_owner_notification(
     fake = FakeFeishu()
     fake.fail_approval_inbox = True
     config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    _seed_policy(store, config)
     processor = TaskProcessingService(
         store=store,
         config=config,
@@ -603,6 +723,7 @@ logging:
     fake = FakeFeishu()
     fake.fail_approval_inbox = True
     config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    _seed_policy(store, config)
     processor = TaskProcessingService(
         store=store,
         config=config,
@@ -656,6 +777,7 @@ def test_fake_feishu_hermes_tick_runs_ordered_ingest_watch_and_dispatch(tmp_path
         owner=OwnerConfig(open_id="ou_owner"),
         chats={"oc_group": ChatPolicyConfig(auto_reply=True, bot_joined=True)},
     )
+    _seed_policy(store, config)
     processor = TaskProcessingService(
         store=store,
         config=config,
@@ -710,6 +832,7 @@ def test_dispatch_failure_is_reflected_in_tick_heartbeat_summary(tmp_path: Path)
         owner=OwnerConfig(open_id="ou_owner"),
         chats={"oc_group": ChatPolicyConfig(auto_reply=True, bot_joined=True)},
     )
+    _seed_policy(store, config)
     processor = TaskProcessingService(
         store=store,
         config=config,

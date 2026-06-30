@@ -56,6 +56,15 @@ def failed_hermes(loaded: LoadedConfig) -> HealthCheckResult:
     return HealthCheckResult("hermes_reachable", "critical", "failed", "down")
 
 
+def _initialized_store(tmp_path: Path, loaded: LoadedConfig) -> SQLiteStore:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.import_product_policy_from_config(
+        loaded.config,
+        used_defaults=loaded.reply_policy_used_defaults,
+    )
+    return store
+
+
 def test_http_hermes_health_mode_still_checks_cli_runtime_backend(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -89,7 +98,7 @@ agent_backend:
 
 def test_doctor_all_green_and_default_owner_notification_is_dry_run(tmp_path: Path) -> None:
     loaded = ConfigService().load(FIXTURE)
-    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store = _initialized_store(tmp_path, loaded)
     client = FakeFeishuClient()
     suite = HealthSuite(
         loaded_config=loaded,
@@ -105,12 +114,31 @@ def test_doctor_all_green_and_default_owner_notification_is_dry_run(tmp_path: Pa
     assert client.owner_message_dry_runs == [True]
 
 
+def test_doctor_fails_when_product_policy_store_is_not_initialized(tmp_path: Path) -> None:
+    loaded = ConfigService().load(FIXTURE)
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    client = FakeFeishuClient()
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=store,
+        feishu_client=client,
+        hermes_checker=ok_hermes,
+        run_id="doctor_1",
+    )
+
+    results = suite.run(send_test=False)
+
+    failed = {result.name: result for result in results if result.is_critical_failure}
+    assert failed["product_policy_initialized"].details["missing"] == ["global:reply_policy"]
+    assert "policy import-config" in failed["product_policy_initialized"].message
+
+
 def test_lark_cli_version_records_resolved_path(tmp_path: Path) -> None:
     fake_cli = tmp_path / "lark-cli"
     fake_cli.write_text("#!/bin/sh\n", encoding="utf-8")
     loaded = ConfigService().load(FIXTURE)
     loaded.config.lark_cli.path = str(fake_cli)
-    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store = _initialized_store(tmp_path, loaded)
     client = FakeFeishuClient()
     suite = HealthSuite(
         loaded_config=loaded,
@@ -129,7 +157,7 @@ def test_lark_cli_version_records_resolved_path(tmp_path: Path) -> None:
 
 def test_send_test_owner_notification_is_not_dry_run(tmp_path: Path) -> None:
     loaded = ConfigService().load(FIXTURE)
-    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store = _initialized_store(tmp_path, loaded)
     client = FakeFeishuClient()
     suite = HealthSuite(
         loaded_config=loaded,
@@ -146,7 +174,7 @@ def test_send_test_owner_notification_is_not_dry_run(tmp_path: Path) -> None:
 
 def test_missing_scope_is_critical_failure(tmp_path: Path) -> None:
     loaded = ConfigService().load(FIXTURE)
-    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store = _initialized_store(tmp_path, loaded)
     client = FakeFeishuClient(scopes=REQUIRED_USER_SCOPES - {"search:message"})
     suite = HealthSuite(
         loaded_config=loaded,
@@ -165,7 +193,7 @@ def test_missing_scope_is_critical_failure(tmp_path: Path) -> None:
 
 def test_hermes_unreachable_is_critical_failure(tmp_path: Path) -> None:
     loaded = ConfigService().load(FIXTURE)
-    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store = _initialized_store(tmp_path, loaded)
     client = FakeFeishuClient()
     suite = HealthSuite(
         loaded_config=loaded,
@@ -182,7 +210,7 @@ def test_hermes_unreachable_is_critical_failure(tmp_path: Path) -> None:
 
 def test_runtime_critical_health_includes_agent_backend(tmp_path: Path) -> None:
     loaded = ConfigService().load(FIXTURE)
-    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store = _initialized_store(tmp_path, loaded)
     client = FakeFeishuClient()
     suite = HealthSuite(
         loaded_config=loaded,
@@ -382,7 +410,7 @@ agent_backend:
         encoding="utf-8",
     )
     loaded = ConfigService().load(config_path)
-    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store = _initialized_store(tmp_path, loaded)
     client = FakeFeishuClient()
     suite = HealthSuite(
         loaded_config=loaded,
@@ -417,7 +445,7 @@ agent_backend:
         encoding="utf-8",
     )
     loaded = ConfigService().load(config_path)
-    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store = _initialized_store(tmp_path, loaded)
     client = FakeFeishuClient()
     suite = HealthSuite(
         loaded_config=loaded,
@@ -452,7 +480,7 @@ agent_backend:
         encoding="utf-8",
     )
     loaded = ConfigService().load(config_path)
-    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store = _initialized_store(tmp_path, loaded)
     client = FakeFeishuClient()
     suite = HealthSuite(
         loaded_config=loaded,

@@ -176,7 +176,7 @@ class TaskProcessingService:
         self.collector = CandidateCollector(store)
         self.approvals = ApprovalService(store=store, config=config)
         self.composer = SendComposer(owner_open_id=config.owner.open_id)
-        self.policy = PolicyResolver(config)
+        self.policy = PolicyResolver(store)
         self.agent_invoker = AgentInvoker(
             logger=logger,
             max_attempts=agent_max_attempts,

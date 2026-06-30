@@ -162,6 +162,10 @@ def _config(**kwargs: Any) -> AppConfig:
     return AppConfig(owner=OwnerConfig(open_id="ou_owner", name="Owner"), **kwargs)
 
 
+def _seed_policy(store: SQLiteStore, config: AppConfig) -> None:
+    store.import_product_policy_from_config(config)
+
+
 def _message(
     message_id: str,
     *,
@@ -409,10 +413,12 @@ def test_resource_store_failure_is_retried_for_duplicate_message(
     monkeypatch.chdir(tmp_path)
     store = FailingResourceStore(tmp_path / "agent.sqlite3")
     fake = FakeFeishuClient()
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(bot_joined=True)})
+    _seed_policy(store, cfg)
     service = IngestionService(
         store=store,
         feishu_client=fake,
-        config=_config(chats={"oc_1": ChatPolicyConfig(bot_joined=True)}),
+        config=cfg,
         logger=JSONLLogger(tmp_path / "agent.jsonl"),
         clock=lambda: "2026-06-22T10:10:00+08:00",
     )
@@ -1036,10 +1042,12 @@ def test_resource_status_downloaded_and_bot_not_joined(tmp_path: Path, monkeypat
     monkeypatch.chdir(tmp_path)
     fake = FakeFeishuClient()
     store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(bot_joined=True), "oc_2": ChatPolicyConfig(bot_joined=False)})
+    _seed_policy(store, cfg)
     service = IngestionService(
         store=store,
         feishu_client=fake,
-        config=_config(chats={"oc_1": ChatPolicyConfig(bot_joined=True)}),
+        config=cfg,
         logger=JSONLLogger(tmp_path / "agent.jsonl"),
         clock=lambda: "2026-06-22T10:10:00+08:00",
     )
@@ -1053,7 +1061,7 @@ def test_resource_status_downloaded_and_bot_not_joined(tmp_path: Path, monkeypat
     service_no_bot = IngestionService(
         store=store,
         feishu_client=fake,
-        config=_config(chats={"oc_2": ChatPolicyConfig(bot_joined=False)}),
+        config=cfg,
         logger=JSONLLogger(tmp_path / "agent.jsonl"),
         clock=lambda: "2026-06-22T10:10:00+08:00",
     )
@@ -1084,10 +1092,12 @@ def test_resource_status_downloaded_and_bot_not_joined(tmp_path: Path, monkeypat
 def test_unknown_group_resource_download_is_independent_from_auto_reply(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config()
+    _seed_policy(store, cfg)
     service = IngestionService(
         store=store,
         feishu_client=FakeFeishuClient(),
-        config=_config(),
+        config=cfg,
         logger=JSONLLogger(tmp_path / "agent.jsonl"),
         clock=lambda: "2026-06-22T10:10:00+08:00",
     )
@@ -1112,13 +1122,15 @@ def test_resource_download_disabled_skips_even_when_auto_reply_enabled(tmp_path:
     monkeypatch.chdir(tmp_path)
     fake = FakeFeishuClient()
     store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config(
+        reply_policy=ReplyPolicyConfig(unknown_group_auto_reply=True),
+        chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True, resource_download=False)},
+    )
+    _seed_policy(store, cfg)
     service = IngestionService(
         store=store,
         feishu_client=fake,
-        config=_config(
-            reply_policy=ReplyPolicyConfig(unknown_group_auto_reply=True),
-            chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True, resource_download=False)},
-        ),
+        config=cfg,
         logger=JSONLLogger(tmp_path / "agent.jsonl"),
         clock=lambda: "2026-06-22T10:10:00+08:00",
     )
@@ -1140,15 +1152,53 @@ def test_resource_download_disabled_skips_even_when_auto_reply_enabled(tmp_path:
     assert "disabled_by_chat_policy" in resource["raw_json"]
 
 
+def test_resource_download_policy_uses_db_instead_of_runtime_yaml_config(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake = FakeFeishuClient()
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    db_policy = _config(chats={"oc_1": ChatPolicyConfig(bot_joined=True, resource_download=False)})
+    runtime_config = _config(chats={"oc_1": ChatPolicyConfig(bot_joined=True, resource_download=True)})
+    _seed_policy(store, db_policy)
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=runtime_config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+
+    service.process_raw_message(
+        _message("om_db_policy_img", mentions=[{"open_id": "ou_owner"}], image_key="img_db_policy"),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        resource = conn.execute(
+            "SELECT download_status, raw_json FROM resources WHERE file_key = ?",
+            ("img_db_policy",),
+        ).fetchone()
+    assert fake.downloads == []
+    assert resource["download_status"] == "skipped"
+    assert "explicit_chat" in resource["raw_json"]
+    assert "disabled_by_chat_policy" in resource["raw_json"]
+
+
 def test_resource_download_success_without_file_records_missing_file(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     fake = FakeFeishuClient()
     fake.write_download_files = False
     store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(bot_joined=True)})
+    _seed_policy(store, cfg)
     service = IngestionService(
         store=store,
         feishu_client=fake,
-        config=_config(chats={"oc_1": ChatPolicyConfig(bot_joined=True)}),
+        config=cfg,
         logger=JSONLLogger(tmp_path / "agent.jsonl"),
         clock=lambda: "2026-06-22T10:10:00+08:00",
     )
@@ -1176,13 +1226,15 @@ def test_oversized_resource_download_is_deleted_and_marked_too_large(
     monkeypatch.chdir(tmp_path)
     fake = FakeFeishuClient()
     store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config(
+        storage=StorageConfig(max_resource_bytes=4),
+        chats={"oc_1": ChatPolicyConfig(bot_joined=True)},
+    )
+    _seed_policy(store, cfg)
     service = IngestionService(
         store=store,
         feishu_client=fake,
-        config=_config(
-            storage=StorageConfig(max_resource_bytes=4),
-            chats={"oc_1": ChatPolicyConfig(bot_joined=True)},
-        ),
+        config=cfg,
         logger=JSONLLogger(tmp_path / "agent.jsonl"),
         clock=lambda: "2026-06-22T10:10:00+08:00",
     )
@@ -1213,13 +1265,15 @@ def test_resource_dir_quota_deletes_download_and_blocks_following_resources(
     monkeypatch.chdir(tmp_path)
     fake = FakeFeishuClient()
     store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config(
+        storage=StorageConfig(max_resource_dir_bytes=4),
+        chats={"oc_1": ChatPolicyConfig(bot_joined=True)},
+    )
+    _seed_policy(store, cfg)
     service = IngestionService(
         store=store,
         feishu_client=fake,
-        config=_config(
-            storage=StorageConfig(max_resource_dir_bytes=4),
-            chats={"oc_1": ChatPolicyConfig(bot_joined=True)},
-        ),
+        config=cfg,
         logger=JSONLLogger(tmp_path / "agent.jsonl"),
         clock=lambda: "2026-06-22T10:10:00+08:00",
     )
@@ -1254,13 +1308,15 @@ def test_resource_dir_quota_blocks_following_message_in_same_service(
     monkeypatch.chdir(tmp_path)
     fake = FakeFeishuClient()
     store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config(
+        storage=StorageConfig(max_resource_dir_bytes=4),
+        chats={"oc_1": ChatPolicyConfig(bot_joined=True)},
+    )
+    _seed_policy(store, cfg)
     service = IngestionService(
         store=store,
         feishu_client=fake,
-        config=_config(
-            storage=StorageConfig(max_resource_dir_bytes=4),
-            chats={"oc_1": ChatPolicyConfig(bot_joined=True)},
-        ),
+        config=cfg,
         logger=JSONLLogger(tmp_path / "agent.jsonl"),
         clock=lambda: "2026-06-22T10:10:00+08:00",
     )
@@ -1304,10 +1360,12 @@ def test_active_watch_ignores_unmatched_resource_message_without_download(
     monkeypatch.chdir(tmp_path)
     fake = FakeFeishuClient()
     store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(bot_joined=True)})
+    _seed_policy(store, cfg)
     service = IngestionService(
         store=store,
         feishu_client=fake,
-        config=_config(chats={"oc_1": ChatPolicyConfig(bot_joined=True)}),
+        config=cfg,
         logger=JSONLLogger(tmp_path / "agent.jsonl"),
         clock=lambda: "2026-06-22T10:10:00+08:00",
     )
@@ -1552,13 +1610,15 @@ def test_thread_active_watch_target_comes_from_watch_key_without_task_thread_id(
 def test_daemon_tick_runs_p2_stages_in_order(tmp_path: Path) -> None:
     fake = FakeFeishuClient()
     store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config()
+    _seed_policy(store, cfg)
     daemon = Daemon(
         store=store,
         logger=JSONLLogger(tmp_path / "agent.jsonl"),
         health_suite=FakeHealthSuite(),  # type: ignore[arg-type]
         tick_interval_seconds=1,
         dry_run=True,
-        app_config=_config(),
+        app_config=cfg,
         feishu_client=fake,
     )
 

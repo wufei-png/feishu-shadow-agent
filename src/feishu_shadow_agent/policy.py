@@ -1,12 +1,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal, Protocol
 
-from .config import AppConfig, ChatPolicyConfig
+from pydantic import ValidationError
+
+from .config import ChatPolicyConfig, ReplyPolicyConfig
 from .types import NormalizedMessage, TaskRecord
 
 PolicySource = Literal["explicit_chat", "unknown_group", "p2p", "default"]
+
+
+class ProductPolicyRepository(Protocol):
+    def get_product_policy(self) -> dict[str, Any] | None: ...
+
+    def get_chat_product_policy(self, chat_id: str) -> dict[str, Any] | None: ...
+
+
+class ProductPolicyMissingError(RuntimeError):
+    pass
+
+
+class ProductPolicyInvalidError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -35,19 +51,23 @@ class ReplyPolicyDecision:
 
 
 class PolicyResolver:
-    def __init__(self, config: AppConfig):
-        self.config = config
+    def __init__(self, repository: ProductPolicyRepository):
+        self.repository = repository
 
     def resolve_chat_policy(self, chat_id: str | None, chat_type: str | None) -> ResolvedChatPolicy:
-        if chat_id and chat_id in self.config.chats:
-            return _resolved_from_config(self.config.chats[chat_id], policy_source="explicit_chat")
-        default = ChatPolicyConfig()
+        global_policy = self._global_product_policy()
+        if chat_id:
+            chat_policy = self.repository.get_chat_product_policy(chat_id)
+            if chat_policy is not None:
+                return _resolved_from_policy(chat_policy, policy_source="explicit_chat")
+        reply_policy = _reply_policy_config(global_policy)
+        default = _default_chat_policy_config(global_policy)
         if chat_type == "p2p":
-            return _resolved_from_config(default, auto_reply=self.config.reply_policy.p2p_auto_reply, policy_source="p2p")
+            return _resolved_from_config(default, auto_reply=reply_policy.p2p_auto_reply, policy_source="p2p")
         if chat_type == "group":
             return _resolved_from_config(
                 default,
-                auto_reply=self.config.reply_policy.unknown_group_auto_reply,
+                auto_reply=reply_policy.unknown_group_auto_reply,
                 policy_source="unknown_group",
             )
         return _resolved_from_config(default, policy_source="default")
@@ -79,7 +99,7 @@ class PolicyResolver:
         if not proposed_reply.strip() or not final_reply.strip():
             return ReplyPolicyDecision(False, "empty_proposed_reply", "user", policy.policy_source)
         if chat_type == "p2p":
-            if not self.config.reply_policy.p2p_auto_reply:
+            if not _reply_policy_config(self._global_product_policy()).p2p_auto_reply:
                 return ReplyPolicyDecision(False, "p2p_auto_reply_disabled", "user", policy.policy_source)
             return ReplyPolicyDecision(True, "ok", "user", policy.policy_source)
         if chat_type == "group":
@@ -101,6 +121,16 @@ class PolicyResolver:
             return ReplyPolicyDecision(False, "bot_not_joined", "bot", policy.policy_source)
         return ReplyPolicyDecision(False, "unknown_chat_type", "user", policy.policy_source)
 
+    def _global_product_policy(self) -> dict[str, Any]:
+        policy = self.repository.get_product_policy()
+        if policy is None:
+            raise ProductPolicyMissingError(
+                "Product Policy Store global policy is not initialized; run `policy import-config`."
+            )
+        if not isinstance(policy, dict) or "reply_policy" not in policy or "default_chat_policy" not in policy:
+            raise ProductPolicyInvalidError("Product Policy Store global policy is missing required fields.")
+        return policy
+
 
 def _resolved_from_config(
     config: ChatPolicyConfig,
@@ -116,3 +146,29 @@ def _resolved_from_config(
         allow_user_fallback=config.allow_user_fallback,
         policy_source=policy_source,
     )
+
+
+def _resolved_from_policy(policy: dict[str, Any], *, policy_source: PolicySource) -> ResolvedChatPolicy:
+    return _resolved_from_config(_chat_policy_config(policy), policy_source=policy_source)
+
+
+def _reply_policy_config(global_policy: dict[str, Any]) -> ReplyPolicyConfig:
+    try:
+        return ReplyPolicyConfig.model_validate(global_policy["reply_policy"])
+    except (KeyError, TypeError, ValidationError) as exc:
+        raise ProductPolicyInvalidError("Product Policy Store reply_policy is invalid.") from exc
+
+
+def _default_chat_policy_config(global_policy: dict[str, Any]) -> ChatPolicyConfig:
+    try:
+        return ChatPolicyConfig.model_validate(global_policy["default_chat_policy"])
+    except (KeyError, TypeError, ValidationError) as exc:
+        raise ProductPolicyInvalidError("Product Policy Store default_chat_policy is invalid.") from exc
+
+
+def _chat_policy_config(policy: dict[str, Any]) -> ChatPolicyConfig:
+    data = {key: value for key, value in policy.items() if key != "chat_id"}
+    try:
+        return ChatPolicyConfig.model_validate(data)
+    except (TypeError, ValidationError) as exc:
+        raise ProductPolicyInvalidError("Product Policy Store chat policy is invalid.") from exc

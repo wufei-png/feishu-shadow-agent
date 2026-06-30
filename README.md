@@ -30,13 +30,19 @@ cp config.example.yaml config.yaml
 编辑 `config.yaml`，至少确认：
 
 - `owner.open_id` 是 owner 的飞书 open_id
-- `chats` 中需要自动回复的群配置了 `auto_reply: true`
-- 需要下载图片/文件资源的群配置了 `bot_joined: true`
+- Policy Import Source 中需要自动回复的群配置了 `chats.<chat_id>.auto_reply: true`
+- 需要下载图片/文件资源的群在 Policy Import Source 中配置了 `chats.<chat_id>.bot_joined: true`
 - `lark_cli.path` 和 `agent_backend.hermes.path` 留空时会使用当前 `PATH`
 
 完整配置项见 [配置参考](docs/configuration.md)；JSON Schema 见 [schemas/config.schema.json](schemas/config.schema.json)。
 
-启动前先跑健康检查：
+启动前先把 `config.yaml` 中的策略字段显式导入 Product Policy Store；daemon 运行时只读取 SQLite 中的 Product Policy，未初始化时会 fail closed：
+
+```bash
+python -m feishu_shadow_agent policy import-config --config config.yaml
+```
+
+如需用当前 `config.yaml` 覆盖已有全局策略和其中列出的群策略，使用 `--replace`。导入后再跑健康检查：
 
 ```bash
 python -m feishu_shadow_agent doctor --config config.yaml

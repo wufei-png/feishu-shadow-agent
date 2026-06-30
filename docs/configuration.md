@@ -2,7 +2,7 @@
 
 Feishu Shadow Agent 的 `config.yaml` 结构真相来源是 `src/feishu_shadow_agent/config.py` 中的 Pydantic 模型。`config.yaml` 启动时由 `ConfigService.load()` 校验；`schemas/config.schema.json` 是从同一模型生成的 JSON Schema，主要给编辑器、CI 和文档引用使用。
 
-`reply_policy` 和 `chats` 同时是 Product Policy Store 的 Policy Import Source：operator 必须显式运行 `policy import-config` 才会把这些字段写入 SQLite。P12a 只建立 store、import/replace 和 audit 基础；runtime `PolicyResolver(config)` 切到 DB 由后续阶段处理。
+`reply_policy` 和 `chats` 是 Product Policy Store 的 Policy Import Source：operator 必须显式运行 `policy import-config` 才会把这些字段写入 SQLite。daemon、资源下载 preflight 和回复 gate 的运行时 Product Policy 只从 SQLite Product Policy Store 读取；DB 全局策略未初始化时，`doctor` 和 daemon runtime health 会 critical fail closed。
 
 常用命令：
 
@@ -27,8 +27,8 @@ python -m feishu_shadow_agent policy import-config --config config.yaml --replac
 | `logging` | object | 见下表 | 本地 JSONL 日志路径。 |
 | `lark_cli` | object | 见下表 | `lark-cli` 可执行文件和超时。 |
 | `agent_backend` | object | 见下表 | Agent backend 选择、上下文隔离策略和 provider 专属参数。 |
-| `reply_policy` | object | 见下表 | 全局自动回复策略。 |
-| `chats` | map | `{}` | 按 Feishu `chat_id` 配置群级策略覆盖，例如 `oc_xxx`。 |
+| `reply_policy` | object | 见下表 | Policy Import Source 中的全局自动回复策略。 |
+| `chats` | map | `{}` | Policy Import Source 中按 Feishu `chat_id` 声明的群级策略，例如 `oc_xxx`。 |
 | `tool_permissions` | enum | `guarded_write` | Agent backend 工具权限档位：`read_only`、`guarded_write`、`full_access`。当前仅 Hermes backend 实现映射。 |
 | `retention` | object | 见下表 | 本地数据保留时间。 |
 | `lifecycle` | object | 见下表 | 全局任务生命周期和审批过期设置。 |
@@ -71,8 +71,8 @@ python -m feishu_shadow_agent policy import-config --config config.yaml --replac
 | `agent_backend.hermes.timeout_seconds` | int `> 0` | `60` | Hermes 子进程或 health 调用超时。 |
 | `agent_backend.hermes.health_url` | string/null | `null` | `agent_backend.hermes.mode: http` 时追加使用；必须以 `http://` 或 `https://` 开头，HTTP 模式下必填。典型值为 `http://127.0.0.1:8642/health`。**不用于 chat/路由/会话调用**。 |
 | `agent_backend.hermes.api_key_env` | string/null | `HERMES_API_KEY` | `agent_backend.hermes.mode: http` 时可选 Bearer token 环境变量名。Hermes 官方 API server 常用 `API_SERVER_KEY`；`/health` 端点通常无需认证，此字段主要留给需要鉴权的 health URL。 |
-| `reply_policy.p2p_auto_reply` | bool | `true` | P2P 私聊在回复 gate 通过时是否允许自动回复。 |
-| `reply_policy.unknown_group_auto_reply` | bool | `false` | 未在 `chats` 显式配置的群是否允许自动回复；不影响资源下载、bot 是否入群或 user fallback。 |
+| `reply_policy.p2p_auto_reply` | bool | `true` | 导入 Product Policy Store 后，P2P 私聊在回复 gate 通过时是否允许自动回复。 |
+| `reply_policy.unknown_group_auto_reply` | bool | `false` | 导入 Product Policy Store 后，未显式配置的群是否允许自动回复；不影响资源下载、bot 是否入群或 user fallback。 |
 | `chats.<chat_id>.name` | string | `""` | 方便 operator 识别的群名，不作为 chat_id。 |
 | `chats.<chat_id>.auto_reply` | bool | `false` | 该群在所有 gate 通过时是否允许自动回复。 |
 | `chats.<chat_id>.bot_joined` | bool | `false` | bot 是否已进群；影响 bot 回复和资源访问能力判断。 |
@@ -94,7 +94,7 @@ P8 暂不启用 `PRAGMA journal_mode=WAL`。当前部署形态以本地单文件
 
 `status` 输出中的 `daemon_liveness` 来自最新有 daemon tick 的 run（例如 `last_tick_started_at IS NOT NULL`）的 heartbeat；`last_run` 仍保留最新任意 run，包括 doctor 等非 daemon run。该 daemon run 仍是 `running` 且 `last_heartbeat_at` 超过固定阈值未更新时，会显示为 `stale`；这表示上一次 daemon 可能卡住或崩溃，需要结合 JSONL 日志和进程状态确认。`runs.last_tick_summary_json` 只保留最近一个 tick 的阶段摘要，详细历史仍以 JSONL 为准。
 
-Product Policy Store 目前包含全局 `product_policies`、复用的 per-chat `chat_policies` 和 `policy_audits`。默认导入只填缺失的全局策略和缺失的 chat policy；如果 `config.yaml` 省略 `reply_policy`，导入会使用 Pydantic 默认值并在结果中报告 `used_defaults: true`。`--replace` 会替换全局策略和 config 中列出的 chat policy，但不会删除 DB 中存在而 config 缺失的 chat policy。每个插入或替换都会写入 `policy_audits`。这类比较和导入语义叫 Policy Import Source / Policy Import Diff，不叫 config drift。
+Product Policy Store 是运行时 Product Policy 真相来源，包含全局 `product_policies`、复用的 per-chat `chat_policies` 和 `policy_audits`。默认导入只填缺失的全局策略和缺失的 chat policy；如果 `config.yaml` 省略 `reply_policy`，导入会使用 Pydantic 默认值并在结果中报告 `used_defaults: true`。`--replace` 会替换全局策略和 config 中列出的 chat policy，但不会删除 DB 中存在而 config 缺失的 chat policy。每个插入或替换都会写入 `policy_audits`。这类比较和导入语义叫 Policy Import Source / Policy Import Diff，不叫 config drift。
 
 `status`、`replay` 和 `dispatch inspect` 是 operator 读路径，不会把 overdue approval 写成 `expired`。超过 `expires_at` 但尚未被显式推进的 approval 仍是 `status: pending`，读模型额外显示 `is_overdue`、`overdue_seconds` 和 `recommended_action`。需要立即推进过期时运行：
 

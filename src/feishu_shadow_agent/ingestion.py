@@ -146,7 +146,7 @@ class ResourceProcessor:
         self.config = config
         self.logger = logger
         self.config_base_dir = Path(config_base_dir or Path.cwd()).expanduser().resolve()
-        self.policy = PolicyResolver(config)
+        self.policy = PolicyResolver(store)
         self.quota = ResourceQuotaGuard(config=config, base_dir=self.config_base_dir)
         self._quota_downloads_blocked = False
 

@@ -90,6 +90,10 @@ def _config(**kwargs: Any) -> AppConfig:
     return AppConfig(owner=OwnerConfig(open_id="ou_owner", name="Owner"), **kwargs)
 
 
+def _seed_policy(store: SQLiteStore, config: AppConfig) -> None:
+    store.import_product_policy_from_config(config)
+
+
 def _message(
     message_id: str,
     *,
@@ -162,6 +166,7 @@ def _service(tmp_path: Path, *, config: AppConfig | None = None, hermes: FakeHer
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     fake_hermes = hermes or FakeHermes()
     cfg = config or _config()
+    _seed_policy(store, cfg)
     processor = TaskProcessingService(
         store=store,
         config=cfg,
@@ -432,6 +437,7 @@ def test_resource_blockers_record_blocked_waiting_external(
     hermes = FakeHermes()
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     cfg = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)})
+    _seed_policy(store, cfg)
     processor = TaskProcessingService(
         store=store,
         config=cfg,
@@ -1299,6 +1305,7 @@ def test_task_session_exception_retries_terminal_without_empty_approval(tmp_path
 def test_duplicate_with_routing_audit_but_no_processing_reruns_task_session(tmp_path: Path) -> None:
     cfg = _config()
     store = SQLiteStore(tmp_path / "agent.sqlite3")
+    _seed_policy(store, cfg)
     raw = _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a")
     p2_service = IngestionService(
         store=store,

@@ -97,7 +97,9 @@ class Daemon:
                 heartbeat.record(result)
                 heartbeat.finish()
                 return results
-            if not self._runtime_health_ok_for_tick(run_id=run_id):
+            if not self._runtime_product_policy_ok_for_tick(run_id=run_id) or not self._runtime_health_ok_for_tick(
+                run_id=run_id
+            ):
                 self.logger.emit(
                     "error",
                     "daemon_runtime_health_failed",
@@ -297,6 +299,36 @@ class Daemon:
             return 0
         health = self.app_config.health
         return health.interval_seconds if self._runtime_health_ok else health.retry_interval_seconds
+
+    def _runtime_product_policy_ok_for_tick(self, *, run_id: str) -> bool:
+        try:
+            probe = self.store.product_policy_initialization_probe()
+        except Exception as exc:  # pragma: no cover - platform-specific detail
+            result = HealthCheckResult(
+                "product_policy_initialized",
+                "critical",
+                "failed",
+                "Product Policy Store initialization check failed",
+                {"error": str(exc), "path": str(self.store.path)},
+            )
+        else:
+            if probe["initialized"]:
+                return True
+            result = HealthCheckResult(
+                "product_policy_initialized",
+                "critical",
+                "failed",
+                "Product Policy Store global policy is not initialized; run `policy import-config`.",
+                {"missing": probe["missing"], "path": str(self.store.path)},
+            )
+        self.store.record_health_results(run_id=run_id, results=[result])
+        self.logger.emit(
+            "error",
+            "runtime_critical_health_failed",
+            run_id=run_id,
+            data=summarize_results([result]),
+        )
+        return False
 
     def _run_retention_stage(self, *, run_id: str) -> StageResult:
         if self.app_config is None:

@@ -26,6 +26,7 @@ python -m pytest -q tests/test_p2_ingestion_routing.py tests/test_p3_hermes_appr
 python -m pytest -q tests/test_daemon.py tests/test_dispatcher.py tests/test_cli.py
 python -m pytest -q tests/test_store_migrations.py tests/test_retention.py
 python -m pytest -q tests/test_product_policy_store.py
+python -m pytest -q tests/test_policy_runtime.py
 ```
 
 提交前做基础格式卫生检查：
@@ -46,6 +47,7 @@ git diff --check
 - `tests/test_dispatcher.py`：dry-run、真实发送、dispatch attempt、读回验证、stale sending 恢复。
 - `tests/test_store_migrations.py`：SQLite migration、busy timeout、约束、状态 enum 契约、幂等动作。
 - `tests/test_product_policy_store.py`：Product Policy Store 初始化探针、config import/replace、chat policy skip、audit old/new。
+- `tests/test_policy_runtime.py`：runtime resolver 从 Product Policy Store 读取、缺失全局策略 fail closed、DB policy 覆盖 YAML import source。
 - `tests/test_retention.py`：消息 raw JSON 和资源保留策略。
 
 这些测试验证代码契约，不证明当前机器的 `lark-cli` 授权、飞书权限或 Hermes 可执行文件可用；真实环境要跑下面的端到端流程。
@@ -61,15 +63,9 @@ git diff --check
 - 飞书 bot 可私聊 owner。
 - 如果要测群聊资源下载，bot 已加入测试群，且该群在 `chats` 中配置 `bot_joined: true`。
 - `hermes --version` 和 `hermes status` 可执行。
-- 测试群如需自动回复，配置 `auto_reply: true`；未知群默认只处理，不自动回复。
+- 测试群如需自动回复，在 `config.yaml` 的 Policy Import Source 中配置 `auto_reply: true`。
 
-先运行无副作用健康检查：
-
-```bash
-python -m feishu_shadow_agent doctor --config config.yaml
-```
-
-Product Policy Store 初始化是显式 operator 动作，不会由 daemon 启动自动同步。需要验证 P12a 的持久化基础时先运行：
+Product Policy Store 初始化是显式 operator 动作，不会由 daemon 启动自动同步。首次运行 `doctor` 或 daemon 前先导入：
 
 ```bash
 python -m feishu_shadow_agent policy import-config --config config.yaml
@@ -79,6 +75,12 @@ python -m feishu_shadow_agent policy import-config --config config.yaml
 
 ```bash
 python -m feishu_shadow_agent policy import-config --config config.yaml --replace
+```
+
+再运行无副作用健康检查：
+
+```bash
+python -m feishu_shadow_agent doctor --config config.yaml
 ```
 
 如需验证 bot 能真实私聊 owner，再显式运行：

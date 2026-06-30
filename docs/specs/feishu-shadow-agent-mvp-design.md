@@ -107,6 +107,7 @@ health check 分级：
 critical:
   config schema
   SQLite writable
+  Product Policy Store global policy initialized
   lark-cli path/version
   auth status --verify
   required user scopes
@@ -260,7 +261,9 @@ daemon 单轮执行顺序见 [Daemon tick 流程](./feishu-shadow-agent-flows.md
 
 ## 7. 自动回复策略
 
-默认策略：
+Product Policy Store 是运行时 Product Policy 真相来源。`config.yaml.reply_policy` 和 `config.yaml.chats` 只作为显式 Policy Import Source；operator 运行 `policy import-config` 后才会写入 SQLite。DB 全局策略未初始化时，`doctor` 和 daemon runtime health critical fail closed，daemon 不处理任务或真实发送。
+
+导入后的默认全局策略：
 
 ```yaml
 reply_policy:
@@ -306,7 +309,7 @@ lark-cli im +messages-reply --message-id ...
 
 Hermes 输出、reply policy gate 与发送动作创建见 [Hermes 处理与回复决策](./feishu-shadow-agent-flows.md#hermes-reply-flow)。
 
-Product Policy Store 持久化全局策略和 per-chat 策略。全局策略 row 除 `reply_policy` 外，还保存运行时需要的 ChatPolicyConfig 默认字段作为 `default_chat_policy`，用于后续 runtime cutover。`config.yaml.reply_policy` 和 `config.yaml.chats` 是显式 Policy Import Source；`policy import-config` 默认只填缺失项，`--replace` 覆盖全局策略和 config 中列出的群策略，但不删除 DB-only 群策略。每次插入或替换都写 `policy_audits`。P12a 不把 runtime `PolicyResolver(config)` 切到 DB，runtime cutover 由后续阶段完成。
+Product Policy Store 持久化全局策略和 per-chat 策略。全局策略 row 除 `reply_policy` 外，还保存运行时需要的 ChatPolicyConfig 默认字段作为 `default_chat_policy`。`policy import-config` 默认只填缺失项，`--replace` 覆盖全局策略和 config 中列出的群策略，但不删除 DB-only 群策略。每次插入或替换都写 `policy_audits`。runtime `PolicyResolver` 只读 Product Policy Store，不从 `config.yaml` fallback。
 
 ## 8. @ 用户规则
 
@@ -1045,6 +1048,7 @@ python -m feishu_shadow_agent doctor --send-test
 - owner open_id 已配置。
 - approval inbox 可发送 dry-run。
 - 数据库可写。
+- Product Policy Store 全局策略已初始化；未初始化时提示先运行 `policy import-config`。
 - Hermes CLI `--version` critical check 和 `status` warning check。
 - Hermes tool permission profile 到 CLI flag 的派生检查。
 - 配置 YAML schema。
