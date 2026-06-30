@@ -31,6 +31,10 @@ dispatcher hardening.
   ids, response JSON, error, latency, and optional full prompt.
 - Gate-passed auto replies create pending `send_reply` actions.
 - `approved` is reserved for owner approval commands.
+- Approval is a blocker, not task lifecycle: creating a pending approval leaves
+  `tasks.status` unchanged; `approved`, `rejected`, and `expired` are approval
+  history states. The removed legacy `waiting_approval` task status must not be
+  reintroduced.
 - Resource gate mapping:
   - Task Session only runs after all task prompt resources are `downloaded`.
   - `bot_not_joined` / `bot_invisible`: create a `resource_needs_bot` owner notification.
@@ -96,6 +100,7 @@ dispatcher hardening.
 - Add approvals and owner commands:
   - Extend approvals with preview/notification metadata and add an `approval_commands` table keyed by `message_id` to make inbox command processing idempotent.
   - `ApprovalService` creates `send_reply` approvals when gates fail or Hermes schema/target validation fails, leaves `tasks.status` unchanged, exposes the pending approval as a blocker for status/replay/operator views, and creates a pending `owner_notification` action with copyable `/approve`, `/send`, and `/reject` commands.
+  - `approved`、`rejected`、`expired` 只描述 approval 历史状态，不是 active blocker，也不写入 `tasks.status`。
   - Replace `run_approval_inbox_placeholder` with real inbox ingestion. Resolve bot open id from `lark-cli auth status --json --verify`, then read owner-bot P2P using user identity: `+chat-messages-list --as user --user-id <bot_open_id>`.
   - Parse only owner-sent commands in that P2P: `/approve <a_id|t_id>`, `/reject <a_id|t_id>`, `/send <task_id> <final reply>`. Task-id shortcut works only when exactly one pending approval exists for the task; multiple pending approvals produce an owner notification asking for the concrete `a_...`.
   - `/approve` marks approval approved and creates one pending send action. `/reject` marks approval rejected and closes the task. `/send` creates an approved manual `send_reply` approval and pending send action, using the sole pending approval target when available, otherwise the task root message.
