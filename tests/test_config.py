@@ -17,6 +17,7 @@ def test_load_minimal_config() -> None:
     loaded = ConfigService().load(FIXTURE)
 
     assert loaded.config.owner.open_id == "ou_owner"
+    assert loaded.reply_policy_used_defaults is False
     assert loaded.config.storage.resource_dir == "data/resources"
     assert loaded.config.storage.max_resource_bytes == 52_428_800
     assert loaded.config.storage.max_resource_dir_bytes == 2_147_483_648
@@ -200,6 +201,23 @@ reply_policy:
 
     with pytest.raises(ConfigError, match="default_group_auto_reply"):
         ConfigService().load(config_path)
+
+
+def test_loaded_config_reports_reply_policy_defaults_for_import_source(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+""",
+        encoding="utf-8",
+    )
+
+    loaded = ConfigService().load(config_path)
+
+    assert loaded.reply_policy_used_defaults is True
+    assert loaded.config.reply_policy.p2p_auto_reply is True
+    assert loaded.config.reply_policy.unknown_group_auto_reply is False
 
 
 def test_approval_timeout_can_be_null(tmp_path: Path) -> None:

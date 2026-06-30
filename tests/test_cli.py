@@ -249,6 +249,84 @@ def test_status_shows_overdue_pending_approvals_without_expiring_real_db(tmp_pat
     assert rows["a_overdue"]["resolved_at"] is None
 
 
+def test_policy_import_config_uses_defaults_when_reply_policy_is_omitted(tmp_path: Path, capsys) -> None:
+    config = _write_config(tmp_path)
+    store = _store(tmp_path)
+
+    assert main(["policy", "import-config", "--config", str(config)]) == 0
+
+    output = yaml.safe_load(capsys.readouterr().out)
+    assert output["used_defaults"] is True
+    assert output["inserted"]["global"] == ["reply_policy"]
+    assert output["audit_count"] == 1
+    assert output["initialization"] == {"initialized": True, "missing": []}
+    product_policy = store.get_product_policy()
+    assert product_policy is not None
+    assert product_policy["reply_policy"] == {
+        "p2p_auto_reply": True,
+        "unknown_group_auto_reply": False,
+    }
+
+
+def test_policy_import_config_replace_updates_config_listed_chats(tmp_path: Path, capsys) -> None:
+    config = _write_config(tmp_path)
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + """
+chats:
+  oc_replace:
+    name: Before
+    auto_reply: true
+  oc_absent:
+    name: Not in replacement
+    auto_reply: true
+""",
+        encoding="utf-8",
+    )
+    assert main(["policy", "import-config", "--config", str(config)]) == 0
+    capsys.readouterr()
+
+    config.write_text(
+        """
+owner:
+  open_id: ou_owner
+  name: Owner
+storage:
+  sqlite_path: agent.sqlite3
+logging:
+  jsonl_path: agent.jsonl
+reply_policy:
+  p2p_auto_reply: false
+  unknown_group_auto_reply: true
+chats:
+  oc_replace:
+    name: After
+    auto_reply: false
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    assert main(["policy", "import-config", "--config", str(config), "--replace"]) == 0
+
+    output = yaml.safe_load(capsys.readouterr().out)
+    assert output["used_defaults"] is False
+    assert output["replaced"]["global"] == ["reply_policy"]
+    assert output["replaced"]["chats"] == ["oc_replace"]
+    store = _store(tmp_path)
+    product_policy = store.get_product_policy()
+    assert product_policy is not None
+    assert product_policy["reply_policy"] == {
+        "p2p_auto_reply": False,
+        "unknown_group_auto_reply": True,
+    }
+    replaced_chat = store.get_chat_product_policy("oc_replace")
+    absent_chat = store.get_chat_product_policy("oc_absent")
+    assert replaced_chat is not None
+    assert absent_chat is not None
+    assert replaced_chat["name"] == "After"
+    assert absent_chat["name"] == "Not in replacement"
+
+
 def test_replay_explains_current_state_without_real_db_mutation(tmp_path: Path, capsys) -> None:
     config = _write_config(tmp_path)
     store = _store(tmp_path)

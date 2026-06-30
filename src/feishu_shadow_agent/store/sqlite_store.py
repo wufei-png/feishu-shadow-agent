@@ -8,6 +8,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Iterable
 
+from ..config import AppConfig, ChatPolicyConfig
 from ..types import (
     ActionRecord,
     ActionKind,
@@ -32,6 +33,7 @@ from ..types import (
 
 SQLITE_BUSY_TIMEOUT_MS = 5000
 RUN_HEARTBEAT_STALE_AFTER_SECONDS = 300
+PRODUCT_POLICY_KEY = "reply_policy"
 
 
 class SQLiteStore:
@@ -77,6 +79,167 @@ class SQLiteStore:
     def health_probe(self) -> None:
         with self.connect() as conn:
             conn.execute("SELECT 1").fetchone()
+
+    def get_product_policy(self, key: str = PRODUCT_POLICY_KEY) -> dict[str, Any] | None:
+        self.migrate()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT policy_json FROM product_policies WHERE key = ?",
+                (key,),
+            ).fetchone()
+        return None if row is None else json.loads(row["policy_json"])
+
+    def get_chat_product_policy(self, chat_id: str) -> dict[str, Any] | None:
+        self.migrate()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT chat_id, name, auto_reply, bot_joined, reply_identity,
+                       allow_user_fallback, resource_download
+                FROM chat_policies
+                WHERE chat_id = ?
+                """,
+                (chat_id,),
+            ).fetchone()
+        return None if row is None else _chat_policy_from_row(row)
+
+    def product_policy_initialization_probe(self) -> dict[str, Any]:
+        self.migrate()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM product_policies WHERE key = ?",
+                (PRODUCT_POLICY_KEY,),
+            ).fetchone()
+        missing = [] if row is not None else [f"global:{PRODUCT_POLICY_KEY}"]
+        return {
+            "initialized": not missing,
+            "missing": missing,
+        }
+
+    def list_policy_audits(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        self.migrate()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, scope, policy_key, actor, old_json, new_json, reason, created_at
+                FROM policy_audits
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [_json_row_dict(row, "old_json", "new_json") for row in rows]
+
+    def import_product_policy_from_config(
+        self,
+        config: AppConfig,
+        *,
+        replace: bool = False,
+        used_defaults: bool = False,
+    ) -> dict[str, Any]:
+        self.migrate()
+        now = utc_now_iso()
+        reason = "policy import-config --replace" if replace else "policy import-config"
+        result: dict[str, Any] = {
+            "status": "imported",
+            "mode": "replace" if replace else "fill_missing",
+            "used_defaults": used_defaults,
+            "inserted": {"global": [], "chats": []},
+            "skipped": {"global": [], "chats": []},
+            "replaced": {"global": [], "chats": []},
+            "audit_count": 0,
+        }
+        global_policy = _global_product_policy_from_config(config)
+        with self.connect() as conn:
+            existing_global = conn.execute(
+                "SELECT policy_json FROM product_policies WHERE key = ?",
+                (PRODUCT_POLICY_KEY,),
+            ).fetchone()
+            if existing_global is None:
+                conn.execute(
+                    """
+                    INSERT INTO product_policies(key, policy_json, updated_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (PRODUCT_POLICY_KEY, _policy_json(global_policy), now),
+                )
+                self._record_policy_audit_locked(
+                    conn,
+                    scope="global",
+                    policy_key=PRODUCT_POLICY_KEY,
+                    old_policy=None,
+                    new_policy=global_policy,
+                    reason=reason,
+                    now=now,
+                )
+                result["inserted"]["global"].append(PRODUCT_POLICY_KEY)
+                result["audit_count"] += 1
+            elif replace:
+                old_policy = json.loads(existing_global["policy_json"])
+                conn.execute(
+                    """
+                    UPDATE product_policies
+                    SET policy_json = ?, updated_at = ?
+                    WHERE key = ?
+                    """,
+                    (_policy_json(global_policy), now, PRODUCT_POLICY_KEY),
+                )
+                self._record_policy_audit_locked(
+                    conn,
+                    scope="global",
+                    policy_key=PRODUCT_POLICY_KEY,
+                    old_policy=old_policy,
+                    new_policy=global_policy,
+                    reason=reason,
+                    now=now,
+                )
+                result["replaced"]["global"].append(PRODUCT_POLICY_KEY)
+                result["audit_count"] += 1
+            else:
+                result["skipped"]["global"].append(PRODUCT_POLICY_KEY)
+
+            for chat_id, chat_config in sorted(config.chats.items()):
+                chat_policy = _chat_policy_from_config(chat_id, chat_config)
+                existing_chat = conn.execute(
+                    """
+                    SELECT chat_id, name, auto_reply, bot_joined, reply_identity,
+                           allow_user_fallback, resource_download
+                    FROM chat_policies
+                    WHERE chat_id = ?
+                    """,
+                    (chat_id,),
+                ).fetchone()
+                if existing_chat is None:
+                    self._insert_chat_policy_locked(conn, chat_policy, now=now)
+                    self._record_policy_audit_locked(
+                        conn,
+                        scope="chat",
+                        policy_key=f"chat:{chat_id}",
+                        old_policy=None,
+                        new_policy=chat_policy,
+                        reason=reason,
+                        now=now,
+                    )
+                    result["inserted"]["chats"].append(chat_id)
+                    result["audit_count"] += 1
+                elif replace:
+                    old_policy = _chat_policy_from_row(existing_chat)
+                    self._update_chat_policy_locked(conn, chat_policy, now=now)
+                    self._record_policy_audit_locked(
+                        conn,
+                        scope="chat",
+                        policy_key=f"chat:{chat_id}",
+                        old_policy=old_policy,
+                        new_policy=chat_policy,
+                        reason=reason,
+                        now=now,
+                    )
+                    result["replaced"]["chats"].append(chat_id)
+                    result["audit_count"] += 1
+                else:
+                    result["skipped"]["chats"].append(chat_id)
+        result["initialization"] = self.product_policy_initialization_probe()
+        return result
 
     def record_run_start(
         self,
@@ -2498,6 +2661,91 @@ class SQLiteStore:
                 (short_id, task_id, kind, status, utc_now_iso(), None),
             )
 
+    def _insert_chat_policy_locked(
+        self,
+        conn: sqlite3.Connection,
+        policy: dict[str, Any],
+        *,
+        now: str,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO chat_policies(
+              chat_id, name, auto_reply, bot_joined, reply_identity,
+              allow_user_fallback, resource_download, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                policy["chat_id"],
+                policy["name"],
+                int(policy["auto_reply"]),
+                int(policy["bot_joined"]),
+                policy["reply_identity"],
+                int(policy["allow_user_fallback"]),
+                int(policy["resource_download"]),
+                now,
+            ),
+        )
+
+    def _update_chat_policy_locked(
+        self,
+        conn: sqlite3.Connection,
+        policy: dict[str, Any],
+        *,
+        now: str,
+    ) -> None:
+        conn.execute(
+            """
+            UPDATE chat_policies
+            SET name = ?,
+                auto_reply = ?,
+                bot_joined = ?,
+                reply_identity = ?,
+                allow_user_fallback = ?,
+                resource_download = ?,
+                updated_at = ?
+            WHERE chat_id = ?
+            """,
+            (
+                policy["name"],
+                int(policy["auto_reply"]),
+                int(policy["bot_joined"]),
+                policy["reply_identity"],
+                int(policy["allow_user_fallback"]),
+                int(policy["resource_download"]),
+                now,
+                policy["chat_id"],
+            ),
+        )
+
+    def _record_policy_audit_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        scope: str,
+        policy_key: str,
+        old_policy: dict[str, Any] | None,
+        new_policy: dict[str, Any],
+        reason: str,
+        now: str,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO policy_audits(
+              scope, policy_key, actor, old_json, new_json, reason, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                scope,
+                policy_key,
+                "import_config",
+                None if old_policy is None else _policy_json(old_policy),
+                _policy_json(new_policy),
+                reason,
+                now,
+            ),
+        )
+
     def _get_task_by_id(self, conn: sqlite3.Connection, task_id: int) -> TaskRecord:
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if row is None:
@@ -2880,6 +3128,43 @@ def _dispatch_attempt_dict(attempt: DispatchAttemptRecord) -> dict[str, Any]:
         "started_at": attempt.started_at,
         "finished_at": attempt.finished_at,
     }
+
+
+def _global_product_policy_from_config(config: AppConfig) -> dict[str, Any]:
+    default_chat_policy = ChatPolicyConfig().model_dump(mode="json")
+    return {
+        "reply_policy": config.reply_policy.model_dump(mode="json"),
+        "default_chat_policy": {
+            key: default_chat_policy[key]
+            for key in (
+                "bot_joined",
+                "reply_identity",
+                "allow_user_fallback",
+                "resource_download",
+            )
+        },
+    }
+
+
+def _chat_policy_from_config(chat_id: str, config: ChatPolicyConfig) -> dict[str, Any]:
+    data = config.model_dump(mode="json")
+    return {"chat_id": chat_id, **data}
+
+
+def _chat_policy_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "chat_id": row["chat_id"],
+        "name": row["name"] or "",
+        "auto_reply": bool(row["auto_reply"]),
+        "bot_joined": bool(row["bot_joined"]),
+        "reply_identity": row["reply_identity"],
+        "allow_user_fallback": bool(row["allow_user_fallback"]),
+        "resource_download": bool(row["resource_download"]),
+    }
+
+
+def _policy_json(policy: dict[str, Any]) -> str:
+    return json.dumps(policy, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def _row_dict(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, Any] | None:

@@ -306,6 +306,8 @@ lark-cli im +messages-reply --message-id ...
 
 Hermes 输出、reply policy gate 与发送动作创建见 [Hermes 处理与回复决策](./feishu-shadow-agent-flows.md#hermes-reply-flow)。
 
+Product Policy Store 持久化全局策略和 per-chat 策略。全局策略 row 除 `reply_policy` 外，还保存运行时需要的 ChatPolicyConfig 默认字段作为 `default_chat_policy`，用于后续 runtime cutover。`config.yaml.reply_policy` 和 `config.yaml.chats` 是显式 Policy Import Source；`policy import-config` 默认只填缺失项，`--replace` 覆盖全局策略和 config 中列出的群策略，但不删除 DB-only 群策略。每次插入或替换都写 `policy_audits`。P12a 不把 runtime `PolicyResolver(config)` 切到 DB，runtime cutover 由后续阶段完成。
+
 ## 8. @ 用户规则
 
 Hermes 不生成 @。Python `SendComposer` 统一加 `<at user_id="...">显示名</at>` 前缀。
@@ -331,7 +333,7 @@ mention 组装后的 dry-run、真实发送与读回验证见 [幂等发送与�
 
 ## 9. Per-chat policy
 
-群聊自动回复从一开始按 per-chat policy 设计，MVP 可以用 YAML 配置，未来 UI 复用同一套 Store API。
+群聊自动回复从一开始按 per-chat policy 设计。Product Policy Store 是持久化边界，`config.yaml` 中的 `chats` 只作为显式导入来源；不要实现 YAML 和 DB 的运行时合并解析器。
 
 MVP 最小字段：
 
@@ -950,6 +952,8 @@ checkpoints
 runs
 health_checks
 chat_policies
+product_policies
+policy_audits
 config_suggestions
 ```
 

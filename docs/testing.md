@@ -25,6 +25,7 @@ python -m pytest -q tests/test_config.py tests/test_lark_cli.py
 python -m pytest -q tests/test_p2_ingestion_routing.py tests/test_p3_hermes_approval.py
 python -m pytest -q tests/test_daemon.py tests/test_dispatcher.py tests/test_cli.py
 python -m pytest -q tests/test_store_migrations.py tests/test_retention.py
+python -m pytest -q tests/test_product_policy_store.py
 ```
 
 提交前做基础格式卫生检查：
@@ -44,6 +45,7 @@ git diff --check
 - `tests/test_daemon.py`：tick 顺序、heartbeat、运行中 health fail-closed、approval inbox 失败保护、dispatch 行为。
 - `tests/test_dispatcher.py`：dry-run、真实发送、dispatch attempt、读回验证、stale sending 恢复。
 - `tests/test_store_migrations.py`：SQLite migration、busy timeout、约束、状态 enum 契约、幂等动作。
+- `tests/test_product_policy_store.py`：Product Policy Store 初始化探针、config import/replace、chat policy skip、audit old/new。
 - `tests/test_retention.py`：消息 raw JSON 和资源保留策略。
 
 这些测试验证代码契约，不证明当前机器的 `lark-cli` 授权、飞书权限或 Hermes 可执行文件可用；真实环境要跑下面的端到端流程。
@@ -65,6 +67,18 @@ git diff --check
 
 ```bash
 python -m feishu_shadow_agent doctor --config config.yaml
+```
+
+Product Policy Store 初始化是显式 operator 动作，不会由 daemon 启动自动同步。需要验证 P12a 的持久化基础时先运行：
+
+```bash
+python -m feishu_shadow_agent policy import-config --config config.yaml
+```
+
+如需用当前 `config.yaml` 覆盖已有全局策略和其中列出的群策略，运行：
+
+```bash
+python -m feishu_shadow_agent policy import-config --config config.yaml --replace
 ```
 
 如需验证 bot 能真实私聊 owner，再显式运行：

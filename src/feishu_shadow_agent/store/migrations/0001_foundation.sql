@@ -176,6 +176,23 @@ CREATE TABLE IF NOT EXISTS chat_policies (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS product_policies (
+  key TEXT PRIMARY KEY,
+  policy_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS policy_audits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope TEXT NOT NULL CHECK (scope IN ('global', 'chat')),
+  policy_key TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  old_json TEXT,
+  new_json TEXT NOT NULL,
+  reason TEXT,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS config_suggestions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   status TEXT NOT NULL,
@@ -256,6 +273,7 @@ CREATE INDEX IF NOT EXISTS idx_message_processing_status ON message_processing(s
 CREATE INDEX IF NOT EXISTS idx_message_processing_message ON message_processing(message_id, stage);
 CREATE INDEX IF NOT EXISTS idx_dispatch_attempts_action ON dispatch_attempts(action_id, started_at, id);
 CREATE INDEX IF NOT EXISTS idx_dispatch_attempts_status ON dispatch_attempts(status, finished_at);
+CREATE INDEX IF NOT EXISTS idx_policy_audits_policy ON policy_audits(policy_key, created_at);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_active_send_reply_target
 ON actions(task_id, target_message_id)

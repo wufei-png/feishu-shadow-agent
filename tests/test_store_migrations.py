@@ -24,6 +24,8 @@ EXPECTED_TABLES = {
     "runs",
     "health_checks",
     "chat_policies",
+    "product_policies",
+    "policy_audits",
     "config_suggestions",
     "routing_audits",
     "agent_audits",
@@ -127,6 +129,12 @@ def test_baseline_schema_includes_current_columns(tmp_path: Path) -> None:
         run_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(runs)").fetchall()
         }
+        product_policy_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(product_policies)").fetchall()
+        }
+        policy_audit_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(policy_audits)").fetchall()
+        }
 
     assert {"thread_id", "reply_to_message_id", "sender_role", "direct_mention", "at_all", "text"} <= message_columns
     assert {"chat_type", "thread_id", "watch_until", "last_user_message", "last_agent_reply", "agent_session_id"} <= task_columns
@@ -154,9 +162,20 @@ def test_baseline_schema_includes_current_columns(tmp_path: Path) -> None:
         "last_tick_status",
         "last_tick_summary_json",
     } <= run_columns
+    assert {"key", "policy_json", "updated_at"} <= product_policy_columns
+    assert {
+        "scope",
+        "policy_key",
+        "actor",
+        "old_json",
+        "new_json",
+        "reason",
+        "created_at",
+    } <= policy_audit_columns
     assert "idx_agent_audits_task" in indexes
     assert "idx_actions_active_send_reply_target" in indexes
     assert "idx_dispatch_attempts_action" in indexes
+    assert "idx_policy_audits_policy" in indexes
 
 
 def test_send_reply_guard_and_failed_retry_use_current_baseline(tmp_path: Path) -> None:

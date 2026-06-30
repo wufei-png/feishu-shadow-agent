@@ -1,6 +1,8 @@
 # 配置参考
 
-Feishu Shadow Agent 的唯一配置真相来源是 `src/feishu_shadow_agent/config.py` 中的 Pydantic 模型。`config.yaml` 启动时由 `ConfigService.load()` 校验；`schemas/config.schema.json` 是从同一模型生成的 JSON Schema，主要给编辑器、CI 和文档引用使用。
+Feishu Shadow Agent 的 `config.yaml` 结构真相来源是 `src/feishu_shadow_agent/config.py` 中的 Pydantic 模型。`config.yaml` 启动时由 `ConfigService.load()` 校验；`schemas/config.schema.json` 是从同一模型生成的 JSON Schema，主要给编辑器、CI 和文档引用使用。
+
+`reply_policy` 和 `chats` 同时是 Product Policy Store 的 Policy Import Source：operator 必须显式运行 `policy import-config` 才会把这些字段写入 SQLite。P12a 只建立 store、import/replace 和 audit 基础；runtime `PolicyResolver(config)` 切到 DB 由后续阶段处理。
 
 常用命令：
 
@@ -8,6 +10,8 @@ Feishu Shadow Agent 的唯一配置真相来源是 `src/feishu_shadow_agent/conf
 python -m feishu_shadow_agent config show --config config.yaml --redacted
 python -m feishu_shadow_agent config validate --config config.yaml
 python -m feishu_shadow_agent config schema
+python -m feishu_shadow_agent policy import-config --config config.yaml
+python -m feishu_shadow_agent policy import-config --config config.yaml --replace
 ```
 
 `config validate` 只校验 YAML 结构和 Pydantic 语义，不检查 Feishu、agent backend、SQLite 或 CLI 可用性。运行前完整健康检查仍使用 `doctor`。
@@ -89,6 +93,8 @@ python -m feishu_shadow_agent config schema
 P8 暂不启用 `PRAGMA journal_mode=WAL`。当前部署形态以本地单文件 SQLite、手工复制/回放和简单清理为主；WAL 会额外生成 `-wal`/`-shm` 文件，容易让 operator 复制数据库或清理 `data/` 时漏文件。现阶段先用 busy timeout 改善短暂写锁等待，后续如果需要更高并发再单独评估 WAL。
 
 `status` 输出中的 `daemon_liveness` 来自最新有 daemon tick 的 run（例如 `last_tick_started_at IS NOT NULL`）的 heartbeat；`last_run` 仍保留最新任意 run，包括 doctor 等非 daemon run。该 daemon run 仍是 `running` 且 `last_heartbeat_at` 超过固定阈值未更新时，会显示为 `stale`；这表示上一次 daemon 可能卡住或崩溃，需要结合 JSONL 日志和进程状态确认。`runs.last_tick_summary_json` 只保留最近一个 tick 的阶段摘要，详细历史仍以 JSONL 为准。
+
+Product Policy Store 目前包含全局 `product_policies`、复用的 per-chat `chat_policies` 和 `policy_audits`。默认导入只填缺失的全局策略和缺失的 chat policy；如果 `config.yaml` 省略 `reply_policy`，导入会使用 Pydantic 默认值并在结果中报告 `used_defaults: true`。`--replace` 会替换全局策略和 config 中列出的 chat policy，但不会删除 DB 中存在而 config 缺失的 chat policy。每个插入或替换都会写入 `policy_audits`。这类比较和导入语义叫 Policy Import Source / Policy Import Diff，不叫 config drift。
 
 `status`、`replay` 和 `dispatch inspect` 是 operator 读路径，不会把 overdue approval 写成 `expired`。超过 `expires_at` 但尚未被显式推进的 approval 仍是 `status: pending`，读模型额外显示 `is_overdue`、`overdue_seconds` 和 `recommended_action`。需要立即推进过期时运行：
 

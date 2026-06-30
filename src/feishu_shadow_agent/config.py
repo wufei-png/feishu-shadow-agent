@@ -303,6 +303,11 @@ class LoadedConfig:
     config: AppConfig
     path: Path
     base_dir: Path
+    raw: dict[str, Any]
+
+    @property
+    def reply_policy_used_defaults(self) -> bool:
+        return "reply_policy" not in self.raw
 
 
 class ConfigService:
@@ -334,7 +339,7 @@ class ConfigService:
             config = AppConfig.model_validate(raw)
         except ValidationError as exc:
             raise ConfigError(str(exc)) from exc
-        return LoadedConfig(config=config, path=path, base_dir=path.resolve().parent)
+        return LoadedConfig(config=config, path=path, base_dir=path.resolve().parent, raw=raw)
 
     def redacted_dict(self, config: AppConfig) -> dict[str, Any]:
         data = config.model_dump(mode="json")

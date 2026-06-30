@@ -99,6 +99,20 @@ def build_parser() -> argparse.ArgumentParser:
     _add_config_arg(maintenance_expire_approvals)
     maintenance_expire_approvals.set_defaults(handler=_handle_maintenance_expire_approvals)
 
+    policy = subparsers.add_parser("policy", help="product policy helpers")
+    policy_subparsers = policy.add_subparsers(dest="policy_command")
+    policy_import_config = policy_subparsers.add_parser(
+        "import-config",
+        help="import config.yaml policy fields into Product Policy Store",
+    )
+    _add_config_arg(policy_import_config)
+    policy_import_config.add_argument(
+        "--replace",
+        action="store_true",
+        help="replace global policy and config-listed chat policies instead of only filling missing rows",
+    )
+    policy_import_config.set_defaults(handler=_handle_policy_import_config)
+
     dispatch = subparsers.add_parser("dispatch", help="dispatch recovery helpers")
     dispatch_subparsers = dispatch.add_subparsers(dest="dispatch_command")
     dispatch_inspect = dispatch_subparsers.add_parser("inspect", help="inspect an action and dispatch attempts")
@@ -338,6 +352,17 @@ def _handle_maintenance_expire_approvals(args: argparse.Namespace) -> int:
     _, store, _ = _load_runtime(args.config)
     expired = store.expire_pending_approvals()
     print(yaml.safe_dump({"expired_approvals": expired}, allow_unicode=True, sort_keys=False), end="")
+    return 0
+
+
+def _handle_policy_import_config(args: argparse.Namespace) -> int:
+    loaded, store, _ = _load_runtime(args.config)
+    result = store.import_product_policy_from_config(
+        loaded.config,
+        replace=args.replace,
+        used_defaults=loaded.reply_policy_used_defaults,
+    )
+    print(yaml.safe_dump(result, allow_unicode=True, sort_keys=False), end="")
     return 0
 
 
