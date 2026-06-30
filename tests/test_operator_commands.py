@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from feishu_shadow_agent.config import AppConfig, ChatPolicyConfig, OwnerConfig, ReplyPolicyConfig
 from feishu_shadow_agent.operator_commands import OperatorCommandService, command_exit_code
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 
@@ -40,6 +41,18 @@ def _create_pending_reply_approval(store: SQLiteStore, *, task_id: int, text: st
     )
     with store.connect() as conn:
         return conn.execute("SELECT short_id FROM approvals WHERE id = ?", (approval_id,)).fetchone()["short_id"]
+
+
+def _config(
+    *,
+    reply_policy: ReplyPolicyConfig | None = None,
+    chats: dict[str, ChatPolicyConfig] | None = None,
+) -> AppConfig:
+    return AppConfig(
+        owner=OwnerConfig(open_id="ou_owner"),
+        reply_policy=reply_policy or ReplyPolicyConfig(),
+        chats=chats or {},
+    )
 
 
 def test_operator_command_service_send_returns_stable_result_shape(tmp_path: Path) -> None:
@@ -187,3 +200,214 @@ def test_operator_command_service_expire_approvals_reports_no_change(tmp_path: P
         "warnings": [],
         "next_actions": [],
     }
+
+
+def test_operator_command_service_policy_import_uses_facade_result_shape(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    service = OperatorCommandService(store)
+
+    result = service.import_policy_config(
+        _config(),
+        used_defaults=True,
+        actor="test_operator",
+        reason="initial seed",
+    )
+    output = result.as_dict()
+
+    assert command_exit_code(result) == 0
+    assert output["status"] == "applied"
+    assert output["command"] == "policy.import_config"
+    assert output["actor"] == "test_operator"
+    assert output["reason"] == "initial seed"
+    assert output["changed"] is True
+    assert output["result"]["inserted"]["global"] == ["reply_policy"]
+    assert output["risk_level"] == "low"
+    assert output["confirmation_required"] is False
+    assert output["audit_count"] == 1
+    assert output["policy_import_diff"]["status"] == "matches"
+    audit = store.list_policy_audits(limit=1)[0]
+    assert audit["actor"] == "test_operator"
+    assert audit["reason"] == "initial seed"
+
+
+def test_global_policy_high_risk_update_requires_confirmation_before_mutation(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.import_product_policy_from_config(
+        _config(reply_policy=ReplyPolicyConfig(p2p_auto_reply=False, unknown_group_auto_reply=False))
+    )
+    service = OperatorCommandService(store)
+
+    result = service.update_global_policy(
+        {"p2p_auto_reply": True},
+        actor="test_operator",
+        reason="enable p2p",
+    )
+    output = result.as_dict()
+
+    assert command_exit_code(result) == 2
+    assert output["status"] == "confirmation_required"
+    assert output["risk_level"] == "high"
+    assert output["confirmation_required"] is True
+    assert output["changed"] is False
+    assert output["audit_count"] == 0
+    assert store.get_product_policy()["reply_policy"]["p2p_auto_reply"] is False
+    assert len(store.list_policy_audits(limit=10)) == 1
+
+    confirmed = service.update_global_policy(
+        {"p2p_auto_reply": True},
+        actor="test_operator",
+        reason="enable p2p",
+        confirm_risk=True,
+    )
+    confirmed_output = confirmed.as_dict()
+
+    assert command_exit_code(confirmed) == 0
+    assert confirmed_output["status"] == "applied"
+    assert confirmed_output["risk_level"] == "high"
+    assert confirmed_output["confirmation_required"] is False
+    assert confirmed_output["audit_count"] == 1
+    assert store.get_product_policy()["reply_policy"]["p2p_auto_reply"] is True
+    audit = store.list_policy_audits(limit=1)[0]
+    assert audit["actor"] == "test_operator"
+    assert audit["reason"] == "enable p2p"
+
+
+def test_chat_policy_high_risk_and_low_risk_updates_are_structured(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.import_product_policy_from_config(
+        _config(
+            chats={
+                "oc_policy": ChatPolicyConfig(
+                    name="Policy group",
+                    auto_reply=False,
+                    resource_download=True,
+                )
+            }
+        )
+    )
+    service = OperatorCommandService(store)
+
+    high_risk = service.update_chat_policy(
+        "oc_policy",
+        {"auto_reply": True},
+        actor="test_operator",
+        reason="open chat",
+    )
+
+    assert high_risk.status == "confirmation_required"
+    assert high_risk.changed is False
+    assert high_risk.as_dict()["old_policy"]["auto_reply"] is False
+    assert high_risk.as_dict()["new_policy"]["auto_reply"] is True
+    assert store.get_chat_product_policy("oc_policy")["auto_reply"] is False
+
+    low_risk = service.update_chat_policy(
+        "oc_policy",
+        {"resource_download": False},
+        actor="test_operator",
+        reason="narrow resources",
+    )
+    output = low_risk.as_dict()
+
+    assert command_exit_code(low_risk) == 0
+    assert output["status"] == "applied"
+    assert output["risk_level"] == "low"
+    assert output["audit_count"] == 1
+    assert store.get_chat_product_policy("oc_policy")["resource_download"] is False
+    audit = store.list_policy_audits(limit=1)[0]
+    assert audit["actor"] == "test_operator"
+    assert audit["reason"] == "narrow resources"
+
+
+def test_chat_policy_update_requires_initialized_global_policy(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    service = OperatorCommandService(store)
+
+    result = service.update_chat_policy(
+        "oc_missing_global",
+        {"auto_reply": False},
+        actor="test_operator",
+    )
+
+    assert command_exit_code(result) == 2
+    assert result.as_dict()["status"] == "not_found"
+    assert "policy import-config" in result.as_dict()["result"]["error"]
+    assert store.get_chat_product_policy("oc_missing_global") is None
+
+
+def test_chat_policy_update_normalizes_chat_id_before_lookup(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.import_product_policy_from_config(
+        _config(
+            chats={
+                "oc_policy": ChatPolicyConfig(
+                    name="Policy group",
+                    auto_reply=True,
+                    bot_joined=True,
+                    resource_download=True,
+                )
+            }
+        )
+    )
+    service = OperatorCommandService(store)
+
+    result = service.update_chat_policy(
+        "  oc_policy  ",
+        {"resource_download": False},
+        actor="test_operator",
+        reason="narrow resources",
+    )
+
+    assert command_exit_code(result) == 0
+    assert result.as_dict()["target"] == {"type": "chat_policy", "chat_id": "oc_policy"}
+    policy = store.get_chat_product_policy("oc_policy")
+    assert policy["name"] == "Policy group"
+    assert policy["auto_reply"] is True
+    assert policy["bot_joined"] is True
+    assert policy["resource_download"] is False
+
+
+def test_chat_policy_effective_capability_expansion_requires_confirmation(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.import_product_policy_from_config(
+        _config(
+            chats={
+                "oc_bot_joined": ChatPolicyConfig(
+                    name="Bot joined",
+                    auto_reply=True,
+                    bot_joined=False,
+                    reply_identity="bot_preferred",
+                    resource_download=True,
+                ),
+                "oc_bot_preferred": ChatPolicyConfig(
+                    name="Bot preferred",
+                    auto_reply=True,
+                    bot_joined=False,
+                    reply_identity="bot",
+                    allow_user_fallback=True,
+                    resource_download=False,
+                ),
+            }
+        )
+    )
+    service = OperatorCommandService(store)
+
+    bot_joined = service.update_chat_policy(
+        "oc_bot_joined",
+        {"bot_joined": True},
+        actor="test_operator",
+        reason="bot available",
+    )
+    bot_preferred = service.update_chat_policy(
+        "oc_bot_preferred",
+        {"reply_identity": "bot_preferred"},
+        actor="test_operator",
+        reason="allow fallback",
+    )
+
+    assert bot_joined.status == "confirmation_required"
+    assert any("resource downloads" in warning for warning in bot_joined.warnings)
+    assert any("bot-capable replies" in warning for warning in bot_joined.warnings)
+    assert bot_preferred.status == "confirmation_required"
+    assert any("user fallback" in warning for warning in bot_preferred.warnings)
+    assert store.get_chat_product_policy("oc_bot_joined")["bot_joined"] is False
+    assert store.get_chat_product_policy("oc_bot_preferred")["reply_identity"] == "bot"

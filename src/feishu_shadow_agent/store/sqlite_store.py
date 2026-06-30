@@ -8,7 +8,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Iterable
 
-from ..config import AppConfig, ChatPolicyConfig
+from ..config import AppConfig, ChatPolicyConfig, ReplyPolicyConfig
 from ..types import (
     ActionRecord,
     ActionKind,
@@ -136,10 +136,12 @@ class SQLiteStore:
         *,
         replace: bool = False,
         used_defaults: bool = False,
+        actor: str = "import_config",
+        reason: str | None = None,
     ) -> dict[str, Any]:
         self.migrate()
         now = utc_now_iso()
-        reason = "policy import-config --replace" if replace else "policy import-config"
+        audit_reason = reason or ("policy import-config --replace" if replace else "policy import-config")
         result: dict[str, Any] = {
             "status": "imported",
             "mode": "replace" if replace else "fill_missing",
@@ -169,7 +171,8 @@ class SQLiteStore:
                     policy_key=PRODUCT_POLICY_KEY,
                     old_policy=None,
                     new_policy=global_policy,
-                    reason=reason,
+                    actor=actor,
+                    reason=audit_reason,
                     now=now,
                 )
                 result["inserted"]["global"].append(PRODUCT_POLICY_KEY)
@@ -190,7 +193,8 @@ class SQLiteStore:
                     policy_key=PRODUCT_POLICY_KEY,
                     old_policy=old_policy,
                     new_policy=global_policy,
-                    reason=reason,
+                    actor=actor,
+                    reason=audit_reason,
                     now=now,
                 )
                 result["replaced"]["global"].append(PRODUCT_POLICY_KEY)
@@ -217,7 +221,8 @@ class SQLiteStore:
                         policy_key=f"chat:{chat_id}",
                         old_policy=None,
                         new_policy=chat_policy,
-                        reason=reason,
+                        actor=actor,
+                        reason=audit_reason,
                         now=now,
                     )
                     result["inserted"]["chats"].append(chat_id)
@@ -231,7 +236,8 @@ class SQLiteStore:
                         policy_key=f"chat:{chat_id}",
                         old_policy=old_policy,
                         new_policy=chat_policy,
-                        reason=reason,
+                        actor=actor,
+                        reason=audit_reason,
                         now=now,
                     )
                     result["replaced"]["chats"].append(chat_id)
@@ -240,6 +246,121 @@ class SQLiteStore:
                     result["skipped"]["chats"].append(chat_id)
         result["initialization"] = self.product_policy_initialization_probe()
         return result
+
+    def update_product_policy(
+        self,
+        policy: dict[str, Any],
+        *,
+        actor: str,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        self.migrate()
+        now = utc_now_iso()
+        new_policy = _normalize_global_product_policy(policy)
+        with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT policy_json FROM product_policies WHERE key = ?",
+                (PRODUCT_POLICY_KEY,),
+            ).fetchone()
+            old_policy = None if existing is None else json.loads(existing["policy_json"])
+            if old_policy == new_policy:
+                return {
+                    "scope": "global",
+                    "policy_key": PRODUCT_POLICY_KEY,
+                    "changed": False,
+                    "old_policy": old_policy,
+                    "new_policy": new_policy,
+                    "audit_id": None,
+                }
+            if existing is None:
+                conn.execute(
+                    """
+                    INSERT INTO product_policies(key, policy_json, updated_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (PRODUCT_POLICY_KEY, _policy_json(new_policy), now),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE product_policies
+                    SET policy_json = ?, updated_at = ?
+                    WHERE key = ?
+                    """,
+                    (_policy_json(new_policy), now, PRODUCT_POLICY_KEY),
+                )
+            audit_id = self._record_policy_audit_locked(
+                conn,
+                scope="global",
+                policy_key=PRODUCT_POLICY_KEY,
+                old_policy=old_policy,
+                new_policy=new_policy,
+                actor=actor,
+                reason=reason or "policy update-global",
+                now=now,
+            )
+        return {
+            "scope": "global",
+            "policy_key": PRODUCT_POLICY_KEY,
+            "changed": True,
+            "old_policy": old_policy,
+            "new_policy": new_policy,
+            "audit_id": audit_id,
+        }
+
+    def upsert_chat_product_policy(
+        self,
+        policy: dict[str, Any],
+        *,
+        actor: str,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        self.migrate()
+        now = utc_now_iso()
+        new_policy = _normalize_chat_product_policy(policy)
+        chat_id = str(new_policy["chat_id"])
+        with self.connect() as conn:
+            existing = conn.execute(
+                """
+                SELECT chat_id, name, auto_reply, bot_joined, reply_identity,
+                       allow_user_fallback, resource_download
+                FROM chat_policies
+                WHERE chat_id = ?
+                """,
+                (chat_id,),
+            ).fetchone()
+            old_policy = None if existing is None else _chat_policy_from_row(existing)
+            if old_policy == new_policy:
+                return {
+                    "scope": "chat",
+                    "policy_key": f"chat:{chat_id}",
+                    "changed": False,
+                    "old_policy": old_policy,
+                    "new_policy": new_policy,
+                    "audit_id": None,
+                }
+            if existing is None:
+                self._insert_chat_policy_locked(conn, new_policy, now=now)
+            else:
+                self._update_chat_policy_locked(conn, new_policy, now=now)
+            audit_id = self._record_policy_audit_locked(
+                conn,
+                scope="chat",
+                policy_key=f"chat:{chat_id}",
+                old_policy=old_policy,
+                new_policy=new_policy,
+                actor=actor,
+                reason=reason or "policy update-chat",
+                now=now,
+            )
+        return {
+            "scope": "chat",
+            "policy_key": f"chat:{chat_id}",
+            "changed": True,
+            "old_policy": old_policy,
+            "new_policy": new_policy,
+            "audit_id": audit_id,
+        }
 
     def record_run_start(
         self,
@@ -2726,10 +2847,11 @@ class SQLiteStore:
         policy_key: str,
         old_policy: dict[str, Any] | None,
         new_policy: dict[str, Any],
+        actor: str,
         reason: str,
         now: str,
-    ) -> None:
-        conn.execute(
+    ) -> int:
+        cursor = conn.execute(
             """
             INSERT INTO policy_audits(
               scope, policy_key, actor, old_json, new_json, reason, created_at
@@ -2738,13 +2860,14 @@ class SQLiteStore:
             (
                 scope,
                 policy_key,
-                "import_config",
+                actor,
                 None if old_policy is None else _policy_json(old_policy),
                 _policy_json(new_policy),
                 reason,
                 now,
             ),
         )
+        return int(cursor.lastrowid)
 
     def _get_task_by_id(self, conn: sqlite3.Connection, task_id: int) -> TaskRecord:
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
@@ -3149,6 +3272,39 @@ def _global_product_policy_from_config(config: AppConfig) -> dict[str, Any]:
 def _chat_policy_from_config(chat_id: str, config: ChatPolicyConfig) -> dict[str, Any]:
     data = config.model_dump(mode="json")
     return {"chat_id": chat_id, **data}
+
+
+def _normalize_global_product_policy(policy: dict[str, Any]) -> dict[str, Any]:
+    reply_policy = ReplyPolicyConfig.model_validate(policy.get("reply_policy")).model_dump(mode="json")
+    default_chat_policy = ChatPolicyConfig.model_validate(
+        {
+            "name": "",
+            "auto_reply": False,
+            **_loads_json_object(policy.get("default_chat_policy")),
+        }
+    ).model_dump(mode="json")
+    return {
+        "reply_policy": reply_policy,
+        "default_chat_policy": {
+            key: default_chat_policy[key]
+            for key in (
+                "bot_joined",
+                "reply_identity",
+                "allow_user_fallback",
+                "resource_download",
+            )
+        },
+    }
+
+
+def _normalize_chat_product_policy(policy: dict[str, Any]) -> dict[str, Any]:
+    chat_id = str(policy.get("chat_id", "")).strip()
+    if not chat_id:
+        raise ValueError("chat_id is required")
+    chat_policy = ChatPolicyConfig.model_validate(
+        {key: value for key, value in policy.items() if key != "chat_id"}
+    ).model_dump(mode="json")
+    return {"chat_id": chat_id, **chat_policy}
 
 
 def _chat_policy_from_row(row: sqlite3.Row) -> dict[str, Any]:

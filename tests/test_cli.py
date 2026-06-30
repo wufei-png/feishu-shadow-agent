@@ -348,10 +348,18 @@ def test_policy_import_config_uses_defaults_when_reply_policy_is_omitted(tmp_pat
     assert main(["policy", "import-config", "--config", str(config)]) == 0
 
     output = yaml.safe_load(capsys.readouterr().out)
-    assert output["used_defaults"] is True
-    assert output["inserted"]["global"] == ["reply_policy"]
+    assert output["status"] == "applied"
+    assert output["command"] == "policy.import_config"
+    assert output["actor"] == "local_cli"
+    assert output["changed"] is True
+    assert output["risk_level"] == "low"
+    assert output["confirmation_required"] is False
     assert output["audit_count"] == 1
-    assert output["initialization"] == {"initialized": True, "missing": []}
+    assert output["policy_import_diff"]["status"] == "matches"
+    assert output["result"]["used_defaults"] is True
+    assert output["result"]["inserted"]["global"] == ["reply_policy"]
+    assert output["result"]["audit_count"] == 1
+    assert output["result"]["initialization"] == {"initialized": True, "missing": []}
     product_policy = store.get_product_policy()
     assert product_policy is not None
     assert product_policy["reply_policy"] == {
@@ -401,9 +409,12 @@ chats:
     assert main(["policy", "import-config", "--config", str(config), "--replace"]) == 0
 
     output = yaml.safe_load(capsys.readouterr().out)
-    assert output["used_defaults"] is False
-    assert output["replaced"]["global"] == ["reply_policy"]
-    assert output["replaced"]["chats"] == ["oc_replace"]
+    assert output["status"] == "applied"
+    assert output["command"] == "policy.import_config"
+    assert output["result"]["used_defaults"] is False
+    assert output["result"]["replaced"]["global"] == ["reply_policy"]
+    assert output["result"]["replaced"]["chats"] == ["oc_replace"]
+    assert output["policy_import_diff"]["status"] == "matches"
     store = _store(tmp_path)
     product_policy = store.get_product_policy()
     assert product_policy is not None
@@ -417,6 +428,162 @@ chats:
     assert absent_chat is not None
     assert replaced_chat["name"] == "After"
     assert absent_chat["name"] == "Not in replacement"
+
+
+def test_policy_update_global_requires_confirmation_for_high_risk_change(tmp_path: Path, capsys) -> None:
+    config = _write_config(tmp_path)
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + """
+reply_policy:
+  p2p_auto_reply: false
+  unknown_group_auto_reply: false
+""",
+        encoding="utf-8",
+    )
+    store = _store(tmp_path)
+    assert main(["policy", "import-config", "--config", str(config)]) == 0
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "policy",
+                "update-global",
+                "--config",
+                str(config),
+                "--p2p-auto-reply",
+                "true",
+                "--reason",
+                "enable p2p trial",
+            ]
+        )
+        == 2
+    )
+
+    output = yaml.safe_load(capsys.readouterr().out)
+    assert output["status"] == "confirmation_required"
+    assert output["command"] == "policy.update_global"
+    assert output["confirmation_required"] is True
+    assert output["risk_level"] == "high"
+    assert output["changed"] is False
+    assert store.get_product_policy()["reply_policy"]["p2p_auto_reply"] is False
+
+    assert (
+        main(
+            [
+                "policy",
+                "update-global",
+                "--config",
+                str(config),
+                "--p2p-auto-reply",
+                "true",
+                "--confirm-risk",
+                "--reason",
+                "enable p2p trial",
+            ]
+        )
+        == 0
+    )
+
+    confirmed = yaml.safe_load(capsys.readouterr().out)
+    assert confirmed["status"] == "applied"
+    assert confirmed["actor"] == "local_cli"
+    assert confirmed["confirmation_required"] is False
+    assert confirmed["audit_count"] == 1
+    assert store.get_product_policy()["reply_policy"]["p2p_auto_reply"] is True
+    audit = store.list_policy_audits(limit=1)[0]
+    assert audit["actor"] == "local_cli"
+    assert audit["reason"] == "enable p2p trial"
+
+
+def test_policy_update_chat_low_risk_change_writes_audit(tmp_path: Path, capsys) -> None:
+    config = _write_config(tmp_path)
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + """
+chats:
+  oc_policy:
+    name: Policy group
+    auto_reply: true
+    resource_download: true
+""",
+        encoding="utf-8",
+    )
+    store = _store(tmp_path)
+    assert main(["policy", "import-config", "--config", str(config)]) == 0
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "policy",
+                "update-chat",
+                "--config",
+                str(config),
+                "--chat-id",
+                "oc_policy",
+                "--auto-reply",
+                "false",
+                "--reason",
+                "pause chat",
+            ]
+        )
+        == 0
+    )
+
+    output = yaml.safe_load(capsys.readouterr().out)
+    assert output["status"] == "applied"
+    assert output["command"] == "policy.update_chat"
+    assert output["risk_level"] == "low"
+    assert output["audit_count"] == 1
+    assert store.get_chat_product_policy("oc_policy")["auto_reply"] is False
+    audit = store.list_policy_audits(limit=1)[0]
+    assert audit["actor"] == "local_cli"
+    assert audit["reason"] == "pause chat"
+
+
+def test_policy_update_chat_bot_joined_expansion_requires_confirmation(tmp_path: Path, capsys) -> None:
+    config = _write_config(tmp_path)
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + """
+chats:
+  oc_policy:
+    name: Policy group
+    auto_reply: true
+    bot_joined: false
+    reply_identity: bot_preferred
+    resource_download: true
+""",
+        encoding="utf-8",
+    )
+    store = _store(tmp_path)
+    assert main(["policy", "import-config", "--config", str(config)]) == 0
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "policy",
+                "update-chat",
+                "--config",
+                str(config),
+                "--chat-id",
+                "oc_policy",
+                "--bot-joined",
+                "true",
+            ]
+        )
+        == 2
+    )
+
+    output = yaml.safe_load(capsys.readouterr().out)
+    assert output["status"] == "confirmation_required"
+    assert output["risk_level"] == "high"
+    assert output["changed"] is False
+    assert any("resource downloads" in warning for warning in output["warnings"])
+    assert store.get_chat_product_policy("oc_policy")["bot_joined"] is False
 
 
 def test_replay_explains_current_state_without_real_db_mutation(tmp_path: Path, capsys) -> None:

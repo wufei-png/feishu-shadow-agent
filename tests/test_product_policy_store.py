@@ -137,3 +137,53 @@ def test_replace_updates_global_and_listed_chats_without_deleting_absent_chats(t
     assert chat_audit["actor"] == "import_config"
     assert chat_audit["old_json"]["auto_reply"] is True
     assert chat_audit["new_json"]["auto_reply"] is False
+
+
+def test_direct_policy_updates_persist_actor_reason_and_audit(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.import_product_policy_from_config(
+        _config(
+            reply_policy=ReplyPolicyConfig(p2p_auto_reply=False, unknown_group_auto_reply=False),
+            chats={"oc_direct": ChatPolicyConfig(name="Direct", auto_reply=True)},
+        )
+    )
+
+    global_result = store.update_product_policy(
+        {
+            "reply_policy": {
+                "p2p_auto_reply": False,
+                "unknown_group_auto_reply": True,
+            },
+            "default_chat_policy": {
+                "bot_joined": False,
+                "reply_identity": "bot_preferred",
+                "allow_user_fallback": True,
+                "resource_download": True,
+            },
+        },
+        actor="test_operator",
+        reason="global policy edit",
+    )
+    chat_result = store.upsert_chat_product_policy(
+        {
+            "chat_id": "oc_direct",
+            "name": "Direct",
+            "auto_reply": False,
+            "bot_joined": False,
+            "reply_identity": "bot_preferred",
+            "allow_user_fallback": True,
+            "resource_download": True,
+        },
+        actor="test_operator",
+        reason="chat policy edit",
+    )
+
+    assert global_result["changed"] is True
+    assert chat_result["changed"] is True
+    assert store.get_product_policy()["reply_policy"]["unknown_group_auto_reply"] is True
+    assert store.get_chat_product_policy("oc_direct")["auto_reply"] is False
+    audits = store.list_policy_audits(limit=2)
+    assert [audit["actor"] for audit in audits] == ["test_operator", "test_operator"]
+    assert [audit["reason"] for audit in audits] == ["chat policy edit", "global policy edit"]
+    assert audits[0]["old_json"]["auto_reply"] is True
+    assert audits[0]["new_json"]["auto_reply"] is False

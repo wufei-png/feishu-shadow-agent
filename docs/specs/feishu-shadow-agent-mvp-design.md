@@ -309,7 +309,7 @@ lark-cli im +messages-reply --message-id ...
 
 Hermes 输出、reply policy gate 与发送动作创建见 [Hermes 处理与回复决策](./feishu-shadow-agent-flows.md#hermes-reply-flow)。
 
-Product Policy Store 持久化全局策略和 per-chat 策略。全局策略 row 除 `reply_policy` 外，还保存运行时需要的 ChatPolicyConfig 默认字段作为 `default_chat_policy`。`policy import-config` 默认只填缺失项，`--replace` 覆盖全局策略和 config 中列出的群策略，但不删除 DB-only 群策略。每次插入或替换都写 `policy_audits`。runtime `PolicyResolver` 只读 Product Policy Store，不从 `config.yaml` fallback。
+Product Policy Store 持久化全局策略和 per-chat 策略。全局策略 row 除 `reply_policy` 外，还保存运行时需要的 ChatPolicyConfig 默认字段作为 `default_chat_policy`。`policy import-config` 默认只填缺失项，`--replace` 覆盖全局策略和 config 中列出的群策略，但不删除 DB-only 群策略。每次插入或替换都写 `policy_audits`。`policy update-global` 和 `policy update-chat` 直接修改 Product Policy Store，不写 `config.yaml`；高风险扩张变更缺少显式确认时返回 `confirmation_required` 且不修改 DB。runtime `PolicyResolver` 只读 Product Policy Store，不从 `config.yaml` fallback。
 
 ## 8. @ 用户规则
 
@@ -1116,6 +1116,17 @@ python -m feishu_shadow_agent config show --redacted
 ```
 
 MVP 不做 `config set`。
+
+### product policy commands
+
+```bash
+python -m feishu_shadow_agent policy import-config --config config.yaml
+python -m feishu_shadow_agent policy import-config --config config.yaml --replace
+python -m feishu_shadow_agent policy update-global --config config.yaml --p2p-auto-reply false --reason "pause P2P"
+python -m feishu_shadow_agent policy update-chat --config config.yaml --chat-id oc_xxx --auto-reply false --reason "pause chat"
+```
+
+Policy mutation commands go through OperatorCommandService and return the same structured command result fields as approval/dispatch commands. Every applied mutation writes `policy_audits` with actor, reason, old policy, and new policy. High-risk changes that broaden auto-reply, resource download, user fallback, or bot-capable reply identity require `--confirm-risk`.
 
 ## 25. Idempotency
 

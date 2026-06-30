@@ -113,7 +113,37 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="replace global policy and config-listed chat policies instead of only filling missing rows",
     )
+    policy_import_config.add_argument("--reason", help="optional policy audit reason")
     policy_import_config.set_defaults(handler=_handle_policy_import_config)
+    policy_update_global = policy_subparsers.add_parser(
+        "update-global",
+        help="update Product Policy Store global policy fields",
+    )
+    _add_config_arg(policy_update_global)
+    policy_update_global.add_argument("--p2p-auto-reply", type=_parse_bool_arg, metavar="true|false")
+    policy_update_global.add_argument("--unknown-group-auto-reply", type=_parse_bool_arg, metavar="true|false")
+    policy_update_global.add_argument("--bot-joined", type=_parse_bool_arg, metavar="true|false")
+    policy_update_global.add_argument("--reply-identity", choices=["bot_preferred", "bot", "user"])
+    policy_update_global.add_argument("--allow-user-fallback", type=_parse_bool_arg, metavar="true|false")
+    policy_update_global.add_argument("--resource-download", type=_parse_bool_arg, metavar="true|false")
+    policy_update_global.add_argument("--confirm-risk", action="store_true", help="confirm high-risk policy expansion")
+    policy_update_global.add_argument("--reason", help="optional policy audit reason")
+    policy_update_global.set_defaults(handler=_handle_policy_update_global)
+    policy_update_chat = policy_subparsers.add_parser(
+        "update-chat",
+        help="update a Product Policy Store chat policy",
+    )
+    _add_config_arg(policy_update_chat)
+    policy_update_chat.add_argument("--chat-id", required=True)
+    policy_update_chat.add_argument("--name")
+    policy_update_chat.add_argument("--auto-reply", type=_parse_bool_arg, metavar="true|false")
+    policy_update_chat.add_argument("--bot-joined", type=_parse_bool_arg, metavar="true|false")
+    policy_update_chat.add_argument("--reply-identity", choices=["bot_preferred", "bot", "user"])
+    policy_update_chat.add_argument("--allow-user-fallback", type=_parse_bool_arg, metavar="true|false")
+    policy_update_chat.add_argument("--resource-download", type=_parse_bool_arg, metavar="true|false")
+    policy_update_chat.add_argument("--confirm-risk", action="store_true", help="confirm high-risk policy expansion")
+    policy_update_chat.add_argument("--reason", help="optional policy audit reason")
+    policy_update_chat.set_defaults(handler=_handle_policy_update_chat)
 
     dispatch = subparsers.add_parser("dispatch", help="dispatch recovery helpers")
     dispatch_subparsers = dispatch.add_subparsers(dest="dispatch_command")
@@ -359,13 +389,37 @@ def _handle_maintenance_expire_approvals(args: argparse.Namespace) -> int:
 
 def _handle_policy_import_config(args: argparse.Namespace) -> int:
     loaded, store, _ = _load_runtime(args.config)
-    result = store.import_product_policy_from_config(
+    result = OperatorCommandService(store).import_policy_config(
         loaded.config,
         replace=args.replace,
         used_defaults=loaded.reply_policy_used_defaults,
+        actor="local_cli",
+        reason=args.reason,
     )
-    print(yaml.safe_dump(result, allow_unicode=True, sort_keys=False), end="")
-    return 0
+    return _emit_command_result(result)
+
+
+def _handle_policy_update_global(args: argparse.Namespace) -> int:
+    _, store, _ = _load_runtime(args.config)
+    result = OperatorCommandService(store).update_global_policy(
+        _global_policy_changes_from_args(args),
+        actor="local_cli",
+        reason=args.reason,
+        confirm_risk=args.confirm_risk,
+    )
+    return _emit_command_result(result)
+
+
+def _handle_policy_update_chat(args: argparse.Namespace) -> int:
+    _, store, _ = _load_runtime(args.config)
+    result = OperatorCommandService(store).update_chat_policy(
+        args.chat_id,
+        _chat_policy_changes_from_args(args),
+        actor="local_cli",
+        reason=args.reason,
+        confirm_risk=args.confirm_risk,
+    )
+    return _emit_command_result(result)
 
 
 def _handle_dispatch_inspect(args: argparse.Namespace) -> int:
@@ -410,6 +464,37 @@ def _handle_dispatch_cancel(args: argparse.Namespace) -> int:
 def _emit_command_result(result: CommandResult) -> int:
     print(yaml.safe_dump(result.as_dict(), allow_unicode=True, sort_keys=False), end="")
     return command_exit_code(result)
+
+
+def _parse_bool_arg(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    raise argparse.ArgumentTypeError("expected true or false")
+
+
+def _global_policy_changes_from_args(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        "p2p_auto_reply": args.p2p_auto_reply,
+        "unknown_group_auto_reply": args.unknown_group_auto_reply,
+        "bot_joined": args.bot_joined,
+        "reply_identity": args.reply_identity,
+        "allow_user_fallback": args.allow_user_fallback,
+        "resource_download": args.resource_download,
+    }
+
+
+def _chat_policy_changes_from_args(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        "name": args.name,
+        "auto_reply": args.auto_reply,
+        "bot_joined": args.bot_joined,
+        "reply_identity": args.reply_identity,
+        "allow_user_fallback": args.allow_user_fallback,
+        "resource_download": args.resource_download,
+    }
 
 
 def _load_runtime(config_path: str | None) -> tuple[LoadedConfig, SQLiteStore, JSONLLogger]:
