@@ -36,6 +36,10 @@ _Avoid_: Config drift, runtime drift
 A pending approval that blocks an automated send while leaving the task lifecycle unchanged.
 _Avoid_: waiting approval status, task status
 
+**Action Queue**:
+The prioritized operator-facing set of items that need attention, such as pending approvals, overdue approvals, failed dispatch actions, stale sending actions, and blocking health or policy initialization issues.
+_Avoid_: Metrics dashboard, raw status list, activity feed
+
 **Operator Query**:
 A read-only operator-facing view of current state. It may derive overdue or recommended-action fields, but it must not mutate state.
 _Avoid_: Status mutation, maintenance action

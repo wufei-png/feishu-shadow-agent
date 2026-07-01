@@ -1,6 +1,6 @@
 # Operator Surface Implementation Outline
 
-日期：2026-06-30
+日期：2026-07-01
 
 本文是下一轮 Operator Surface / UI 后端契约的总纲。目标不是直接做页面，而是先把 UI 需要依赖的产品策略、查询模型和命令边界固定下来。`context_access` 不在本轮范围内。
 
@@ -36,6 +36,10 @@
 | Spec | `docs/specs/operator-console-local-api.md` | 固定本地 console API、安全模型、route contract 和 Query/Command 映射 |
 | Spec | `docs/specs/operator-console-settings-catalog.md` | 固定 console-exposed Settings Catalog 字段映射 |
 | P15 | `docs/plans/p15-operator-console-foundation.md` | 建立本地 console runtime、FastAPI shell、Vite/React/TS scaffold 和静态资源打包基础 |
+| Spec | `docs/specs/operator-console-screen-flows.md` | 固定最终 Operator Console 页面流、页面职责和分阶段页面实现顺序 |
+| P16 | `docs/plans/p16-operator-console-core-screens.md` | 实现 Dashboard / Approvals / Tasks / Message Detail / Dispatch 核心操作页面 |
+| P17 | `docs/plans/p17-operator-console-policy-settings.md` | 实现 Policy / Settings / Policy Import Diff / Policy Audit History 页面 |
+| P18 | `docs/plans/p18-operator-console-health-release.md` | 实现 Logs / Health 诊断页面、视觉 QA 和 GitHub Release readiness |
 
 ## 3. Recommended Order
 
@@ -50,6 +54,10 @@
 9. Operator Console Local API Spec
 10. Operator Console Settings Catalog Spec
 11. P15 Operator Console Foundation
+12. Operator Console Screen Flows Spec
+13. P16 Operator Console Core Screens
+14. P17 Operator Console Policy And Settings
+15. P18 Operator Console Health And Release Readiness
 
 依赖关系：
 
@@ -60,6 +68,10 @@
 - P14b 放在 P14a 后，避免 policy update 写入/audit 逻辑和 command facade 基础设施混在一个大阶段。
 - Operator Console UI System / Local API / Settings Catalog specs 必须先于 P15，避免前端 scaffold、API shell 和 settings 表达在实现中临时发明。
 - P15 放在 P10-P14 后，因为它依赖已固定的 QueryService、CommandService 和 Product Policy Store 边界。
+- Operator Console Screen Flows spec 必须先于 P16，避免最终页面职责和分期边界在代码实现中临时扩散。
+- P16 放在 P15 后，因为它依赖本地 console runtime、renderer scaffold、settings catalog route 和 `message_detail` read model。
+- P17 放在 P16 后，因为 Policy / Settings 页面应复用 P16 已建立的导航、query/mutation、命令反馈和 detail 交互模式。
+- P18 放在 P17 后，因为 release readiness 和视觉 QA 应覆盖完整最终页面集，而不是在 Policy / Settings 未完成前过早冻结。
 - P10 可独立提前做，工作量很小。
 
 ## 4. P10-P14 Global Non-goals
@@ -71,7 +83,17 @@
 - 不做 Feishu 交互卡片。
 - 不做 SDK 替换。
 
-## 5. Fresh Context Contract
+## 5. P15-P18 UI Non-goals
+
+- 不做远程 console、账号登录、多用户权限或外网访问。
+- 不做 GitHub Pages；公开分发走 GitHub tags/releases。
+- 不做 `config.yaml` 写回；v1 只允许 Product Policy 通过命令边界更新。
+- 不做 risk levels 或 confirmation-required 二次确认流程。
+- 不做动态 Settings schema engine；Settings Catalog 是稳定产品字段映射。
+- 不做 Electron、Tauri、PyInstaller 等二进制打包；后续等 UI 稳定后单独评估。
+- 不把 Logs / Health 做成默认 raw log viewer。
+
+## 6. Fresh Context Contract
 
 每个 plan 文件都必须包含：
 
@@ -84,7 +106,7 @@
 
 计划之间可以共享术语，但单个实现上下文不应需要回看当前聊天记录才能知道验收标准。
 
-## 6. Global Acceptance
+## 7. Global Acceptance
 
 每个实现计划完成时至少运行：
 
