@@ -7,6 +7,7 @@ import { queryKeys } from "./queryKeys";
 import { ApprovalsScreen } from "./screens/ApprovalsScreen";
 import { DashboardScreen } from "./screens/DashboardScreen";
 import { DispatchScreen } from "./screens/DispatchScreen";
+import { HealthScreen } from "./screens/HealthScreen";
 import { PolicyScreen } from "./screens/PolicyScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { TasksScreen } from "./screens/TasksScreen";
@@ -100,6 +101,8 @@ export function App() {
             <PolicyScreen selectedId={location.selectedId} token={token} />
           ) : location.route === "settings" ? (
             <SettingsScreen token={token} />
+          ) : location.route === "health" ? (
+            <HealthScreen token={token} />
           ) : (
             <FollowUpScreen route={location.route} />
           )}

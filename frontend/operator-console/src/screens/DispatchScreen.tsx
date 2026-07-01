@@ -200,17 +200,25 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
               <h2>Recover action</h2>
               <TextareaField label="Reason" onChange={setReason} placeholder="Optional recovery note" rows={2} value={reason} />
               <div className="command-buttons">
-                <Button disabled={!canRetry(detail.data.action.status) || retry.isPending} onClick={() => retry.mutate()} tone="warning">
+                <Button disabled={!hasRecommendedCommand(detail.data.recommended_actions, "dispatch retry") || retry.isPending} onClick={() => retry.mutate()} tone="warning">
                   <RotateCcw aria-hidden="true" size={15} />
                   Retry
                 </Button>
-                <Button disabled={detail.data.action.status === "sent" || cancel.isPending} onClick={() => cancel.mutate()} tone="danger">
+                <Button disabled={!hasRecommendedCommand(detail.data.recommended_actions, "dispatch cancel") || cancel.isPending} onClick={() => cancel.mutate()} tone="danger">
                   <XCircle aria-hidden="true" size={15} />
                   Cancel
                 </Button>
               </div>
               <TextField label="Sent message ID" onChange={setSentMessageId} placeholder="om_xxx from Feishu readback" value={sentMessageId} />
-              <Button disabled={!sentMessageId.trim() || markSent.isPending} onClick={() => markSent.mutate()} tone="success">
+              <Button
+                disabled={
+                  !sentMessageId.trim() ||
+                  !hasRecommendedCommand(detail.data.recommended_actions, "dispatch mark-sent") ||
+                  markSent.isPending
+                }
+                onClick={() => markSent.mutate()}
+                tone="success"
+              >
                 <ShieldCheck aria-hidden="true" size={15} />
                 Mark sent
               </Button>
@@ -249,8 +257,8 @@ function FactRow({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
-function canRetry(status: string): boolean {
-  return status === "failed" || status === "failed_needs_review";
+function hasRecommendedCommand(actions: string[], command: string): boolean {
+  return actions.some((action) => action.startsWith(command));
 }
 
 function numberOrNull(value: string | null): number | null {

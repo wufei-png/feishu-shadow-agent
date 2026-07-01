@@ -7,6 +7,7 @@ import type {
   DispatchActionDetail,
   DispatchActionSummary,
   ActionStatus,
+  HealthIssuesResponse,
   MessageDetail,
   PolicyAudit,
   PolicyStatus,
@@ -77,6 +78,10 @@ export class ApiError extends Error {
 
 export function getDashboard(token: string): Promise<DashboardSnapshot> {
   return fetchApi("/api/dashboard", token);
+}
+
+export function getHealthIssues(token: string): Promise<HealthIssuesResponse> {
+  return fetchApi("/api/health/issues", token);
 }
 
 export function listApprovals(

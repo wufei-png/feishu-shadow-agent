@@ -146,6 +146,66 @@ def test_dashboard_returns_operator_query_dto_with_valid_token(tmp_path: Path) -
     assert "policy_audits" not in payload
 
 
+def test_dashboard_redacts_failed_approval_command_body(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    store = _store(tmp_path)
+    store.migrate()
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO approval_commands(message_id, command, status, result_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "cmd_dashboard_secret",
+                "/send t_dashboard highly sensitive final reply",
+                "failed",
+                json.dumps({"error": "active send action already exists"}),
+                "2026-07-01T10:00:00+08:00",
+                "2026-07-01T10:00:00+08:00",
+            ),
+        )
+
+    response = client.get("/api/dashboard", headers=_auth())
+    payload = response.json()
+    serialized = json.dumps(payload, ensure_ascii=False)
+
+    assert response.status_code == 200
+    assert "highly sensitive final reply" not in serialized
+    assert payload["recent_errors"][0]["message"] == "/send t_dashboard"
+    assert payload["failed_approval_commands"][0]["label"] == "/send t_dashboard"
+
+
+def test_dashboard_redacts_health_warning_paths(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    store = _store(tmp_path)
+    store.migrate()
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO health_checks(run_id, check_name, severity, status, message, details_json, checked_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                None,
+                "hermes",
+                "warning",
+                "failed",
+                "Hermes failed at /tmp/secret/hermes.log",
+                "{}",
+                "2026-07-01T10:00:00+08:00",
+            ),
+        )
+
+    response = client.get("/api/dashboard", headers=_auth())
+    payload = response.json()
+    serialized = json.dumps(payload, ensure_ascii=False)
+
+    assert response.status_code == 200
+    assert "/tmp/secret" not in serialized
+    assert payload["recent_health_warnings"][0]["message"] == "Hermes failed at [path]"
+
+
 def test_settings_catalog_and_runtime_routes_are_readonly_product_maps(tmp_path: Path) -> None:
     client = _client(tmp_path)
 
@@ -315,6 +375,7 @@ def test_message_detail_api_is_service_backed_and_read_only(tmp_path: Path) -> N
         ("POST", "/api/policy/import-config"),
         ("PATCH", "/api/policy/global"),
         ("PATCH", "/api/policy/chats/oc_policy"),
+        ("GET", "/api/health/issues"),
     ],
 )
 def test_core_console_routes_require_token(tmp_path: Path, method: str, path: str) -> None:
@@ -613,6 +674,30 @@ def test_policy_routes_return_standard_validation_errors(tmp_path: Path) -> None
     assert invalid_audit_limit.json()["error"]["code"] == "validation_failed"
     assert invalid_patch_field.status_code == 400
     assert invalid_patch_field.json()["error"]["code"] == "validation_failed"
+
+
+def test_health_issues_route_returns_normalized_store_issue(tmp_path: Path) -> None:
+    client = _client(tmp_path / "missing")
+
+    response = client.get("/api/health/issues", headers=_auth())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["highest_severity"] == "critical"
+    assert payload["summary"]["open_issue_count"] == 1
+    assert payload["runtime"]["store"]["status"] == "missing"
+    assert payload["issues"][0]["category"] == "store"
+    assert payload["issues"][0]["severity"] == "critical"
+    assert "agent.sqlite3" not in payload["issues"][0]["detail"]
+
+
+def test_health_issues_route_validates_limit(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+
+    response = client.get("/api/health/issues?limit=101", headers=_auth())
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "validation_failed"
 
 
 def test_dispatch_mark_sent_route_reports_marker_construction_failure(tmp_path: Path, monkeypatch) -> None:

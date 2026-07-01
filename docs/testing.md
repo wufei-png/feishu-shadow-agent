@@ -39,6 +39,39 @@ npm --prefix frontend/operator-console run typecheck
 npm --prefix frontend/operator-console run build
 ```
 
+Operator Console 发布产物验证：
+
+```bash
+rm -rf dist build
+npm --prefix frontend/operator-console ci
+npm --prefix frontend/operator-console run build
+python -m pytest -q
+python -m build
+python3.11 -m venv /tmp/feishu-shadow-agent-release-check
+/tmp/feishu-shadow-agent-release-check/bin/python -m pip install dist/*.whl
+/tmp/feishu-shadow-agent-release-check/bin/python -m feishu_shadow_agent console --help
+python - <<'PY'
+import zipfile
+from pathlib import Path
+
+wheel = next(Path("dist").glob("*.whl"))
+with zipfile.ZipFile(wheel) as archive:
+    names = set(archive.namelist())
+    index = "feishu_shadow_agent/console_static/index.html"
+    assert index in names, f"missing {index}"
+    html = archive.read(index).decode("utf-8")
+    for ref in html.split('/assets/')[1:]:
+        asset = ref.split('"', 1)[0].split("'", 1)[0]
+        path = f"feishu_shadow_agent/console_static/assets/{asset}"
+        assert path in names, f"missing {path}"
+PY
+git diff --check
+```
+
+GitHub Release 应附加同一次 renderer build 后生成的 sdist 和 wheel。不要发布 GitHub Pages，不要在本阶段生成 Electron、Tauri、PyInstaller 等二进制。
+
+P18 的本地浏览器视觉 QA 记录见 `docs/plans/p18-operator-console-health-release-qa.md`。
+
 提交前做基础格式卫生检查：
 
 ```bash

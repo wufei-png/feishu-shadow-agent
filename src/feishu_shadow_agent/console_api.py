@@ -272,6 +272,12 @@ def create_console_app(
             since=since,
         )
 
+    @api.get("/health/issues")
+    def health_issues(
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    ) -> dict[str, Any]:
+        return query_service().health_issues(limit=limit)
+
     @api.get("/messages/{message_id}/detail")
     def message_detail(message_id: str) -> dict[str, Any]:
         try:

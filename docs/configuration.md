@@ -111,7 +111,7 @@ python -m feishu_shadow_agent maintenance expire-approvals --config config.yaml
 
 ## Operator Console
 
-本地 Operator Console 通过 Python local console server 提供 bundled Vite/React renderer 和 `/api/*` 只读 foundation routes。默认命令：
+本地 Operator Console 通过 Python local console server 提供 bundled Vite/React renderer 和 `/api/*` routes。默认命令：
 
 ```bash
 python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --port 8765
@@ -119,7 +119,7 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 
 启动时会生成一次性的 bearer token，并在 stdout 输出带 `token` 的本地访问 URL。API 默认只接受 loopback Host header 和 `Authorization: Bearer <token>`；renderer 会把 URL token 保存到当前浏览器 session 并从可见 URL 中移除。
 
-P15 console foundation 只读取 `OperatorQueryService` 暴露的 dashboard、Settings Catalog/runtime 和 Message Detail DTO。它不写 `config.yaml`，不直接读 SQLite，不生成 dispatch preview，也不绕过 Product Policy / OperatorCommandService 边界。
+Console 覆盖 Dashboard、Approvals、Tasks、Dispatch、Policy、Settings 和 Logs / Health。读路径通过 `OperatorQueryService` 暴露 dashboard、queue/detail、Policy/Settings、Message Detail 和 Health DTO；写路径通过 `OperatorCommandService` 执行 approval、dispatch recovery、maintenance expiry 和 Product Policy 命令。它不写 `config.yaml`，不直接读 SQLite，不生成 dispatch preview，也不绕过 Product Policy / OperatorCommandService 边界。Logs / Health 展示规范化 issue、runtime liveness 和失败命令/dispatch 摘要，不作为默认 raw log viewer。
 
 资源下载先通过 chat policy，再受本地限额保护。单文件超过 `storage.max_resource_bytes` 时，刚下载的文件会被删除，`resources.download_status` 置为 `too_large`，`path` 置空，并把尝试路径和大小写入 `raw_json`。`resource_dir` 用量超过 `storage.max_resource_dir_bytes` 时，刚下载文件会被删除，当前和后续资源标记为 `quota_exceeded` 且 `path` 置空。`too_large` / `quota_exceeded` 会阻塞 task session agent，并创建 owner notification；第一版不让 agent 在缺少资源的情况下语义降级回答。
 

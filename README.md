@@ -9,7 +9,7 @@ Feishu Shadow Agent 是一个本机运行的飞书个人办公影子助手。它
 当前项目处于 MVP 阶段，核心形态是：
 
 - `Python + SQLite + lark-cli subprocess`
-- 长驻 `daemon/watch`，不做 LaunchAgent、cron、systemd 或 Web UI
+- 长驻 `daemon/watch`，附带本机 Operator Console；不做 LaunchAgent、cron、systemd、远程 Web UI 或桌面二进制
 - 飞书 user 身份负责读消息和必要的代发回复
 - 飞书 bot 身份负责 owner 通知、审批入口、群聊自动回复和资源下载
 - Hermes CLI 负责任务路由和单任务会话处理
@@ -69,7 +69,10 @@ python -m feishu_shadow_agent config show --config config.yaml --redacted
 python -m feishu_shadow_agent config validate --config config.yaml
 python -m feishu_shadow_agent config schema
 python -m feishu_shadow_agent retention prune --config config.yaml --dry-run
+python -m feishu_shadow_agent console --config config.yaml
 ```
+
+本地 Operator Console 默认绑定 `127.0.0.1`，通过启动时生成的一次性 bearer token 访问。Console 覆盖 Dashboard、Approvals、Tasks、Dispatch、Policy、Settings 和 Logs / Health；它只通过本地 `/api/*` 调用 `OperatorQueryService` / `OperatorCommandService`，不直接读 SQLite，也不写 `config.yaml`。
 
 ## 测试
 
@@ -80,6 +83,18 @@ python -m pytest -q
 ```
 
 端到端测试需要真实 `lark-cli`、飞书 user/bot 授权、owner open_id、测试群或测试 P2P 会话，以及可用的 Hermes CLI。完整步骤见 [测试方式](docs/testing.md)。
+
+## 发布产物
+
+公开分发走 GitHub tag + GitHub Release。发布前先构建 renderer，再构建 Python sdist/wheel，确保 wheel 内包含 `feishu_shadow_agent/console_static/index.html` 和它引用的 `/assets/*` 文件：
+
+```bash
+npm --prefix frontend/operator-console ci
+npm --prefix frontend/operator-console run build
+python -m build
+```
+
+GitHub Release 应附加同一次构建生成的 source distribution 和 wheel；当前不发布 GitHub Pages，也不构建 Electron、Tauri 或 PyInstaller 二进制。
 
 ## 数据与日志
 

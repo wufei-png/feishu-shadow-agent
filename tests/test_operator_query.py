@@ -6,6 +6,7 @@ from pathlib import Path
 from feishu_shadow_agent.config import AppConfig, ChatPolicyConfig, OwnerConfig, ReplyPolicyConfig
 from feishu_shadow_agent.operator_query import OperatorQueryService
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
+from feishu_shadow_agent.types import HealthCheckResult
 
 
 def _config(
@@ -365,6 +366,157 @@ def test_policy_import_diff_and_audit_history_are_focused_read_models(tmp_path: 
     assert history[0]["policy_key"] == "chat:oc_replace"
     assert history[0]["old_summary"]["auto_reply"] is True
     assert history[0]["new_summary"]["auto_reply"] is False
+
+
+def test_health_issues_reports_store_availability_without_migrating(tmp_path: Path) -> None:
+    missing = OperatorQueryService(_store(tmp_path / "missing")).health_issues()
+
+    empty_db = tmp_path / "empty" / "agent.sqlite3"
+    empty_db.parent.mkdir()
+    empty_db.write_bytes(b"")
+    unmigrated = OperatorQueryService(SQLiteStore(empty_db)).health_issues()
+
+    directory_db = tmp_path / "directory.sqlite3"
+    directory_db.mkdir()
+    unreadable = OperatorQueryService(SQLiteStore(directory_db)).health_issues()
+
+    bad_schema_store = _store(tmp_path / "bad_schema")
+    bad_schema_store.migrate()
+    with bad_schema_store.connect() as conn:
+        conn.execute("ALTER TABLE product_policies DROP COLUMN updated_at")
+    schema_incompatible = OperatorQueryService(bad_schema_store).health_issues()
+
+    assert missing["runtime"]["store"]["status"] == "missing"
+    assert missing["issues"][0]["category"] == "store"
+    assert missing["summary"]["highest_severity"] == "critical"
+    assert unmigrated["runtime"]["store"]["status"] == "schema_uninitialized"
+    assert unreadable["runtime"]["store"]["status"] == "unreadable"
+    assert schema_incompatible["runtime"]["store"]["status"] == "schema_incompatible"
+    assert schema_incompatible["issues"][0]["id"] == "store-schema_incompatible"
+
+
+def test_health_issues_summary_count_is_not_truncated_by_list_limit(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.migrate()
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:00:00+08:00")
+
+    payload = query.health_issues(limit=1)
+
+    assert len(payload["issues"]) == 1
+    assert payload["summary"]["open_issue_count"] == 2
+    assert {issue["id"] for issue in payload["issues"]} <= {"policy-uninitialized", "daemon-not-started"}
+
+
+def test_health_issues_redacts_failed_approval_command_body(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.migrate()
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO approval_commands(message_id, command, status, result_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "cmd_secret",
+                "/send t_secret highly sensitive final reply",
+                "failed",
+                json.dumps({"error": "failed at /tmp/secret/log.jsonl"}),
+                "2026-06-22T09:30:00+08:00",
+                "2026-06-22T09:30:00+08:00",
+            ),
+        )
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:00:00+08:00")
+
+    payload = query.health_issues()
+    serialized = json.dumps(payload, ensure_ascii=False)
+
+    assert "highly sensitive final reply" not in serialized
+    assert "/tmp/secret" not in serialized
+    assert payload["recent_failed_commands"][0]["label"] == "/send t_secret"
+    assert payload["recent_failed_commands"][0]["command"] == "/send t_secret"
+    assert payload["recent_failed_commands"][0]["result_summary"]["error"] == "failed at [path]"
+    assert payload["recent_failed_commands"][0]["verb"] == "send"
+    assert payload["recent_failed_commands"][0]["target_id"] == "t_secret"
+
+
+def test_health_issues_derives_actionable_runtime_and_recovery_issues(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    task_id = _insert_task(store)
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_root",
+        payload={"reply_target_message_id": "om_root", "text": "reply", "identity": "user"},
+    )
+    assert action_id is not None
+    store.finish_action(action_id, status="failed_needs_review", result={"error_stage": "send"})
+    store.record_run_tick_started(run_id="run_stale", dry_run=True)
+    store.record_health_results(
+        run_id="run_stale",
+        results=[
+            HealthCheckResult(
+                name="hermes",
+                severity="warning",
+                status="failed",
+                message="Hermes health failed at /tmp/secret/hermes.log",
+            )
+        ],
+    )
+    with store.connect() as conn:
+        conn.execute(
+            """
+            UPDATE runs
+            SET last_heartbeat_at = ?,
+                health_summary_json = ?,
+                last_tick_summary_json = ?
+            WHERE run_id = ?
+            """,
+            (
+                "2026-06-22T09:00:00+08:00",
+                json.dumps({"error": "doctor failed at /tmp/secret/doctor.log"}),
+                json.dumps({"stage": "runtime", "log": "/tmp/secret/tick.log"}),
+                "run_stale",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO approval_commands(message_id, command, status, result_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "cmd_failed",
+                "/approve a_missing",
+                "failed",
+                json.dumps({"error": "approval not found"}),
+                "2026-06-22T09:30:00+08:00",
+                "2026-06-22T09:30:00+08:00",
+            ),
+        )
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:00:00+08:00")
+
+    payload = query.health_issues()
+    serialized = json.dumps(payload, ensure_ascii=False)
+
+    issues = {issue["id"]: issue for issue in payload["issues"]}
+    assert payload["runtime"]["store"]["status"] == "available"
+    assert payload["runtime"]["daemon_liveness"]["status"] == "stale"
+    assert "health_summary_json" not in payload["runtime"]["last_run"]
+    assert "last_tick_summary_json" not in payload["runtime"]["last_run"]
+    assert "/tmp/secret" not in serialized
+    assert payload["summary"]["highest_severity"] == "critical"
+    assert issues["policy-uninitialized"]["category"] == "policy"
+    assert issues["daemon-stale"]["severity"] == "error"
+    assert issues[f"dispatch-action-{action_id}"]["recommended_actions"] == [
+        "inspect",
+        "mark_sent",
+        "retry",
+        "cancel",
+    ]
+    assert issues["approval-command-cmd_failed"]["links"] == [{"type": "approval", "id": "a_missing"}]
+    hermes_issue = next(issue for issue in payload["issues"] if issue["id"].startswith("health-hermes-"))
+    assert "/tmp/secret" not in hermes_issue["detail"]
+    assert "[path]" in hermes_issue["detail"]
+    assert payload["recent_failed_dispatch_actions"][0]["action_id"] == action_id
+    assert payload["recent_failed_commands"][0]["message_id"] == "cmd_failed"
 
 
 def _message_detail_state(store: SQLiteStore, action_id: int) -> dict[str, object]:

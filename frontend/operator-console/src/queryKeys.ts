@@ -5,6 +5,7 @@ export type ApprovalFilter = "all" | "pending" | "expired" | "resolved";
 
 export const queryKeys = {
   dashboard: () => ["dashboard"] as const,
+  healthIssues: () => ["health-issues"] as const,
   approvals: (filters: { status?: ApprovalStatus | ApprovalFilter; limit?: number; offset?: number }) =>
     ["approvals", filters] as const,
   approval: (approvalId: string | null) => ["approval", approvalId] as const,
@@ -25,6 +26,7 @@ export const queryKeys = {
 export function invalidateAfterApprovalCommand(queryClient: QueryClient): Promise<void[]> {
   return Promise.all([
     queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+    queryClient.invalidateQueries({ queryKey: ["health-issues"] }),
     queryClient.invalidateQueries({ queryKey: ["approvals"] }),
     queryClient.invalidateQueries({ queryKey: ["approval"] }),
     queryClient.invalidateQueries({ queryKey: ["tasks"] }),
@@ -38,6 +40,7 @@ export function invalidateAfterApprovalCommand(queryClient: QueryClient): Promis
 export function invalidateAfterDispatchCommand(queryClient: QueryClient): Promise<void[]> {
   return Promise.all([
     queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+    queryClient.invalidateQueries({ queryKey: ["health-issues"] }),
     queryClient.invalidateQueries({ queryKey: ["dispatch-actions"] }),
     queryClient.invalidateQueries({ queryKey: ["dispatch-action"] }),
     queryClient.invalidateQueries({ queryKey: ["tasks"] }),
@@ -48,6 +51,7 @@ export function invalidateAfterDispatchCommand(queryClient: QueryClient): Promis
 export function invalidateAfterMaintenanceCommand(queryClient: QueryClient): Promise<void[]> {
   return Promise.all([
     queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+    queryClient.invalidateQueries({ queryKey: ["health-issues"] }),
     queryClient.invalidateQueries({ queryKey: ["approvals"] }),
     queryClient.invalidateQueries({ queryKey: ["approval"] }),
     queryClient.invalidateQueries({ queryKey: ["tasks"] }),
@@ -59,6 +63,7 @@ export function invalidateAfterMaintenanceCommand(queryClient: QueryClient): Pro
 export function invalidateAfterPolicyCommand(queryClient: QueryClient): Promise<void[]> {
   return Promise.all([
     queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+    queryClient.invalidateQueries({ queryKey: ["health-issues"] }),
     queryClient.invalidateQueries({ queryKey: ["policy-status"] }),
     queryClient.invalidateQueries({ queryKey: ["policy-audits"] }),
     queryClient.invalidateQueries({ queryKey: ["settings-runtime"] }),

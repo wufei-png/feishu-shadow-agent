@@ -32,6 +32,41 @@ export type DashboardSnapshot = {
   } | null;
 };
 
+export type HealthSeverity = "info" | "warning" | "error" | "critical";
+
+export type HealthIssueLink = {
+  type: "task" | "message" | "approval" | "dispatch_action" | "policy" | "settings";
+  id: string;
+};
+
+export type HealthIssue = {
+  id: string;
+  severity: HealthSeverity;
+  category: "daemon" | "policy" | "approval_command" | "dispatch" | "store" | "runtime";
+  title: string;
+  detail: string;
+  detected_at: string | null;
+  links: HealthIssueLink[];
+  recommended_actions: string[];
+};
+
+export type HealthIssuesResponse = {
+  generated_at: string;
+  summary: {
+    highest_severity: HealthSeverity;
+    open_issue_count: number;
+  };
+  runtime: {
+    store?: Record<string, unknown>;
+    daemon_liveness?: Record<string, unknown>;
+    last_run?: Record<string, unknown> | null;
+    policy_status?: PolicyStatus;
+  };
+  issues: HealthIssue[];
+  recent_failed_commands?: Array<Record<string, unknown>>;
+  recent_failed_dispatch_actions?: DispatchActionSummary[];
+};
+
 export type PolicyStatus = {
   initialized?: boolean;
   global_policy_updated_at?: string | null;

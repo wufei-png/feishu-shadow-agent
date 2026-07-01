@@ -324,6 +324,16 @@ h2 {
   overflow-wrap: anywhere;
 }
 
+.health-metrics .metric-card {
+  min-height: 84px;
+}
+
+.health-metrics .metric-card strong {
+  font-size: 15px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 .metric-card.warning strong,
 .status-pill.warning {
   color: var(--status-warning);
@@ -1009,6 +1019,22 @@ dd {
   max-width: 100%;
   white-space: normal;
   overflow-wrap: anywhere;
+}
+
+.health-link-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.health-link-list .button {
+  text-decoration: none;
+}
+
+.disabled-action {
+  cursor: not-allowed;
+  opacity: 0.48;
 }
 
 .spin {
