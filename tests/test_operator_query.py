@@ -232,6 +232,39 @@ def test_task_detail_returns_related_read_models_and_effective_policy(tmp_path: 
     assert approval["status"] == "pending"
 
 
+def test_task_and_dispatch_lists_include_recommended_actions(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    task_id = _insert_task(store)
+    _insert_approval(
+        store,
+        task_id=task_id,
+        short_id="a_overdue_list",
+        expires_at="2026-06-22T09:00:00+08:00",
+    )
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_root",
+        payload={"reply_target_message_id": "om_root", "text": "reply", "identity": "user"},
+    )
+    assert action_id is not None
+    store.finish_action(action_id, status="failed_needs_review", result={"error_stage": "send"})
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:00:00+08:00")
+
+    tasks = query.list_tasks()
+    actions = query.list_dispatch_actions()
+
+    assert tasks[0]["recommended_actions"] == [
+        "expire_overdue_approvals",
+        "inspect_failed_needs_review_actions",
+    ]
+    assert actions[0]["recommended_actions"] == [
+        f"dispatch inspect --action-id {action_id}",
+        f"dispatch mark-sent --action-id {action_id} --sent-message-id <message_id>",
+        f"dispatch retry --action-id {action_id}",
+        f"dispatch cancel --action-id {action_id}",
+    ]
+
+
 def test_dispatch_action_detail_reads_attempts_without_recovering_stale_sends(tmp_path: Path) -> None:
     store = _store(tmp_path)
     task_id = _insert_task(store)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -48,7 +49,13 @@ def _static_dir(tmp_path: Path) -> Path:
     return static_dir
 
 
-def _client(tmp_path: Path, *, token: str = "test-token", host: str = "127.0.0.1") -> TestClient:
+def _client(
+    tmp_path: Path,
+    *,
+    token: str = "test-token",
+    host: str = "127.0.0.1",
+    readback_marker: Any | None = None,
+) -> TestClient:
     config = ConfigService().load(_write_config(tmp_path))
     app = create_console_app(
         loaded_config=config,
@@ -57,6 +64,7 @@ def _client(tmp_path: Path, *, token: str = "test-token", host: str = "127.0.0.1
         host=host,
         port=8765,
         static_dir=_static_dir(tmp_path),
+        readback_marker=readback_marker,
     )
     return TestClient(app, base_url="http://127.0.0.1:8765")
 
@@ -284,6 +292,324 @@ def test_message_detail_api_is_service_backed_and_read_only(tmp_path: Path) -> N
     assert payload["recorded_dispatch_outcomes"][0]["attempts"] == []
     assert payload["recommended_actions"] == ["review_pending_approvals"]
     assert _message_detail_state(store, action_id) == before
+
+
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("GET", "/api/approvals"),
+        ("GET", "/api/approvals/a_missing"),
+        ("GET", "/api/tasks"),
+        ("GET", "/api/tasks/t_missing"),
+        ("GET", "/api/dispatch/actions"),
+        ("GET", "/api/dispatch/actions/1"),
+        ("POST", "/api/approvals/a_missing/approve"),
+        ("POST", "/api/approvals/a_missing/reject"),
+        ("POST", "/api/tasks/t_missing/send"),
+        ("POST", "/api/maintenance/expire-approvals"),
+        ("POST", "/api/dispatch/actions/1/retry"),
+        ("POST", "/api/dispatch/actions/1/cancel"),
+        ("POST", "/api/dispatch/actions/1/mark-sent"),
+    ],
+)
+def test_core_console_routes_require_token(tmp_path: Path, method: str, path: str) -> None:
+    client = _client(tmp_path)
+
+    response = client.request(method, path, json={})
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "unauthorized"
+
+
+def test_core_read_routes_use_operator_query_filters_and_details(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    store = _store(tmp_path)
+    task_id = _seed_task_with_message(store)
+    approval_id = store.create_send_reply_approval(
+        task_id=task_id,
+        preview="draft reply",
+        payload={"reply_target_message_id": "om_1", "text": "draft reply", "identity": "user"},
+        approval_timeout_hours=None,
+    )
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_1",
+        payload={"reply_target_message_id": "om_1", "text": "draft reply", "identity": "user"},
+        approval_id=approval_id,
+    )
+    assert action_id is not None
+    with store.connect() as conn:
+        approval_short_id = conn.execute(
+            "SELECT short_id FROM approvals WHERE id = ?",
+            (approval_id,),
+        ).fetchone()["short_id"]
+        task_short_id = conn.execute("SELECT short_id FROM tasks WHERE id = ?", (task_id,)).fetchone()["short_id"]
+
+    approvals = client.get("/api/approvals?status=pending&limit=10&offset=0", headers=_auth())
+    approval_detail = client.get(f"/api/approvals/{approval_short_id}", headers=_auth())
+    tasks = client.get("/api/tasks?status=watching&chat_id=oc_1", headers=_auth())
+    task_detail = client.get(f"/api/tasks/{task_short_id}", headers=_auth())
+    actions = client.get("/api/dispatch/actions?status=pending", headers=_auth())
+    action_detail = client.get(f"/api/dispatch/actions/{action_id}", headers=_auth())
+
+    assert approvals.status_code == 200
+    assert approvals.json()[0]["approval_id"] == approval_short_id
+    assert "payload" not in approvals.json()[0]
+    assert approval_detail.status_code == 200
+    assert approval_detail.json()["payload"]["text"] == "draft reply"
+    assert tasks.status_code == 200
+    assert tasks.json()[0]["task_id"] == task_short_id
+    assert task_detail.status_code == 200
+    assert task_detail.json()["recent_messages"][0]["message_id"] == "om_1"
+    assert actions.status_code == 200
+    assert actions.json()[0]["action_id"] == action_id
+    assert action_detail.status_code == 200
+    assert action_detail.json()["action"]["payload"]["text"] == "draft reply"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/approvals?status=waiting_approval",
+        "/api/tasks?status=waiting_approval",
+        "/api/dispatch/actions?status=unknown",
+        "/api/approvals?limit=101",
+        "/api/tasks?offset=-1",
+    ],
+)
+def test_core_read_routes_return_standard_validation_errors(tmp_path: Path, path: str) -> None:
+    client = _client(tmp_path)
+
+    response = client.get(path, headers=_auth())
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "validation_failed"
+
+
+def test_approval_and_task_command_routes_return_command_results(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    store = _store(tmp_path)
+    task_id = _seed_task_with_message(store, task_short_id="t_api_cmd")
+    approval_id = store.create_send_reply_approval(
+        task_id=task_id,
+        preview="approve me",
+        payload={"reply_target_message_id": "om_1", "text": "approve me", "identity": "user"},
+        approval_timeout_hours=None,
+    )
+    with store.connect() as conn:
+        approval_short_id = conn.execute(
+            "SELECT short_id FROM approvals WHERE id = ?",
+            (approval_id,),
+        ).fetchone()["short_id"]
+
+    approve = client.post(
+        f"/api/approvals/{approval_short_id}/approve",
+        headers=_auth(),
+        json={"reason": "reviewed", "command_id": "cmd_approve_api"},
+    )
+    send = client.post(
+        "/api/tasks/t_api_cmd/send",
+        headers=_auth(),
+        json={"final_reply": "operator final", "reason": "manual close", "command_id": "cmd_send_api"},
+    )
+    invalid_send = client.post("/api/tasks/t_api_cmd/send", headers=_auth(), json={"final_reply": "   "})
+
+    assert approve.status_code == 200
+    approve_payload = approve.json()
+    assert approve_payload["status"] == "applied"
+    assert approve_payload["command"] == "approval.approve"
+    assert approve_payload["actor"] == "local_console"
+    assert approve_payload["reason"] == "reviewed"
+
+    _seed_task_with_message(store, task_short_id="t_api_send", message_id="om_send")
+    assert send.status_code == 200
+    send_payload = send.json()
+    assert send_payload["status"] == "conflict"
+    conflict = send_payload
+    send = client.post(
+        "/api/tasks/t_api_send/send",
+        headers=_auth(),
+        json={"final_reply": "operator final", "reason": "manual close", "command_id": "cmd_send_api_2"},
+    )
+    send_payload = send.json()
+    assert conflict["status"] == "conflict"
+    assert send_payload["status"] == "applied"
+    assert send_payload["command"] == "approval.send"
+    assert send_payload["actor"] == "local_console"
+    assert send_payload["result"]["approval_command_status"] == "applied"
+    assert invalid_send.status_code == 400
+    assert invalid_send.json()["error"]["code"] == "validation_failed"
+
+
+def test_maintenance_and_dispatch_command_routes_return_command_results(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    store = _store(tmp_path)
+    task_id = _seed_task_with_message(store)
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_1",
+        payload={"reply_target_message_id": "om_1", "text": "recover me", "identity": "user"},
+    )
+    assert action_id is not None
+    store.finish_action(action_id, status="failed", result={"error_stage": "send"})
+
+    retry = client.post(f"/api/dispatch/actions/{action_id}/retry", headers=_auth(), json={"reason": "try again"})
+    cancel = client.post(f"/api/dispatch/actions/{action_id}/cancel", headers=_auth(), json={"reason": "stop"})
+    expire = client.post("/api/maintenance/expire-approvals", headers=_auth(), json={"reason": "sweep"})
+
+    assert retry.status_code == 200
+    assert retry.json()["status"] == "applied"
+    assert retry.json()["command"] == "dispatch.retry"
+    assert retry.json()["actor"] == "local_console"
+    assert cancel.status_code == 200
+    assert cancel.json()["status"] == "applied"
+    assert cancel.json()["command"] == "dispatch.cancel"
+    assert expire.status_code == 200
+    assert expire.json()["command"] == "maintenance.expire_approvals"
+    assert expire.json()["actor"] == "local_console"
+
+
+def test_dispatch_mark_sent_route_uses_readback_marker(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    task_id = _seed_task_with_message(store)
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_1",
+        payload={"reply_target_message_id": "om_1", "text": "sent already", "identity": "user"},
+    )
+    assert action_id is not None
+    store.finish_action(action_id, status="failed_needs_review", result={"error_stage": "send"})
+
+    class FakeReadbackMarker:
+        calls: list[dict[str, Any]]
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        def mark_action_sent_after_readback(
+            self,
+            action_id: int,
+            *,
+            sent_message_id: str,
+            run_id: str,
+        ) -> dict[str, Any]:
+            self.calls.append(
+                {
+                    "action_id": action_id,
+                    "sent_message_id": sent_message_id,
+                    "run_id": run_id,
+                }
+            )
+            store.mark_action_sent_after_evidence(
+                action_id,
+                sent_message_id=sent_message_id,
+                result={"readback": {"ok": True, "message_id": sent_message_id}, "warnings": []},
+                run_id=run_id,
+            )
+            return {"status": "sent", "action_id": action_id, "sent_message_id": sent_message_id}
+
+    marker = FakeReadbackMarker()
+    client = _client(tmp_path, readback_marker=marker)
+
+    response = client.post(
+        f"/api/dispatch/actions/{action_id}/mark-sent",
+        headers=_auth(),
+        json={"sent_message_id": "om_sent", "reason": "verified in Feishu"},
+    )
+    missing = client.post(f"/api/dispatch/actions/{action_id}/mark-sent", headers=_auth(), json={})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "applied"
+    assert payload["command"] == "dispatch.mark_sent"
+    assert payload["actor"] == "local_console"
+    assert payload["reason"] == "verified in Feishu"
+    assert payload["result"]["sent_message_id"] == "om_sent"
+    assert marker.calls[0]["action_id"] == action_id
+    assert marker.calls[0]["sent_message_id"] == "om_sent"
+    assert store.get_action(action_id).status == "sent"  # type: ignore[union-attr]
+    assert missing.status_code == 400
+    assert missing.json()["error"]["code"] == "validation_failed"
+
+
+def test_dispatch_mark_sent_route_reports_marker_construction_failure(tmp_path: Path, monkeypatch) -> None:
+    store = _store(tmp_path)
+    task_id = _seed_task_with_message(store)
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_1",
+        payload={"reply_target_message_id": "om_1", "text": "sent already", "identity": "user"},
+    )
+    assert action_id is not None
+    store.finish_action(action_id, status="failed_needs_review", result={"error_stage": "send"})
+    monkeypatch.setattr(
+        "feishu_shadow_agent.console_api._build_dispatch_readback_marker",
+        lambda **_: (_ for _ in ()).throw(OSError("log path unavailable")),
+    )
+    client = _client(tmp_path)
+
+    response = client.post(
+        f"/api/dispatch/actions/{action_id}/mark-sent",
+        headers=_auth(),
+        json={"sent_message_id": "om_sent", "reason": "verified in Feishu"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "failed"
+    assert payload["command"] == "dispatch.mark_sent"
+    assert payload["actor"] == "local_console"
+    assert payload["changed"] is False
+    assert "readback marker unavailable" in payload["result"]["error"]
+    assert store.get_action(action_id).status == "failed_needs_review"  # type: ignore[union-attr]
+
+
+def _seed_task_with_message(
+    store: SQLiteStore,
+    *,
+    task_short_id: str = "t_api",
+    message_id: str = "om_1",
+) -> int:
+    store.migrate()
+    with store.connect() as conn:
+        task_id = conn.execute(
+            """
+            INSERT INTO tasks(short_id, status, chat_id, chat_type, root_message_id, task_label, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_short_id,
+                "watching",
+                "oc_1",
+                "p2p",
+                message_id,
+                "api task",
+                "2026-06-22T10:00:00+08:00",
+                "2026-06-22T10:00:00+08:00",
+            ),
+        ).lastrowid
+        conn.execute(
+            """
+            INSERT INTO messages(message_id, chat_id, chat_type, sender_id, sender_role, sent_at, text, raw_json, inserted_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                message_id,
+                "oc_1",
+                "p2p",
+                "ou_external",
+                "external_user_message",
+                "2026-06-22T10:00:00+08:00",
+                "hello",
+                json.dumps({"message_id": message_id}),
+                "2026-06-22T10:00:00+08:00",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO task_messages(task_id, message_id, role, created_at) VALUES (?, ?, ?, ?)",
+            (task_id, message_id, "root", "2026-06-22T10:00:00+08:00"),
+        )
+    return int(task_id)
 
 
 def _message_detail_state(store: SQLiteStore, action_id: int) -> dict[str, object]:

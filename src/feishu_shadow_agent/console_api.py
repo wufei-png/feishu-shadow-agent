@@ -2,20 +2,37 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Annotated
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict
 
 from .config import LoadedConfig
 from .console_security import bearer_token_valid, host_header_allowed, validate_console_bind_host
+from .dispatcher import Dispatcher
+from .feishu.lark_cli import LarkCliClient
+from .jsonl import JSONLLogger
+from .operator_commands import DispatchReadbackMarker, OperatorCommandService
 from .operator_query import OperatorQueryReadError, OperatorQueryService, OperatorQueryUnavailable
+from .paths import resolve_relative_path
 from .settings_catalog import settings_catalog
 from .store.sqlite_store import SQLiteStore
+from .types import ActionStatus, ApprovalStatus, TaskStatus
 
 _ASSET_REF_PATTERN = re.compile(r"""(?:src|href)=["'](/assets/[^"']+)["']""")
+LOCAL_CONSOLE_ACTOR = "local_console"
+
+
+class CommandRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = None
+    command_id: str | None = None
+    final_reply: str | None = None
+    sent_message_id: str | None = None
 
 
 def default_console_static_dir() -> Path:
@@ -52,6 +69,7 @@ def create_console_app(
     host: str = "127.0.0.1",
     port: int = 8765,
     static_dir: Path | None = None,
+    readback_marker: DispatchReadbackMarker | None = None,
 ) -> FastAPI:
     validate_console_bind_host(host)
     app = FastAPI(title="Feishu Shadow Agent Operator Console")
@@ -95,11 +113,79 @@ def create_console_app(
     def query_service() -> OperatorQueryService:
         return OperatorQueryService(store, policy_import_source=loaded_config.config)
 
+    def command_service(*, needs_readback_marker: bool = False) -> OperatorCommandService:
+        marker = None
+        if needs_readback_marker:
+            marker = readback_marker or _build_dispatch_readback_marker(
+                loaded_config=loaded_config,
+                store=store,
+            )
+        return OperatorCommandService(
+            store,
+            readback_marker=marker,
+        )
+
     api = APIRouter(prefix="/api", dependencies=[Depends(require_token)])
 
     @api.get("/dashboard")
     def dashboard() -> dict[str, Any]:
         return query_service().dashboard_snapshot()
+
+    @api.get("/approvals")
+    def approvals(
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        offset: Annotated[int, Query(ge=0)] = 0,
+        status: ApprovalStatus | None = None,
+    ) -> list[dict[str, Any]]:
+        return query_service().list_approvals(
+            status=None if status is None else status.value,
+            limit=limit,
+            offset=offset,
+        )
+
+    @api.get("/approvals/{approval_id}")
+    def approval_detail(approval_id: str) -> dict[str, Any]:
+        detail = query_service().approval_detail(approval_id)
+        if detail is None:
+            _raise_api_error(404, "not_found", f"Approval not found: {approval_id}")
+        return detail
+
+    @api.get("/tasks")
+    def tasks(
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        offset: Annotated[int, Query(ge=0)] = 0,
+        status: TaskStatus | None = None,
+        chat_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return query_service().list_tasks(
+            status=None if status is None else status.value,
+            chat_id=chat_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    @api.get("/tasks/{task_id}")
+    def task_detail(task_id: str) -> dict[str, Any]:
+        detail = query_service().task_detail(task_id)
+        if detail is None:
+            _raise_api_error(404, "not_found", f"Task not found: {task_id}")
+        return detail
+
+    @api.get("/dispatch/actions")
+    def dispatch_actions(
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        offset: Annotated[int, Query(ge=0)] = 0,
+        status: Annotated[list[ActionStatus] | None, Query()] = None,
+    ) -> list[dict[str, Any]]:
+        statuses = None if status is None else tuple(item.value for item in status)
+        return query_service().list_dispatch_actions(statuses=statuses, limit=limit, offset=offset)
+
+    @api.get("/dispatch/actions/{action_id}")
+    def dispatch_action_detail(action_id: int) -> dict[str, Any]:
+        detail = query_service().dispatch_action_detail(action_id)
+        if detail is None:
+            _raise_api_error(404, "not_found", f"Dispatch action not found: {action_id}")
+        return detail
 
     @api.get("/settings/catalog")
     def settings_catalog_route() -> dict[str, Any]:
@@ -121,6 +207,103 @@ def create_console_app(
             _raise_api_error(404, "not_found", f"Message not found: {message_id}")
         return detail
 
+    @api.post("/approvals/{approval_id}/approve")
+    def approve_approval(
+        approval_id: str,
+        body: Annotated[CommandRequest | None, Body()] = None,
+    ) -> dict[str, Any]:
+        payload = body or CommandRequest()
+        return command_service().approve(
+            approval_id,
+            actor=LOCAL_CONSOLE_ACTOR,
+            reason=payload.reason,
+            command_id=payload.command_id,
+        ).as_dict()
+
+    @api.post("/approvals/{approval_id}/reject")
+    def reject_approval(
+        approval_id: str,
+        body: Annotated[CommandRequest | None, Body()] = None,
+    ) -> dict[str, Any]:
+        payload = body or CommandRequest()
+        return command_service().reject(
+            approval_id,
+            actor=LOCAL_CONSOLE_ACTOR,
+            reason=payload.reason,
+            command_id=payload.command_id,
+        ).as_dict()
+
+    @api.post("/tasks/{task_id}/send")
+    def send_task(
+        task_id: str,
+        body: Annotated[CommandRequest | None, Body()] = None,
+    ) -> dict[str, Any]:
+        payload = body or CommandRequest()
+        final_reply = _required_text(payload.final_reply, field="final_reply")
+        return command_service().send(
+            task_id,
+            final_reply,
+            actor=LOCAL_CONSOLE_ACTOR,
+            reason=payload.reason,
+            command_id=payload.command_id,
+        ).as_dict()
+
+    @api.post("/maintenance/expire-approvals")
+    def expire_approvals(body: Annotated[CommandRequest | None, Body()] = None) -> dict[str, Any]:
+        payload = body or CommandRequest()
+        return command_service().expire_approvals(
+            actor=LOCAL_CONSOLE_ACTOR,
+            reason=payload.reason,
+        ).as_dict()
+
+    @api.post("/dispatch/actions/{action_id}/retry")
+    def retry_dispatch_action(
+        action_id: int,
+        body: Annotated[CommandRequest | None, Body()] = None,
+    ) -> dict[str, Any]:
+        payload = body or CommandRequest()
+        return command_service().retry_dispatch_action(
+            action_id,
+            actor=LOCAL_CONSOLE_ACTOR,
+            reason=payload.reason,
+        ).as_dict()
+
+    @api.post("/dispatch/actions/{action_id}/cancel")
+    def cancel_dispatch_action(
+        action_id: int,
+        body: Annotated[CommandRequest | None, Body()] = None,
+    ) -> dict[str, Any]:
+        payload = body or CommandRequest()
+        return command_service().cancel_dispatch_action(
+            action_id,
+            actor=LOCAL_CONSOLE_ACTOR,
+            reason=payload.reason,
+        ).as_dict()
+
+    @api.post("/dispatch/actions/{action_id}/mark-sent")
+    def mark_dispatch_sent(
+        action_id: int,
+        body: Annotated[CommandRequest | None, Body()] = None,
+    ) -> dict[str, Any]:
+        payload = body or CommandRequest()
+        sent_message_id = _required_text(payload.sent_message_id, field="sent_message_id")
+        try:
+            service = command_service(needs_readback_marker=True)
+        except Exception as exc:
+            return _command_error_result(
+                command="dispatch.mark_sent",
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=payload.reason,
+                target={"type": "dispatch_action", "action_id": action_id},
+                error=f"dispatch mark-sent readback marker unavailable: {exc}",
+            )
+        return service.mark_dispatch_sent(
+            action_id,
+            sent_message_id=sent_message_id,
+            actor=LOCAL_CONSOLE_ACTOR,
+            reason=payload.reason,
+        ).as_dict()
+
     @api.api_route("", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
     @api.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
     def api_not_found(path: str = "") -> None:
@@ -129,6 +312,36 @@ def create_console_app(
     app.include_router(api)
     _install_static_routes(app, resolved_static_dir)
     return app
+
+
+def _build_dispatch_readback_marker(
+    *,
+    loaded_config: LoadedConfig,
+    store: SQLiteStore,
+) -> Dispatcher:
+    config = loaded_config.config
+    jsonl_path = resolve_relative_path(config.logging.jsonl_path, loaded_config.base_dir)
+    text_path = (
+        None
+        if config.logging.text_path is None
+        else resolve_relative_path(config.logging.text_path, loaded_config.base_dir)
+    )
+    client = LarkCliClient(
+        path=config.lark_cli.path,
+        timeout_seconds=config.lark_cli.timeout_seconds,
+        cwd=loaded_config.base_dir,
+    )
+    return Dispatcher(
+        store=store,
+        feishu_client=client,
+        config=config,
+        logger=JSONLLogger(
+            jsonl_path,
+            level=config.logging.level,
+            console=config.logging.console,
+            text_path=text_path,
+        ),
+    )
 
 
 def _install_static_routes(app: FastAPI, static_dir: Path) -> None:
@@ -169,6 +382,38 @@ def _raise_api_error(status_code: int, code: str, message: str, *, details: dict
             "details": details or {},
         },
     )
+
+
+def _required_text(value: str | None, *, field: str) -> str:
+    if value is None or not value.strip():
+        _raise_api_error(
+            400,
+            "validation_failed",
+            f"{field} is required.",
+            details={"field": field},
+        )
+    return value
+
+
+def _command_error_result(
+    *,
+    command: str,
+    actor: str,
+    reason: str | None,
+    target: dict[str, Any],
+    error: str,
+) -> dict[str, Any]:
+    return {
+        "status": "failed",
+        "command": command,
+        "actor": actor,
+        "reason": reason,
+        "target": target,
+        "changed": False,
+        "result": {"error": error},
+        "warnings": [],
+        "next_actions": [],
+    }
 
 
 def _error_response(

@@ -201,7 +201,33 @@ class OperatorQueryService:
                     f"""
                     SELECT t.id, t.short_id, t.status, t.chat_id, t.chat_type, t.thread_id,
                            t.root_message_id, t.task_label, t.watch_until, t.updated_at,
-                           COUNT(tm.message_id) AS message_count
+                           COUNT(tm.message_id) AS message_count,
+                           (
+                             SELECT COUNT(*)
+                             FROM approvals ap
+                             WHERE ap.task_id = t.id
+                               AND ap.status = 'pending'
+                           ) AS pending_approval_count,
+                           (
+                             SELECT COUNT(*)
+                             FROM approvals ap
+                             WHERE ap.task_id = t.id
+                               AND ap.status = 'pending'
+                               AND ap.expires_at IS NOT NULL
+                               AND datetime(ap.expires_at) < datetime(?)
+                           ) AS overdue_approval_count,
+                           (
+                             SELECT COUNT(*)
+                             FROM actions ac
+                             WHERE ac.task_id = t.id
+                               AND ac.status = 'failed_needs_review'
+                           ) AS failed_needs_review_action_count,
+                           (
+                             SELECT COUNT(*)
+                             FROM actions ac
+                             WHERE ac.task_id = t.id
+                               AND ac.status = 'failed'
+                           ) AS failed_action_count
                     FROM tasks t
                     LEFT JOIN task_messages tm ON tm.task_id = t.id
                     {where_sql}
@@ -209,7 +235,7 @@ class OperatorQueryService:
                     ORDER BY t.updated_at DESC, t.id DESC
                     LIMIT ? OFFSET ?
                     """,
-                    params,
+                    [now, *params],
                 ).fetchall()
         except _ReadStoreUnavailable:
             return []
@@ -883,6 +909,12 @@ def _approval_overdue_seconds(expires_at: Any, *, now: str) -> int:
 def _task_summary_dto(row: sqlite3.Row) -> dict[str, Any]:
     data = _row_dict(row)
     short_id = str(data["short_id"])
+    recommended_actions = _summary_recommended_actions(
+        pending_approval_count=int(data.get("pending_approval_count") or 0),
+        overdue_approval_count=int(data.get("overdue_approval_count") or 0),
+        failed_needs_review_action_count=int(data.get("failed_needs_review_action_count") or 0),
+        failed_action_count=int(data.get("failed_action_count") or 0),
+    )
     return {
         "id": data["id"],
         "task_id": short_id,
@@ -897,6 +929,7 @@ def _task_summary_dto(row: sqlite3.Row) -> dict[str, Any]:
         "watch_until": data.get("watch_until"),
         "updated_at": data.get("updated_at"),
         "message_count": int(data.get("message_count") or 0),
+        "recommended_actions": recommended_actions,
     }
 
 
@@ -928,6 +961,7 @@ def _action_dto(row: sqlite3.Row, *, include_payload: bool) -> dict[str, Any]:
         "updated_at": data["updated_at"],
         "result_summary": _result_summary(_loads_json_object(data.get("result_json"))),
     }
+    dto["recommended_actions"] = _dispatch_recommended_actions(dto)
     if include_payload:
         dto["idempotency_key"] = data["idempotency_key"]
         dto["payload"] = _loads_json_object(data.get("payload_json"))
@@ -1009,6 +1043,25 @@ def _task_recommended_actions(
     if any(action["status"] == ActionStatus.FAILED_NEEDS_REVIEW.value for action in actions):
         recommendations.append("inspect_failed_needs_review_actions")
     elif any(action["status"] == ActionStatus.FAILED.value for action in actions):
+        recommendations.append("retry_or_cancel_failed_actions")
+    return recommendations
+
+
+def _summary_recommended_actions(
+    *,
+    pending_approval_count: int,
+    overdue_approval_count: int,
+    failed_needs_review_action_count: int,
+    failed_action_count: int,
+) -> list[str]:
+    recommendations = []
+    if overdue_approval_count > 0:
+        recommendations.append("expire_overdue_approvals")
+    elif pending_approval_count > 0:
+        recommendations.append("review_pending_approvals")
+    if failed_needs_review_action_count > 0:
+        recommendations.append("inspect_failed_needs_review_actions")
+    elif failed_action_count > 0:
         recommendations.append("retry_or_cancel_failed_actions")
     return recommendations
 
