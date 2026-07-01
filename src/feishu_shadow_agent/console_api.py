@@ -35,6 +35,63 @@ class CommandRequest(BaseModel):
     sent_message_id: str | None = None
 
 
+class PolicyImportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = None
+    replace: bool = False
+
+
+class GlobalPolicyUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = None
+    p2p_auto_reply: bool | None = None
+    unknown_group_auto_reply: bool | None = None
+    bot_joined: bool | None = None
+    reply_identity: str | None = None
+    allow_user_fallback: bool | None = None
+    resource_download: bool | None = None
+
+    def changes(self) -> dict[str, Any]:
+        return _policy_request_changes(
+            self,
+            (
+                "p2p_auto_reply",
+                "unknown_group_auto_reply",
+                "bot_joined",
+                "reply_identity",
+                "allow_user_fallback",
+                "resource_download",
+            ),
+        )
+
+
+class ChatPolicyUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = None
+    name: str | None = None
+    auto_reply: bool | None = None
+    bot_joined: bool | None = None
+    reply_identity: str | None = None
+    allow_user_fallback: bool | None = None
+    resource_download: bool | None = None
+
+    def changes(self) -> dict[str, Any]:
+        return _policy_request_changes(
+            self,
+            (
+                "name",
+                "auto_reply",
+                "bot_joined",
+                "reply_identity",
+                "allow_user_fallback",
+                "resource_download",
+            ),
+        )
+
+
 def default_console_static_dir() -> Path:
     return Path(__file__).with_name("console_static")
 
@@ -195,6 +252,26 @@ def create_console_app(
     def settings_runtime() -> dict[str, Any]:
         return query_service().settings_runtime(loaded_config.config)
 
+    @api.get("/policy/status")
+    def policy_status() -> dict[str, Any]:
+        return query_service().policy_status()
+
+    @api.get("/policy/audits")
+    def policy_audits(
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        offset: Annotated[int, Query(ge=0)] = 0,
+        scope: str | None = None,
+        policy_key: str | None = None,
+        since: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return query_service().policy_audit_history(
+            limit=limit,
+            offset=offset,
+            scope=scope,
+            policy_key=policy_key,
+            since=since,
+        )
+
     @api.get("/messages/{message_id}/detail")
     def message_detail(message_id: str) -> dict[str, Any]:
         try:
@@ -304,6 +381,34 @@ def create_console_app(
             reason=payload.reason,
         ).as_dict()
 
+    @api.post("/policy/import-config")
+    def import_policy_config(body: Annotated[PolicyImportRequest | None, Body()] = None) -> dict[str, Any]:
+        payload = body or PolicyImportRequest()
+        return command_service().import_policy_config(
+            loaded_config.config,
+            replace=payload.replace,
+            used_defaults=loaded_config.reply_policy_used_defaults,
+            actor=LOCAL_CONSOLE_ACTOR,
+            reason=payload.reason,
+        ).as_dict()
+
+    @api.patch("/policy/global")
+    def update_global_policy(body: GlobalPolicyUpdateRequest) -> dict[str, Any]:
+        return command_service().update_global_policy(
+            body.changes(),
+            actor=LOCAL_CONSOLE_ACTOR,
+            reason=body.reason,
+        ).as_dict()
+
+    @api.patch("/policy/chats/{chat_id}")
+    def update_chat_policy(chat_id: str, body: ChatPolicyUpdateRequest) -> dict[str, Any]:
+        return command_service().update_chat_policy(
+            chat_id,
+            body.changes(),
+            actor=LOCAL_CONSOLE_ACTOR,
+            reason=body.reason,
+        ).as_dict()
+
     @api.api_route("", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
     @api.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
     def api_not_found(path: str = "") -> None:
@@ -393,6 +498,11 @@ def _required_text(value: str | None, *, field: str) -> str:
             details={"field": field},
         )
     return value
+
+
+def _policy_request_changes(body: BaseModel, fields: tuple[str, ...]) -> dict[str, Any]:
+    data = body.model_dump(exclude_none=True)
+    return {field: data[field] for field in fields if field in data}
 
 
 def _command_error_result(

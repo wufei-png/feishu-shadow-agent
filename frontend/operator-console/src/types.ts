@@ -36,14 +36,53 @@ export type PolicyStatus = {
   initialized?: boolean;
   global_policy_updated_at?: string | null;
   chat_policy_count?: number;
-  policy_import_diff?: {
-    status?: string;
-    message?: string;
-    missing_global?: boolean;
-    changed_global?: boolean;
-    missing_chats?: string[];
-    changed_chats?: string[];
+  policy_import_diff?: PolicyImportDiff;
+};
+
+export type PolicyImportDiff = {
+  status?: string;
+  message?: string;
+  missing_global?: boolean;
+  changed_global?: boolean;
+  missing_chats?: string[];
+  changed_chats?: string[];
+};
+
+export type ReplyIdentity = "bot_preferred" | "bot" | "user";
+
+export type ProductPolicy = {
+  reply_policy?: {
+    p2p_auto_reply?: boolean;
+    unknown_group_auto_reply?: boolean;
   };
+  default_chat_policy?: {
+    bot_joined?: boolean;
+    reply_identity?: ReplyIdentity;
+    allow_user_fallback?: boolean;
+    resource_download?: boolean;
+  };
+};
+
+export type ChatPolicy = {
+  chat_id: string;
+  name: string;
+  auto_reply: boolean;
+  bot_joined: boolean;
+  reply_identity: ReplyIdentity;
+  allow_user_fallback: boolean;
+  resource_download: boolean;
+  updated_at?: string | null;
+};
+
+export type PolicyAudit = {
+  id: number;
+  scope: string;
+  policy_key: string;
+  actor: string;
+  reason: string | null;
+  created_at: string | null;
+  old_summary: Record<string, unknown>;
+  new_summary: Record<string, unknown>;
 };
 
 export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired";
@@ -188,11 +227,27 @@ export type MessageDetail = {
 
 export type SettingsCatalog = {
   version: number;
-  entries: Array<{
-    key: string;
-    label: string;
-    source: string;
-    visibility: string;
-    editable_v1: boolean | string;
-  }>;
+  entries: SettingsCatalogEntry[];
+};
+
+export type SettingsCatalogEntry = {
+  key: string;
+  label: string;
+  description: string;
+  help: string | null;
+  source: string;
+  scope: string;
+  visibility: string;
+  editable_v1: boolean | string;
+  requires_restart: boolean;
+  audit_behavior: string;
+  write_boundary: string | null;
+};
+
+export type SettingsRuntime = {
+  values: Record<string, unknown>;
+  global_policy: ProductPolicy | null;
+  chat_policies: ChatPolicy[];
+  policy_status: PolicyStatus;
+  policy_audit_history: PolicyAudit[];
 };

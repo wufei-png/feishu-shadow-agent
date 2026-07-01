@@ -7,6 +7,8 @@ import { queryKeys } from "./queryKeys";
 import { ApprovalsScreen } from "./screens/ApprovalsScreen";
 import { DashboardScreen } from "./screens/DashboardScreen";
 import { DispatchScreen } from "./screens/DispatchScreen";
+import { PolicyScreen } from "./screens/PolicyScreen";
+import { SettingsScreen } from "./screens/SettingsScreen";
 import { TasksScreen } from "./screens/TasksScreen";
 import type { DashboardSnapshot, RouteKey, Tone } from "./types";
 
@@ -94,6 +96,10 @@ export function App() {
             <TasksScreen selectedId={location.selectedId} token={token} />
           ) : location.route === "dispatch" ? (
             <DispatchScreen selectedId={location.selectedId} token={token} />
+          ) : location.route === "policy" ? (
+            <PolicyScreen selectedId={location.selectedId} token={token} />
+          ) : location.route === "settings" ? (
+            <SettingsScreen token={token} />
           ) : (
             <FollowUpScreen route={location.route} />
           )}

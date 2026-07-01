@@ -310,6 +310,11 @@ def test_message_detail_api_is_service_backed_and_read_only(tmp_path: Path) -> N
         ("POST", "/api/dispatch/actions/1/retry"),
         ("POST", "/api/dispatch/actions/1/cancel"),
         ("POST", "/api/dispatch/actions/1/mark-sent"),
+        ("GET", "/api/policy/status"),
+        ("GET", "/api/policy/audits"),
+        ("POST", "/api/policy/import-config"),
+        ("PATCH", "/api/policy/global"),
+        ("PATCH", "/api/policy/chats/oc_policy"),
     ],
 )
 def test_core_console_routes_require_token(tmp_path: Path, method: str, path: str) -> None:
@@ -530,6 +535,84 @@ def test_dispatch_mark_sent_route_uses_readback_marker(tmp_path: Path) -> None:
     assert store.get_action(action_id).status == "sent"  # type: ignore[union-attr]
     assert missing.status_code == 400
     assert missing.json()["error"]["code"] == "validation_failed"
+
+
+def test_policy_routes_use_command_facade_and_settings_runtime_read_model(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    store = _store(tmp_path)
+
+    initial_status = client.get("/api/policy/status", headers=_auth())
+    imported = client.post(
+        "/api/policy/import-config",
+        headers=_auth(),
+        json={"reason": "seed local console policy"},
+    )
+    updated_global = client.patch(
+        "/api/policy/global",
+        headers=_auth(),
+        json={"p2p_auto_reply": False, "reason": "pause p2p"},
+    )
+    updated_chat = client.patch(
+        "/api/policy/chats/oc_console",
+        headers=_auth(),
+        json={
+            "name": "Console group",
+            "auto_reply": True,
+            "bot_joined": True,
+            "reply_identity": "bot",
+            "allow_user_fallback": False,
+            "resource_download": False,
+            "reason": "open console test chat",
+        },
+    )
+    audits = client.get("/api/policy/audits?limit=10&scope=chat", headers=_auth())
+    runtime = client.get("/api/settings/runtime", headers=_auth())
+
+    assert initial_status.status_code == 200
+    assert initial_status.json()["initialized"] is False
+    assert imported.status_code == 200
+    imported_payload = imported.json()
+    assert imported_payload["status"] == "applied"
+    assert imported_payload["command"] == "policy.import_config"
+    assert imported_payload["actor"] == "local_console"
+    assert imported_payload["reason"] == "seed local console policy"
+    assert imported_payload["policy_import_diff"]["status"] == "matches"
+    assert updated_global.status_code == 200
+    global_payload = updated_global.json()
+    assert global_payload["command"] == "policy.update_global"
+    assert global_payload["actor"] == "local_console"
+    assert global_payload["new_policy"]["reply_policy"]["p2p_auto_reply"] is False
+    assert updated_chat.status_code == 200
+    chat_payload = updated_chat.json()
+    assert chat_payload["command"] == "policy.update_chat"
+    assert chat_payload["target"] == {"type": "chat_policy", "chat_id": "oc_console"}
+    assert chat_payload["new_policy"]["reply_identity"] == "bot"
+    assert audits.status_code == 200
+    assert audits.json()[0]["actor"] == "local_console"
+    assert audits.json()[0]["reason"] == "open console test chat"
+    assert runtime.status_code == 200
+    runtime_payload = runtime.json()
+    assert runtime_payload["global_policy"]["reply_policy"]["p2p_auto_reply"] is False
+    assert runtime_payload["values"]["policy.global.p2p_auto_reply"] is False
+    assert runtime_payload["chat_policies"][0]["chat_id"] == "oc_console"
+    assert runtime_payload["policy_audit_history"][0]["scope"] == "chat"
+    assert store.get_chat_product_policy("oc_console")["auto_reply"] is True
+
+
+def test_policy_routes_return_standard_validation_errors(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+
+    invalid_audit_limit = client.get("/api/policy/audits?limit=101", headers=_auth())
+    invalid_patch_field = client.patch(
+        "/api/policy/global",
+        headers=_auth(),
+        json={"config_drift": True},
+    )
+
+    assert invalid_audit_limit.status_code == 400
+    assert invalid_audit_limit.json()["error"]["code"] == "validation_failed"
+    assert invalid_patch_field.status_code == 400
+    assert invalid_patch_field.json()["error"]["code"] == "validation_failed"
 
 
 def test_dispatch_mark_sent_route_reports_marker_construction_failure(tmp_path: Path, monkeypatch) -> None:

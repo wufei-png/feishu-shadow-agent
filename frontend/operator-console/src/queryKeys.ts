@@ -14,7 +14,12 @@ export const queryKeys = {
   dispatchActions: (filters: { status?: ActionStatus | "all"; limit?: number; offset?: number }) =>
     ["dispatch-actions", filters] as const,
   dispatchAction: (actionId: number | null) => ["dispatch-action", actionId] as const,
-  messageDetail: (messageId: string | null) => ["message-detail", messageId] as const
+  messageDetail: (messageId: string | null) => ["message-detail", messageId] as const,
+  policyStatus: () => ["policy-status"] as const,
+  policyAudits: (filters: { limit?: number; offset?: number; scope?: string; policy_key?: string; since?: string }) =>
+    ["policy-audits", filters] as const,
+  settingsCatalog: () => ["settings-catalog"] as const,
+  settingsRuntime: () => ["settings-runtime"] as const
 };
 
 export function invalidateAfterApprovalCommand(queryClient: QueryClient): Promise<void[]> {
@@ -45,6 +50,19 @@ export function invalidateAfterMaintenanceCommand(queryClient: QueryClient): Pro
     queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
     queryClient.invalidateQueries({ queryKey: ["approvals"] }),
     queryClient.invalidateQueries({ queryKey: ["approval"] }),
+    queryClient.invalidateQueries({ queryKey: ["tasks"] }),
+    queryClient.invalidateQueries({ queryKey: ["task"] }),
+    queryClient.invalidateQueries({ queryKey: ["message-detail"] })
+  ]);
+}
+
+export function invalidateAfterPolicyCommand(queryClient: QueryClient): Promise<void[]> {
+  return Promise.all([
+    queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+    queryClient.invalidateQueries({ queryKey: ["policy-status"] }),
+    queryClient.invalidateQueries({ queryKey: ["policy-audits"] }),
+    queryClient.invalidateQueries({ queryKey: ["settings-runtime"] }),
+    queryClient.invalidateQueries({ queryKey: ["settings-catalog"] }),
     queryClient.invalidateQueries({ queryKey: ["tasks"] }),
     queryClient.invalidateQueries({ queryKey: ["task"] }),
     queryClient.invalidateQueries({ queryKey: ["message-detail"] })

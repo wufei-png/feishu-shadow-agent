@@ -8,6 +8,10 @@ import type {
   DispatchActionSummary,
   ActionStatus,
   MessageDetail,
+  PolicyAudit,
+  PolicyStatus,
+  SettingsCatalog,
+  SettingsRuntime,
   TaskDetail,
   TaskStatus,
   TaskSummary
@@ -18,6 +22,31 @@ type CommandBody = {
   command_id?: string;
   final_reply?: string;
   sent_message_id?: string;
+};
+
+export type PolicyImportBody = {
+  reason?: string;
+  replace?: boolean;
+};
+
+export type GlobalPolicyUpdateBody = {
+  reason?: string;
+  p2p_auto_reply?: boolean;
+  unknown_group_auto_reply?: boolean;
+  bot_joined?: boolean;
+  reply_identity?: string;
+  allow_user_fallback?: boolean;
+  resource_download?: boolean;
+};
+
+export type ChatPolicyUpdateBody = {
+  reason?: string;
+  name?: string;
+  auto_reply?: boolean;
+  bot_joined?: boolean;
+  reply_identity?: string;
+  allow_user_fallback?: boolean;
+  resource_download?: boolean;
 };
 
 type ListParams = {
@@ -112,9 +141,44 @@ export function getMessageDetail(token: string, messageId: string): Promise<Mess
   return fetchApi(`/api/messages/${encodeURIComponent(messageId)}/detail`, token);
 }
 
-async function postCommand(path: string, token: string, body: CommandBody): Promise<CommandResult> {
+export function getPolicyStatus(token: string): Promise<PolicyStatus> {
+  return fetchApi("/api/policy/status", token);
+}
+
+export function listPolicyAudits(token: string, params: ListParams & { scope?: string; policy_key?: string; since?: string }): Promise<PolicyAudit[]> {
+  return fetchApi(`/api/policy/audits${queryString(params)}`, token);
+}
+
+export function importPolicyConfig(token: string, body: PolicyImportBody): Promise<CommandResult> {
+  return postCommand("/api/policy/import-config", token, body);
+}
+
+export function updateGlobalPolicy(token: string, body: GlobalPolicyUpdateBody): Promise<CommandResult> {
+  return patchCommand("/api/policy/global", token, body);
+}
+
+export function updateChatPolicy(token: string, chatId: string, body: ChatPolicyUpdateBody): Promise<CommandResult> {
+  return patchCommand(`/api/policy/chats/${encodeURIComponent(chatId)}`, token, body);
+}
+
+export function getSettingsCatalog(token: string): Promise<SettingsCatalog> {
+  return fetchApi("/api/settings/catalog", token);
+}
+
+export function getSettingsRuntime(token: string): Promise<SettingsRuntime> {
+  return fetchApi("/api/settings/runtime", token);
+}
+
+async function postCommand(path: string, token: string, body: Record<string, unknown>): Promise<CommandResult> {
   return fetchApi(path, token, {
     method: "POST",
+    body: JSON.stringify(body)
+  });
+}
+
+async function patchCommand(path: string, token: string, body: Record<string, unknown>): Promise<CommandResult> {
+  return fetchApi(path, token, {
+    method: "PATCH",
     body: JSON.stringify(body)
   });
 }
