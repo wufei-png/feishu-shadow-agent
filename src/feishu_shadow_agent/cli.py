@@ -126,7 +126,6 @@ def build_parser() -> argparse.ArgumentParser:
     policy_update_global.add_argument("--reply-identity", choices=["bot_preferred", "bot", "user"])
     policy_update_global.add_argument("--allow-user-fallback", type=_parse_bool_arg, metavar="true|false")
     policy_update_global.add_argument("--resource-download", type=_parse_bool_arg, metavar="true|false")
-    policy_update_global.add_argument("--confirm-risk", action="store_true", help="confirm high-risk policy expansion")
     policy_update_global.add_argument("--reason", help="optional policy audit reason")
     policy_update_global.set_defaults(handler=_handle_policy_update_global)
     policy_update_chat = policy_subparsers.add_parser(
@@ -141,7 +140,6 @@ def build_parser() -> argparse.ArgumentParser:
     policy_update_chat.add_argument("--reply-identity", choices=["bot_preferred", "bot", "user"])
     policy_update_chat.add_argument("--allow-user-fallback", type=_parse_bool_arg, metavar="true|false")
     policy_update_chat.add_argument("--resource-download", type=_parse_bool_arg, metavar="true|false")
-    policy_update_chat.add_argument("--confirm-risk", action="store_true", help="confirm high-risk policy expansion")
     policy_update_chat.add_argument("--reason", help="optional policy audit reason")
     policy_update_chat.set_defaults(handler=_handle_policy_update_chat)
 
@@ -405,7 +403,6 @@ def _handle_policy_update_global(args: argparse.Namespace) -> int:
         _global_policy_changes_from_args(args),
         actor="local_cli",
         reason=args.reason,
-        confirm_risk=args.confirm_risk,
     )
     return _emit_command_result(result)
 
@@ -417,7 +414,6 @@ def _handle_policy_update_chat(args: argparse.Namespace) -> int:
         _chat_policy_changes_from_args(args),
         actor="local_cli",
         reason=args.reason,
-        confirm_risk=args.confirm_risk,
     )
     return _emit_command_result(result)
 

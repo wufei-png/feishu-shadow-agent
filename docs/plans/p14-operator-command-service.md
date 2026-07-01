@@ -4,7 +4,7 @@
 
 P14a introduces `OperatorCommandService` as the mutation-side companion to `OperatorQueryService`. This phase wraps existing approval, dispatch recovery, and maintenance commands behind a stable command facade and structured command result shape.
 
-P14a deliberately does not add arbitrary policy update commands. Policy import already exists from P12a, and broader policy mutation/risk confirmation is P14b.
+P14a deliberately does not add arbitrary policy update commands. Policy import already exists from P12a, and broader policy mutation/auditing is P14b.
 
 ## Background
 
@@ -51,7 +51,6 @@ Implementers in a fresh context should read:
 
 - No Web UI implementation.
 - No policy update commands.
-- No high-risk policy confirmation.
 - No multi owner or authentication model.
 - No Feishu interactive card commands.
 - No automatic dispatch resend.
@@ -148,7 +147,7 @@ CLI can render YAML; future UI can render JSON/cards. The facade should not prin
 - This phase is a facade and result-shape phase, not a state-machine rewrite.
 - Do not move approval expiry into QueryService.
 - Do not make `retry` automatically send; it only requeues according to existing dispatch recovery semantics.
-- P14b owns policy command/update/risk confirmation.
+- P14b owns policy command/update auditing.
 
 ## Acceptance
 

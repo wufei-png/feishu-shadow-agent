@@ -52,7 +52,7 @@ Implementers in a fresh context should read:
 - No new policy mutation commands beyond P12a import/replace.
 - No Web UI or HTTP server.
 - No OperatorQueryService implementation.
-- No high-risk policy update confirmation.
+- No direct policy update commands.
 - No deletion command.
 - No multi-owner or permission account model.
 - No `context_access` changes.
@@ -107,7 +107,7 @@ Implementers in a fresh context should read:
 - Do not keep a fallback from missing DB policy to YAML policy. That recreates two live policy sources.
 - Do not remove config fields; they remain the explicit Policy Import Source.
 - P13 owns read-only UI DTOs and Policy Import Diff display.
-- P14b owns arbitrary policy updates and high-risk confirmation.
+- P14b owns arbitrary policy updates and policy audit records.
 
 ## Acceptance
 

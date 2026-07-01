@@ -98,7 +98,7 @@ P8 暂不启用 `PRAGMA journal_mode=WAL`。当前部署形态以本地单文件
 
 Product Policy Store 是运行时 Product Policy 真相来源，包含全局 `product_policies`、复用的 per-chat `chat_policies` 和 `policy_audits`。默认导入只填缺失的全局策略和缺失的 chat policy；如果 `config.yaml` 省略 `reply_policy`，导入会使用 Pydantic 默认值并在结果中报告 `used_defaults: true`。`--replace` 会替换全局策略和 config 中列出的 chat policy，但不会删除 DB 中存在而 config 缺失的 chat policy。每个插入或替换都会写入 `policy_audits`。这类比较和导入语义叫 Policy Import Source / Policy Import Diff，不叫 config drift。
 
-`policy import-config`、`policy update-global` 和 `policy update-chat` 都通过 OperatorCommandService 返回统一命令结果，并把真实 actor、reason、old/new policy 写入 `policy_audits`。直接 update 命令只修改 Product Policy Store，不写 `config.yaml`。会扩大自动化或下载范围的高风险变更，例如把 P2P/未知群/单群 auto-reply 从 `false` 改成 `true`、把 resource download 从 `false` 改成 `true`、让 `bot_joined` 使既有下载或 bot-capable 回复生效、或把 reply identity 改成更宽的 bot/user fallback 组合，必须带 `--confirm-risk` 才会写入；缺少确认时命令返回 `status: confirmation_required` 且不修改 DB。
+`policy import-config`、`policy update-global` 和 `policy update-chat` 都通过 OperatorCommandService 返回统一命令结果，并把真实 actor、reason、old/new policy 写入 `policy_audits`。直接 update 命令只修改 Product Policy Store，不写 `config.yaml`。合法变更通过 schema 校验后直接写入并审计；后端不对 auto-reply、resource download、bot joined、reply identity 或 user fallback 等配置变更做风险分级或二次确认。未来 UI 应通过配置项说明和 hover/help 文案解释字段含义，而不是依赖后端风险标签限制 owner 应用合法配置。
 
 `status`、`replay` 和 `dispatch inspect` 是 operator 读路径，不会把 overdue approval 写成 `expired`。超过 `expires_at` 但尚未被显式推进的 approval 仍是 `status: pending`，读模型额外显示 `is_overdue`、`overdue_seconds` 和 `recommended_action`。需要立即推进过期时运行：
 

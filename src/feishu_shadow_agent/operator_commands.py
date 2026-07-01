@@ -334,8 +334,6 @@ class PolicyCommandService:
             result=raw,
             next_actions=[{"command": "status", "target": {"type": "operator_dashboard"}}],
             extra={
-                "risk_level": "low",
-                "confirmation_required": False,
                 "audit_count": audit_count,
                 "policy_import_diff": diff,
             },
@@ -347,7 +345,6 @@ class PolicyCommandService:
         *,
         actor: str,
         reason: str | None = None,
-        confirm_risk: bool = False,
     ) -> CommandResult:
         target = {"type": "global_policy", "key": "reply_policy"}
         try:
@@ -391,17 +388,6 @@ class PolicyCommandService:
                 target=target,
                 error=str(exc),
             )
-        warnings = _global_policy_risks(old_policy, new_policy)
-        if warnings and not confirm_risk:
-            return _confirmation_required_result(
-                command="policy.update_global",
-                actor=actor,
-                reason=reason,
-                target=target,
-                warnings=warnings,
-                old_policy=old_policy,
-                new_policy=new_policy,
-            )
         raw = self.store.update_product_policy(
             new_policy,
             actor=actor,
@@ -413,7 +399,6 @@ class PolicyCommandService:
             reason=reason,
             target=target,
             raw=raw,
-            warnings=warnings,
         )
 
     def update_chat_policy(
@@ -423,7 +408,6 @@ class PolicyCommandService:
         *,
         actor: str,
         reason: str | None = None,
-        confirm_risk: bool = False,
     ) -> CommandResult:
         normalized_chat_id = chat_id.strip()
         target = {"type": "chat_policy", "chat_id": normalized_chat_id}
@@ -478,18 +462,6 @@ class PolicyCommandService:
                 target=target,
                 error=str(exc),
             )
-        risk_base = old_policy or base_policy
-        warnings = _chat_policy_risks(risk_base, new_policy)
-        if warnings and not confirm_risk:
-            return _confirmation_required_result(
-                command="policy.update_chat",
-                actor=actor,
-                reason=reason,
-                target=target,
-                warnings=warnings,
-                old_policy=old_policy,
-                new_policy=new_policy,
-            )
         raw = self.store.upsert_chat_product_policy(
             new_policy,
             actor=actor,
@@ -501,7 +473,6 @@ class PolicyCommandService:
             reason=reason,
             target=target,
             raw=raw,
-            warnings=warnings,
         )
 
 
@@ -606,13 +577,11 @@ class OperatorCommandService:
         *,
         actor: str = "operator",
         reason: str | None = None,
-        confirm_risk: bool = False,
     ) -> CommandResult:
         return self.policy.update_global_policy(
             changes,
             actor=actor,
             reason=reason,
-            confirm_risk=confirm_risk,
         )
 
     def update_chat_policy(
@@ -622,14 +591,12 @@ class OperatorCommandService:
         *,
         actor: str = "operator",
         reason: str | None = None,
-        confirm_risk: bool = False,
     ) -> CommandResult:
         return self.policy.update_chat_policy(
             chat_id,
             changes,
             actor=actor,
             reason=reason,
-            confirm_risk=confirm_risk,
         )
 
 
@@ -687,191 +654,6 @@ def _merged_chat_policy(old_policy: dict[str, Any], changes: dict[str, Any]) -> 
     return {"chat_id": chat_id, **validated}
 
 
-def _global_policy_risks(old_policy: dict[str, Any], new_policy: dict[str, Any]) -> list[str]:
-    warnings: list[str] = []
-    old_reply = _dict_result(old_policy.get("reply_policy"))
-    new_reply = _dict_result(new_policy.get("reply_policy"))
-    old_default = _dict_result(old_policy.get("default_chat_policy"))
-    new_default = _dict_result(new_policy.get("default_chat_policy"))
-    _append_bool_enable_risk(
-        warnings,
-        old_reply,
-        new_reply,
-        "p2p_auto_reply",
-        "Enables automatic replies in one-to-one chats.",
-    )
-    _append_bool_enable_risk(
-        warnings,
-        old_reply,
-        new_reply,
-        "unknown_group_auto_reply",
-        "Enables automatic replies in groups without explicit chat policy.",
-    )
-    _append_bool_enable_risk(
-        warnings,
-        old_default,
-        new_default,
-        "allow_user_fallback",
-        "Enables user fallback for chats using the global default chat policy.",
-    )
-    _append_bool_enable_risk(
-        warnings,
-        old_default,
-        new_default,
-        "resource_download",
-        "Enables resource downloads for chats using the global default chat policy.",
-    )
-    _append_bot_joined_expansion_risks(
-        warnings,
-        old_default,
-        new_default,
-        resource_message="Bot joined now enables resource downloads for chats using the global default chat policy.",
-        identity_message="Bot joined now enables bot-capable replies for chats using the global default chat policy.",
-    )
-    _append_identity_risk(
-        warnings,
-        old_default,
-        new_default,
-        "Changes the global default reply identity from user to bot-capable identity.",
-    )
-    _append_bot_preferred_fallback_risk(
-        warnings,
-        old_default,
-        new_default,
-        "Changes the global default reply identity from bot-only to bot-preferred with user fallback.",
-    )
-    return warnings
-
-
-def _chat_policy_risks(old_policy: dict[str, Any], new_policy: dict[str, Any]) -> list[str]:
-    warnings: list[str] = []
-    _append_bool_enable_risk(
-        warnings,
-        old_policy,
-        new_policy,
-        "auto_reply",
-        "Enables automatic replies for this chat.",
-    )
-    _append_bool_enable_risk(
-        warnings,
-        old_policy,
-        new_policy,
-        "allow_user_fallback",
-        "Enables user fallback for this chat.",
-    )
-    _append_bool_enable_risk(
-        warnings,
-        old_policy,
-        new_policy,
-        "resource_download",
-        "Enables resource downloads for this chat.",
-    )
-    _append_bot_joined_expansion_risks(
-        warnings,
-        old_policy,
-        new_policy,
-        resource_message="Bot joined now enables resource downloads for this chat.",
-        identity_message="Bot joined now enables bot-capable replies for this chat.",
-    )
-    _append_identity_risk(
-        warnings,
-        old_policy,
-        new_policy,
-        "Changes this chat reply identity from user to bot-capable identity.",
-    )
-    _append_bot_preferred_fallback_risk(
-        warnings,
-        old_policy,
-        new_policy,
-        "Changes this chat reply identity from bot-only to bot-preferred with user fallback.",
-    )
-    return warnings
-
-
-def _append_bool_enable_risk(
-    warnings: list[str],
-    old_policy: dict[str, Any],
-    new_policy: dict[str, Any],
-    field_name: str,
-    message: str,
-) -> None:
-    if old_policy.get(field_name) is False and new_policy.get(field_name) is True:
-        warnings.append(message)
-
-
-def _append_identity_risk(
-    warnings: list[str],
-    old_policy: dict[str, Any],
-    new_policy: dict[str, Any],
-    message: str,
-) -> None:
-    if old_policy.get("reply_identity") == "user" and new_policy.get("reply_identity") in {
-        "bot",
-        "bot_preferred",
-    }:
-        warnings.append(message)
-
-
-def _append_bot_joined_expansion_risks(
-    warnings: list[str],
-    old_policy: dict[str, Any],
-    new_policy: dict[str, Any],
-    *,
-    resource_message: str,
-    identity_message: str,
-) -> None:
-    if old_policy.get("bot_joined") is not False or new_policy.get("bot_joined") is not True:
-        return
-    if new_policy.get("resource_download") is True:
-        warnings.append(resource_message)
-    if new_policy.get("reply_identity") in {"bot", "bot_preferred"}:
-        warnings.append(identity_message)
-
-
-def _append_bot_preferred_fallback_risk(
-    warnings: list[str],
-    old_policy: dict[str, Any],
-    new_policy: dict[str, Any],
-    message: str,
-) -> None:
-    if (
-        old_policy.get("reply_identity") == "bot"
-        and new_policy.get("reply_identity") == "bot_preferred"
-        and new_policy.get("allow_user_fallback") is True
-    ):
-        warnings.append(message)
-
-
-def _confirmation_required_result(
-    *,
-    command: str,
-    actor: str,
-    reason: str | None,
-    target: dict[str, Any],
-    warnings: list[str],
-    old_policy: dict[str, Any] | None,
-    new_policy: dict[str, Any],
-) -> CommandResult:
-    return CommandResult(
-        status="confirmation_required",
-        command=command,
-        actor=actor,
-        reason=reason,
-        target=target,
-        changed=False,
-        result={"proposed_policy": new_policy},
-        warnings=warnings,
-        next_actions=[{"command": command, "target": target, "confirm_risk": True}],
-        extra={
-            "risk_level": "high",
-            "confirmation_required": True,
-            "old_policy": old_policy,
-            "new_policy": new_policy,
-            "audit_count": 0,
-        },
-    )
-
-
 def _policy_mutation_result(
     *,
     command: str,
@@ -879,7 +661,6 @@ def _policy_mutation_result(
     reason: str | None,
     target: dict[str, Any],
     raw: dict[str, Any],
-    warnings: list[str],
 ) -> CommandResult:
     changed = bool(raw.get("changed"))
     audit_id = raw.get("audit_id")
@@ -891,11 +672,8 @@ def _policy_mutation_result(
         target=target,
         changed=changed,
         result=raw,
-        warnings=warnings,
         next_actions=[{"command": "status", "target": {"type": "operator_dashboard"}}],
         extra={
-            "risk_level": "high" if warnings else "low",
-            "confirmation_required": False,
             "old_policy": raw.get("old_policy"),
             "new_policy": raw.get("new_policy"),
             "audit_id": audit_id,

@@ -31,7 +31,7 @@
 | P12b | `docs/plans/p12b-policy-runtime-cutover.md` | 把 runtime `PolicyResolver` / daemon 从 YAML 切到 Product Policy Store |
 | P13 | `docs/plans/p13-operator-query-service.md` | 建立稳定 UI/read model DTO 和只读查询服务 |
 | P14a | `docs/plans/p14-operator-command-service.md` | 建立 operator command 门面，包住 approval/dispatch/maintenance 现有命令 |
-| P14b | `docs/plans/p14b-policy-command-updates.md` | 增加 policy update 命令、风险确认和 audit 写入 |
+| P14b | `docs/plans/p14b-policy-command-updates.md` | 增加 policy update 命令和 audit 写入 |
 
 ## 3. Recommended Order
 
@@ -49,7 +49,7 @@
 - P12a 必须先于 P12b，避免 runtime resolver 依赖尚未落地的 store/import/audit API。
 - P12b 必须先于 P13，避免 UI read model 先绑定 YAML policy 后再切 DB policy。
 - P14a 放在 P13 后，因为 command 返回值和 UI 操作反馈应复用稳定的 operator DTO 和 policy status 语言。
-- P14b 放在 P14a 后，避免 policy update 的风险确认逻辑和 command facade 基础设施混在一个大阶段。
+- P14b 放在 P14a 后，避免 policy update 写入/audit 逻辑和 command facade 基础设施混在一个大阶段。
 - P10 可独立提前做，工作量很小。
 
 ## 4. Global Non-goals

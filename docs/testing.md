@@ -50,7 +50,7 @@ git diff --check
 - `tests/test_product_policy_store.py`：Product Policy Store 初始化探针、config import/replace、chat policy skip、audit old/new。
 - `tests/test_policy_runtime.py`：runtime resolver 从 Product Policy Store 读取、缺失全局策略 fail closed、DB policy 覆盖 YAML import source。
 - `tests/test_operator_query.py`：OperatorQueryService 只读 dashboard/detail DTO、overdue 派生、effective policy、Policy Import Diff 和 audit history。
-- `tests/test_operator_commands.py`：OperatorCommandService 审批/dispatch/maintenance/policy mutation 结果 shape、policy 风险确认、audit actor/reason。
+- `tests/test_operator_commands.py`：OperatorCommandService 审批/dispatch/maintenance/policy mutation 结果 shape、policy 直接写入和 audit actor/reason。
 - `tests/test_retention.py`：消息 raw JSON 和资源保留策略。
 
 这些测试验证代码契约，不证明当前机器的 `lark-cli` 授权、飞书权限或 Hermes 可执行文件可用；真实环境要跑下面的端到端流程。
@@ -80,16 +80,16 @@ python -m feishu_shadow_agent policy import-config --config config.yaml
 python -m feishu_shadow_agent policy import-config --config config.yaml --replace
 ```
 
-如需直接修改运行时 Product Policy Store，使用 policy update 命令。收窄策略通常可直接写入，例如暂停某个群自动回复：
+如需直接修改运行时 Product Policy Store，使用 policy update 命令。合法变更通过 schema 校验后会直接写入并审计，例如暂停某个群自动回复：
 
 ```bash
 python -m feishu_shadow_agent policy update-chat --config config.yaml --chat-id oc_xxx --auto-reply false --reason "pause chat"
 ```
 
-扩大自动化、下载、bot joined 生效范围或 bot/user fallback 身份范围的高风险变更会返回 `status: confirmation_required` 且不修改 DB；确认后重跑并加 `--confirm-risk`：
+扩大自动化、下载、bot joined 生效范围或 bot/user fallback 身份范围的变更同样直接写入并审计：
 
 ```bash
-python -m feishu_shadow_agent policy update-global --config config.yaml --unknown-group-auto-reply true --confirm-risk --reason "temporary trial"
+python -m feishu_shadow_agent policy update-global --config config.yaml --unknown-group-auto-reply true --reason "temporary trial"
 ```
 
 再运行无副作用健康检查：

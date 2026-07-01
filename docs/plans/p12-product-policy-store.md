@@ -49,7 +49,7 @@ python -m feishu_shadow_agent policy import-config --config config.yaml --replac
 - No runtime `PolicyResolver` cutover.
 - No daemon fail-closed behavior yet; P12a may expose an initialization probe, but P12b decides runtime critical gating.
 - No OperatorQueryService integration.
-- No policy update UI or high-risk confirmation workflow.
+- No policy update UI or direct update workflow.
 - No deletion command.
 - No old DB compatibility beyond the current clean-baseline migration style.
 - No `context_access` changes.

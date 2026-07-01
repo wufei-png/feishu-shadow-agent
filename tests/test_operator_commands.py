@@ -221,8 +221,8 @@ def test_operator_command_service_policy_import_uses_facade_result_shape(tmp_pat
     assert output["reason"] == "initial seed"
     assert output["changed"] is True
     assert output["result"]["inserted"]["global"] == ["reply_policy"]
-    assert output["risk_level"] == "low"
-    assert output["confirmation_required"] is False
+    assert "risk_level" not in output
+    assert "confirmation_required" not in output
     assert output["audit_count"] == 1
     assert output["policy_import_diff"]["status"] == "matches"
     audit = store.list_policy_audits(limit=1)[0]
@@ -230,7 +230,7 @@ def test_operator_command_service_policy_import_uses_facade_result_shape(tmp_pat
     assert audit["reason"] == "initial seed"
 
 
-def test_global_policy_high_risk_update_requires_confirmation_before_mutation(tmp_path: Path) -> None:
+def test_global_policy_expansion_applies_directly_with_audit(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.import_product_policy_from_config(
         _config(reply_policy=ReplyPolicyConfig(p2p_auto_reply=False, unknown_group_auto_reply=False))
@@ -244,35 +244,22 @@ def test_global_policy_high_risk_update_requires_confirmation_before_mutation(tm
     )
     output = result.as_dict()
 
-    assert command_exit_code(result) == 2
-    assert output["status"] == "confirmation_required"
-    assert output["risk_level"] == "high"
-    assert output["confirmation_required"] is True
-    assert output["changed"] is False
-    assert output["audit_count"] == 0
-    assert store.get_product_policy()["reply_policy"]["p2p_auto_reply"] is False
-    assert len(store.list_policy_audits(limit=10)) == 1
-
-    confirmed = service.update_global_policy(
-        {"p2p_auto_reply": True},
-        actor="test_operator",
-        reason="enable p2p",
-        confirm_risk=True,
-    )
-    confirmed_output = confirmed.as_dict()
-
-    assert command_exit_code(confirmed) == 0
-    assert confirmed_output["status"] == "applied"
-    assert confirmed_output["risk_level"] == "high"
-    assert confirmed_output["confirmation_required"] is False
-    assert confirmed_output["audit_count"] == 1
+    assert command_exit_code(result) == 0
+    assert output["status"] == "applied"
+    assert output["changed"] is True
+    assert output["warnings"] == []
+    assert "risk_level" not in output
+    assert "confirmation_required" not in output
+    assert output["audit_count"] == 1
     assert store.get_product_policy()["reply_policy"]["p2p_auto_reply"] is True
     audit = store.list_policy_audits(limit=1)[0]
     assert audit["actor"] == "test_operator"
     assert audit["reason"] == "enable p2p"
+    assert audit["old_json"]["reply_policy"]["p2p_auto_reply"] is False
+    assert audit["new_json"]["reply_policy"]["p2p_auto_reply"] is True
 
 
-def test_chat_policy_high_risk_and_low_risk_updates_are_structured(tmp_path: Path) -> None:
+def test_chat_policy_expansion_and_narrowing_updates_are_structured(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.import_product_policy_from_config(
         _config(
@@ -287,30 +274,37 @@ def test_chat_policy_high_risk_and_low_risk_updates_are_structured(tmp_path: Pat
     )
     service = OperatorCommandService(store)
 
-    high_risk = service.update_chat_policy(
+    expansion = service.update_chat_policy(
         "oc_policy",
         {"auto_reply": True},
         actor="test_operator",
         reason="open chat",
     )
+    expansion_output = expansion.as_dict()
 
-    assert high_risk.status == "confirmation_required"
-    assert high_risk.changed is False
-    assert high_risk.as_dict()["old_policy"]["auto_reply"] is False
-    assert high_risk.as_dict()["new_policy"]["auto_reply"] is True
-    assert store.get_chat_product_policy("oc_policy")["auto_reply"] is False
+    assert command_exit_code(expansion) == 0
+    assert expansion.status == "applied"
+    assert expansion.changed is True
+    assert expansion_output["warnings"] == []
+    assert expansion_output["old_policy"]["auto_reply"] is False
+    assert expansion_output["new_policy"]["auto_reply"] is True
+    assert "risk_level" not in expansion_output
+    assert "confirmation_required" not in expansion_output
+    assert store.get_chat_product_policy("oc_policy")["auto_reply"] is True
 
-    low_risk = service.update_chat_policy(
+    narrowing = service.update_chat_policy(
         "oc_policy",
         {"resource_download": False},
         actor="test_operator",
         reason="narrow resources",
     )
-    output = low_risk.as_dict()
+    output = narrowing.as_dict()
 
-    assert command_exit_code(low_risk) == 0
+    assert command_exit_code(narrowing) == 0
     assert output["status"] == "applied"
-    assert output["risk_level"] == "low"
+    assert output["warnings"] == []
+    assert "risk_level" not in output
+    assert "confirmation_required" not in output
     assert output["audit_count"] == 1
     assert store.get_chat_product_policy("oc_policy")["resource_download"] is False
     audit = store.list_policy_audits(limit=1)[0]
@@ -366,7 +360,7 @@ def test_chat_policy_update_normalizes_chat_id_before_lookup(tmp_path: Path) -> 
     assert policy["resource_download"] is False
 
 
-def test_chat_policy_effective_capability_expansion_requires_confirmation(tmp_path: Path) -> None:
+def test_chat_policy_effective_capability_expansion_applies_directly(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.import_product_policy_from_config(
         _config(
@@ -404,10 +398,11 @@ def test_chat_policy_effective_capability_expansion_requires_confirmation(tmp_pa
         reason="allow fallback",
     )
 
-    assert bot_joined.status == "confirmation_required"
-    assert any("resource downloads" in warning for warning in bot_joined.warnings)
-    assert any("bot-capable replies" in warning for warning in bot_joined.warnings)
-    assert bot_preferred.status == "confirmation_required"
-    assert any("user fallback" in warning for warning in bot_preferred.warnings)
-    assert store.get_chat_product_policy("oc_bot_joined")["bot_joined"] is False
-    assert store.get_chat_product_policy("oc_bot_preferred")["reply_identity"] == "bot"
+    assert bot_joined.status == "applied"
+    assert bot_joined.warnings == []
+    assert bot_joined.as_dict()["audit_count"] == 1
+    assert bot_preferred.status == "applied"
+    assert bot_preferred.warnings == []
+    assert bot_preferred.as_dict()["audit_count"] == 1
+    assert store.get_chat_product_policy("oc_bot_joined")["bot_joined"] is True
+    assert store.get_chat_product_policy("oc_bot_preferred")["reply_identity"] == "bot_preferred"
