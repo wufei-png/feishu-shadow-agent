@@ -40,6 +40,14 @@ _Avoid_: waiting approval status, task status
 A read-only operator-facing view of current state. It may derive overdue or recommended-action fields, but it must not mutate state.
 _Avoid_: Status mutation, maintenance action
 
+**Message Detail**:
+A read-only operator view of one Feishu message's processing context, including related task links, routing decisions, approvals, dispatch actions, and recorded outcomes. It explains what happened around a message without generating new dispatch previews or mutating state.
+_Avoid_: Replay command, raw message dump, dispatch preview generation
+
 **Operator Command**:
 An explicit owner action that may mutate state, such as approving a reply, recovering a dispatch action, expiring approvals, or updating Product Policy.
 _Avoid_: Store helper, UI callback
+
+**Settings Catalog**:
+A stable product field map that defines which settings the Operator Console exposes, how they are grouped, whether they are editable, and which source owns them. It is not a dynamic schema engine and should not mirror every raw config field.
+_Avoid_: Raw config schema, dynamic form engine, every setting is editable

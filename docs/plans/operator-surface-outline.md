@@ -32,6 +32,10 @@
 | P13 | `docs/plans/p13-operator-query-service.md` | 建立稳定 UI/read model DTO 和只读查询服务 |
 | P14a | `docs/plans/p14-operator-command-service.md` | 建立 operator command 门面，包住 approval/dispatch/maintenance 现有命令 |
 | P14b | `docs/plans/p14b-policy-command-updates.md` | 增加 policy update 命令和 audit 写入 |
+| Spec | `docs/specs/operator-console-ui-system.md` | 固定本地 Operator Console 的 UI 系统、渲染栈和交互边界 |
+| Spec | `docs/specs/operator-console-local-api.md` | 固定本地 console API、安全模型、route contract 和 Query/Command 映射 |
+| Spec | `docs/specs/operator-console-settings-catalog.md` | 固定 console-exposed Settings Catalog 字段映射 |
+| P15 | `docs/plans/p15-operator-console-foundation.md` | 建立本地 console runtime、FastAPI shell、Vite/React/TS scaffold 和静态资源打包基础 |
 
 ## 3. Recommended Order
 
@@ -42,6 +46,10 @@
 5. P13 Operator Query Service
 6. P14a Operator Command Service Facade
 7. P14b Policy Command Updates
+8. Operator Console UI System Spec
+9. Operator Console Local API Spec
+10. Operator Console Settings Catalog Spec
+11. P15 Operator Console Foundation
 
 依赖关系：
 
@@ -50,11 +58,13 @@
 - P12b 必须先于 P13，避免 UI read model 先绑定 YAML policy 后再切 DB policy。
 - P14a 放在 P13 后，因为 command 返回值和 UI 操作反馈应复用稳定的 operator DTO 和 policy status 语言。
 - P14b 放在 P14a 后，避免 policy update 写入/audit 逻辑和 command facade 基础设施混在一个大阶段。
+- Operator Console UI System / Local API / Settings Catalog specs 必须先于 P15，避免前端 scaffold、API shell 和 settings 表达在实现中临时发明。
+- P15 放在 P10-P14 后，因为它依赖已固定的 QueryService、CommandService 和 Product Policy Store 边界。
 - P10 可独立提前做，工作量很小。
 
-## 4. Global Non-goals
+## 4. P10-P14 Global Non-goals
 
-- 不做实际 Web UI / TUI 页面。
+- 不做实际 Web UI / TUI 页面；P15 会在后续阶段开始本地 Operator Console foundation。
 - 不处理 `context_access`。
 - 不做旧 DB 兼容迁移；当前项目仍允许 clean baseline。
 - 不做多 owner、多租户、权限账户模型。
