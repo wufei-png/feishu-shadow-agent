@@ -12,6 +12,8 @@ from typing import Sequence
 import yaml
 
 from .config import ConfigError, ConfigService, LoadedConfig
+from .console_api import console_static_ready, create_console_app, default_console_static_dir
+from .console_security import console_access_url, generate_console_token, validate_console_bind_host
 from .daemon import Daemon
 from .dispatcher import Dispatcher
 from .feishu.lark_cli import LarkCliClient
@@ -62,6 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --dry-run, actually send and consume owner_notification actions; external replies stay pending",
     )
     daemon.set_defaults(handler=_handle_daemon)
+
+    console = subparsers.add_parser("console", help="run the local Operator Console")
+    _add_config_arg(console)
+    console.add_argument("--host", default="127.0.0.1", help="loopback host to bind")
+    console.add_argument("--port", type=int, default=8765, help="local port to bind")
+    console.set_defaults(handler=_handle_console)
 
     config = subparsers.add_parser("config", help="configuration helpers")
     config_subparsers = config.add_subparsers(dest="config_command")
@@ -250,6 +258,40 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         config_base_dir=loaded.base_dir,
     )
     return daemon.run_forever()
+
+
+def _handle_console(args: argparse.Namespace) -> int:
+    try:
+        host = validate_console_bind_host(args.host)
+    except ValueError as exc:
+        print(f"console error: {exc}", file=sys.stderr)
+        return 2
+    if args.port <= 0 or args.port > 65535:
+        print("console error: port must be between 1 and 65535", file=sys.stderr)
+        return 2
+    static_dir = default_console_static_dir()
+    if not console_static_ready(static_dir):
+        print(
+            "console error: renderer assets are missing. "
+            "Run `npm --prefix frontend/operator-console run build` first.",
+            file=sys.stderr,
+        )
+        return 2
+    loaded = ConfigService().load(args.config)
+    sqlite_path = resolve_relative_path(loaded.config.storage.sqlite_path, loaded.base_dir)
+    store = SQLiteStore(sqlite_path)
+    token = generate_console_token()
+    app = create_console_app(
+        loaded_config=loaded,
+        store=store,
+        token=token,
+        host=host,
+        port=args.port,
+        static_dir=static_dir,
+    )
+    print(f"Operator Console: {console_access_url(host=host, port=args.port, token=token)}", flush=True)
+    _run_console_server(app, host=host, port=args.port)
+    return 0
 
 
 def _handle_config_show(args: argparse.Namespace) -> int:
@@ -535,3 +577,9 @@ def _git_output(argv: list[str], cwd: Path) -> str | None:
     if completed.returncode != 0:
         return None
     return completed.stdout.strip()
+
+
+def _run_console_server(app: object, *, host: str, port: int) -> None:
+    import uvicorn
+
+    uvicorn.run(app, host=host, port=port)

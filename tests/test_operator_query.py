@@ -265,6 +265,42 @@ def test_dispatch_action_detail_reads_attempts_without_recovering_stale_sends(tm
     assert store.get_action(action_id).status == "sending"  # type: ignore[union-attr]
 
 
+def test_message_detail_returns_processing_context_without_preview_side_effects(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    task_id = _insert_task(store)
+    _insert_message(store, task_id=task_id)
+    _insert_approval(store, task_id=task_id, short_id="a_msg_detail")
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO routing_audits(message_id, task_id, route, route_reason, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("om_root", task_id, "new_task", "new task", "2026-06-22T08:00:00+08:00"),
+        )
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_root",
+        payload={"reply_target_message_id": "om_root", "text": "reply", "identity": "user"},
+    )
+    assert action_id is not None
+    before = _message_detail_state(store, action_id)
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:00:00+08:00")
+
+    detail = query.message_detail("om_root")
+
+    assert detail is not None
+    assert detail["message"]["message_id"] == "om_root"
+    assert detail["task_ids"] == [task_id]
+    assert detail["task_summaries"][0]["task_id"] == "t_1"
+    assert detail["routing_audits"][0]["route"] == "new_task"
+    assert detail["approvals"][0]["approval_id"] == "a_msg_detail"
+    assert detail["actions"][0]["action_id"] == action_id
+    assert detail["recorded_dispatch_outcomes"][0]["attempts"] == []
+    assert detail["recommended_actions"] == ["review_pending_approvals"]
+    assert _message_detail_state(store, action_id) == before
+
+
 def test_policy_import_diff_and_audit_history_are_focused_read_models(tmp_path: Path) -> None:
     store = _store(tmp_path)
     initial = _config(chats={"oc_replace": ChatPolicyConfig(name="Before", auto_reply=True)})
@@ -296,3 +332,23 @@ def test_policy_import_diff_and_audit_history_are_focused_read_models(tmp_path: 
     assert history[0]["policy_key"] == "chat:oc_replace"
     assert history[0]["old_summary"]["auto_reply"] is True
     assert history[0]["new_summary"]["auto_reply"] is False
+
+
+def _message_detail_state(store: SQLiteStore, action_id: int) -> dict[str, object]:
+    with store.connect() as conn:
+        approval = conn.execute(
+            "SELECT status, resolved_at FROM approvals WHERE short_id = ?",
+            ("a_msg_detail",),
+        ).fetchone()
+        action = conn.execute("SELECT status, result_json FROM actions WHERE id = ?", (action_id,)).fetchone()
+        attempts = conn.execute(
+            "SELECT COUNT(*) AS count FROM dispatch_attempts WHERE action_id = ?",
+            (action_id,),
+        ).fetchone()
+    return {
+        "approval_status": approval["status"],
+        "approval_resolved_at": approval["resolved_at"],
+        "action_status": action["status"],
+        "action_result_json": action["result_json"],
+        "attempt_count": attempts["count"],
+    }
