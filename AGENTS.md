@@ -14,7 +14,7 @@ python3.11 -m venv .venv
 python -m pip install -e ".[dev]"
 ```
 
-Run all local tests with `python -m pytest -q`. Run `git diff --check` before handing off changes to catch whitespace issues. For local operation, copy `config.example.yaml` to `config.yaml`, then run `python -m feishu_shadow_agent doctor --config config.yaml` before starting `python -m feishu_shadow_agent daemon --config config.yaml --dry-run`.
+Run all local tests with `python -m pytest -q`. Frontend Operator Console changes must pass `npm --prefix frontend/operator-console run build`, which also refreshes the bundled static assets under `src/feishu_shadow_agent/console_static/`. Release or packaging changes should also run `python -m build` and inspect the wheel for `feishu_shadow_agent/console_static/index.html` plus referenced assets. Run `git diff --check` before handing off changes to catch whitespace issues. For local operation, copy `config.example.yaml` to `config.yaml`, run `python -m feishu_shadow_agent policy import-config --config config.yaml`, then run `python -m feishu_shadow_agent doctor --config config.yaml` before starting `python -m feishu_shadow_agent daemon --config config.yaml --dry-run`.
 
 ## Coding Style & Naming Conventions
 

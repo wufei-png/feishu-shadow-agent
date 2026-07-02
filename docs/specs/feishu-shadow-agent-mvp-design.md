@@ -4,6 +4,8 @@
 
 本文沉淀 `feishu-shadow-agent` MVP 的已确认设计。目标是做一个本机飞书个人助手：定时读取群聊里 `@我` 的消息和 P2P 私聊消息，交给 Hermes 处理，低风险高置信时自动回复，不确定或高风险时通过 bot 私聊 owner 审批。
 
+维护说明：本文是 2026-06-22 的 MVP 基线。后续 Product Policy Store、Operator Console 和 release readiness 的当前边界以 ADR、`docs/plans/operator-surface-outline.md`、`docs/specs/operator-console-*.md` 和 `docs/configuration.md` 为准；本文中早期的“未来 UI”“config.yaml 为主”等表述不应覆盖这些后续决策。
+
 流程图补充见 [Feishu Shadow Agent MVP 流程图](./feishu-shadow-agent-flows.md)，其中 [整体数据流程](./feishu-shadow-agent-flows.md#overall-flow) 可作为实现阅读入口。
 
 ## 1. MVP 边界
@@ -915,7 +917,7 @@ owner 命令解析、task_id shortcut、`/approve`、`/reject` 和 `/send` 的�
 
 ## 21. 配置
 
-MVP 配置源以 `config.yaml` 为主，SQLite 存动态状态。通过 `ConfigService` 封装，未来 UI 可迁移到 SQLite 或双写。
+历史基线中，MVP 配置源以 `config.yaml` 为主，SQLite 存动态状态。当前实现已把 Product Policy Store 作为运行时 Product Policy 真相来源；`config.yaml.reply_policy` 和 `config.yaml.chats` 只作为显式 Policy Import Source，相关语义以 `docs/adr/0001-product-policy-store.md` 和 `docs/configuration.md` 为准。
 
 `config.yaml` 可含 open_id、chat_id、群名等非密钥配置，不含任何 token/secret。
 
@@ -1161,7 +1163,7 @@ prepare_send
 明确后续但不进 MVP：
 
 - macOS LaunchAgent / Windows service / Ubuntu systemd。
-- 本地 Web UI / TUI 审批台。
+- 本地 Web UI / TUI 审批台。历史说明：本地 Operator Console 已由后续 P15-P18 落地；远程 Web UI、多用户 UI 和桌面二进制仍不在当前范围。
 - 飞书交互卡片。
 - 配置 UI 和 `ApprovalRequest(type=config_change)`。
 - `/reply` 补充背景。

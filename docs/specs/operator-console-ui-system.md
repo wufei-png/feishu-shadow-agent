@@ -233,7 +233,8 @@ Use this pattern for:
 - Tasks: task list plus task timeline/detail.
 - Dispatch: action list plus attempts/readback/detail.
 - Policy: global/chat policy list plus editor/diff/audit.
-- Logs / Health: check/event list plus raw detail.
+- Logs / Health: normalized issue list plus diagnostic detail; it is not a raw
+  log viewer.
 
 Avoid full-page navigation for every selected object. Operators need to keep
 queue context while processing multiple items.

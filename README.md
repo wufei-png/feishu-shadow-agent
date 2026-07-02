@@ -74,6 +74,8 @@ python -m feishu_shadow_agent console --config config.yaml
 
 本地 Operator Console 默认绑定 `127.0.0.1`，通过启动时生成的一次性 bearer token 访问。Console 覆盖 Dashboard、Approvals、Tasks、Dispatch、Policy、Settings 和 Logs / Health；它只通过本地 `/api/*` 调用 `OperatorQueryService` / `OperatorCommandService`，不直接读 SQLite，也不写 `config.yaml`。
 
+从源码修改 `frontend/operator-console/` 后，需要运行 `npm --prefix frontend/operator-console run build`，把 renderer 重新写入 Python 包内的 bundled static assets。
+
 ## 测试
 
 本地单元测试不会真实访问飞书或 Hermes：

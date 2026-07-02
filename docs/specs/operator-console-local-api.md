@@ -144,6 +144,58 @@ since
 Exact filters are route-specific and should stay aligned with
 `OperatorQueryService` capabilities.
 
+## Health Issues
+
+Route:
+
+```text
+GET /api/health/issues
+```
+
+Query-service method:
+
+```text
+OperatorQueryService.health_issues()
+```
+
+The response is a normalized diagnostic DTO, not a raw log or table dump:
+
+```text
+generated_at
+summary.highest_severity
+summary.open_issue_count
+runtime.store
+runtime.daemon_liveness
+runtime.last_run
+runtime.policy_status
+issues[]
+recent_failed_commands[]
+recent_failed_dispatch_actions[]
+```
+
+Store status values:
+
+```text
+available
+missing
+unreadable
+schema_uninitialized
+schema_incompatible
+```
+
+Rules:
+
+- The route handler must stay thin and call `OperatorQueryService`.
+- Store and schema availability problems must be surfaced as normalized store
+  issues instead of becoming a renderer-side empty state or API 500.
+- `runtime.last_run` and daemon liveness must use an allowlisted runtime summary;
+  do not expose raw `runs` rows, `health_summary_json`, or
+  `last_tick_summary_json`.
+- Issue details and recent summaries must not expose raw log tails, arbitrary
+  filesystem paths, full approval `/send` bodies, or direct SQL rows.
+- Links should target existing console identifiers such as `task`, `message`,
+  `approval`, `dispatch_action`, `policy`, and `settings`.
+
 ## Message Detail
 
 `message_detail` is the canonical product name for viewing one Feishu message's
