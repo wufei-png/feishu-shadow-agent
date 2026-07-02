@@ -36,6 +36,10 @@ _Avoid_: Config drift, runtime drift
 A pending approval that blocks an automated send while leaving the task lifecycle unchanged.
 _Avoid_: waiting approval status, task status
 
+**Owner Notification**:
+A bot private message to the owner that carries the minimum context and commands needed to resolve an Approval Blocker without opening the Operator Surface.
+_Avoid_: alert stub, raw dispatch action, Console-only pointer
+
 **Action Queue**:
 The prioritized operator-facing set of items that need attention, such as pending approvals, overdue approvals, failed dispatch actions, stale sending actions, and blocking health or policy initialization issues.
 _Avoid_: Metrics dashboard, raw status list, activity feed

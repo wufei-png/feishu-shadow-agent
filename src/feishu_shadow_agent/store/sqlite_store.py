@@ -2526,16 +2526,36 @@ class SQLiteStore:
         now: str,
     ) -> dict[str, Any]:
         pending_short_ids = [row["short_id"] for row in pending]
+        task = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        root_message = None
+        if task is not None and task["root_message_id"]:
+            root_message = conn.execute(
+                "SELECT * FROM messages WHERE message_id = ?",
+                (task["root_message_id"],),
+            ).fetchone()
+        payload = {
+            "type": "approval_command_conflict",
+            "task_id": task_short_id,
+            "reason": "multiple_pending_approvals",
+            "pending_approval_ids": pending_short_ids,
+            "pending_approvals": [
+                _pending_approval_notification_payload(row, task_short_id=task_short_id)
+                for row in pending
+            ],
+            "message": f"Multiple pending approvals exist for {task_short_id}; use a concrete a_ approval id.",
+        }
+        source = _owner_notification_source_payload(task, root_message)
+        if any(value for value in source.values()):
+            payload["source"] = source
+        if task is not None and task["root_message_id"]:
+            payload["incoming_message"] = _owner_notification_message_payload(
+                root_message,
+                fallback_message_id=task["root_message_id"],
+            )
         action_id = self._create_owner_notification_action_locked(
             conn,
             task_id=task_id,
-            payload={
-                "type": "approval_command_conflict",
-                "task_id": task_short_id,
-                "reason": "multiple_pending_approvals",
-                "pending_approval_ids": pending_short_ids,
-                "message": f"Multiple pending approvals exist for {task_short_id}; use a concrete a_ approval id.",
-            },
+            payload=payload,
             now=now,
         )
         return {
@@ -3677,6 +3697,65 @@ def _approval_notification_payload(
         payload["commands"] = commands
     payload["approval_id"] = approval_short_id
     return payload
+
+
+def _pending_approval_notification_payload(
+    row: sqlite3.Row,
+    *,
+    task_short_id: str,
+) -> dict[str, Any]:
+    payload = _loads_json_object(row["payload_json"])
+    approval_short_id = row["short_id"]
+    kind = row["kind"]
+    approvable = payload.get("approvable") is not False
+    commands: list[str] = []
+    if approvable:
+        commands.append(f"/approve {approval_short_id}")
+    if kind == "send_reply":
+        commands.append(f"/send {task_short_id} <final reply>")
+    commands.append(f"/reject {approval_short_id}")
+    return {
+        "approval_id": approval_short_id,
+        "kind": kind,
+        "reason": payload.get("reason") or "",
+        "preview": row["preview"] or "",
+        "approvable": approvable,
+        "commands": commands,
+    }
+
+
+def _owner_notification_source_payload(
+    task: sqlite3.Row | None,
+    message: sqlite3.Row | None,
+) -> dict[str, Any]:
+    return {
+        "task_label": None if task is None else task["task_label"],
+        "chat_id": _row_value(message, "chat_id") or (None if task is None else task["chat_id"]),
+        "chat_type": _row_value(message, "chat_type") or (None if task is None else task["chat_type"]),
+        "sender_name": _row_value(message, "sender_name"),
+        "sender_id": _row_value(message, "sender_id"),
+        "sent_at": _row_value(message, "sent_at"),
+    }
+
+
+def _owner_notification_message_payload(
+    message: sqlite3.Row | None,
+    *,
+    fallback_message_id: str,
+) -> dict[str, Any]:
+    return {
+        "message_id": _row_value(message, "message_id") or fallback_message_id,
+        "text": _row_value(message, "text") or "",
+    }
+
+
+def _row_value(row: sqlite3.Row | None, key: str) -> Any | None:
+    if row is None:
+        return None
+    try:
+        return row[key]
+    except (IndexError, KeyError, TypeError):
+        return None
 
 
 def _closed_recall_text_patterns(text: str) -> list[str]:

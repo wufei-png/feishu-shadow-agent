@@ -546,7 +546,39 @@ def test_owner_notification_can_be_sent_independently(tmp_path: Path) -> None:
     task_id = _insert_task(store)
     action_id = store.create_owner_notification_action(
         task_id=task_id,
-        payload={"type": "approval_required", "task_id": "t_1", "commands": ["/approve a_1"]},
+        payload={
+            "type": "approval_required",
+            "task_id": "t_1",
+            "approval_id": "a_1",
+            "reason": "needs_owner",
+            "source": {
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "sender_name": "Ext",
+                "task_label": "classification service",
+            },
+            "incoming_message": {
+                "message_id": "om_target",
+                "text": "classification service failed to start",
+            },
+            "stage": "task_session",
+            "attempt_count": 3,
+            "pending_approval_ids": ["a_1", "a_2"],
+            "pending_approvals": [
+                {
+                    "approval_id": "a_1",
+                    "kind": "send_reply",
+                    "reason": "needs_owner",
+                    "preview": "first pending reply",
+                    "commands": ["/approve a_1", "/send t_1 <final reply>", "/reject a_1"],
+                }
+            ],
+            "statuses": {"missing_file": 1},
+            "error": "session exploded",
+            "suggested_reply": "",
+            "approvable": False,
+            "commands": ["/send t_1 <final reply>", "/reject a_1"],
+        },
     )
     fake.owner_results.extend(
         [
@@ -583,8 +615,87 @@ def test_owner_notification_can_be_sent_independently(tmp_path: Path) -> None:
     assert action.status == "sent"
     assert action.result["sent_message_id"] == "om_owner_sent"
     assert [call["dry_run"] for call in fake.owner_calls] == [True, False]
+    sent_text = fake.owner_calls[0]["text"]
+    assert "reason: needs_owner" in sent_text
+    assert "source: group oc_1 / Ext / classification service" in sent_text
+    assert "message_id: om_target" in sent_text
+    assert "incoming: classification service failed to start" in sent_text
+    assert "suggested_reply: <none>" in sent_text
+    assert "approvable: no" in sent_text
+    assert "stage: task_session" in sent_text
+    assert "attempt_count: 3" in sent_text
+    assert "pending_approval_ids: a_1, a_2" in sent_text
+    assert "pending_approvals:" in sent_text
+    assert "- a_1 | send_reply | reason: needs_owner | preview: first pending reply" in sent_text
+    assert "commands: /approve a_1, /send t_1 <final reply>, /reject a_1" in sent_text
+    assert 'statuses: {"missing_file": 1}' in sent_text
+    assert "error: session exploded" in sent_text
+    assert "/send t_1 <final reply>" in sent_text
     attempts = _attempts(store, action_id)
     assert attempts[0].status == "readback_ok"
+
+
+def test_owner_notification_neutralizes_freeform_mentions(tmp_path: Path) -> None:
+    store, dispatcher, fake = _dispatcher(tmp_path)
+    task_id = _insert_task(store)
+    action_id = store.create_owner_notification_action(
+        task_id=task_id,
+        payload={
+            "type": "approval_required",
+            "task_id": "t_1",
+            "approval_id": "a_1",
+            "reason": "needs_owner <at user_id=\"ou_x\">owner</at> @所有人",
+            "source": {
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "sender_name": "Mallory <at user_id=\"ou_x\">owner</at>",
+                "task_label": "classification @all",
+            },
+            "incoming_message": {
+                "message_id": "om_target",
+                "text": "please notify <at user_id=\"ou_all\">all</at> @_all",
+            },
+            "pending_approvals": [
+                {
+                    "approval_id": "a_1",
+                    "kind": "send_reply",
+                    "reason": "<at user_id=\"ou_x\">owner</at>",
+                    "preview": "reply @所有人",
+                    "commands": ["/approve a_1", "/send t_1 <final reply>", "/reject a_1"],
+                }
+            ],
+            "suggested_reply": "done <at user_id=\"ou_x\">owner</at> @all",
+            "preview": "preview <at user_id=\"ou_x\">owner</at> @_all",
+            "commands": ["/send t_1 <final reply>", "/reject a_1"],
+        },
+    )
+    fake.owner_results.extend(
+        [
+            LarkCliResult(["dry"], 0, json_data={"api": []}),
+            LarkCliResult(["send"], 0, json_data={"data": {"message_id": "om_owner_sent"}}),
+        ]
+    )
+    fake.readback_pages.append(MessagePage([]))
+
+    dispatcher.dispatch(
+        run_id="run_1",
+        allow_send_reply_actual=False,
+        allow_owner_notification_actual=True,
+    )
+
+    action = store.get_action(action_id)
+    assert action is not None
+    assert action.status == "sent"
+    sent_text = fake.owner_calls[0]["text"]
+    assert "<at" not in sent_text
+    assert "</at>" not in sent_text
+    assert "@所有人" not in sent_text
+    assert "@all" not in sent_text
+    assert "@_all" not in sent_text
+    assert "＠所有人" in sent_text
+    assert "＠all" in sent_text
+    assert "＠_all" in sent_text
+    assert "/send t_1 <final reply>" in sent_text
 
 
 def test_stale_sending_is_marked_failed_needs_review_without_resend(tmp_path: Path) -> None:

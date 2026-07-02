@@ -95,6 +95,8 @@ class ApprovalService:
         ]
         if approvable:
             commands.insert(0, f"/approve {task.short_id}")
+        current_task = self.store.get_task_by_id(task.id)
+        source_message = self.store.get_message(reply_target_message_id)
         payload = {
             "reply_target_message_id": reply_target_message_id,
             "text": payload_text,
@@ -108,6 +110,10 @@ class ApprovalService:
             "task_id": task.short_id,
             "reason": reason,
             "preview": proposed_reply,
+            "source": _notification_source(task=current_task, message=source_message),
+            "incoming_message": _notification_message(source_message, fallback_message_id=reply_target_message_id),
+            "suggested_reply": payload_text,
+            "approvable": approvable,
             "commands": commands,
         }
         return self.store.create_send_reply_approval(
@@ -120,8 +126,17 @@ class ApprovalService:
 
     def notify_owner(self, *, task: TaskRecord | None, reason: str, payload: dict[str, Any] | None = None) -> int:
         data = {"type": "owner_notification", "reason": reason} | (payload or {})
+        current_task = self.store.get_task_by_id(task.id) if task is not None else None
+        message_id = data.get("message_id")
+        source_message = self.store.get_message(message_id) if isinstance(message_id, str) and message_id else None
         if task is not None:
             data["task_id"] = task.short_id
+        if "incoming_message" not in data and isinstance(message_id, str) and message_id:
+            data["incoming_message"] = _notification_message(source_message, fallback_message_id=message_id)
+        if "source" not in data:
+            source = _notification_source(task=current_task, message=source_message)
+            if any(value for value in source.values()):
+                data["source"] = source
         return self.store.create_owner_notification_action(task_id=None if task is None else task.id, payload=data)
 
     def apply_command(self, *, message: NormalizedMessage) -> dict[str, Any] | None:
@@ -1159,6 +1174,33 @@ def _router_target_route_error(
 
 def _can_directly_approve(proposed_reply: str, composed: ComposedReply) -> bool:
     return bool(proposed_reply.strip()) and bool(composed.text.strip()) and not composed.had_forbidden_mentions
+
+
+def _notification_source(*, task: TaskRecord | None, message: Any | None) -> dict[str, Any]:
+    return {
+        "task_label": None if task is None else task.task_label,
+        "chat_id": _row_value(message, "chat_id") or (None if task is None else task.chat_id),
+        "chat_type": _row_value(message, "chat_type") or (None if task is None else task.chat_type),
+        "sender_name": _row_value(message, "sender_name"),
+        "sender_id": _row_value(message, "sender_id"),
+        "sent_at": _row_value(message, "sent_at"),
+    }
+
+
+def _notification_message(message: Any | None, *, fallback_message_id: str) -> dict[str, Any]:
+    return {
+        "message_id": _row_value(message, "message_id") or fallback_message_id,
+        "text": _row_value(message, "text") or "",
+    }
+
+
+def _row_value(row: Any | None, key: str) -> Any | None:
+    if row is None:
+        return None
+    try:
+        return row[key]
+    except (IndexError, KeyError, TypeError):
+        return None
 
 
 def _escape_mention_display(value: str) -> str:

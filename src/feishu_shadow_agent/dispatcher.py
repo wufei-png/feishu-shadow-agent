@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from html import escape
 from typing import Any
 
 from .config import AppConfig
@@ -13,6 +15,8 @@ from .store.sqlite_store import SQLiteStore
 from .types import ActionRecord, ActionStatus, DispatchAttemptStatus, DispatchErrorStage, LarkCliResult, NormalizedMessage
 
 EXPECTED_MENTION_RE = re.compile(r"<at\s+[^>]*user_id=[\"']([^\"']+)[\"'][^>]*>", re.IGNORECASE)
+NOTIFICATION_AT_SPAN_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE | re.DOTALL)
+NOTIFICATION_AT_TAG_RE = re.compile(r"</?at\b[^>]*>", re.IGNORECASE)
 READBACK_BLOCKING_WARNINGS = {
     "readback_reply_target_mismatch",
     "readback_reply_target_unavailable",
@@ -642,15 +646,119 @@ def _owner_notification_text(payload: dict[str, Any]) -> str:
     for key in ("type", "task_id", "approval_id", "reason", "message"):
         value = payload.get(key)
         if value:
-            lines.append(f"{key}: {value}")
+            lines.append(f"{key}: {_notification_display_text(str(value))}")
+    source = _owner_notification_source(payload.get("source"))
+    if source:
+        lines.append(f"source: {source}")
+    incoming = _owner_notification_incoming_message(payload.get("incoming_message"))
+    if incoming:
+        lines.extend(incoming)
+    if "suggested_reply" in payload:
+        suggested = payload.get("suggested_reply")
+        if isinstance(suggested, str) and suggested.strip():
+            lines.append(f"suggested_reply: {_compact_notification_text(suggested)}")
+        else:
+            lines.append("suggested_reply: <none>")
+    if "approvable" in payload:
+        lines.append(f"approvable: {'yes' if payload.get('approvable') else 'no'}")
+    for key in ("stage", "target", "attempt_count", "pending_approval_ids", "statuses", "error"):
+        detail = _owner_notification_detail(payload.get(key))
+        if detail:
+            lines.append(f"{key}: {detail}")
+    pending_approvals = _owner_notification_pending_approvals(payload.get("pending_approvals"))
+    if pending_approvals:
+        lines.append("pending_approvals:")
+        lines.extend(pending_approvals)
     preview = payload.get("preview")
     if isinstance(preview, str) and preview:
-        lines.append(f"preview: {preview}")
+        lines.append(f"preview: {_compact_notification_text(preview)}")
     commands = payload.get("commands")
     if isinstance(commands, list) and commands:
         lines.append("commands:")
         lines.extend(str(command) for command in commands)
     return "\n".join(lines)
+
+
+def _owner_notification_source(value: Any) -> str:
+    if isinstance(value, str):
+        return _notification_display_text(value)
+    if not isinstance(value, dict):
+        return ""
+    chat = " ".join(_notification_display_text(str(part)) for part in (value.get("chat_type"), value.get("chat_id")) if part)
+    sender = value.get("sender_name") or value.get("sender_id")
+    task_label = value.get("task_label")
+    parts = [_notification_display_text(str(part)) for part in (chat, sender, task_label) if part]
+    return " / ".join(parts)
+
+
+def _owner_notification_incoming_message(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [f"incoming: {_compact_notification_text(value)}"] if value.strip() else []
+    if not isinstance(value, dict):
+        return []
+    lines: list[str] = []
+    message_id = value.get("message_id")
+    if message_id:
+        lines.append(f"message_id: {message_id}")
+    text = value.get("text")
+    if isinstance(text, str) and text.strip():
+        lines.append(f"incoming: {_compact_notification_text(text)}")
+    return lines
+
+
+def _owner_notification_detail(value: Any) -> str:
+    if value is None or value == "" or value == [] or value == {}:
+        return ""
+    if isinstance(value, list):
+        return ", ".join(_notification_display_text(str(item)) for item in value)
+    if isinstance(value, dict):
+        return _compact_notification_text(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))
+    return _compact_notification_text(str(value))
+
+
+def _owner_notification_pending_approvals(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    lines: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        approval_id = _notification_display_text(str(item.get("approval_id") or "unknown"))
+        kind = _notification_display_text(str(item.get("kind") or "unknown"))
+        reason = _notification_display_text(str(item.get("reason") or ""))
+        preview = item.get("preview")
+        parts = [approval_id, kind]
+        if reason:
+            parts.append(f"reason: {reason}")
+        if isinstance(preview, str) and preview.strip():
+            parts.append(f"preview: {_compact_notification_text(preview)}")
+        commands = item.get("commands")
+        if isinstance(commands, list) and commands:
+            parts.append(f"commands: {', '.join(str(command) for command in commands)}")
+        lines.append("- " + " | ".join(parts))
+    return lines
+
+
+def _compact_notification_text(value: str, *, limit: int = 500) -> str:
+    compact = _notification_display_text(value)
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[:limit - 3]}..."
+
+
+def _notification_display_text(value: str) -> str:
+    neutralized = NOTIFICATION_AT_SPAN_RE.sub(lambda match: _neutralize_at_token(match.group(0)), value)
+    neutralized = NOTIFICATION_AT_TAG_RE.sub(lambda match: _neutralize_at_token(match.group(0)), neutralized)
+    neutralized = (
+        neutralized.replace("@所有人", "＠所有人")
+        .replace("@_all", "＠_all")
+        .replace("@all", "＠all")
+    )
+    return " ".join(escape(neutralized, quote=False).split())
+
+
+def _neutralize_at_token(value: str) -> str:
+    return value.replace("<", "‹").replace(">", "›")
 
 
 def _extract_message_id(value: Any, *, exclude: str | None = None) -> str | None:

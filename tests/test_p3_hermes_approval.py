@@ -185,6 +185,19 @@ def _service(tmp_path: Path, *, config: AppConfig | None = None, hermes: FakeHer
     return store, service, fake_hermes
 
 
+def _assert_owner_notification_context(
+    payload: dict[str, Any],
+    *,
+    message_id: str,
+    text: str,
+    sender_name: str,
+    chat_id: str,
+) -> None:
+    assert payload["incoming_message"] == {"message_id": message_id, "text": text}
+    assert payload["source"]["chat_id"] == chat_id
+    assert payload["source"]["sender_name"] == sender_name
+
+
 def test_gate_passed_p2p_creates_pending_send_and_persists_session(tmp_path: Path) -> None:
     hermes = FakeHermes()
     hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
@@ -237,6 +250,17 @@ def test_group_auto_reply_disabled_downgrades_to_approval(tmp_path: Path) -> Non
     assert task["status"] == "watching"
     assert task["closed_at"] is None
     assert notify_payload["approval_id"] == approval["short_id"]
+    assert notify_payload["source"] == {
+        "task_label": "label",
+        "chat_id": "oc_1",
+        "chat_type": "group",
+        "sender_name": "Ext",
+        "sender_id": "ou_ext",
+        "sent_at": "2026-06-22T10:00:00+08:00",
+    }
+    assert notify_payload["incoming_message"] == {"message_id": "om_1", "text": "hello"}
+    assert notify_payload["suggested_reply"] == '<at user_id="ou_ext">Ext</at> reply text'
+    assert notify_payload["approvable"] is True
     assert notify_payload["commands"] == [
         f"/approve {approval['short_id']}",
         f"/send {notify_payload['task_id']} <final reply>",
@@ -256,6 +280,52 @@ def test_group_auto_reply_disabled_downgrades_to_approval(tmp_path: Path) -> Non
         action = conn.execute("SELECT payload_json FROM actions WHERE kind = 'send_reply'").fetchone()
     action_payload = json.loads(action["payload_json"])
     assert action_payload["text"] == '<at user_id="ou_ext">Ext</at> reply text'
+
+
+def test_needs_owner_notification_includes_context_without_suggested_reply(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(
+        _session_output(
+            answerability="needs_owner",
+            proposed_reply="",
+            reply_target_message_id="om_1",
+            watch_action="keep_watching",
+        )
+    )
+    store, service, _ = _service(tmp_path, hermes=hermes)
+
+    service.process_raw_message(
+        _message(
+            "om_1",
+            text="classification service failed to start",
+            mentions=[{"open_id": "ou_owner"}],
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        approval = conn.execute("SELECT short_id, payload_json FROM approvals").fetchone()
+        notification = conn.execute("SELECT payload_json FROM actions WHERE kind = 'owner_notification'").fetchone()
+    approval_payload = json.loads(approval["payload_json"])
+    notify_payload = json.loads(notification["payload_json"])
+    assert approval_payload["reason"] == "needs_owner"
+    assert approval_payload["approvable"] is False
+    assert approval_payload["text"] == ""
+    assert notify_payload["reason"] == "needs_owner"
+    assert notify_payload["incoming_message"] == {
+        "message_id": "om_1",
+        "text": "classification service failed to start",
+    }
+    assert notify_payload["source"]["chat_id"] == "oc_1"
+    assert notify_payload["source"]["sender_name"] == "Ext"
+    assert notify_payload["suggested_reply"] == ""
+    assert notify_payload["approvable"] is False
+    assert notify_payload["commands"] == [
+        f"/send {notify_payload['task_id']} <final reply>",
+        f"/reject {approval['short_id']}",
+    ]
 
 
 def test_forbidden_hermes_mentions_downgrade_to_approval(tmp_path: Path) -> None:
@@ -411,9 +481,11 @@ def test_resource_dependent_bot_not_joined_creates_owner_notification(tmp_path: 
         notification = conn.execute("SELECT kind, status, payload_json FROM actions").fetchone()
         processing = conn.execute("SELECT stage, status, terminal_reason FROM message_processing").fetchone()
         approvals = conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()["c"]
+    payload = json.loads(notification["payload_json"])
     assert resource["download_status"] == "bot_not_joined"
     assert notification["kind"] == "owner_notification"
     assert "resource_needs_bot" in notification["payload_json"]
+    _assert_owner_notification_context(payload, message_id="om_1", text="hello", sender_name="Ext", chat_id="oc_1")
     assert processing["stage"] == "resource_download"
     assert processing["status"] == "blocked_waiting_external"
     assert processing["terminal_reason"] == "resource_needs_bot"
@@ -481,7 +553,9 @@ def test_resource_blockers_record_blocked_waiting_external(
     assert processing["status"] == "blocked_waiting_external"
     assert processing["terminal_reason"] == expected_reason
     assert notification["kind"] == "owner_notification"
-    assert expected_reason in notification["payload_json"]
+    payload = json.loads(notification["payload_json"])
+    assert payload["reason"] == expected_reason
+    _assert_owner_notification_context(payload, message_id="om_1", text="hello", sender_name="Ext", chat_id="oc_1")
     assert send_count == 0
     assert hermes.session_prompts == []
 
@@ -551,6 +625,7 @@ def test_resource_download_failure_blocks_task_session_after_retries(tmp_path: P
     assert notification["status"] == "pending"
     assert payload["reason"] == "resource_download_failed"
     assert payload["stage"] == "resource_download"
+    _assert_owner_notification_context(payload, message_id="om_1", text="hello", sender_name="Ext", chat_id="oc_1")
     assert processing["stage"] == "resource_download"
     assert processing["status"] == "processing_failed_terminal"
     assert processing["attempt_count"] == 3
@@ -769,7 +844,50 @@ def test_task_router_invalid_target_records_ambiguous_audit_and_notification(tmp
     assert route["route"] == "ambiguous"
     assert route["route_reason"] == "task_router_invalid_target"
     assert route["router_called"] == 1
-    assert "task_router_invalid_target" in notification["payload_json"]
+    payload = json.loads(notification["payload_json"])
+    assert payload["reason"] == "task_router_invalid_target"
+    _assert_owner_notification_context(payload, message_id="om_2", text="hello", sender_name="Bob", chat_id="oc_1")
+
+
+def test_task_router_ambiguous_notification_includes_context(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
+    hermes.router_outputs.append(
+        {
+            "route": "ambiguous",
+            "target_task_id": None,
+            "reason": "needs owner to pick a task",
+        }
+    )
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)})
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    service.process_raw_message(
+        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    service.process_raw_message(
+        _message("om_2", sender_id="ou_b", sender_name="Bob", text="which task is this", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        notification = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'owner_notification'",
+        ).fetchone()
+    payload = json.loads(notification["payload_json"])
+    assert payload["reason"] == "task_router_ambiguous"
+    _assert_owner_notification_context(
+        payload,
+        message_id="om_2",
+        text="which task is this",
+        sender_name="Bob",
+        chat_id="oc_1",
+    )
 
 
 @pytest.mark.parametrize("route", ["attach_task", "reopen_task"])
@@ -1218,6 +1336,8 @@ def test_task_session_followup_rejects_task_label(tmp_path: Path) -> None:
     assert processing["terminal_reason"] == "agent_schema_failed"
     assert send_count == 1
     assert notification is not None
+    payload = json.loads(notification["payload_json"])
+    _assert_owner_notification_context(payload, message_id="om_2", text="hello", sender_name="Ext", chat_id="ou_chat")
 
 
 def test_task_session_schema_failure_does_not_persist_session_id(tmp_path: Path) -> None:
@@ -1250,7 +1370,9 @@ def test_task_session_schema_failure_does_not_persist_session_id(tmp_path: Path)
     assert processing["status"] == "processing_failed_terminal"
     assert processing["attempt_count"] == 1
     assert processing["terminal_reason"] == "agent_schema_failed"
-    assert "processing_failed" in notification["payload_json"]
+    payload = json.loads(notification["payload_json"])
+    assert payload["type"] == "processing_failed"
+    _assert_owner_notification_context(payload, message_id="om_1", text="hello", sender_name="Ext", chat_id="ou_chat")
 
 
 def test_task_session_exception_retries_terminal_without_empty_approval(tmp_path: Path) -> None:
@@ -1290,6 +1412,7 @@ def test_task_session_exception_retries_terminal_without_empty_approval(tmp_path
     assert payload["message_id"] == "om_1"
     assert payload["stage"] == "task_session"
     assert payload["dedupe_key"] == "owner-processing-failed:om_1:task_session"
+    _assert_owner_notification_context(payload, message_id="om_1", text="hello", sender_name="Ext", chat_id="ou_chat")
     assert task["status"] == "watching"
 
     service.process_raw_message(raw, source="p2p", default_chat_type="p2p", run_id="run_1")
@@ -2206,6 +2329,23 @@ def _task_with_two_pending_approvals(tmp_path: Path) -> tuple[SQLiteStore, str]:
     return store, created.task.short_id
 
 
+def _assert_pending_approval_options(payload: dict[str, Any], *, task_short_id: str) -> None:
+    pending_approvals = payload["pending_approvals"]
+    assert len(pending_approvals) == 2
+    assert {item["preview"] for item in pending_approvals} == {"first", "second"}
+    assert {item["reason"] for item in pending_approvals} == {"test"}
+    assert {item["kind"] for item in pending_approvals} == {"send_reply"}
+    assert {item["approval_id"] for item in pending_approvals} == set(payload["pending_approval_ids"])
+    for item in pending_approvals:
+        approval_id = item["approval_id"]
+        assert item["approvable"] is True
+        assert item["commands"] == [
+            f"/approve {approval_id}",
+            f"/send {task_short_id} <final reply>",
+            f"/reject {approval_id}",
+        ]
+
+
 def test_approve_task_shortcut_multiple_pending_approvals_creates_owner_notification(tmp_path: Path) -> None:
     store, task_short_id = _task_with_two_pending_approvals(tmp_path)
 
@@ -2236,6 +2376,8 @@ def test_approve_task_shortcut_multiple_pending_approvals_creates_owner_notifica
     assert payload["reason"] == "multiple_pending_approvals"
     assert payload["task_id"] == task_short_id
     assert len(payload["pending_approval_ids"]) == 2
+    _assert_pending_approval_options(payload, task_short_id=task_short_id)
+    _assert_owner_notification_context(payload, message_id="om_root", text="hello", sender_name="Ext", chat_id="ou_chat")
     assert "concrete a_" in payload["message"]
 
 
@@ -2269,6 +2411,8 @@ def test_reject_task_shortcut_multiple_pending_approvals_creates_owner_notificat
     assert payload["reason"] == "multiple_pending_approvals"
     assert payload["task_id"] == task_short_id
     assert len(payload["pending_approval_ids"]) == 2
+    _assert_pending_approval_options(payload, task_short_id=task_short_id)
+    _assert_owner_notification_context(payload, message_id="om_root", text="hello", sender_name="Ext", chat_id="ou_chat")
     assert "concrete a_" in payload["message"]
 
 
@@ -2322,6 +2466,9 @@ def test_approve_task_shortcut_mixed_pending_approval_kinds_creates_owner_notifi
     assert all(row["status"] == "pending" for row in approvals)
     assert "a_tool" in payload["pending_approval_ids"]
     assert len(payload["pending_approval_ids"]) == 2
+    pending_approvals = {item["approval_id"]: item for item in payload["pending_approvals"]}
+    assert pending_approvals["a_tool"]["kind"] == "tool_action"
+    assert pending_approvals["a_tool"]["commands"] == ["/approve a_tool", "/reject a_tool"]
 
 
 def test_send_command_multiple_pending_approvals_creates_owner_notification(tmp_path: Path) -> None:
@@ -2374,7 +2521,11 @@ def test_send_command_multiple_pending_approvals_creates_owner_notification(tmp_
         ).fetchone()
     assert pending == 2
     assert send_actions == 0
-    assert "multiple_pending_approvals" in notification["payload_json"]
+    payload = json.loads(notification["payload_json"])
+    assert payload["reason"] == "multiple_pending_approvals"
+    assert payload["task_id"] == created.task.short_id
+    _assert_pending_approval_options(payload, task_short_id=created.task.short_id)
+    _assert_owner_notification_context(payload, message_id="om_root", text="hello", sender_name="Ext", chat_id="ou_chat")
 
 
 def test_send_command_without_pending_approval_uses_task_root_message(tmp_path: Path) -> None:
