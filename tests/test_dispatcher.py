@@ -644,28 +644,28 @@ def test_owner_notification_neutralizes_freeform_mentions(tmp_path: Path) -> Non
             "type": "approval_required",
             "task_id": "t_1",
             "approval_id": "a_1",
-            "reason": "needs_owner <at user_id=\"ou_x\">owner</at> @所有人",
+            "reason": "needs_owner <at user_id=\"ou_x\">owner</at> @所有人 @ALL",
             "source": {
                 "chat_id": "oc_1",
                 "chat_type": "group",
-                "sender_name": "Mallory <at user_id=\"ou_x\">owner</at>",
+                "sender_name": "Mallory <at user_id=\"ou_x\">owner</at> @All",
                 "task_label": "classification @all",
             },
             "incoming_message": {
                 "message_id": "om_target",
-                "text": "please notify <at user_id=\"ou_all\">all</at> @_all",
+                "text": "please notify <at user_id=\"ou_all\">all</at> @_ALL",
             },
             "pending_approvals": [
                 {
                     "approval_id": "a_1",
                     "kind": "send_reply",
                     "reason": "<at user_id=\"ou_x\">owner</at>",
-                    "preview": "reply @所有人",
+                    "preview": "reply @所有人 @_All",
                     "commands": ["/approve a_1", "/send t_1 <final reply>", "/reject a_1"],
                 }
             ],
             "suggested_reply": "done <at user_id=\"ou_x\">owner</at> @all",
-            "preview": "preview <at user_id=\"ou_x\">owner</at> @_all",
+            "preview": "preview <at user_id=\"ou_x\">owner</at> @_all @ALL",
             "commands": ["/send t_1 <final reply>", "/reject a_1"],
         },
     )
@@ -690,11 +690,14 @@ def test_owner_notification_neutralizes_freeform_mentions(tmp_path: Path) -> Non
     assert "<at" not in sent_text
     assert "</at>" not in sent_text
     assert "@所有人" not in sent_text
-    assert "@all" not in sent_text
-    assert "@_all" not in sent_text
+    assert "@all" not in sent_text.lower()
+    assert "@_all" not in sent_text.lower()
     assert "＠所有人" in sent_text
     assert "＠all" in sent_text
-    assert "＠_all" in sent_text
+    assert "＠ALL" in sent_text
+    assert "＠All" in sent_text
+    assert "＠_ALL" in sent_text
+    assert "＠_All" in sent_text
     assert "/send t_1 <final reply>" in sent_text
 
 

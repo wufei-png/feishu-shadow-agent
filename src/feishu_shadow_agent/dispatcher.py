@@ -17,6 +17,7 @@ from .types import ActionRecord, ActionStatus, DispatchAttemptStatus, DispatchEr
 EXPECTED_MENTION_RE = re.compile(r"<at\s+[^>]*user_id=[\"']([^\"']+)[\"'][^>]*>", re.IGNORECASE)
 NOTIFICATION_AT_SPAN_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE | re.DOTALL)
 NOTIFICATION_AT_TAG_RE = re.compile(r"</?at\b[^>]*>", re.IGNORECASE)
+NOTIFICATION_GROUP_MENTION_RE = re.compile(r"@所有人|@_?all\b", re.IGNORECASE)
 READBACK_BLOCKING_WARNINGS = {
     "readback_reply_target_mismatch",
     "readback_reply_target_unavailable",
@@ -749,10 +750,9 @@ def _compact_notification_text(value: str, *, limit: int = 500) -> str:
 def _notification_display_text(value: str) -> str:
     neutralized = NOTIFICATION_AT_SPAN_RE.sub(lambda match: _neutralize_at_token(match.group(0)), value)
     neutralized = NOTIFICATION_AT_TAG_RE.sub(lambda match: _neutralize_at_token(match.group(0)), neutralized)
-    neutralized = (
-        neutralized.replace("@所有人", "＠所有人")
-        .replace("@_all", "＠_all")
-        .replace("@all", "＠all")
+    neutralized = NOTIFICATION_GROUP_MENTION_RE.sub(
+        lambda match: "＠" + match.group(0)[1:],
+        neutralized,
     )
     return " ".join(escape(neutralized, quote=False).split())
 
