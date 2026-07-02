@@ -82,6 +82,7 @@ class ApprovalService:
         *,
         task: TaskRecord,
         reply_target_message_id: str,
+        incoming_message_id: str | None = None,
         proposed_reply: str,
         reason: str,
         final_reply: str | None = None,
@@ -96,7 +97,8 @@ class ApprovalService:
         if approvable:
             commands.insert(0, f"/approve {task.short_id}")
         current_task = self.store.get_task_by_id(task.id)
-        source_message = self.store.get_message(reply_target_message_id)
+        notification_message_id = incoming_message_id or reply_target_message_id
+        source_message = self.store.get_message(notification_message_id)
         payload = {
             "reply_target_message_id": reply_target_message_id,
             "text": payload_text,
@@ -111,11 +113,13 @@ class ApprovalService:
             "reason": reason,
             "preview": proposed_reply,
             "source": _notification_source(task=current_task, message=source_message),
-            "incoming_message": _notification_message(source_message, fallback_message_id=reply_target_message_id),
+            "incoming_message": _notification_message(source_message, fallback_message_id=notification_message_id),
             "suggested_reply": payload_text,
             "approvable": approvable,
             "commands": commands,
         }
+        if notification_message_id != reply_target_message_id:
+            notify["reply_target_message_id"] = reply_target_message_id
         return self.store.create_send_reply_approval(
             task_id=task.id,
             preview=proposed_reply,
@@ -919,6 +923,7 @@ class TaskProcessingService:
             approval_id = self.approvals.request_send_reply(
                 task=task,
                 reply_target_message_id=message.message_id,
+                incoming_message_id=message.message_id,
                 proposed_reply=output.proposed_reply,
                 final_reply=composed.text,
                 reason="invalid_reply_target_message_id",
@@ -994,6 +999,7 @@ class TaskProcessingService:
             approval_id = self.approvals.request_send_reply(
                 task=task,
                 reply_target_message_id=reply_target_id,
+                incoming_message_id=message.message_id,
                 proposed_reply=output.proposed_reply,
                 final_reply=composed.text,
                 reason=gate["reason"],

@@ -662,7 +662,7 @@ def _owner_notification_text(payload: dict[str, Any]) -> str:
             lines.append("suggested_reply: <none>")
     if "approvable" in payload:
         lines.append(f"approvable: {'yes' if payload.get('approvable') else 'no'}")
-    for key in ("stage", "target", "attempt_count", "pending_approval_ids", "statuses", "error"):
+    for key in ("stage", "target", "reply_target_message_id", "attempt_count", "pending_approval_ids", "statuses", "error"):
         detail = _owner_notification_detail(payload.get(key))
         if detail:
             lines.append(f"{key}: {detail}")

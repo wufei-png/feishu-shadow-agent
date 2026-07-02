@@ -1263,6 +1263,65 @@ def test_task_session_followup_uses_stored_hermes_session(tmp_path: Path) -> Non
     assert audit["tool_permissions_profile"] == "guarded_write"
 
 
+def test_task_session_followup_approval_notification_uses_current_message_context(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(
+        _session_output(
+            _session_id="sid_1",
+            proposed_reply="root reply",
+            reply_target_message_id="om_1",
+        )
+    )
+    hermes.session_outputs.append(
+        _session_output(
+            include_task_label=False,
+            _session_id="sid_1",
+            proposed_reply="@All root reply",
+            reply_target_message_id="om_1",
+        )
+    )
+    store, service, _ = _service(tmp_path, hermes=hermes)
+
+    first = service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a", sender_name="Alice", text="root question"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert first is not None and first.task is not None
+    hermes.router_outputs.append(
+        {
+            "route": "attach_task",
+            "target_task_id": first.task.short_id,
+            "reason": "same task",
+        }
+    )
+
+    service.process_raw_message(
+        _message("om_2", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a", sender_name="Alice", text="follow-up blocker"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        approval = conn.execute("SELECT payload_json FROM approvals").fetchone()
+        notification = conn.execute("SELECT payload_json FROM actions WHERE kind = 'owner_notification'").fetchone()
+    approval_payload = json.loads(approval["payload_json"])
+    notify_payload = json.loads(notification["payload_json"])
+    assert approval_payload["reason"] == "forbidden_mentions"
+    assert approval_payload["reply_target_message_id"] == "om_1"
+    assert notify_payload["reason"] == "forbidden_mentions"
+    assert notify_payload["reply_target_message_id"] == "om_1"
+    _assert_owner_notification_context(
+        notify_payload,
+        message_id="om_2",
+        text="follow-up blocker",
+        sender_name="Alice",
+        chat_id="ou_chat",
+    )
+
+
 def test_context_access_omitted_for_read_only_tool_profile(tmp_path: Path) -> None:
     hermes = FakeHermes()
     hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))

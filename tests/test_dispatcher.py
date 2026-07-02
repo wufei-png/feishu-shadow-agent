@@ -562,6 +562,7 @@ def test_owner_notification_can_be_sent_independently(tmp_path: Path) -> None:
                 "text": "classification service failed to start",
             },
             "stage": "task_session",
+            "reply_target_message_id": "om_root",
             "attempt_count": 3,
             "pending_approval_ids": ["a_1", "a_2"],
             "pending_approvals": [
@@ -623,6 +624,7 @@ def test_owner_notification_can_be_sent_independently(tmp_path: Path) -> None:
     assert "suggested_reply: <none>" in sent_text
     assert "approvable: no" in sent_text
     assert "stage: task_session" in sent_text
+    assert "reply_target_message_id: om_root" in sent_text
     assert "attempt_count: 3" in sent_text
     assert "pending_approval_ids: a_1, a_2" in sent_text
     assert "pending_approvals:" in sent_text
