@@ -82,6 +82,9 @@ python -m feishu_shadow_agent console --config config.yaml
 
 ```bash
 python -m pytest -q
+python -m ruff check .
+python -m ruff format --check .
+pre-commit run --all-files
 ```
 
 端到端测试需要真实 `lark-cli`、飞书 user/bot 授权、owner open_id、测试群或测试 P2P 会话，以及可用的 Hermes CLI。完整步骤见 [测试方式](docs/testing.md)。

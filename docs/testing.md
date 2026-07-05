@@ -18,6 +18,19 @@ python -m pip install -e ".[dev]"
 python -m pytest -q
 ```
 
+运行 Ruff lint 和格式检查：
+
+```bash
+python -m ruff check .
+python -m ruff format --check .
+```
+
+如需验证 git hook 行为，或提交前跑同一套 Ruff autofix/format hooks：
+
+```bash
+pre-commit run --all-files
+```
+
 按模块收窄测试：
 
 ```bash
@@ -47,6 +60,8 @@ rm -rf dist build
 npm --prefix frontend/operator-console ci
 npm --prefix frontend/operator-console run build
 python -m pytest -q
+python -m ruff check .
+python -m ruff format --check .
 python -m build
 python3.11 -m venv /tmp/feishu-shadow-agent-release-check
 /tmp/feishu-shadow-agent-release-check/bin/python -m pip install dist/*.whl
@@ -76,6 +91,7 @@ P18 的本地浏览器视觉 QA 记录见 `docs/plans/p18-operator-console-healt
 提交前做基础格式卫生检查：
 
 ```bash
+pre-commit run --all-files
 git diff --check
 ```
 
