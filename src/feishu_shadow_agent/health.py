@@ -6,14 +6,18 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from .agent_backend import AgentRunResult
 from .config import LoadedConfig
 from .feishu.client import FeishuClient
 from .hermes import hermes_execution_policy
-from .paths import resolve_agent_skill_path, resolve_agent_working_dir, resolve_relative_path
+from .paths import (
+    resolve_agent_skill_path,
+    resolve_agent_working_dir,
+    resolve_relative_path,
+)
 from .store.sqlite_store import SQLiteStore
 from .types import HealthCheckResult, LarkCliResult, new_run_id
 
@@ -52,9 +56,13 @@ class HermesHttpChecker:
                     f"environment variable {hermes.api_key_env} is not set",
                 )
             headers["Authorization"] = f"Bearer {api_key}"
-        request = urllib.request.Request(hermes.health_url, headers=headers, method="GET")
+        request = urllib.request.Request(
+            hermes.health_url, headers=headers, method="GET"
+        )
         try:
-            with urllib.request.urlopen(request, timeout=hermes.timeout_seconds) as response:
+            with urllib.request.urlopen(
+                request, timeout=hermes.timeout_seconds
+            ) as response:
                 status = response.status
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             return HealthCheckResult(
@@ -85,8 +93,12 @@ class HermesCliChecker:
     def __call__(self, loaded: LoadedConfig) -> list[HealthCheckResult]:
         hermes = loaded.config.agent_backend.hermes
         path = hermes.path or "hermes"
-        cwd = resolve_agent_working_dir(loaded.config.agent_backend.working_dir, loaded.base_dir)
-        version = _run_hermes_command([path, "--version"], timeout_seconds=hermes.timeout_seconds, cwd=cwd)
+        cwd = resolve_agent_working_dir(
+            loaded.config.agent_backend.working_dir, loaded.base_dir
+        )
+        version = _run_hermes_command(
+            [path, "--version"], timeout_seconds=hermes.timeout_seconds, cwd=cwd
+        )
         version_result = _hermes_command_result(
             "hermes_cli_version",
             version,
@@ -96,7 +108,9 @@ class HermesCliChecker:
         )
         if version_result.is_critical_failure:
             return [version_result]
-        status = _run_hermes_command([path, "status"], timeout_seconds=hermes.timeout_seconds, cwd=cwd)
+        status = _run_hermes_command(
+            [path, "status"], timeout_seconds=hermes.timeout_seconds, cwd=cwd
+        )
         status_result = _hermes_command_result(
             "hermes_cli_status",
             status,
@@ -104,7 +118,9 @@ class HermesCliChecker:
             "Hermes CLI status command failed",
             severity="warning",
         )
-        chat_help = _run_hermes_command([path, "chat", "--help"], timeout_seconds=hermes.timeout_seconds, cwd=cwd)
+        chat_help = _run_hermes_command(
+            [path, "chat", "--help"], timeout_seconds=hermes.timeout_seconds, cwd=cwd
+        )
         permissions_result = _hermes_tool_permissions_result(loaded, chat_help)
         return [version_result, status_result, permissions_result]
 
@@ -152,7 +168,9 @@ class HealthSuite:
         ]
         auth_result = self._check_auth_status()
         results.append(auth_result)
-        auth_json = auth_result.details.get("auth_json") if auth_result.details else None
+        auth_json = (
+            auth_result.details.get("auth_json") if auth_result.details else None
+        )
         results.append(self._check_user_scopes(auth_json))
         results.append(self._check_bot_available(auth_json))
         results.append(self._check_owner_config())
@@ -177,7 +195,9 @@ class HealthSuite:
         ]
         auth_result = self._check_auth_status()
         results.append(auth_result)
-        auth_json = auth_result.details.get("auth_json") if auth_result.details else None
+        auth_json = (
+            auth_result.details.get("auth_json") if auth_result.details else None
+        )
         results.append(self._check_user_scopes(auth_json))
         results.append(self._check_bot_available(auth_json))
         results.append(self._check_owner_config())
@@ -260,7 +280,9 @@ class HealthSuite:
                 )
         result = self.feishu_client.version()
         if not result.ok:
-            return _command_failed("lark_cli_version", result, "lark-cli version check failed")
+            return _command_failed(
+                "lark_cli_version", result, "lark-cli version check failed"
+            )
         argv_path = result.argv[0] if result.argv else configured_path
         resolved_path = resolved_path or _resolve_executable_path(argv_path)
         return HealthCheckResult(
@@ -310,7 +332,9 @@ class HealthSuite:
     def _check_auth_status(self) -> HealthCheckResult:
         result = self.feishu_client.auth_status(verify=True)
         if not result.ok:
-            return _command_failed("lark_auth_verify", result, "lark-cli auth verify failed")
+            return _command_failed(
+                "lark_auth_verify", result, "lark-cli auth verify failed"
+            )
         return HealthCheckResult(
             "lark_auth_verify",
             "critical",
@@ -356,7 +380,9 @@ class HealthSuite:
             if isinstance(maybe_bot, dict):
                 bot = maybe_bot
         bot_open_id = bot.get("openId") or bot.get("open_id") or bot.get("id")
-        if (bot.get("available") is True or bot.get("status") == "ready") and bot_open_id:
+        if (
+            bot.get("available") is True or bot.get("status") == "ready"
+        ) and bot_open_id:
             return HealthCheckResult(
                 "bot_identity",
                 "critical",
@@ -369,7 +395,11 @@ class HealthSuite:
             "critical",
             "failed",
             "bot identity is not available",
-            {"status": bot.get("status"), "message": bot.get("message"), "open_id": bot_open_id},
+            {
+                "status": bot.get("status"),
+                "message": bot.get("message"),
+                "open_id": bot_open_id,
+            },
         )
 
     def _check_owner_config(self) -> HealthCheckResult:
@@ -392,7 +422,9 @@ class HealthSuite:
         )
         name = "owner_notification_send" if send_test else "owner_notification_dry_run"
         if not result.ok:
-            return _command_failed(name, result, "owner notification check failed", severity="warning")
+            return _command_failed(
+                name, result, "owner notification check failed", severity="warning"
+            )
         return HealthCheckResult(
             name,
             "warning",
@@ -427,7 +459,12 @@ class HealthSuite:
                 "warning",
                 "failed",
                 "some explicit agent skills are missing or invalid",
-                {"configured": skills, "resolved": resolved, "missing": missing, "invalid": invalid},
+                {
+                    "configured": skills,
+                    "resolved": resolved,
+                    "missing": missing,
+                    "invalid": invalid,
+                },
             )
         return HealthCheckResult(
             "agent_explicit_skills",
@@ -443,7 +480,9 @@ class HealthSuite:
             return []
         results: list[HealthCheckResult] = []
         if cfg.owner_style.enabled:
-            path = resolve_relative_path(cfg.owner_style.profile_path, self.loaded_config.base_dir)
+            path = resolve_relative_path(
+                cfg.owner_style.profile_path, self.loaded_config.base_dir
+            )
             results.append(
                 _readable_file_result(
                     name="reply_postprocess_owner_style_profile",
@@ -454,7 +493,9 @@ class HealthSuite:
                 )
             )
         if cfg.humanizer_zh.enabled:
-            path = resolve_relative_path(cfg.humanizer_zh.skill_path, self.loaded_config.base_dir)
+            path = resolve_relative_path(
+                cfg.humanizer_zh.skill_path, self.loaded_config.base_dir
+            )
             results.append(
                 _readable_file_result(
                     name="reply_postprocess_humanizer_zh_skill",
@@ -471,15 +512,27 @@ def has_critical_failure(results: list[HealthCheckResult]) -> bool:
     return any(result.is_critical_failure for result in results)
 
 
-def _health_result_list(result: HealthCheckResult | list[HealthCheckResult]) -> list[HealthCheckResult]:
+def _health_result_list(
+    result: HealthCheckResult | list[HealthCheckResult],
+) -> list[HealthCheckResult]:
     return result if isinstance(result, list) else [result]
 
 
 def summarize_results(results: list[HealthCheckResult]) -> dict[str, object]:
     return {
-        "critical_failed": [result.name for result in results if result.is_critical_failure],
-        "critical_messages": {result.name: result.message for result in results if result.is_critical_failure},
-        "warnings": [result.name for result in results if result.severity == "warning" and result.status != "ok"],
+        "critical_failed": [
+            result.name for result in results if result.is_critical_failure
+        ],
+        "critical_messages": {
+            result.name: result.message
+            for result in results
+            if result.is_critical_failure
+        },
+        "warnings": [
+            result.name
+            for result in results
+            if result.severity == "warning" and result.status != "ok"
+        ],
     }
 
 
@@ -506,7 +559,9 @@ def _command_failed(
     )
 
 
-def _run_hermes_command(argv: list[str], *, timeout_seconds: int, cwd: Path | None = None) -> AgentRunResult:
+def _run_hermes_command(
+    argv: list[str], *, timeout_seconds: int, cwd: Path | None = None
+) -> AgentRunResult:
     started = time.monotonic()
     try:
         completed = subprocess.run(
@@ -539,7 +594,9 @@ def _run_hermes_command(argv: list[str], *, timeout_seconds: int, cwd: Path | No
         exit_code=completed.returncode,
         stdout=completed.stdout,
         stderr=completed.stderr,
-        error=None if completed.returncode == 0 else (completed.stderr.strip() or completed.stdout.strip()),
+        error=None
+        if completed.returncode == 0
+        else (completed.stderr.strip() or completed.stdout.strip()),
         latency_ms=int((time.monotonic() - started) * 1000),
     )
 
@@ -582,7 +639,9 @@ def _hermes_command_result(
     )
 
 
-def _hermes_tool_permissions_result(loaded: LoadedConfig, result: AgentRunResult) -> HealthCheckResult:
+def _hermes_tool_permissions_result(
+    loaded: LoadedConfig, result: AgentRunResult
+) -> HealthCheckResult:
     profile = loaded.config.tool_permissions
     policy = hermes_execution_policy(profile)
     backend = loaded.config.agent_backend

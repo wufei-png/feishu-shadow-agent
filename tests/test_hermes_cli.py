@@ -5,7 +5,9 @@ from feishu_shadow_agent.config import HermesConfig, ReplyPostprocessConfig
 from feishu_shadow_agent.hermes import HermesCliClient
 
 
-def test_hermes_cli_builds_guarded_write_chat_command_with_model_provider_and_resume() -> None:
+def test_hermes_cli_builds_guarded_write_chat_command_with_model_provider_and_resume() -> (
+    None
+):
     config = HermesConfig(
         path="/bin/hermes",
         source="feishu-shadow-agent",
@@ -15,7 +17,9 @@ def test_hermes_cli_builds_guarded_write_chat_command_with_model_provider_and_re
     )
     client = HermesCliClient(config=config)
 
-    argv = client.build_chat_command(prompt='{"ok": true}', max_turns=7, session_id="sid_1")
+    argv = client.build_chat_command(
+        prompt='{"ok": true}', max_turns=7, session_id="sid_1"
+    )
 
     assert argv == [
         "/bin/hermes",
@@ -41,7 +45,9 @@ def test_hermes_cli_builds_guarded_write_chat_command_with_model_provider_and_re
 
 
 def test_hermes_cli_maps_read_only_to_safe_toolset() -> None:
-    client = HermesCliClient(config=HermesConfig(path="/bin/hermes"), tool_permissions="read_only")
+    client = HermesCliClient(
+        config=HermesConfig(path="/bin/hermes"), tool_permissions="read_only"
+    )
 
     argv = client.build_chat_command(prompt="{}", max_turns=1)
 
@@ -51,7 +57,9 @@ def test_hermes_cli_maps_read_only_to_safe_toolset() -> None:
 
 
 def test_hermes_cli_maps_full_access_to_yolo_full_toolset() -> None:
-    client = HermesCliClient(config=HermesConfig(path="/bin/hermes"), tool_permissions="full_access")
+    client = HermesCliClient(
+        config=HermesConfig(path="/bin/hermes"), tool_permissions="full_access"
+    )
 
     argv = client.build_chat_command(prompt="{}", max_turns=1)
 
@@ -79,12 +87,19 @@ def test_hermes_cli_injects_explicit_skills_only_for_task_session() -> None:
     )
 
     router_argv = client.build_chat_command(prompt="{}", max_turns=1)
-    session_argv = client.build_chat_command(prompt="{}", max_turns=1, include_session_skills=True)
+    session_argv = client.build_chat_command(
+        prompt="{}", max_turns=1, include_session_skills=True
+    )
 
     assert "--skills" not in router_argv
     assert session_argv.count("--skills") == 2
     assert session_argv[session_argv.index("--skills") + 1] == "/skills/triage"
-    assert session_argv[session_argv.index("--skills", session_argv.index("--skills") + 1) + 1] == "/skills/support"
+    assert (
+        session_argv[
+            session_argv.index("--skills", session_argv.index("--skills") + 1) + 1
+        ]
+        == "/skills/support"
+    )
 
 
 def test_hermes_cli_parses_json_and_session_id() -> None:
@@ -107,7 +122,9 @@ def test_hermes_cli_parses_json_and_session_id() -> None:
 
 def test_hermes_cli_rejects_non_json_stdout() -> None:
     def runner(argv: list[str], timeout: int) -> AgentRunResult:
-        return AgentRunResult(argv=argv, exit_code=0, stdout="not json", stderr="session_id: sid")
+        return AgentRunResult(
+            argv=argv, exit_code=0, stdout="not json", stderr="session_id: sid"
+        )
 
     client = HermesCliClient(config=HermesConfig(path="hermes"), runner=runner)
 
@@ -123,10 +140,17 @@ def test_reply_postprocess_uses_safe_toolset_without_resume_or_skills() -> None:
 
     def runner(argv: list[str], timeout: int) -> AgentRunResult:
         seen.append(argv)
-        return AgentRunResult(argv=argv, exit_code=0, stdout='{"status":"ok","final_reply":"done"}')
+        return AgentRunResult(
+            argv=argv, exit_code=0, stdout='{"status":"ok","final_reply":"done"}'
+        )
 
     client = HermesCliClient(
-        config=HermesConfig(path="/bin/hermes", session_max_turns=8, model="main-model", provider="main-provider"),
+        config=HermesConfig(
+            path="/bin/hermes",
+            session_max_turns=8,
+            model="main-model",
+            provider="main-provider",
+        ),
         tool_permissions="full_access",
         reply_postprocess=ReplyPostprocessConfig(max_turns=5),
         session_skills=["/skills/task"],
@@ -151,12 +175,20 @@ def test_owner_style_refresh_uses_safe_toolset_and_postprocess_overrides() -> No
 
     def runner(argv: list[str], timeout: int) -> AgentRunResult:
         seen.append(argv)
-        return AgentRunResult(argv=argv, exit_code=0, stdout='{"status":"ok","profile_markdown":"# Profile"}')
+        return AgentRunResult(
+            argv=argv,
+            exit_code=0,
+            stdout='{"status":"ok","profile_markdown":"# Profile"}',
+        )
 
     client = HermesCliClient(
-        config=HermesConfig(path="/bin/hermes", model="main-model", provider="main-provider"),
+        config=HermesConfig(
+            path="/bin/hermes", model="main-model", provider="main-provider"
+        ),
         tool_permissions="guarded_write",
-        reply_postprocess=ReplyPostprocessConfig(max_turns=6, model="style-model", provider="style-provider"),
+        reply_postprocess=ReplyPostprocessConfig(
+            max_turns=6, model="style-model", provider="style-provider"
+        ),
         session_skills=["/skills/task"],
         runner=runner,
     )

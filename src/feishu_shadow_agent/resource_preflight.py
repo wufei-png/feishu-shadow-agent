@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from .agent_invocation import truncate_error
 from .jsonl import JSONLLogger
@@ -38,7 +39,9 @@ class ResourcePreflight:
         self.sleep_func = sleep_func
         self.retry_func: Callable[[NormalizedMessage, str | None], None] | None = None
 
-    def set_retry_func(self, func: Callable[[NormalizedMessage, str | None], None]) -> None:
+    def set_retry_func(
+        self, func: Callable[[NormalizedMessage, str | None], None]
+    ) -> None:
         self.retry_func = func
 
     def check(
@@ -50,7 +53,9 @@ class ResourcePreflight:
         run_id: str,
     ) -> ResourcePreflightResult:
         resources = self.store.list_resources_for_messages(prompt_message_ids)
-        state = resource_preflight_state(resources, message=message, prompt_message_ids=prompt_message_ids)
+        state = resource_preflight_state(
+            resources, message=message, prompt_message_ids=prompt_message_ids
+        )
         if state["allow"]:
             return ResourcePreflightResult(True, "ok", resources)
         attempt_count = initial_resource_attempt_count(
@@ -59,9 +64,13 @@ class ResourcePreflight:
             prompt_message_ids=prompt_message_ids,
         )
         last_error = state["error"]
-        if state["retryable"] and self.retry_func is not None and has_current_prompt_resources(
-            message=message,
-            prompt_message_ids=prompt_message_ids,
+        if (
+            state["retryable"]
+            and self.retry_func is not None
+            and has_current_prompt_resources(
+                message=message,
+                prompt_message_ids=prompt_message_ids,
+            )
         ):
             for attempt in range(attempt_count + 1, self.max_attempts + 1):
                 attempt_count = attempt
@@ -94,11 +103,19 @@ class ResourcePreflight:
                         },
                     )
                 resources = self.store.list_resources_for_messages(prompt_message_ids)
-                state = resource_preflight_state(resources, message=message, prompt_message_ids=prompt_message_ids)
-                if retry_error is None and not state["allow"] and state["error"] is not None:
+                state = resource_preflight_state(
+                    resources, message=message, prompt_message_ids=prompt_message_ids
+                )
+                if (
+                    retry_error is None
+                    and not state["allow"]
+                    and state["error"] is not None
+                ):
                     last_error = state["error"]
                 if state["allow"]:
-                    return ResourcePreflightResult(True, "ok", resources, attempt_count=attempt_count)
+                    return ResourcePreflightResult(
+                        True, "ok", resources, attempt_count=attempt_count
+                    )
                 if not state["retryable"]:
                     break
                 if attempt < self.max_attempts:
@@ -106,7 +123,9 @@ class ResourcePreflight:
         reason = state["reason"]
         if state["retryable"]:
             reason = "resource_download_failed"
-            last_error = last_error or state["error"] or resource_status_error(resources)
+            last_error = (
+                last_error or state["error"] or resource_status_error(resources)
+            )
         return ResourcePreflightResult(
             False,
             reason,
@@ -191,20 +210,23 @@ def initial_resource_attempt_count(
     message: NormalizedMessage,
     prompt_message_ids: list[str],
 ) -> int:
-    if not has_current_prompt_resources(message=message, prompt_message_ids=prompt_message_ids):
+    if not has_current_prompt_resources(
+        message=message, prompt_message_ids=prompt_message_ids
+    ):
         return 0
     current_keys = {
         (resource.message_id, resource.file_key, resource.resource_type)
         for resource in message.resources
     }
     row_keys = {
-        (row["message_id"], row["file_key"], row["resource_type"])
-        for row in resources
+        (row["message_id"], row["file_key"], row["resource_type"]) for row in resources
     }
     return 1 if current_keys & row_keys else 0
 
 
-def has_current_prompt_resources(*, message: NormalizedMessage, prompt_message_ids: list[str]) -> bool:
+def has_current_prompt_resources(
+    *, message: NormalizedMessage, prompt_message_ids: list[str]
+) -> bool:
     return message.message_id in set(prompt_message_ids) and bool(message.resources)
 
 
@@ -214,11 +236,12 @@ def missing_current_prompt_resources(
     message: NormalizedMessage,
     prompt_message_ids: list[str],
 ) -> list[str]:
-    if not has_current_prompt_resources(message=message, prompt_message_ids=prompt_message_ids):
+    if not has_current_prompt_resources(
+        message=message, prompt_message_ids=prompt_message_ids
+    ):
         return []
     row_keys = {
-        (row["message_id"], row["file_key"], row["resource_type"])
-        for row in resources
+        (row["message_id"], row["file_key"], row["resource_type"]) for row in resources
     }
     missing: list[str] = []
     for resource in message.resources:
@@ -240,4 +263,6 @@ def resource_status_error(resources: list[Any]) -> str | None:
     counts = resource_status_counts(resources)
     if not counts:
         return None
-    return "resource statuses: " + ", ".join(f"{status}={count}" for status, count in sorted(counts.items()))
+    return "resource statuses: " + ", ".join(
+        f"{status}={count}" for status, count in sorted(counts.items())
+    )

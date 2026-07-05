@@ -36,7 +36,9 @@ def _store(tmp_path: Path) -> SQLiteStore:
 
 def _seed_legacy_0001_store_without_agent_working_dir(store: SQLiteStore) -> None:
     store.path.parent.mkdir(parents=True, exist_ok=True)
-    migration = resources.files("feishu_shadow_agent.store").joinpath("migrations/0001_foundation.sql")
+    migration = resources.files("feishu_shadow_agent.store").joinpath(
+        "migrations/0001_foundation.sql"
+    )
     with store.connect() as conn:
         conn.executescript(migration.read_text(encoding="utf-8"))
         conn.execute(
@@ -48,7 +50,16 @@ def _seed_legacy_0001_store_without_agent_working_dir(store: SQLiteStore) -> Non
             INSERT INTO tasks(short_id, status, chat_id, chat_type, root_message_id, task_label, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            ("t_legacy", "watching", "oc_legacy", "p2p", "om_legacy", "legacy", "now", "now"),
+            (
+                "t_legacy",
+                "watching",
+                "oc_legacy",
+                "p2p",
+                "om_legacy",
+                "legacy",
+                "now",
+                "now",
+            ),
         )
 
 
@@ -60,7 +71,16 @@ def _insert_task(store: SQLiteStore, short_id: str, root_message_id: str) -> int
             INSERT INTO tasks(short_id, status, chat_id, root_message_id, task_label, created_at, updated_at, chat_type)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (short_id, "watching", "oc_1", root_message_id, "label", "now", "now", "p2p"),
+            (
+                short_id,
+                "watching",
+                "oc_1",
+                root_message_id,
+                "label",
+                "now",
+                "now",
+                "p2p",
+            ),
         )
     return int(cursor.lastrowid)
 
@@ -86,7 +106,9 @@ def _insert_message(store: SQLiteStore, message_id: str) -> None:
         )
 
 
-def test_send_preserves_multiword_text_and_local_command_id_is_unique(tmp_path: Path) -> None:
+def test_send_preserves_multiword_text_and_local_command_id_is_unique(
+    tmp_path: Path,
+) -> None:
     config = _write_config(tmp_path)
     store = _store(tmp_path)
     _insert_task(store, "t_1", "om_root")
@@ -96,8 +118,12 @@ def test_send_preserves_multiword_text_and_local_command_id_is_unique(tmp_path: 
     assert main(["reject", "--config", str(config), "a_missing"]) == 2
 
     with store.connect() as conn:
-        action = conn.execute("SELECT payload_json FROM actions WHERE kind = 'send_reply'").fetchone()
-        commands = conn.execute("SELECT message_id, status FROM approval_commands ORDER BY id").fetchall()
+        action = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'send_reply'"
+        ).fetchone()
+        commands = conn.execute(
+            "SELECT message_id, status FROM approval_commands ORDER BY id"
+        ).fetchall()
     payload = json.loads(action["payload_json"])
     assert payload["text"] == "hello world"
     assert len(commands) == 3
@@ -115,12 +141,16 @@ def test_send_can_read_exact_text_from_stdin(tmp_path: Path, monkeypatch) -> Non
     assert main(["send", "--config", str(config), "--stdin", "t_2"]) == 0
 
     with store.connect() as conn:
-        action = conn.execute("SELECT payload_json FROM actions WHERE kind = 'send_reply'").fetchone()
+        action = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'send_reply'"
+        ).fetchone()
     payload = json.loads(action["payload_json"])
     assert payload["text"] == "line 1\n    line 2\n"
 
 
-def test_approve_and_reject_emit_operator_command_result(tmp_path: Path, capsys) -> None:
+def test_approve_and_reject_emit_operator_command_result(
+    tmp_path: Path, capsys
+) -> None:
     config = _write_config(tmp_path)
     store = _store(tmp_path)
     approve_task_id = _insert_task(store, "t_approve", "om_approve_root")
@@ -148,15 +178,22 @@ def test_approve_and_reject_emit_operator_command_result(tmp_path: Path, capsys)
         approval_timeout_hours=None,
     )
     with store.connect() as conn:
-        approve_short_id = conn.execute("SELECT short_id FROM approvals WHERE id = ?", (approve_id,)).fetchone()["short_id"]
-        reject_short_id = conn.execute("SELECT short_id FROM approvals WHERE id = ?", (reject_id,)).fetchone()["short_id"]
+        approve_short_id = conn.execute(
+            "SELECT short_id FROM approvals WHERE id = ?", (approve_id,)
+        ).fetchone()["short_id"]
+        reject_short_id = conn.execute(
+            "SELECT short_id FROM approvals WHERE id = ?", (reject_id,)
+        ).fetchone()["short_id"]
 
     assert main(["approve", "--config", str(config), approve_short_id]) == 0
     approve_output = yaml.safe_load(capsys.readouterr().out)
     assert approve_output["status"] == "applied"
     assert approve_output["command"] == "approval.approve"
     assert approve_output["actor"] == "local_cli"
-    assert approve_output["target"] == {"type": "approval_or_task", "id": approve_short_id}
+    assert approve_output["target"] == {
+        "type": "approval_or_task",
+        "id": approve_short_id,
+    }
     assert approve_output["changed"] is True
     assert approve_output["result"]["approval_command_status"] == "applied"
     assert approve_output["next_actions"][0]["command"] == "dispatch.inspect"
@@ -166,7 +203,10 @@ def test_approve_and_reject_emit_operator_command_result(tmp_path: Path, capsys)
     assert reject_output["status"] == "applied"
     assert reject_output["command"] == "approval.reject"
     assert reject_output["actor"] == "local_cli"
-    assert reject_output["target"] == {"type": "approval_or_task", "id": reject_short_id}
+    assert reject_output["target"] == {
+        "type": "approval_or_task",
+        "id": reject_short_id,
+    }
     assert reject_output["changed"] is True
     assert reject_output["result"]["approval_command_status"] == "applied"
     assert reject_output["next_actions"] == []
@@ -174,7 +214,10 @@ def test_approve_and_reject_emit_operator_command_result(tmp_path: Path, capsys)
     with store.connect() as conn:
         approvals = {
             row["id"]: row["status"]
-            for row in conn.execute("SELECT id, status FROM approvals WHERE id IN (?, ?)", (approve_id, reject_id))
+            for row in conn.execute(
+                "SELECT id, status FROM approvals WHERE id IN (?, ?)",
+                (approve_id, reject_id),
+            )
         }
         approved_actions = conn.execute(
             "SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply' AND approval_id = ?",
@@ -203,10 +246,16 @@ def test_config_schema_outputs_json_schema(capsys) -> None:
 
     schema = json.loads(capsys.readouterr().out)
     assert schema["additionalProperties"] is False
-    assert schema["properties"]["tool_permissions"]["enum"] == ["read_only", "guarded_write", "full_access"]
+    assert schema["properties"]["tool_permissions"]["enum"] == [
+        "read_only",
+        "guarded_write",
+        "full_access",
+    ]
     assert "description" in schema["properties"]["reply_policy"]
     assert (
-        schema["$defs"]["ChatPolicyConfig"]["properties"]["reply_identity"]["description"]
+        schema["$defs"]["ChatPolicyConfig"]["properties"]["reply_identity"][
+            "description"
+        ]
         == "Reply identity for this chat: prefer bot with fallback, require bot, or send as user."
     )
 
@@ -246,7 +295,9 @@ def test_status_includes_failed_approval_commands(tmp_path: Path, capsys) -> Non
     assert "policy_audits" not in output
 
 
-def test_status_does_not_create_missing_store_or_log_files(tmp_path: Path, capsys) -> None:
+def test_status_does_not_create_missing_store_or_log_files(
+    tmp_path: Path, capsys
+) -> None:
     config = tmp_path / "config.yaml"
     config.write_text(
         """
@@ -271,7 +322,9 @@ logging:
     assert not (tmp_path / "logs" / "agent.jsonl").exists()
 
 
-def test_status_migrates_existing_legacy_store_before_querying_tasks(tmp_path: Path, capsys) -> None:
+def test_status_migrates_existing_legacy_store_before_querying_tasks(
+    tmp_path: Path, capsys
+) -> None:
     config = _write_config(tmp_path)
     store = _store(tmp_path)
     _seed_legacy_0001_store_without_agent_working_dir(store)
@@ -282,11 +335,15 @@ def test_status_migrates_existing_legacy_store_before_querying_tasks(tmp_path: P
     assert output["active_tasks"][0]["task_id"] == "t_legacy"
     assert "agent_working_dir" in output["active_tasks"][0]
     with store.connect() as conn:
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+        }
     assert "agent_working_dir" in columns
 
 
-def test_status_active_tasks_excludes_expired_watch_windows(tmp_path: Path, capsys) -> None:
+def test_status_active_tasks_excludes_expired_watch_windows(
+    tmp_path: Path, capsys
+) -> None:
     config = _write_config(tmp_path)
     store = _store(tmp_path)
     _insert_task(store, "t_expired", "om_expired")
@@ -309,7 +366,9 @@ def test_status_active_tasks_excludes_expired_watch_windows(tmp_path: Path, caps
     assert "t_expired" not in active_task_ids
 
 
-def test_status_shows_overdue_pending_approvals_without_expiring_real_db(tmp_path: Path, capsys) -> None:
+def test_status_shows_overdue_pending_approvals_without_expiring_real_db(
+    tmp_path: Path, capsys
+) -> None:
     config = _write_config(tmp_path)
     store = _store(tmp_path)
     pending_task_id = _insert_task(store, "t_pending", "om_pending")
@@ -325,7 +384,9 @@ def test_status_shows_overdue_pending_approvals_without_expiring_real_db(tmp_pat
                 pending_task_id,
                 "send_reply",
                 "pending",
-                json.dumps({"reply_target_message_id": "om_pending", "text": "pending reply"}),
+                json.dumps(
+                    {"reply_target_message_id": "om_pending", "text": "pending reply"}
+                ),
                 "pending reply",
                 "2026-06-22T08:00:00+08:00",
                 "2999-01-01T00:00:00+00:00",
@@ -341,7 +402,9 @@ def test_status_shows_overdue_pending_approvals_without_expiring_real_db(tmp_pat
                 expired_task_id,
                 "send_reply",
                 "pending",
-                json.dumps({"reply_target_message_id": "om_overdue", "text": "overdue reply"}),
+                json.dumps(
+                    {"reply_target_message_id": "om_overdue", "text": "overdue reply"}
+                ),
                 "overdue reply",
                 "2026-06-22T08:00:00+08:00",
                 "2000-01-01T00:00:00+00:00",
@@ -351,7 +414,9 @@ def test_status_shows_overdue_pending_approvals_without_expiring_real_db(tmp_pat
     assert main(["status", "--config", str(config)]) == 0
 
     output = yaml.safe_load(capsys.readouterr().out)
-    approvals = {approval["short_id"]: approval for approval in output["pending_approvals"]}
+    approvals = {
+        approval["short_id"]: approval for approval in output["pending_approvals"]
+    }
     assert set(approvals) == {"a_pending", "a_overdue"}
     assert approvals["a_pending"]["status"] == "pending"
     assert approvals["a_pending"]["is_overdue"] is False
@@ -375,7 +440,9 @@ def test_status_shows_overdue_pending_approvals_without_expiring_real_db(tmp_pat
     assert rows["a_overdue"]["resolved_at"] is None
 
 
-def test_policy_import_config_uses_defaults_when_reply_policy_is_omitted(tmp_path: Path, capsys) -> None:
+def test_policy_import_config_uses_defaults_when_reply_policy_is_omitted(
+    tmp_path: Path, capsys
+) -> None:
     config = _write_config(tmp_path)
     store = _store(tmp_path)
 
@@ -402,7 +469,9 @@ def test_policy_import_config_uses_defaults_when_reply_policy_is_omitted(tmp_pat
     }
 
 
-def test_policy_import_config_replace_updates_config_listed_chats(tmp_path: Path, capsys) -> None:
+def test_policy_import_config_replace_updates_config_listed_chats(
+    tmp_path: Path, capsys
+) -> None:
     config = _write_config(tmp_path)
     config.write_text(
         config.read_text(encoding="utf-8")
@@ -464,7 +533,9 @@ chats:
     assert absent_chat["name"] == "Not in replacement"
 
 
-def test_policy_update_global_expansion_applies_directly(tmp_path: Path, capsys) -> None:
+def test_policy_update_global_expansion_applies_directly(
+    tmp_path: Path, capsys
+) -> None:
     config = _write_config(tmp_path)
     config.write_text(
         config.read_text(encoding="utf-8")
@@ -510,7 +581,9 @@ reply_policy:
     assert audit["reason"] == "enable p2p trial"
 
 
-def test_policy_update_chat_narrowing_change_writes_audit(tmp_path: Path, capsys) -> None:
+def test_policy_update_chat_narrowing_change_writes_audit(
+    tmp_path: Path, capsys
+) -> None:
     config = _write_config(tmp_path)
     config.write_text(
         config.read_text(encoding="utf-8")
@@ -558,7 +631,9 @@ chats:
     assert audit["reason"] == "pause chat"
 
 
-def test_policy_update_chat_bot_joined_expansion_applies_directly(tmp_path: Path, capsys) -> None:
+def test_policy_update_chat_bot_joined_expansion_applies_directly(
+    tmp_path: Path, capsys
+) -> None:
     config = _write_config(tmp_path)
     config.write_text(
         config.read_text(encoding="utf-8")
@@ -602,12 +677,17 @@ chats:
     assert store.get_chat_product_policy("oc_policy")["bot_joined"] is True
 
 
-def test_replay_explains_current_state_without_real_db_mutation(tmp_path: Path, capsys) -> None:
+def test_replay_explains_current_state_without_real_db_mutation(
+    tmp_path: Path, capsys
+) -> None:
     config = _write_config(tmp_path)
     store = _store(tmp_path)
     _insert_message(store, "om_1")
 
-    assert main(["replay", "--config", str(config), "--message-id", "om_1", "--dry-run"]) == 0
+    assert (
+        main(["replay", "--config", str(config), "--message-id", "om_1", "--dry-run"])
+        == 0
+    )
 
     output = yaml.safe_load(capsys.readouterr().out)
     assert output["message_id"] == "om_1"
@@ -617,7 +697,9 @@ def test_replay_explains_current_state_without_real_db_mutation(tmp_path: Path, 
     assert action_count == 0
 
 
-def test_replay_shows_overdue_pending_approvals_without_mutation(tmp_path: Path, capsys) -> None:
+def test_replay_shows_overdue_pending_approvals_without_mutation(
+    tmp_path: Path, capsys
+) -> None:
     config = _write_config(tmp_path)
     store = _store(tmp_path)
     _insert_message(store, "om_expired")
@@ -645,7 +727,19 @@ def test_replay_shows_overdue_pending_approvals_without_mutation(tmp_path: Path,
             ),
         )
 
-    assert main(["replay", "--config", str(config), "--message-id", "om_expired", "--dry-run"]) == 0
+    assert (
+        main(
+            [
+                "replay",
+                "--config",
+                str(config),
+                "--message-id",
+                "om_expired",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
 
     output = yaml.safe_load(capsys.readouterr().out)
     assert output["mutated_real_db"] is False
@@ -662,7 +756,9 @@ def test_replay_shows_overdue_pending_approvals_without_mutation(tmp_path: Path,
     assert approval["resolved_at"] is None
 
 
-def test_maintenance_expire_approvals_expires_overdue_and_reports_count(tmp_path: Path, capsys) -> None:
+def test_maintenance_expire_approvals_expires_overdue_and_reports_count(
+    tmp_path: Path, capsys
+) -> None:
     config = _write_config(tmp_path)
     store = _store(tmp_path)
     task_id = _insert_task(store, "t_expire", "om_expire")
@@ -688,7 +784,11 @@ def test_maintenance_expire_approvals_expires_overdue_and_reports_count(tmp_path
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_expire",
-        payload={"reply_target_message_id": "om_expire", "text": "reply", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_expire",
+            "text": "reply",
+            "identity": "user",
+        },
         approval_id=approval_id,
     )
     assert action_id is not None
@@ -706,13 +806,17 @@ def test_maintenance_expire_approvals_expires_overdue_and_reports_count(tmp_path
             "SELECT status, resolved_at FROM approvals WHERE id = ?",
             (approval_id,),
         ).fetchone()
-        action = conn.execute("SELECT status FROM actions WHERE id = ?", (action_id,)).fetchone()
+        action = conn.execute(
+            "SELECT status FROM actions WHERE id = ?", (action_id,)
+        ).fetchone()
     assert approval["status"] == "expired"
     assert approval["resolved_at"] is not None
     assert action["status"] == "cancelled"
 
 
-def test_replay_previews_only_related_pending_actions(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_replay_previews_only_related_pending_actions(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     config = _write_config(tmp_path)
     store = _store(tmp_path)
     _insert_message(store, "om_1")
@@ -721,12 +825,20 @@ def test_replay_previews_only_related_pending_actions(tmp_path: Path, capsys, mo
     related_action_id = store.create_send_reply_action(
         task_id=related_task_id,
         target_message_id="om_1",
-        payload={"reply_target_message_id": "om_1", "text": "related", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_1",
+            "text": "related",
+            "identity": "user",
+        },
     )
     unrelated_action_id = store.create_send_reply_action(
         task_id=unrelated_task_id,
         target_message_id="om_other",
-        payload={"reply_target_message_id": "om_other", "text": "unrelated", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_other",
+            "text": "unrelated",
+            "identity": "user",
+        },
     )
     assert related_action_id is not None and unrelated_action_id is not None
     calls = []
@@ -737,11 +849,16 @@ def test_replay_previews_only_related_pending_actions(tmp_path: Path, capsys, mo
 
         def reply_message(self, **kwargs):
             calls.append(kwargs)
-            return LarkCliResult(["dry"], 0, json_data={"api": [{"message_id": kwargs["message_id"]}]})
+            return LarkCliResult(
+                ["dry"], 0, json_data={"api": [{"message_id": kwargs["message_id"]}]}
+            )
 
     monkeypatch.setattr("feishu_shadow_agent.cli.LarkCliClient", FakeReplayClient)
 
-    assert main(["replay", "--config", str(config), "--message-id", "om_1", "--dry-run"]) == 0
+    assert (
+        main(["replay", "--config", str(config), "--message-id", "om_1", "--dry-run"])
+        == 0
+    )
 
     output = yaml.safe_load(capsys.readouterr().out)
     previews = output["dispatch_preview"]["actions"]
@@ -750,21 +867,29 @@ def test_replay_previews_only_related_pending_actions(tmp_path: Path, capsys, mo
     assert previews[0]["result"]["dry_run"]["json"]["api"][0]["message_id"] == "om_1"
     assert [call["message_id"] for call in calls] == ["om_1"]
     with store.connect() as conn:
-        rows = conn.execute("SELECT id, result_json FROM actions ORDER BY id").fetchall()
+        rows = conn.execute(
+            "SELECT id, result_json FROM actions ORDER BY id"
+        ).fetchall()
     assert [(row["id"], row["result_json"]) for row in rows] == [
         (related_action_id, None),
         (unrelated_action_id, None),
     ]
 
 
-def test_dispatch_inspect_is_read_only_and_shows_attempts(tmp_path: Path, capsys) -> None:
+def test_dispatch_inspect_is_read_only_and_shows_attempts(
+    tmp_path: Path, capsys
+) -> None:
     config = _write_config(tmp_path)
     store = _store(tmp_path)
     task_id = _insert_task(store, "t_dispatch", "om_root")
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_root",
-        payload={"reply_target_message_id": "om_root", "text": "reply", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_root",
+            "text": "reply",
+            "identity": "user",
+        },
     )
     assert action_id is not None
     assert store.claim_action_for_dispatch(action_id, run_id="run_1") is not None
@@ -787,7 +912,19 @@ def test_dispatch_inspect_is_read_only_and_shows_attempts(tmp_path: Path, capsys
             ),
         )
 
-    assert main(["dispatch", "inspect", "--config", str(config), "--action-id", str(action_id)]) == 0
+    assert (
+        main(
+            [
+                "dispatch",
+                "inspect",
+                "--config",
+                str(config),
+                "--action-id",
+                str(action_id),
+            ]
+        )
+        == 0
+    )
 
     output = yaml.safe_load(capsys.readouterr().out)
     assert output["status"] == "no_change"
@@ -808,20 +945,40 @@ def test_dispatch_inspect_is_read_only_and_shows_attempts(tmp_path: Path, capsys
     assert approval["resolved_at"] is None
 
 
-def test_dispatch_retry_requeues_failed_actions_and_preserves_idempotency(tmp_path: Path, capsys) -> None:
+def test_dispatch_retry_requeues_failed_actions_and_preserves_idempotency(
+    tmp_path: Path, capsys
+) -> None:
     config = _write_config(tmp_path)
     store = _store(tmp_path)
     task_id = _insert_task(store, "t_retry", "om_root")
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_root",
-        payload={"reply_target_message_id": "om_root", "text": "reply", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_root",
+            "text": "reply",
+            "identity": "user",
+        },
     )
     assert action_id is not None
     original_key = store.get_action(action_id).idempotency_key  # type: ignore[union-attr]
-    store.finish_action(action_id, status="failed_needs_review", result={"error_stage": "send"})
+    store.finish_action(
+        action_id, status="failed_needs_review", result={"error_stage": "send"}
+    )
 
-    assert main(["dispatch", "retry", "--config", str(config), "--action-id", str(action_id)]) == 0
+    assert (
+        main(
+            [
+                "dispatch",
+                "retry",
+                "--config",
+                str(config),
+                "--action-id",
+                str(action_id),
+            ]
+        )
+        == 0
+    )
 
     output = yaml.safe_load(capsys.readouterr().out)
     action = store.get_action(action_id)
@@ -830,7 +987,10 @@ def test_dispatch_retry_requeues_failed_actions_and_preserves_idempotency(tmp_pa
     assert output["changed"] is True
     assert output["result"]["action"]["status"] == "pending"
     assert output["next_actions"] == [
-        {"command": "dispatch.inspect", "target": {"type": "dispatch_action", "action_id": action_id}}
+        {
+            "command": "dispatch.inspect",
+            "target": {"type": "dispatch_action", "action_id": action_id},
+        }
     ]
     assert action is not None
     assert action.status == "pending"
@@ -845,12 +1005,28 @@ def test_dispatch_retry_rejects_sending_actions(tmp_path: Path, capsys) -> None:
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_root",
-        payload={"reply_target_message_id": "om_root", "text": "reply", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_root",
+            "text": "reply",
+            "identity": "user",
+        },
     )
     assert action_id is not None
     assert store.claim_action_for_dispatch(action_id) is not None
 
-    assert main(["dispatch", "retry", "--config", str(config), "--action-id", str(action_id)]) == 2
+    assert (
+        main(
+            [
+                "dispatch",
+                "retry",
+                "--config",
+                str(config),
+                "--action-id",
+                str(action_id),
+            ]
+        )
+        == 2
+    )
 
     output = yaml.safe_load(capsys.readouterr().out)
     assert output["status"] == "validation_failed"
@@ -867,12 +1043,28 @@ def test_dispatch_cancel_releases_active_send_target(tmp_path: Path, capsys) -> 
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_root",
-        payload={"reply_target_message_id": "om_root", "text": "reply", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_root",
+            "text": "reply",
+            "identity": "user",
+        },
     )
     assert action_id is not None
     assert store.claim_action_for_dispatch(action_id) is not None
 
-    assert main(["dispatch", "cancel", "--config", str(config), "--action-id", str(action_id)]) == 0
+    assert (
+        main(
+            [
+                "dispatch",
+                "cancel",
+                "--config",
+                str(config),
+                "--action-id",
+                str(action_id),
+            ]
+        )
+        == 0
+    )
 
     output = yaml.safe_load(capsys.readouterr().out)
     assert output["status"] == "applied"
@@ -885,26 +1077,40 @@ def test_dispatch_cancel_releases_active_send_target(tmp_path: Path, capsys) -> 
     replacement = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_root",
-        payload={"reply_target_message_id": "om_root", "text": "different", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_root",
+            "text": "different",
+            "identity": "user",
+        },
     )
     assert replacement is not None
     assert replacement != action_id
 
 
-def test_dispatch_mark_sent_requires_readback_evidence(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_dispatch_mark_sent_requires_readback_evidence(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     config = _write_config(tmp_path)
     store = _store(tmp_path)
     task_id = _insert_task(store, "t_mark_sent", "om_root")
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_root",
-        payload={"reply_target_message_id": "om_root", "text": "reply", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_root",
+            "text": "reply",
+            "identity": "user",
+        },
     )
     assert action_id is not None
     claim = store.claim_action_for_dispatch(action_id, run_id="run_1")
     assert claim is not None
-    store.update_dispatch_attempt(claim.attempt.id, status="uncertain", error_stage="send")
-    store.finish_action(action_id, status="failed_needs_review", result={"error_stage": "send"})
+    store.update_dispatch_attempt(
+        claim.attempt.id, status="uncertain", error_stage="send"
+    )
+    store.finish_action(
+        action_id, status="failed_needs_review", result={"error_stage": "send"}
+    )
 
     class FakeMarkSentClient:
         def __init__(self, **kwargs):
@@ -1007,8 +1213,12 @@ def test_dispatch_mark_sent_rejects_unverified_send_reply_evidence(
     assert action_id is not None
     claim = store.claim_action_for_dispatch(action_id, run_id="run_1")
     assert claim is not None
-    store.update_dispatch_attempt(claim.attempt.id, status="uncertain", error_stage="send")
-    store.finish_action(action_id, status="failed_needs_review", result={"error_stage": "send"})
+    store.update_dispatch_attempt(
+        claim.attempt.id, status="uncertain", error_stage="send"
+    )
+    store.finish_action(
+        action_id, status="failed_needs_review", result={"error_stage": "send"}
+    )
 
     class FakeMarkSentClient:
         def __init__(self, **kwargs):
@@ -1077,13 +1287,21 @@ def test_dispatch_mark_sent_cancel_race_does_not_persist_readback_context(
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_root",
-        payload={"reply_target_message_id": "om_root", "text": "reply", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_root",
+            "text": "reply",
+            "identity": "user",
+        },
     )
     assert action_id is not None
     claim = store.claim_action_for_dispatch(action_id, run_id="run_1")
     assert claim is not None
-    store.update_dispatch_attempt(claim.attempt.id, status="uncertain", error_stage="send")
-    store.finish_action(action_id, status="failed_needs_review", result={"error_stage": "send"})
+    store.update_dispatch_attempt(
+        claim.attempt.id, status="uncertain", error_stage="send"
+    )
+    store.finish_action(
+        action_id, status="failed_needs_review", result={"error_stage": "send"}
+    )
 
     class FakeMarkSentClient:
         def __init__(self, **kwargs):
@@ -1112,7 +1330,9 @@ def test_dispatch_mark_sent_cancel_race_does_not_persist_readback_context(
         return original_mark_sent(self, action_id, **kwargs)
 
     monkeypatch.setattr("feishu_shadow_agent.cli.LarkCliClient", FakeMarkSentClient)
-    monkeypatch.setattr(SQLiteStore, "mark_action_sent_after_evidence", cancel_before_mark_sent)
+    monkeypatch.setattr(
+        SQLiteStore, "mark_action_sent_after_evidence", cancel_before_mark_sent
+    )
 
     assert (
         main(

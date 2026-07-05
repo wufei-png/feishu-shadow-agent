@@ -21,8 +21,12 @@ from .types import utc_now_iso
 
 MAX_SAMPLE_CHARS = 1000
 LINK_ONLY_RE = re.compile(r"^(?:https?://|www\.)\S+$", re.IGNORECASE)
-RESOURCE_PLACEHOLDER_RE = re.compile(r"^\s*(?:\[(?:图片|image|文件|file|附件|attachment)\]|<[^>]+>)\s*$", re.IGNORECASE)
-OPERATOR_COMMAND_RE = re.compile(r"^/(?:approve|reject|send|task|dispatch|maintenance|policy)\b", re.IGNORECASE)
+RESOURCE_PLACEHOLDER_RE = re.compile(
+    r"^\s*(?:\[(?:图片|image|文件|file|附件|attachment)\]|<[^>]+>)\s*$", re.IGNORECASE
+)
+OPERATOR_COMMAND_RE = re.compile(
+    r"^/(?:approve|reject|send|task|dispatch|maintenance|policy)\b", re.IGNORECASE
+)
 PROFILE_URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 PROFILE_FEISHU_ID_RE = re.compile(r"\b(?:ou|oc|om|on)_[A-Za-z0-9_-]{4,}\b")
 PROFILE_PHONE_RE = re.compile(r"(?<!\d)(?:1[3-9]\d{9}|\+\d[\d -]{7,}\d)(?!\d)")
@@ -84,7 +88,9 @@ class ReplyStyleRefresher:
         )
         samples = self._filtered_samples(page.items)
         selected = samples[: refresh_cfg.max_samples]
-        profile_path = resolve_relative_path(self.config.reply_postprocess.owner_style.profile_path, self.base_dir)
+        profile_path = resolve_relative_path(
+            self.config.reply_postprocess.owner_style.profile_path, self.base_dir
+        )
         stats = _sample_stats(selected)
         if dry_run:
             return ReplyStyleRefreshResult(
@@ -114,7 +120,9 @@ class ReplyStyleRefresher:
             lookback_days=refresh_cfg.lookback_days,
             samples=selected,
         )
-        cwd = resolve_agent_working_dir(self.config.agent_backend.working_dir, self.base_dir)
+        cwd = resolve_agent_working_dir(
+            self.config.agent_backend.working_dir, self.base_dir
+        )
         outcome = self.agent_invoker.call_with_retries(
             lambda: self.agent_backend.owner_style_refresh(prompt, cwd=cwd),
             run_id=run_id,
@@ -124,7 +132,9 @@ class ReplyStyleRefresher:
         )
         result = outcome.result
         if result is None or not result.ok or not isinstance(result.json_data, dict):
-            error = outcome.last_error or (None if result is None else agent_result_error(result))
+            error = outcome.last_error or (
+                None if result is None else agent_result_error(result)
+            )
             return ReplyStyleRefreshResult(
                 status="failed",
                 pulled_count=len(page.items),
@@ -237,7 +247,9 @@ def _profile_privacy_error(profile_markdown: str) -> str | None:
 
 def _atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
@@ -251,4 +263,8 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 
 def _minus_days(value: str, days: int) -> str:
-    return (datetime.fromisoformat(value) - timedelta(days=days)).astimezone().isoformat(timespec="seconds")
+    return (
+        (datetime.fromisoformat(value) - timedelta(days=days))
+        .astimezone()
+        .isoformat(timespec="seconds")
+    )

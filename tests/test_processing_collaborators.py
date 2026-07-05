@@ -11,7 +11,12 @@ from feishu_shadow_agent.context_access import ContextAccessBuilder
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.resource_preflight import resource_preflight_state
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
-from feishu_shadow_agent.types import NormalizedMessage, ResourceRef, TaskCandidate, TaskRecord
+from feishu_shadow_agent.types import (
+    NormalizedMessage,
+    ResourceRef,
+    TaskCandidate,
+    TaskRecord,
+)
 
 
 def _config() -> AppConfig:
@@ -51,7 +56,9 @@ def _task(*, task_id: int = 1, short_id: str = "t_abc") -> TaskRecord:
     )
 
 
-def test_agent_invoker_retries_transient_result_but_not_terminal_result(tmp_path: Path) -> None:
+def test_agent_invoker_retries_transient_result_but_not_terminal_result(
+    tmp_path: Path,
+) -> None:
     invoker = AgentInvoker(
         logger=JSONLLogger(tmp_path / "agent.jsonl"),
         max_attempts=3,
@@ -80,10 +87,14 @@ def test_agent_invoker_retries_transient_result_but_not_terminal_result(tmp_path
     assert transient.attempt_count == 2
     assert transient.result is not None and transient.result.ok
     assert terminal.attempt_count == 1
-    assert terminal.last_error is not None and "permission denied" in terminal.last_error
+    assert (
+        terminal.last_error is not None and "permission denied" in terminal.last_error
+    )
 
 
-def test_context_access_builder_preserves_router_and_task_scope_cards(tmp_path: Path) -> None:
+def test_context_access_builder_preserves_router_and_task_scope_cards(
+    tmp_path: Path,
+) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.migrate()
     builder = ContextAccessBuilder(store=store, config=_config())
@@ -96,12 +107,20 @@ def test_context_access_builder_preserves_router_and_task_scope_cards(tmp_path: 
         active_candidates=[TaskCandidate(task=active_task, matched_by="thread")],
         historical=[historical_task],
     )
-    task_session = builder.task_session_context_access(message=message, task=active_task)
+    task_session = builder.task_session_context_access(
+        message=message, task=active_task
+    )
 
     assert router is not None
     assert router["backend"] == "sqlite"
     assert router["read_only_uri"].endswith("agent.sqlite3?mode=ro")
-    assert router["allowed_tables"] == ["tasks", "task_messages", "messages", "resources", "routing_audits"]
+    assert router["allowed_tables"] == [
+        "tasks",
+        "task_messages",
+        "messages",
+        "resources",
+        "routing_audits",
+    ]
     assert router["query_scope"] == {
         "current_message_id": "om_1",
         "active_tasks": [{"id": 1, "short_id": "t_active"}],
@@ -132,7 +151,14 @@ def test_resource_preflight_state_preserves_status_mapping(
 ) -> None:
     message = _message()
     state = resource_preflight_state(
-        [{"message_id": "om_1", "file_key": "img_1", "resource_type": "image", "download_status": status}],
+        [
+            {
+                "message_id": "om_1",
+                "file_key": "img_1",
+                "resource_type": "image",
+                "download_status": status,
+            }
+        ],
         message=message,
         prompt_message_ids=["om_1"],
     )
@@ -144,7 +170,9 @@ def test_resource_preflight_state_preserves_status_mapping(
 
 def test_resource_preflight_state_retries_missing_current_resource_record() -> None:
     resource = ResourceRef(message_id="om_1", file_key="img_1", resource_type="image")
-    state = resource_preflight_state([], message=_message(resources=[resource]), prompt_message_ids=["om_1"])
+    state = resource_preflight_state(
+        [], message=_message(resources=[resource]), prompt_message_ids=["om_1"]
+    )
 
     assert state == {
         "allow": False,

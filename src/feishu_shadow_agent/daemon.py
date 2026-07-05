@@ -49,7 +49,9 @@ class Daemon:
         self.task_processor = task_processor
         self.send_owner_notifications = send_owner_notifications
         self.run_metadata = run_metadata or {}
-        self.config_base_dir = None if config_base_dir is None else Path(config_base_dir)
+        self.config_base_dir = (
+            None if config_base_dir is None else Path(config_base_dir)
+        )
         self.runtime_health_interval_seconds = runtime_health_interval_seconds
         self._last_runtime_health_at: float | None = None
         self._runtime_health_ok = True
@@ -68,7 +70,9 @@ class Daemon:
         )
 
     def run_one_tick(self, *, run_id: str) -> list[StageResult]:
-        heartbeat = HeartbeatRecorder(store=self.store, run_id=run_id, dry_run=self.dry_run)
+        heartbeat = HeartbeatRecorder(
+            store=self.store, run_id=run_id, dry_run=self.dry_run
+        )
         heartbeat.start()
         self.logger.debug(
             "daemon_tick_started",
@@ -97,16 +101,18 @@ class Daemon:
                 heartbeat.record(result)
                 heartbeat.finish()
                 return results
-            if not self._runtime_product_policy_ok_for_tick(run_id=run_id) or not self._runtime_health_ok_for_tick(
+            if not self._runtime_product_policy_ok_for_tick(
                 run_id=run_id
-            ):
+            ) or not self._runtime_health_ok_for_tick(run_id=run_id):
                 self.logger.emit(
                     "error",
                     "daemon_runtime_health_failed",
                     run_id=run_id,
                     data={"actual_sends_blocked": True},
                 )
-                result = StageResult("runtime_health", ok=False, error="runtime critical health failed")
+                result = StageResult(
+                    "runtime_health", ok=False, error="runtime critical health failed"
+                )
                 results.append(result)
                 heartbeat.record(result)
                 heartbeat.finish()
@@ -162,12 +168,17 @@ class Daemon:
                     )
                 results.append(result)
                 heartbeat.record(result)
-            approval_failed = any(result.name == "approval_inbox" and not result.ok for result in results)
+            approval_failed = any(
+                result.name == "approval_inbox" and not result.ok for result in results
+            )
             if approval_failed and not self.dry_run:
                 self.logger.warning(
                     "daemon_dispatch_send_reply_blocked",
                     run_id=run_id,
-                    data={"reason": "approval_inbox_failed", "owner_notifications_allowed": True},
+                    data={
+                        "reason": "approval_inbox_failed",
+                        "owner_notifications_allowed": True,
+                    },
                 )
             dispatcher = Dispatcher(
                 store=self.store,
@@ -181,8 +192,11 @@ class Daemon:
             dispatch = dispatcher.dispatch(
                 run_id=run_id,
                 allow_send_reply_actual=not self.dry_run and not approval_failed,
-                allow_owner_notification_actual=not self.dry_run or self.send_owner_notifications,
-                blocked_send_reply_reason="approval_inbox_failed" if approval_failed and not self.dry_run else None,
+                allow_owner_notification_actual=not self.dry_run
+                or self.send_owner_notifications,
+                blocked_send_reply_reason="approval_inbox_failed"
+                if approval_failed and not self.dry_run
+                else None,
             )
             self.logger.emit(
                 "info",
@@ -198,7 +212,11 @@ class Daemon:
                     "send_owner_notifications": self.send_owner_notifications,
                 },
             )
-            dispatch_error = f"{dispatch.failed} dispatch action(s) failed" if dispatch.failed > 0 else None
+            dispatch_error = (
+                f"{dispatch.failed} dispatch action(s) failed"
+                if dispatch.failed > 0
+                else None
+            )
             dispatch_result = StageResult(
                 "dispatch",
                 ok=dispatch.failed == 0,
@@ -221,7 +239,9 @@ class Daemon:
 
     def run_forever(self) -> int:
         run_id = self.health_suite.run_id or new_run_id("run")
-        self.store.record_run_start(run_id=run_id, dry_run=self.dry_run, **self.run_metadata)
+        self.store.record_run_start(
+            run_id=run_id, dry_run=self.dry_run, **self.run_metadata
+        )
         try:
             self.logger.debug(
                 "daemon_startup_health_started",
@@ -231,8 +251,12 @@ class Daemon:
             ok, results = self.run_startup_health()
             if not ok:
                 summary = summarize_results(results)
-                self.logger.emit("error", "daemon_startup_health_failed", run_id=run_id, data=summary)
-                self.store.record_run_finish(run_id=run_id, status="health_failed", health_summary=summary)
+                self.logger.emit(
+                    "error", "daemon_startup_health_failed", run_id=run_id, data=summary
+                )
+                self.store.record_run_finish(
+                    run_id=run_id, status="health_failed", health_summary=summary
+                )
                 return 2
             self.logger.emit(
                 "info",
@@ -255,7 +279,10 @@ class Daemon:
     def _runtime_health_ok_for_tick(self, *, run_id: str) -> bool:
         interval = self._runtime_health_check_interval()
         now = time.monotonic()
-        if self._last_runtime_health_at is not None and now - self._last_runtime_health_at < interval:
+        if (
+            self._last_runtime_health_at is not None
+            and now - self._last_runtime_health_at < interval
+        ):
             self.logger.debug(
                 "runtime_critical_health_reused",
                 run_id=run_id,
@@ -298,7 +325,11 @@ class Daemon:
         if self.app_config is None:
             return 0
         health = self.app_config.health
-        return health.interval_seconds if self._runtime_health_ok else health.retry_interval_seconds
+        return (
+            health.interval_seconds
+            if self._runtime_health_ok
+            else health.retry_interval_seconds
+        )
 
     def _runtime_product_policy_ok_for_tick(self, *, run_id: str) -> bool:
         try:

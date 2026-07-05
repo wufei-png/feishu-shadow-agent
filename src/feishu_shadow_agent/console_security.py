@@ -19,7 +19,9 @@ def validate_console_bind_host(host: str) -> str:
     try:
         address = ipaddress.ip_address(normalized)
     except ValueError as exc:
-        raise ValueError("console host must be localhost or a loopback IP address") from exc
+        raise ValueError(
+            "console host must be localhost or a loopback IP address"
+        ) from exc
     if not address.is_loopback:
         raise ValueError("console host must be localhost or a loopback IP address")
     return normalized
@@ -51,5 +53,9 @@ def bearer_token_valid(authorization: str | None, expected_token: str) -> bool:
 
 def console_access_url(*, host: str, port: int, token: str) -> str:
     normalized = validate_console_bind_host(host)
-    display_host = f"[{normalized}]" if ":" in normalized and not normalized.startswith("[") else normalized
+    display_host = (
+        f"[{normalized}]"
+        if ":" in normalized and not normalized.startswith("[")
+        else normalized
+    )
     return f"http://{display_host}:{port}/?token={quote(token)}"

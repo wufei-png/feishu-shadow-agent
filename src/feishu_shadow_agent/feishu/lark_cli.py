@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any
 
 from ..types import LarkCliResult, MessagePage
 
@@ -493,7 +494,9 @@ class LarkCliClient:
         return result
 
 
-def _run_subprocess(argv: list[str], timeout_seconds: int, *, cwd: Path | None = None) -> LarkCliResult:
+def _run_subprocess(
+    argv: list[str], timeout_seconds: int, *, cwd: Path | None = None
+) -> LarkCliResult:
     try:
         completed = subprocess.run(
             argv,
@@ -520,7 +523,9 @@ def _run_subprocess(argv: list[str], timeout_seconds: int, *, cwd: Path | None =
             exit_code=completed.returncode,
             stdout=completed.stdout,
             stderr=completed.stderr,
-            error=completed.stderr.strip() or completed.stdout.strip() or "command failed",
+            error=completed.stderr.strip()
+            or completed.stdout.strip()
+            or "command failed",
         )
     return LarkCliResult(
         argv=argv,
@@ -571,7 +576,9 @@ def _extract_message_page(data: Any) -> MessagePage:
     if isinstance(source, dict) and isinstance(source.get("data"), dict):
         source = source["data"]
     if isinstance(source, list):
-        return MessagePage(items=[item for item in source if isinstance(item, dict)], raw=data)
+        return MessagePage(
+            items=[item for item in source if isinstance(item, dict)], raw=data
+        )
     if not isinstance(source, dict):
         return MessagePage(items=[], raw=data)
 
@@ -583,7 +590,9 @@ def _extract_message_page(data: Any) -> MessagePage:
         or source.get("nextPageToken")
     )
     has_more = _truthy(source.get("has_more")) or bool(next_page_token)
-    return MessagePage(items=items, next_page_token=next_page_token, has_more=has_more, raw=data)
+    return MessagePage(
+        items=items, next_page_token=next_page_token, has_more=has_more, raw=data
+    )
 
 
 def _extract_items(source: dict[str, Any]) -> list[dict[str, Any]]:

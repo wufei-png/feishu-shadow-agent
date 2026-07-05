@@ -158,7 +158,9 @@ def _level_number(level: LogLevel | str) -> int:
     try:
         return _LEVELS[str(level).lower()]
     except KeyError as exc:
-        raise ValueError("log level must be one of debug, info, warning, error") from exc
+        raise ValueError(
+            "log level must be one of debug, info, warning, error"
+        ) from exc
 
 
 def _text_value(value: Any) -> str:

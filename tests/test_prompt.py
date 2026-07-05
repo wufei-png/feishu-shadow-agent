@@ -49,7 +49,13 @@ def test_router_prompt_embeds_pydantic_output_schema() -> None:
         "backend": "sqlite",
         "mode": "live_read_only",
         "read_only_uri": "file:///tmp/agent.sqlite3?mode=ro",
-        "allowed_tables": ["tasks", "task_messages", "messages", "resources", "routing_audits"],
+        "allowed_tables": [
+            "tasks",
+            "task_messages",
+            "messages",
+            "resources",
+            "routing_audits",
+        ],
         "query_scope": {
             "current_message_id": "om_1",
             "active_tasks": [{"id": 1, "short_id": "t_abc"}],
@@ -79,7 +85,9 @@ def test_router_prompt_embeds_pydantic_output_schema() -> None:
         "ambiguous",
     ]
     route_description = prompt["output_schema"]["properties"]["route"]["description"]
-    target_description = prompt["output_schema"]["properties"]["target_task_id"]["description"]
+    target_description = prompt["output_schema"]["properties"]["target_task_id"][
+        "description"
+    ]
     assert "attach_task appends to one active candidate" in route_description
     assert "Must be null for new_task" in target_description
     assert "schema" not in prompt
@@ -93,7 +101,11 @@ def test_router_prompt_embeds_pydantic_output_schema() -> None:
     "payload,error_match",
     [
         (
-            {"route": "attach_task", "target_task_id": None, "reason": "missing target"},
+            {
+                "route": "attach_task",
+                "target_task_id": None,
+                "reason": "missing target",
+            },
             "attach_task requires a non-empty target_task_id",
         ),
         (
@@ -101,19 +113,35 @@ def test_router_prompt_embeds_pydantic_output_schema() -> None:
             "attach_task requires a non-empty target_task_id",
         ),
         (
-            {"route": "reopen_task", "target_task_id": None, "reason": "missing target"},
+            {
+                "route": "reopen_task",
+                "target_task_id": None,
+                "reason": "missing target",
+            },
             "reopen_task requires a non-empty target_task_id",
         ),
         (
-            {"route": "new_task", "target_task_id": "t_abc", "reason": "unexpected target"},
+            {
+                "route": "new_task",
+                "target_task_id": "t_abc",
+                "reason": "unexpected target",
+            },
             "new_task requires target_task_id to be null",
         ),
         (
-            {"route": "ignore", "target_task_id": "t_abc", "reason": "unexpected target"},
+            {
+                "route": "ignore",
+                "target_task_id": "t_abc",
+                "reason": "unexpected target",
+            },
             "ignore requires target_task_id to be null",
         ),
         (
-            {"route": "ambiguous", "target_task_id": "t_abc", "reason": "unexpected target"},
+            {
+                "route": "ambiguous",
+                "target_task_id": "t_abc",
+                "reason": "unexpected target",
+            },
             "ambiguous requires target_task_id to be null",
         ),
     ],
@@ -166,7 +194,13 @@ def test_initial_task_session_prompt_embeds_pydantic_output_schema() -> None:
         "backend": "sqlite",
         "mode": "live_read_only",
         "read_only_uri": "file:///tmp/agent.sqlite3?mode=ro",
-        "allowed_tables": ["tasks", "task_messages", "messages", "resources", "routing_audits"],
+        "allowed_tables": [
+            "tasks",
+            "task_messages",
+            "messages",
+            "resources",
+            "routing_audits",
+        ],
         "query_scope": {
             "current_message_id": "om_1",
             "task": {"id": 1, "short_id": "t_abc"},
@@ -198,7 +232,10 @@ def test_initial_task_session_prompt_embeds_pydantic_output_schema() -> None:
     assert "watch_extend_minutes" not in prompt["output_schema"]["properties"]
     assert "requires_resources" not in prompt["output_schema"]["properties"]
     assert "context_access" in prompt["instruction"]
-    assert "Only messages in the messages block are real Feishu messages" in prompt["instruction"]
+    assert (
+        "Only messages in the messages block are real Feishu messages"
+        in prompt["instruction"]
+    )
     assert "Previous proposed_reply outputs are not sent" in prompt["instruction"]
     assert "schema" not in prompt
     assert prompt["metadata"]["reply_target_message_ids"] == ["om_1", "om_root"]
@@ -207,7 +244,9 @@ def test_initial_task_session_prompt_embeds_pydantic_output_schema() -> None:
     assert prompt["context_access"] == context_access
 
 
-def test_followup_task_session_prompt_omits_task_label_and_rejects_extra_label() -> None:
+def test_followup_task_session_prompt_omits_task_label_and_rejects_extra_label() -> (
+    None
+):
     task = TaskRecord(
         id=1,
         short_id="t_abc",

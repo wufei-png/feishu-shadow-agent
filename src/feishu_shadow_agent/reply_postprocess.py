@@ -7,8 +7,12 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from .agent_backend import AgentBackend, AgentRunResult
-from .agent_invocation import AgentAttemptOutcome, AgentInvoker, agent_result_error, truncate_error
+from .agent_backend import AgentBackend
+from .agent_invocation import (
+    AgentInvoker,
+    agent_result_error,
+    truncate_error,
+)
 from .config import AppConfig
 from .paths import resolve_relative_path
 from .prompt import ReplyPostprocessOutput, build_reply_postprocess_prompt
@@ -50,12 +54,18 @@ class ReplyPostprocessor:
     ) -> ReplyPostprocessResult:
         cfg = self.config.reply_postprocess
         if not cfg.enabled:
-            return ReplyPostprocessResult(applied=False, reply=original_reply, metadata={"applied": False})
+            return ReplyPostprocessResult(
+                applied=False, reply=original_reply, metadata={"applied": False}
+            )
         if not original_reply.strip():
             return ReplyPostprocessResult(
                 applied=False,
                 reply=original_reply,
-                metadata={"applied": False, "skipped": True, "skip_reason": "empty_original_reply"},
+                metadata={
+                    "applied": False,
+                    "skipped": True,
+                    "skip_reason": "empty_original_reply",
+                },
             )
         guidance = self._guidance_paths()
         if guidance.error is not None:
@@ -69,8 +79,12 @@ class ReplyPostprocessor:
             )
         prompt = build_reply_postprocess_prompt(
             original_reply=original_reply,
-            owner_style_profile_path=None if guidance.owner_style_resolved_path is None else str(guidance.owner_style_resolved_path),
-            humanizer_skill_path=None if guidance.humanizer_resolved_path is None else str(guidance.humanizer_resolved_path),
+            owner_style_profile_path=None
+            if guidance.owner_style_resolved_path is None
+            else str(guidance.owner_style_resolved_path),
+            humanizer_skill_path=None
+            if guidance.humanizer_resolved_path is None
+            else str(guidance.humanizer_resolved_path),
         )
         outcome = self.agent_invoker.call_with_retries(
             lambda: self.agent_backend.reply_postprocess(prompt, cwd=cwd),
@@ -87,7 +101,9 @@ class ReplyPostprocessor:
             "input_message_ids": input_message_ids,
         }
         if result is None or not result.ok or not isinstance(result.json_data, dict):
-            failure = outcome.last_error or (None if result is None else agent_result_error(result))
+            failure = outcome.last_error or (
+                None if result is None else agent_result_error(result)
+            )
             return self._failed(
                 original_reply,
                 failure_reason="agent_failed",
@@ -153,9 +169,11 @@ class ReplyPostprocessor:
             metadata["owner_style_profile_path"] = guidance.owner_style_configured_path
         if guidance.humanizer_configured_path is not None:
             metadata["humanizer_skill_path"] = guidance.humanizer_configured_path
-        return ReplyPostprocessResult(applied=True, reply=final_reply, metadata=metadata, audit=audit)
+        return ReplyPostprocessResult(
+            applied=True, reply=final_reply, metadata=metadata, audit=audit
+        )
 
-    def _guidance_paths(self) -> "_GuidancePaths":
+    def _guidance_paths(self) -> _GuidancePaths:
         cfg = self.config.reply_postprocess
         enabled: list[str] = []
         owner_configured: str | None = None
@@ -178,7 +196,9 @@ class ReplyPostprocessor:
         if cfg.humanizer_zh.enabled:
             enabled.append("humanizer_zh")
             humanizer_configured = cfg.humanizer_zh.skill_path
-            humanizer_resolved = resolve_relative_path(humanizer_configured, self.base_dir)
+            humanizer_resolved = resolve_relative_path(
+                humanizer_configured, self.base_dir
+            )
             if not _readable_file(humanizer_resolved):
                 return _GuidancePaths(
                     enabled_guidance=enabled,
@@ -246,4 +266,6 @@ def _readable_file(path: Path) -> bool:
 
 
 def _length_guard_failed(*, original_reply: str, final_reply: str) -> bool:
-    return (len(final_reply) > len(original_reply) * 3 and len(final_reply) > 300) or len(final_reply) > 2000
+    return (
+        len(final_reply) > len(original_reply) * 3 and len(final_reply) > 300
+    ) or len(final_reply) > 2000

@@ -30,8 +30,15 @@ def test_jsonl_logger_level_helpers(tmp_path: Path) -> None:
     logger.warning("warning_event")
     logger.error("error_event")
 
-    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    assert [record["level"] for record in records] == ["debug", "info", "warning", "error"]
+    records = [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [record["level"] for record in records] == [
+        "debug",
+        "info",
+        "warning",
+        "error",
+    ]
     assert [record["event"] for record in records] == [
         "debug_event",
         "info_event",
@@ -49,7 +56,9 @@ def test_jsonl_logger_filters_by_level(tmp_path: Path) -> None:
     logger.warning("warning_event")
     logger.error("error_event")
 
-    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    records = [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+    ]
     assert [record["event"] for record in records] == ["warning_event", "error_event"]
 
 

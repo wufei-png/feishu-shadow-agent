@@ -6,16 +6,24 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Sequence
 
 import yaml
 
 from .agent_invocation import AgentInvoker
 from .config import ConfigError, ConfigService, LoadedConfig
-from .console_api import console_static_ready, create_console_app, default_console_static_dir
-from .console_security import console_access_url, generate_console_token, validate_console_bind_host
+from .console_api import (
+    console_static_ready,
+    create_console_app,
+    default_console_static_dir,
+)
+from .console_security import (
+    console_access_url,
+    generate_console_token,
+    validate_console_bind_host,
+)
 from .daemon import Daemon
 from .dispatcher import Dispatcher
 from .feishu.lark_cli import LarkCliClient
@@ -24,7 +32,11 @@ from .hermes import HermesCliClient
 from .jsonl import JSONLLogger
 from .operator_commands import CommandResult, OperatorCommandService, command_exit_code
 from .operator_query import OperatorQueryService
-from .paths import resolve_agent_skill_path, resolve_agent_working_dir, resolve_relative_path
+from .paths import (
+    resolve_agent_skill_path,
+    resolve_agent_working_dir,
+    resolve_relative_path,
+)
 from .processing import TaskProcessingService
 from .reply_style import ReplyStyleRefresher
 from .retention import RetentionService
@@ -51,10 +63,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = subparsers.add_parser("doctor", help="run health checks")
     _add_config_arg(doctor)
-    doctor.add_argument("--send-test", action="store_true", help="send a real test DM to owner")
+    doctor.add_argument(
+        "--send-test", action="store_true", help="send a real test DM to owner"
+    )
     doctor.set_defaults(handler=_handle_doctor)
 
-    daemon = subparsers.add_parser("daemon", help="run the daemon", description="run the daemon")
+    daemon = subparsers.add_parser(
+        "daemon", help="run the daemon", description="run the daemon"
+    )
     _add_config_arg(daemon)
     daemon.add_argument(
         "--dry-run",
@@ -78,11 +94,17 @@ def build_parser() -> argparse.ArgumentParser:
     config_subparsers = config.add_subparsers(dest="config_command")
     config_show = config_subparsers.add_parser("show", help="print config")
     _add_config_arg(config_show)
-    config_show.add_argument("--redacted", action="store_true", help="redact secret-like fields")
+    config_show.add_argument(
+        "--redacted", action="store_true", help="redact secret-like fields"
+    )
     config_show.set_defaults(handler=_handle_config_show)
-    config_schema = config_subparsers.add_parser("schema", help="print config JSON schema")
+    config_schema = config_subparsers.add_parser(
+        "schema", help="print config JSON schema"
+    )
     config_schema.set_defaults(handler=_handle_config_schema)
-    config_validate = config_subparsers.add_parser("validate", help="validate config without runtime health checks")
+    config_validate = config_subparsers.add_parser(
+        "validate", help="validate config without runtime health checks"
+    )
     _add_config_arg(config_validate)
     config_validate.set_defaults(handler=_handle_config_validate)
 
@@ -90,7 +112,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_config_arg(status)
     status.set_defaults(handler=_handle_status)
 
-    replay = subparsers.add_parser("replay", help="explain local state and preview dispatch")
+    replay = subparsers.add_parser(
+        "replay", help="explain local state and preview dispatch"
+    )
     _add_config_arg(replay)
     replay.add_argument("--message-id", required=True)
     replay.add_argument("--dry-run", action="store_true", required=True)
@@ -98,26 +122,42 @@ def build_parser() -> argparse.ArgumentParser:
 
     retention = subparsers.add_parser("retention", help="retention helpers")
     retention_subparsers = retention.add_subparsers(dest="retention_command")
-    retention_prune = retention_subparsers.add_parser("prune", help="prune expired local data")
+    retention_prune = retention_subparsers.add_parser(
+        "prune", help="prune expired local data"
+    )
     _add_config_arg(retention_prune)
-    retention_prune.add_argument("--dry-run", action="store_true", help="preview retention cleanup")
+    retention_prune.add_argument(
+        "--dry-run", action="store_true", help="preview retention cleanup"
+    )
     retention_prune.set_defaults(handler=_handle_retention_prune)
 
-    reply_style = subparsers.add_parser("reply-style", help="reply style profile helpers")
+    reply_style = subparsers.add_parser(
+        "reply-style", help="reply style profile helpers"
+    )
     reply_style_subparsers = reply_style.add_subparsers(dest="reply_style_command")
-    reply_style_refresh = reply_style_subparsers.add_parser("refresh", help="refresh owner reply style profile")
+    reply_style_refresh = reply_style_subparsers.add_parser(
+        "refresh", help="refresh owner reply style profile"
+    )
     _add_config_arg(reply_style_refresh)
-    reply_style_refresh.add_argument("--dry-run", action="store_true", help="pull and filter samples without calling Hermes or writing")
+    reply_style_refresh.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="pull and filter samples without calling Hermes or writing",
+    )
     reply_style_refresh.set_defaults(handler=_handle_reply_style_refresh)
 
-    maintenance = subparsers.add_parser("maintenance", help="explicit maintenance helpers")
+    maintenance = subparsers.add_parser(
+        "maintenance", help="explicit maintenance helpers"
+    )
     maintenance_subparsers = maintenance.add_subparsers(dest="maintenance_command")
     maintenance_expire_approvals = maintenance_subparsers.add_parser(
         "expire-approvals",
         help="expire overdue pending approvals",
     )
     _add_config_arg(maintenance_expire_approvals)
-    maintenance_expire_approvals.set_defaults(handler=_handle_maintenance_expire_approvals)
+    maintenance_expire_approvals.set_defaults(
+        handler=_handle_maintenance_expire_approvals
+    )
 
     policy = subparsers.add_parser("policy", help="product policy helpers")
     policy_subparsers = policy.add_subparsers(dest="policy_command")
@@ -138,12 +178,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="update Product Policy Store global policy fields",
     )
     _add_config_arg(policy_update_global)
-    policy_update_global.add_argument("--p2p-auto-reply", type=_parse_bool_arg, metavar="true|false")
-    policy_update_global.add_argument("--unknown-group-auto-reply", type=_parse_bool_arg, metavar="true|false")
-    policy_update_global.add_argument("--bot-joined", type=_parse_bool_arg, metavar="true|false")
-    policy_update_global.add_argument("--reply-identity", choices=["bot_preferred", "bot", "user"])
-    policy_update_global.add_argument("--allow-user-fallback", type=_parse_bool_arg, metavar="true|false")
-    policy_update_global.add_argument("--resource-download", type=_parse_bool_arg, metavar="true|false")
+    policy_update_global.add_argument(
+        "--p2p-auto-reply", type=_parse_bool_arg, metavar="true|false"
+    )
+    policy_update_global.add_argument(
+        "--unknown-group-auto-reply", type=_parse_bool_arg, metavar="true|false"
+    )
+    policy_update_global.add_argument(
+        "--bot-joined", type=_parse_bool_arg, metavar="true|false"
+    )
+    policy_update_global.add_argument(
+        "--reply-identity", choices=["bot_preferred", "bot", "user"]
+    )
+    policy_update_global.add_argument(
+        "--allow-user-fallback", type=_parse_bool_arg, metavar="true|false"
+    )
+    policy_update_global.add_argument(
+        "--resource-download", type=_parse_bool_arg, metavar="true|false"
+    )
     policy_update_global.add_argument("--reason", help="optional policy audit reason")
     policy_update_global.set_defaults(handler=_handle_policy_update_global)
     policy_update_chat = policy_subparsers.add_parser(
@@ -153,30 +205,48 @@ def build_parser() -> argparse.ArgumentParser:
     _add_config_arg(policy_update_chat)
     policy_update_chat.add_argument("--chat-id", required=True)
     policy_update_chat.add_argument("--name")
-    policy_update_chat.add_argument("--auto-reply", type=_parse_bool_arg, metavar="true|false")
-    policy_update_chat.add_argument("--bot-joined", type=_parse_bool_arg, metavar="true|false")
-    policy_update_chat.add_argument("--reply-identity", choices=["bot_preferred", "bot", "user"])
-    policy_update_chat.add_argument("--allow-user-fallback", type=_parse_bool_arg, metavar="true|false")
-    policy_update_chat.add_argument("--resource-download", type=_parse_bool_arg, metavar="true|false")
+    policy_update_chat.add_argument(
+        "--auto-reply", type=_parse_bool_arg, metavar="true|false"
+    )
+    policy_update_chat.add_argument(
+        "--bot-joined", type=_parse_bool_arg, metavar="true|false"
+    )
+    policy_update_chat.add_argument(
+        "--reply-identity", choices=["bot_preferred", "bot", "user"]
+    )
+    policy_update_chat.add_argument(
+        "--allow-user-fallback", type=_parse_bool_arg, metavar="true|false"
+    )
+    policy_update_chat.add_argument(
+        "--resource-download", type=_parse_bool_arg, metavar="true|false"
+    )
     policy_update_chat.add_argument("--reason", help="optional policy audit reason")
     policy_update_chat.set_defaults(handler=_handle_policy_update_chat)
 
     dispatch = subparsers.add_parser("dispatch", help="dispatch recovery helpers")
     dispatch_subparsers = dispatch.add_subparsers(dest="dispatch_command")
-    dispatch_inspect = dispatch_subparsers.add_parser("inspect", help="inspect an action and dispatch attempts")
+    dispatch_inspect = dispatch_subparsers.add_parser(
+        "inspect", help="inspect an action and dispatch attempts"
+    )
     _add_config_arg(dispatch_inspect)
     dispatch_inspect.add_argument("--action-id", type=int, required=True)
     dispatch_inspect.set_defaults(handler=_handle_dispatch_inspect)
-    dispatch_mark_sent = dispatch_subparsers.add_parser("mark-sent", help="verify readback and mark an action sent")
+    dispatch_mark_sent = dispatch_subparsers.add_parser(
+        "mark-sent", help="verify readback and mark an action sent"
+    )
     _add_config_arg(dispatch_mark_sent)
     dispatch_mark_sent.add_argument("--action-id", type=int, required=True)
     dispatch_mark_sent.add_argument("--sent-message-id", required=True)
     dispatch_mark_sent.set_defaults(handler=_handle_dispatch_mark_sent)
-    dispatch_retry = dispatch_subparsers.add_parser("retry", help="requeue a failed dispatch action")
+    dispatch_retry = dispatch_subparsers.add_parser(
+        "retry", help="requeue a failed dispatch action"
+    )
     _add_config_arg(dispatch_retry)
     dispatch_retry.add_argument("--action-id", type=int, required=True)
     dispatch_retry.set_defaults(handler=_handle_dispatch_retry)
-    dispatch_cancel = dispatch_subparsers.add_parser("cancel", help="cancel a dispatch action")
+    dispatch_cancel = dispatch_subparsers.add_parser(
+        "cancel", help="cancel a dispatch action"
+    )
     _add_config_arg(dispatch_cancel)
     dispatch_cancel.add_argument("--action-id", type=int, required=True)
     dispatch_cancel.set_defaults(handler=_handle_dispatch_cancel)
@@ -193,14 +263,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     send = subparsers.add_parser("send", help="send a final reply for a task")
     _add_config_arg(send)
-    send.add_argument("--stdin", action="store_true", dest="read_stdin", help="read final reply from stdin")
+    send.add_argument(
+        "--stdin",
+        action="store_true",
+        dest="read_stdin",
+        help="read final reply from stdin",
+    )
     send.add_argument("task_id")
     send.add_argument("text", nargs=argparse.REMAINDER)
     send.set_defaults(handler=_handle_send)
 
     task = subparsers.add_parser("task", help="task lifecycle helpers")
     task_subparsers = task.add_subparsers(dest="task_command")
-    task_close = task_subparsers.add_parser("close", help="close a task without deleting history")
+    task_close = task_subparsers.add_parser(
+        "close", help="close a task without deleting history"
+    )
     _add_config_arg(task_close)
     task_close.add_argument("--task-id", required=True)
     task_close.add_argument("--reason", help="optional operator audit reason")
@@ -221,13 +298,17 @@ def _add_config_arg(parser: argparse.ArgumentParser) -> None:
 def _handle_doctor(args: argparse.Namespace) -> int:
     loaded, store, logger = _load_runtime(args.config)
     run_id = new_run_id("doctor")
-    store.record_run_start(run_id=run_id, dry_run=not args.send_test, **_git_info(Path.cwd()))
+    store.record_run_start(
+        run_id=run_id, dry_run=not args.send_test, **_git_info(Path.cwd())
+    )
     client = LarkCliClient(
         path=loaded.config.lark_cli.path,
         timeout_seconds=loaded.config.lark_cli.timeout_seconds,
         cwd=loaded.base_dir,
     )
-    suite = HealthSuite(loaded_config=loaded, store=store, feishu_client=client, run_id=run_id)
+    suite = HealthSuite(
+        loaded_config=loaded, store=store, feishu_client=client, run_id=run_id
+    )
     results = suite.run(send_test=args.send_test)
     summary = summarize_results(results)
     status = "health_failed" if has_critical_failure(results) else "ok"
@@ -247,9 +328,13 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         timeout_seconds=loaded.config.lark_cli.timeout_seconds,
         cwd=loaded.base_dir,
     )
-    suite = HealthSuite(loaded_config=loaded, store=store, feishu_client=client, run_id=run_id)
+    suite = HealthSuite(
+        loaded_config=loaded, store=store, feishu_client=client, run_id=run_id
+    )
     backend_config = loaded.config.agent_backend
-    agent_working_dir = resolve_agent_working_dir(backend_config.working_dir, loaded.base_dir)
+    agent_working_dir = resolve_agent_working_dir(
+        backend_config.working_dir, loaded.base_dir
+    )
     session_skills = [
         resolve_agent_skill_path(skill, loaded.base_dir)
         for skill in backend_config.explicit_context.skills
@@ -304,7 +389,9 @@ def _handle_console(args: argparse.Namespace) -> int:
         )
         return 2
     loaded = ConfigService().load(args.config)
-    sqlite_path = resolve_relative_path(loaded.config.storage.sqlite_path, loaded.base_dir)
+    sqlite_path = resolve_relative_path(
+        loaded.config.storage.sqlite_path, loaded.base_dir
+    )
     store = SQLiteStore(sqlite_path)
     store.migrate()
     token = generate_console_token()
@@ -316,7 +403,10 @@ def _handle_console(args: argparse.Namespace) -> int:
         port=args.port,
         static_dir=static_dir,
     )
-    print(f"Operator Console: {console_access_url(host=host, port=args.port, token=token)}", flush=True)
+    print(
+        f"Operator Console: {console_access_url(host=host, port=args.port, token=token)}",
+        flush=True,
+    )
     _run_console_server(app, host=host, port=args.port)
     return 0
 
@@ -324,7 +414,11 @@ def _handle_console(args: argparse.Namespace) -> int:
 def _handle_config_show(args: argparse.Namespace) -> int:
     service = ConfigService()
     loaded = service.load(args.config)
-    data = service.redacted_dict(loaded.config) if args.redacted else loaded.config.model_dump(mode="json")
+    data = (
+        service.redacted_dict(loaded.config)
+        if args.redacted
+        else loaded.config.model_dump(mode="json")
+    )
     print(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), end="")
     return 0
 
@@ -343,21 +437,29 @@ def _handle_config_validate(args: argparse.Namespace) -> int:
 
 def _handle_status(args: argparse.Namespace) -> int:
     loaded = ConfigService().load(args.config)
-    sqlite_path = resolve_relative_path(loaded.config.storage.sqlite_path, loaded.base_dir)
+    sqlite_path = resolve_relative_path(
+        loaded.config.storage.sqlite_path, loaded.base_dir
+    )
     store = SQLiteStore(sqlite_path)
     if sqlite_path.exists():
         store.migrate()
-    snapshot = OperatorQueryService(store, policy_import_source=loaded.config).dashboard_snapshot()
+    snapshot = OperatorQueryService(
+        store, policy_import_source=loaded.config
+    ).dashboard_snapshot()
     print(yaml.safe_dump(snapshot, allow_unicode=True, sort_keys=False), end="")
     return 0
 
 
 def _handle_approve(args: argparse.Namespace) -> int:
-    return _handle_local_approval_command(args.config, verb="approve", target_id=args.approval_id)
+    return _handle_local_approval_command(
+        args.config, verb="approve", target_id=args.approval_id
+    )
 
 
 def _handle_reject(args: argparse.Namespace) -> int:
-    return _handle_local_approval_command(args.config, verb="reject", target_id=args.approval_id)
+    return _handle_local_approval_command(
+        args.config, verb="reject", target_id=args.approval_id
+    )
 
 
 def _handle_send(args: argparse.Namespace) -> int:
@@ -404,7 +506,9 @@ def _handle_local_approval_command(
     loaded, store, _ = _load_runtime(config_path)
     service = OperatorCommandService(
         store,
-        keep_watching_until_factory=lambda: _watch_until_from_now(loaded.config.lifecycle.watch_minutes),
+        keep_watching_until_factory=lambda: _watch_until_from_now(
+            loaded.config.lifecycle.watch_minutes
+        ),
     )
     if verb == "approve":
         result = service.approve(target_id, actor="local_cli")
@@ -436,7 +540,8 @@ def _handle_replay(args: argparse.Namespace) -> int:
         related_pending_action_ids = [
             action["id"]
             for action in summary["actions"]
-            if action.get("status") == "pending" and action.get("kind") in {"send_reply", "owner_notification"}
+            if action.get("status") == "pending"
+            and action.get("kind") in {"send_reply", "owner_notification"}
         ]
         dispatcher = Dispatcher(
             store=temp_store,
@@ -470,7 +575,9 @@ def _handle_retention_prune(args: argparse.Namespace) -> int:
         base_dir=loaded.base_dir,
         logger=logger,
     ).prune(run_id=new_run_id("retention"), dry_run=args.dry_run)
-    print(yaml.safe_dump(summary.as_dict(), allow_unicode=True, sort_keys=False), end="")
+    print(
+        yaml.safe_dump(summary.as_dict(), allow_unicode=True, sort_keys=False), end=""
+    )
     return 0
 
 
@@ -542,7 +649,9 @@ def _handle_policy_update_chat(args: argparse.Namespace) -> int:
 
 def _handle_dispatch_inspect(args: argparse.Namespace) -> int:
     _, store, _ = _load_runtime(args.config)
-    result = OperatorCommandService(store).inspect_dispatch_action(args.action_id, actor="local_cli")
+    result = OperatorCommandService(store).inspect_dispatch_action(
+        args.action_id, actor="local_cli"
+    )
     return _emit_command_result(result)
 
 
@@ -559,7 +668,9 @@ def _handle_dispatch_mark_sent(args: argparse.Namespace) -> int:
         config=loaded.config,
         logger=logger,
     )
-    result = OperatorCommandService(store, readback_marker=dispatcher).mark_dispatch_sent(
+    result = OperatorCommandService(
+        store, readback_marker=dispatcher
+    ).mark_dispatch_sent(
         args.action_id,
         sent_message_id=args.sent_message_id,
         actor="local_cli",
@@ -569,13 +680,17 @@ def _handle_dispatch_mark_sent(args: argparse.Namespace) -> int:
 
 def _handle_dispatch_retry(args: argparse.Namespace) -> int:
     _, store, _ = _load_runtime(args.config)
-    result = OperatorCommandService(store).retry_dispatch_action(args.action_id, actor="local_cli")
+    result = OperatorCommandService(store).retry_dispatch_action(
+        args.action_id, actor="local_cli"
+    )
     return _emit_command_result(result)
 
 
 def _handle_dispatch_cancel(args: argparse.Namespace) -> int:
     _, store, _ = _load_runtime(args.config)
-    result = OperatorCommandService(store).cancel_dispatch_action(args.action_id, actor="local_cli")
+    result = OperatorCommandService(store).cancel_dispatch_action(
+        args.action_id, actor="local_cli"
+    )
     return _emit_command_result(result)
 
 
@@ -615,10 +730,16 @@ def _chat_policy_changes_from_args(args: argparse.Namespace) -> dict[str, object
     }
 
 
-def _load_runtime(config_path: str | None) -> tuple[LoadedConfig, SQLiteStore, JSONLLogger]:
+def _load_runtime(
+    config_path: str | None,
+) -> tuple[LoadedConfig, SQLiteStore, JSONLLogger]:
     loaded = ConfigService().load(config_path)
-    sqlite_path = resolve_relative_path(loaded.config.storage.sqlite_path, loaded.base_dir)
-    jsonl_path = resolve_relative_path(loaded.config.logging.jsonl_path, loaded.base_dir)
+    sqlite_path = resolve_relative_path(
+        loaded.config.storage.sqlite_path, loaded.base_dir
+    )
+    jsonl_path = resolve_relative_path(
+        loaded.config.logging.jsonl_path, loaded.base_dir
+    )
     text_path = (
         None
         if loaded.config.logging.text_path is None
@@ -660,7 +781,11 @@ def _git_output(argv: list[str], cwd: Path) -> str | None:
 
 
 def _watch_until_from_now(minutes: int) -> str:
-    return (_parse_dt(utc_now_iso()) + timedelta(minutes=minutes)).astimezone().isoformat(timespec="seconds")
+    return (
+        (_parse_dt(utc_now_iso()) + timedelta(minutes=minutes))
+        .astimezone()
+        .isoformat(timespec="seconds")
+    )
 
 
 def _parse_dt(value: str) -> datetime:

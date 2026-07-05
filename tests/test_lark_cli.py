@@ -37,7 +37,9 @@ def test_build_messages_search_for_group_at_me() -> None:
 def test_build_chat_messages_list_uses_order_flag() -> None:
     client = LarkCliClient(path="lark-cli")
 
-    argv = client.build_chat_messages_list(as_identity="user", chat_id="oc_1", order="asc")
+    argv = client.build_chat_messages_list(
+        as_identity="user", chat_id="oc_1", order="asc"
+    )
 
     assert "--order" in argv
     assert "asc" in argv
@@ -103,7 +105,9 @@ def test_build_messages_mget_uses_comma_separated_ids_and_limit() -> None:
         "--no-reactions",
     ]
     with pytest.raises(ValueError, match="at most 50"):
-        client.build_messages_mget(as_identity="user", message_ids=[f"om_{i}" for i in range(51)])
+        client.build_messages_mget(
+            as_identity="user", message_ids=[f"om_{i}" for i in range(51)]
+        )
 
 
 def test_run_json_strips_lark_cli_dry_run_banner() -> None:
@@ -116,7 +120,9 @@ def test_run_json_strips_lark_cli_dry_run_banner() -> None:
 
     client = LarkCliClient(path="lark-cli", runner=runner)
 
-    result = client.run_json(["lark-cli", "im", "+messages-reply", "--dry-run", "--json"])
+    result = client.run_json(
+        ["lark-cli", "im", "+messages-reply", "--dry-run", "--json"]
+    )
 
     assert result.ok
     assert result.json_data == {"api": [{"method": "POST"}]}
@@ -164,7 +170,9 @@ def test_search_messages_returns_message_page() -> None:
         return LarkCliResult(
             argv=argv,
             exit_code=0,
-            json_data={"data": {"items": [{"message_id": "om_1"}], "page_token": "next"}},
+            json_data={
+                "data": {"items": [{"message_id": "om_1"}], "page_token": "next"}
+            },
         )
 
     client = LarkCliClient(path="lark-cli", runner=runner)
@@ -181,12 +189,18 @@ def test_search_messages_returns_message_page() -> None:
     assert page.next_page_token == "next"
 
 
-def test_search_owner_messages_uses_sender_time_filters_page_all_and_no_reactions() -> None:
+def test_search_owner_messages_uses_sender_time_filters_page_all_and_no_reactions() -> (
+    None
+):
     seen: list[list[str]] = []
 
     def runner(argv: list[str], timeout: int) -> LarkCliResult:
         seen.append(argv)
-        return LarkCliResult(argv=argv, exit_code=0, json_data={"data": {"items": [{"message_id": "om_1"}]}})
+        return LarkCliResult(
+            argv=argv,
+            exit_code=0,
+            json_data={"data": {"items": [{"message_id": "om_1"}]}},
+        )
 
     client = LarkCliClient(path="lark-cli", runner=runner)
 

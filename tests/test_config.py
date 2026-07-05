@@ -8,7 +8,6 @@ import pytest
 
 from feishu_shadow_agent.config import ConfigError, ConfigService
 
-
 FIXTURE = Path(__file__).parent / "fixtures" / "minimal.config.yaml"
 SCHEMA_FILE = Path(__file__).resolve().parents[1] / "schemas" / "config.schema.json"
 
@@ -118,7 +117,9 @@ debug:
     assert loaded.config.debug.save_full_agent_io is True
 
 
-def test_legacy_top_level_hermes_config_merges_with_partial_agent_backend(tmp_path: Path) -> None:
+def test_legacy_top_level_hermes_config_merges_with_partial_agent_backend(
+    tmp_path: Path,
+) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
@@ -158,7 +159,9 @@ agent_backend:
         ConfigService().load(config_path)
 
 
-def test_ambiguous_legacy_and_new_debug_agent_io_config_is_rejected(tmp_path: Path) -> None:
+def test_ambiguous_legacy_and_new_debug_agent_io_config_is_rejected(
+    tmp_path: Path,
+) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
@@ -208,7 +211,9 @@ reply_policy:
         ConfigService().load(config_path)
 
 
-def test_loaded_config_reports_reply_policy_defaults_for_import_source(tmp_path: Path) -> None:
+def test_loaded_config_reports_reply_policy_defaults_for_import_source(
+    tmp_path: Path,
+) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
@@ -286,11 +291,15 @@ reply_postprocess:
         encoding="utf-8",
     )
 
-    with pytest.raises(ConfigError, match="owner_style.enabled or humanizer_zh.enabled"):
+    with pytest.raises(
+        ConfigError, match="owner_style.enabled or humanizer_zh.enabled"
+    ):
         ConfigService().load(config_path)
 
 
-def test_reply_postprocess_model_provider_can_inherit_main_hermes_settings(tmp_path: Path) -> None:
+def test_reply_postprocess_model_provider_can_inherit_main_hermes_settings(
+    tmp_path: Path,
+) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
@@ -319,7 +328,9 @@ reply_postprocess:
     assert loaded.config.agent_backend.hermes.provider == "main-provider"
 
 
-def test_redacted_config_does_not_leak_env_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_redacted_config_does_not_leak_env_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("HERMES_API_KEY", "super-secret-value")
     service = ConfigService()
     loaded = service.load(FIXTURE)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -17,7 +17,7 @@ from feishu_shadow_agent.retention import (
 )
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 
-NOW = datetime(2026, 6, 23, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 6, 23, 12, 0, tzinfo=UTC)
 OLD = "2026-05-01T00:00:00+00:00"
 RECENT = "2026-06-20T00:00:00+00:00"
 
@@ -26,33 +26,47 @@ def test_retention_prunes_raw_json_and_downloaded_resources(tmp_path: Path) -> N
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
     _insert_message(store, "om_old", OLD, raw={"message_id": "om_old", "raw": True})
-    _insert_message(store, "om_recent", RECENT, raw={"message_id": "om_recent", "raw": True})
+    _insert_message(
+        store, "om_recent", RECENT, raw={"message_id": "om_recent", "raw": True}
+    )
     free_path = _write_resource(tmp_path, "data/resources/om_free/image.bin")
     active_path = _write_resource(tmp_path, "data/resources/om_active/image.bin")
     pending_path = _write_resource(tmp_path, "data/resources/om_pending/image.bin")
     _insert_resource(store, "om_free", "img_free", "data/resources/om_free/image.bin")
-    _insert_resource(store, "om_missing", "img_missing", "data/resources/om_missing/image.bin")
-    _insert_resource(store, "om_active", "img_active", "data/resources/om_active/image.bin")
-    _insert_resource(store, "om_pending", "img_pending", "data/resources/om_pending/image.bin")
+    _insert_resource(
+        store, "om_missing", "img_missing", "data/resources/om_missing/image.bin"
+    )
+    _insert_resource(
+        store, "om_active", "img_active", "data/resources/om_active/image.bin"
+    )
+    _insert_resource(
+        store, "om_pending", "img_pending", "data/resources/om_pending/image.bin"
+    )
     _insert_resource(store, "om_unsafe", "img_unsafe", "../outside.bin")
     _insert_task(store, "t_active", "watching", "om_active")
     pending_task_id = _insert_task(store, "t_pending", "closed", "om_pending")
     _insert_pending_approval(store, pending_task_id)
 
-    summary = RetentionService(store=store, config=config, base_dir=tmp_path).prune(now=NOW)
+    summary = RetentionService(store=store, config=config, base_dir=tmp_path).prune(
+        now=NOW
+    )
 
     assert summary.raw_messages_pruned == 1
     assert summary.resources_candidates == 3
     assert summary.resources_deleted == 1
     assert summary.resources_expired == 2
-    assert [resource.reason for resource in summary.resources_skipped] == ["unsafe_path"]
+    assert [resource.reason for resource in summary.resources_skipped] == [
+        "unsafe_path"
+    ]
     assert not free_path.exists()
     assert active_path.exists()
     assert pending_path.exists()
     with store.connect() as conn:
         messages = {
             row["message_id"]: row["raw_json"]
-            for row in conn.execute("SELECT message_id, raw_json FROM messages ORDER BY message_id")
+            for row in conn.execute(
+                "SELECT message_id, raw_json FROM messages ORDER BY message_id"
+            )
         }
         resources = {
             row["message_id"]: dict(row)
@@ -106,8 +120,12 @@ logging:
     assert preview["resources_deleted"] == 0
     assert resource_path.exists()
     with store.connect() as conn:
-        message = conn.execute("SELECT raw_json FROM messages WHERE message_id = ?", ("om_old",)).fetchone()
-        resource = conn.execute("SELECT download_status FROM resources WHERE message_id = ?", ("om_cli",)).fetchone()
+        message = conn.execute(
+            "SELECT raw_json FROM messages WHERE message_id = ?", ("om_old",)
+        ).fetchone()
+        resource = conn.execute(
+            "SELECT download_status FROM resources WHERE message_id = ?", ("om_cli",)
+        ).fetchone()
     assert json.loads(message["raw_json"])["raw"] is True
     assert resource["download_status"] == "downloaded"
 
@@ -119,7 +137,9 @@ logging:
     assert applied["resources_deleted"] == 1
     assert not resource_path.exists()
     with store.connect() as conn:
-        message = conn.execute("SELECT raw_json FROM messages WHERE message_id = ?", ("om_old",)).fetchone()
+        message = conn.execute(
+            "SELECT raw_json FROM messages WHERE message_id = ?", ("om_old",)
+        ).fetchone()
         resource = conn.execute(
             "SELECT download_status, path FROM resources WHERE message_id = ?",
             ("om_cli",),
@@ -134,14 +154,21 @@ def test_daemon_retention_checkpoint_runs_at_most_daily(tmp_path: Path) -> None:
 
     assert daemon_retention_is_due(store, now=NOW) is True
 
-    summary = RetentionSummary(dry_run=False, raw_message_cutoff=OLD, resource_cutoff=OLD)
+    summary = RetentionSummary(
+        dry_run=False, raw_message_cutoff=OLD, resource_cutoff=OLD
+    )
     record_daemon_retention_checkpoint(store, summary=summary, now=NOW)
 
-    assert daemon_retention_is_due(store, now=NOW + timedelta(hours=23, minutes=59)) is False
+    assert (
+        daemon_retention_is_due(store, now=NOW + timedelta(hours=23, minutes=59))
+        is False
+    )
     assert daemon_retention_is_due(store, now=NOW + timedelta(hours=24)) is True
 
 
-def _insert_message(store: SQLiteStore, message_id: str, inserted_at: str, *, raw: dict[str, object]) -> None:
+def _insert_message(
+    store: SQLiteStore, message_id: str, inserted_at: str, *, raw: dict[str, object]
+) -> None:
     store.migrate()
     with store.connect() as conn:
         conn.execute(
@@ -162,7 +189,9 @@ def _insert_message(store: SQLiteStore, message_id: str, inserted_at: str, *, ra
         )
 
 
-def _insert_resource(store: SQLiteStore, message_id: str, file_key: str, path: str) -> None:
+def _insert_resource(
+    store: SQLiteStore, message_id: str, file_key: str, path: str
+) -> None:
     store.migrate()
     with store.connect() as conn:
         conn.execute(
@@ -185,7 +214,9 @@ def _insert_resource(store: SQLiteStore, message_id: str, file_key: str, path: s
         )
 
 
-def _insert_task(store: SQLiteStore, short_id: str, status: str, root_message_id: str) -> int:
+def _insert_task(
+    store: SQLiteStore, short_id: str, status: str, root_message_id: str
+) -> int:
     store.migrate()
     with store.connect() as conn:
         cursor = conn.execute(

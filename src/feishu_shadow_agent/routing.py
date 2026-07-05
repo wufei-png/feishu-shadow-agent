@@ -4,7 +4,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .store.sqlite_store import SQLiteStore
-from .types import LifecycleStatePolicy, NormalizedMessage, RouteDecision, TaskCandidate, TaskRecord
+from .types import (
+    LifecycleStatePolicy,
+    NormalizedMessage,
+    RouteDecision,
+    TaskCandidate,
+    TaskRecord,
+)
 
 TRIGGER_SOURCES = {"group_at_me", "p2p"}
 ROUTER_PLACEHOLDER_REASONS = {"router_placeholder", "closed_recall_router_placeholder"}
@@ -85,25 +91,40 @@ class MessageRouter:
                 # A duplicate route audit means ingestion was durable, but Hermes
                 # processing may have crashed before reaching a terminal marker.
                 # Reuse that route only when the downstream stage is still open.
-                existing = self.store.get_latest_non_duplicate_routing_decision(message.message_id)
+                existing = self.store.get_latest_non_duplicate_routing_decision(
+                    message.message_id
+                )
                 if existing is not None:
                     decision, task = existing
                     stage = _processing_stage_for_decision(decision)
-                    stage_final = stage is not None and self.store.message_processing_is_final(
-                        message.message_id,
-                        stage=stage,
+                    stage_final = (
+                        stage is not None
+                        and self.store.message_processing_is_final(
+                            message.message_id,
+                            stage=stage,
+                        )
                     )
-                    resource_final = stage == "task_session" and self.store.message_processing_is_final(
-                        message.message_id,
-                        stage="resource_download",
+                    resource_final = (
+                        stage == "task_session"
+                        and self.store.message_processing_is_final(
+                            message.message_id,
+                            stage="resource_download",
+                        )
                     )
                     if stage is not None and not stage_final and not resource_final:
                         if decision.route in TASK_SESSION_ROUTES and task is None:
-                            return self._audit(message, RouteDecision("ignore", reason="duplicate_message"))
+                            return self._audit(
+                                message,
+                                RouteDecision("ignore", reason="duplicate_message"),
+                            )
                         return RoutingResult(decision=decision, task=task)
-            return self._audit(message, RouteDecision("ignore", reason="duplicate_message"))
+            return self._audit(
+                message, RouteDecision("ignore", reason="duplicate_message")
+            )
 
-        sent_action_task = self.store.find_task_for_sent_action_message(message.message_id)
+        sent_action_task = self.store.find_task_for_sent_action_message(
+            message.message_id
+        )
         if sent_action_task is not None:
             # Readback messages prove a dispatch happened. Link them to the task
             # audit trail, then ignore them as fresh work to prevent reply loops.
@@ -121,10 +142,14 @@ class MessageRouter:
             return self._route_owner_message(message, now=now)
 
         if message.at_all:
-            return self._audit(message, RouteDecision("ignore", reason="at_all_suppressed"))
+            return self._audit(
+                message, RouteDecision("ignore", reason="at_all_suppressed")
+            )
 
         if source == "group_at_me" and not message.direct_mention:
-            return self._audit(message, RouteDecision("ignore", reason="non_direct_mention"))
+            return self._audit(
+                message, RouteDecision("ignore", reason="non_direct_mention")
+            )
 
         candidates = self.collector.collect(message, now=now)
         deterministic = self._deterministic_match(message, candidates)
@@ -163,11 +188,15 @@ class MessageRouter:
         if source == "active_watch" and not candidates:
             return self._audit(
                 message,
-                RouteDecision("ignore", reason="active_watch_no_candidate", candidates_count=0),
+                RouteDecision(
+                    "ignore", reason="active_watch_no_candidate", candidates_count=0
+                ),
             )
 
         if not candidates and source in TRIGGER_SOURCES:
-            return self._audit(message, RouteDecision("ignore", reason="missing_chat_id"))
+            return self._audit(
+                message, RouteDecision("ignore", reason="missing_chat_id")
+            )
 
         return self._audit(
             message,
@@ -179,7 +208,9 @@ class MessageRouter:
             ),
         )
 
-    def _route_owner_message(self, message: NormalizedMessage, *, now: str) -> RoutingResult:
+    def _route_owner_message(
+        self, message: NormalizedMessage, *, now: str
+    ) -> RoutingResult:
         task = self._owner_takeover_task(message, now=now)
         if task is None:
             return self._audit(
@@ -192,13 +223,17 @@ class MessageRouter:
         )
         return RoutingResult(decision=decision, task=task)
 
-    def _owner_takeover_task(self, message: NormalizedMessage, *, now: str) -> TaskRecord | None:
+    def _owner_takeover_task(
+        self, message: NormalizedMessage, *, now: str
+    ) -> TaskRecord | None:
         if not message.chat_id:
             return None
         if message.reply_to_message_id:
             tasks = [
                 self.store.get_task_by_id(task_id)
-                for task_id in self.store.find_task_ids_for_message(message.reply_to_message_id)
+                for task_id in self.store.find_task_ids_for_message(
+                    message.reply_to_message_id
+                )
             ]
             active = [task for task in tasks if _is_active(task, now=now)]
             if len(active) == 1:
@@ -220,10 +255,16 @@ class MessageRouter:
     ) -> TaskCandidate | None:
         if not message.chat_id:
             return None
-        reply_matches = [candidate for candidate in candidates if candidate.matched_by == "reply_to_msg"]
+        reply_matches = [
+            candidate
+            for candidate in candidates
+            if candidate.matched_by == "reply_to_msg"
+        ]
         if len(reply_matches) == 1:
             return reply_matches[0]
-        thread_matches = [candidate for candidate in candidates if candidate.matched_by == "thread"]
+        thread_matches = [
+            candidate for candidate in candidates if candidate.matched_by == "thread"
+        ]
         if len(thread_matches) == 1:
             return thread_matches[0]
         return None
@@ -234,7 +275,9 @@ class MessageRouter:
         decision: RouteDecision,
         task: TaskRecord | None = None,
     ) -> RoutingResult:
-        self.store.record_routing_audit(message_id=message.message_id, decision=decision)
+        self.store.record_routing_audit(
+            message_id=message.message_id, decision=decision
+        )
         return RoutingResult(decision=decision, task=task)
 
 

@@ -52,7 +52,9 @@ class TaskSessionRunner:
         self.agent_invoker = agent_invoker
         self.context_access = context_access
 
-    def build_plan(self, *, task: TaskRecord, message: NormalizedMessage) -> TaskSessionPromptPlan:
+    def build_plan(
+        self, *, task: TaskRecord, message: NormalizedMessage
+    ) -> TaskSessionPromptPlan:
         session_id = self.store.get_initialized_agent_session_id(task.id)
         task_message_ids = self.store.list_task_message_ids(task.id)
         prompt_message_ids = self.prompt_message_ids(
@@ -65,8 +67,12 @@ class TaskSessionRunner:
             session_id=session_id,
             task_message_ids=task_message_ids,
             prompt_message_ids=prompt_message_ids,
-            output_model=InitialTaskSessionOutput if session_id is None else FollowupTaskSessionOutput,
-            reply_target_message_ids=reply_target_message_ids(task=task, current_message_id=message.message_id),
+            output_model=InitialTaskSessionOutput
+            if session_id is None
+            else FollowupTaskSessionOutput,
+            reply_target_message_ids=reply_target_message_ids(
+                task=task, current_message_id=message.message_id
+            ),
         )
 
     def prompt_message_ids(
@@ -81,7 +87,11 @@ class TaskSessionRunner:
             # Resumed agent sessions already carry task history; sending only
             # the current message keeps follow-up prompts compact and bounded.
             return [message.message_id]
-        message_ids = task_message_ids if task_message_ids is not None else self.store.list_task_message_ids(task.id)
+        message_ids = (
+            task_message_ids
+            if task_message_ids is not None
+            else self.store.list_task_message_ids(task.id)
+        )
         return message_ids or [message.message_id]
 
     def run(
@@ -104,12 +114,17 @@ class TaskSessionRunner:
             context_metadata=task_session_context_metadata(
                 session_id=plan.session_id,
                 included_message_count=len(plan.prompt_message_ids),
-                task_message_count=len(plan.task_message_ids) or len(plan.prompt_message_ids),
+                task_message_count=len(plan.task_message_ids)
+                or len(plan.prompt_message_ids),
             ),
-            context_access=self.context_access.task_session_context_access(message=message, task=task),
+            context_access=self.context_access.task_session_context_access(
+                message=message, task=task
+            ),
         )
         outcome = self.agent_invoker.call_with_retries(
-            lambda: self.agent_backend.task_session(prompt, session_id=plan.session_id, cwd=cwd),
+            lambda: self.agent_backend.task_session(
+                prompt, session_id=plan.session_id, cwd=cwd
+            ),
             run_id=run_id,
             stage="task_session",
             message_id=message.message_id,
@@ -159,7 +174,9 @@ def task_session_context_metadata(
 ) -> dict[str, Any]:
     history_carried = session_id is not None
     return {
-        "message_context_mode": "incremental_current_message" if history_carried else "full_task_messages",
+        "message_context_mode": "incremental_current_message"
+        if history_carried
+        else "full_task_messages",
         "included_message_count": included_message_count,
         "task_message_count": task_message_count,
         "history_carried_by_agent_session": history_carried,

@@ -6,7 +6,12 @@ from typing import Any
 import pytest
 
 from feishu_shadow_agent.agent_backend import AgentRunResult
-from feishu_shadow_agent.config import AppConfig, ChatPolicyConfig, OwnerConfig, ReplyPolicyConfig
+from feishu_shadow_agent.config import (
+    AppConfig,
+    ChatPolicyConfig,
+    OwnerConfig,
+    ReplyPolicyConfig,
+)
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.policy import PolicyResolver, ProductPolicyMissingError
 from feishu_shadow_agent.processing import ComposedReply, TaskProcessingService
@@ -17,7 +22,9 @@ from feishu_shadow_agent.types import NormalizedMessage, ResourceRef, TaskRecord
 class FakeAgentBackend:
     provider = "hermes"
 
-    def task_router(self, prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
+    def task_router(
+        self, prompt: str, *, cwd: str | Path | None = None
+    ) -> AgentRunResult:
         raise AssertionError("not called")
 
     def task_session(
@@ -51,7 +58,13 @@ def _message(
 ) -> NormalizedMessage:
     resources = []
     if resource:
-        resources.append(ResourceRef(message_id=f"om_{chat_id}", file_key=f"img_{chat_id}", resource_type="image"))
+        resources.append(
+            ResourceRef(
+                message_id=f"om_{chat_id}",
+                file_key=f"img_{chat_id}",
+                resource_type="image",
+            )
+        )
     return NormalizedMessage(
         message_id=f"om_{chat_id}",
         chat_id=chat_id,
@@ -84,7 +97,9 @@ def _task(*, chat_id: str, chat_type: str = "group") -> TaskRecord:
     )
 
 
-def _reply_decision(resolver: PolicyResolver, *, chat_id: str, chat_type: str = "group") -> dict[str, Any]:
+def _reply_decision(
+    resolver: PolicyResolver, *, chat_id: str, chat_type: str = "group"
+) -> dict[str, Any]:
     decision = resolver.resolve_reply_policy(
         task=_task(chat_id=chat_id, chat_type=chat_type),
         message=_message(chat_id=chat_id, chat_type=chat_type),
@@ -113,10 +128,16 @@ def test_imported_product_policy_drives_effective_policy_cases(tmp_path: Path) -
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.import_product_policy_from_config(
         _config(
-            reply_policy=ReplyPolicyConfig(p2p_auto_reply=False, unknown_group_auto_reply=True),
+            reply_policy=ReplyPolicyConfig(
+                p2p_auto_reply=False, unknown_group_auto_reply=True
+            ),
             chats={
-                "oc_blocked": ChatPolicyConfig(auto_reply=False, bot_joined=True, resource_download=False),
-                "oc_bot": ChatPolicyConfig(auto_reply=True, bot_joined=True, reply_identity="bot_preferred"),
+                "oc_blocked": ChatPolicyConfig(
+                    auto_reply=False, bot_joined=True, resource_download=False
+                ),
+                "oc_bot": ChatPolicyConfig(
+                    auto_reply=True, bot_joined=True, reply_identity="bot_preferred"
+                ),
                 "oc_fallback": ChatPolicyConfig(
                     auto_reply=True,
                     bot_joined=False,
@@ -171,11 +192,19 @@ def test_imported_product_policy_drives_effective_policy_cases(tmp_path: Path) -
         "policy_source": "explicit_chat",
     }
 
-    assert resolver.can_download_resources(_message(chat_id="oc_blocked", resource=True)).reason == (
-        "disabled_by_chat_policy"
+    assert resolver.can_download_resources(
+        _message(chat_id="oc_blocked", resource=True)
+    ).reason == ("disabled_by_chat_policy")
+    assert (
+        resolver.can_download_resources(
+            _message(chat_id="oc_fallback", resource=True)
+        ).reason
+        == "bot_not_joined"
     )
-    assert resolver.can_download_resources(_message(chat_id="oc_fallback", resource=True)).reason == "bot_not_joined"
-    assert resolver.can_download_resources(_message(chat_id="oc_bot", resource=True)).allow is True
+    assert (
+        resolver.can_download_resources(_message(chat_id="oc_bot", resource=True)).allow
+        is True
+    )
 
 
 def test_runtime_services_ignore_yaml_policy_after_db_import(tmp_path: Path) -> None:

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from typing import Any
 
 from .config import AppConfig
 from .feishu.client import FeishuClient
@@ -16,12 +17,24 @@ from .policy import PolicyResolver
 from .processing import ApprovalService, TaskProcessingService
 from .routing import MessageRouter, RoutingResult
 from .store.sqlite_store import SQLiteStore
-from .types import MessagePage, NormalizedMessage, ResourceRef, ResourceStatus, utc_now_iso
+from .types import (
+    MessagePage,
+    NormalizedMessage,
+    ResourceRef,
+    ResourceStatus,
+    utc_now_iso,
+)
 
 PAGE_SIZE = 50
-IMAGE_KEY_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])(img_[A-Za-z0-9_-]+)(?![A-Za-z0-9_-])")
-FILE_KEY_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])(file_[A-Za-z0-9_-]+)(?![A-Za-z0-9_-])")
-AT_USER_ID_PATTERN = re.compile(r"<at\s+[^>]*user_id=[\"']([^\"']+)[\"'][^>]*>", re.IGNORECASE)
+IMAGE_KEY_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])(img_[A-Za-z0-9_-]+)(?![A-Za-z0-9_-])"
+)
+FILE_KEY_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])(file_[A-Za-z0-9_-]+)(?![A-Za-z0-9_-])"
+)
+AT_USER_ID_PATTERN = re.compile(
+    r"<at\s+[^>]*user_id=[\"']([^\"']+)[\"'][^>]*>", re.IGNORECASE
+)
 
 
 @dataclass(frozen=True)
@@ -43,40 +56,47 @@ class MessageNormalizer:
     def __init__(self, *, owner_open_id: str):
         self.owner_open_id = owner_open_id
 
-    def normalize(self, raw: dict[str, Any], *, default_chat_type: str | None = None) -> NormalizedMessage:
+    def normalize(
+        self, raw: dict[str, Any], *, default_chat_type: str | None = None
+    ) -> NormalizedMessage:
         message_id = _first_string(raw, "message_id", "messageId", "id") or ""
         if not message_id:
             raise ValueError("message is missing message_id")
         content = _content(raw)
         sender = raw.get("sender") if isinstance(raw.get("sender"), dict) else {}
-        sender_id = (
-            _first_string(raw, "sender_id", "senderId", "open_id", "openId")
-            or _first_string(sender, "sender_id", "senderId", "open_id", "openId", "id")
-        )
+        sender_id = _first_string(
+            raw, "sender_id", "senderId", "open_id", "openId"
+        ) or _first_string(sender, "sender_id", "senderId", "open_id", "openId", "id")
         sender_name = (
-            _first_string(raw, "sender_name", "senderName", "user_name", "userName", "name")
-            or _first_string(sender, "sender_name", "senderName", "user_name", "userName", "name")
+            _first_string(
+                raw, "sender_name", "senderName", "user_name", "userName", "name"
+            )
             or _first_string(
-                sender.get("profile") if isinstance(sender.get("profile"), dict) else {},
+                sender, "sender_name", "senderName", "user_name", "userName", "name"
+            )
+            or _first_string(
+                sender.get("profile")
+                if isinstance(sender.get("profile"), dict)
+                else {},
                 "name",
                 "display_name",
                 "displayName",
             )
             or sender_id
         )
-        sender_type = (
-            _first_string(raw, "sender_type", "senderType")
-            or _first_string(sender, "sender_type", "senderType", "type")
+        sender_type = _first_string(raw, "sender_type", "senderType") or _first_string(
+            sender, "sender_type", "senderType", "type"
         )
         chat = raw.get("chat") if isinstance(raw.get("chat"), dict) else {}
-        chat_id = (
-            _first_string(raw, "chat_id", "chatId")
-            or _first_string(chat, "chat_id", "chatId", "id")
+        chat_id = _first_string(raw, "chat_id", "chatId") or _first_string(
+            chat, "chat_id", "chatId", "id"
         )
         chat_type = _first_string(raw, "chat_type", "chatType") or default_chat_type
         if chat_type not in {"group", "p2p"}:
             chat_type = None
-        sent_at = _first_string(raw, "create_time", "created_at", "sent_at", "timestamp")
+        sent_at = _first_string(
+            raw, "create_time", "created_at", "sent_at", "timestamp"
+        )
         thread_id = _thread_id(raw)
         reply_to_value = raw.get("reply_to") or raw.get("replyTo")
         reply_to = reply_to_value if isinstance(reply_to_value, dict) else {}
@@ -99,7 +119,9 @@ class MessageNormalizer:
         text = _message_text(raw, content)
         mentions = _mentions(raw, content)
         at_all = _is_at_all(raw, text, mentions)
-        direct_mention = bool(raw.get("is_at_me") or raw.get("isAtMe") or self.owner_open_id in mentions)
+        direct_mention = bool(
+            raw.get("is_at_me") or raw.get("isAtMe") or self.owner_open_id in mentions
+        )
         if at_all:
             direct_mention = False
         return NormalizedMessage(
@@ -109,7 +131,9 @@ class MessageNormalizer:
             sender_id=sender_id,
             sender_name=sender_name,
             sender_type=sender_type,
-            sender_role=self._sender_role(sender_id=sender_id, sender_type=sender_type, raw=raw),
+            sender_role=self._sender_role(
+                sender_id=sender_id, sender_type=sender_type, raw=raw
+            ),
             sent_at=sent_at,
             thread_id=thread_id,
             reply_to_message_id=reply_to_message_id,
@@ -121,7 +145,9 @@ class MessageNormalizer:
             raw=raw,
         )
 
-    def _sender_role(self, *, sender_id: str | None, sender_type: str | None, raw: dict[str, Any]) -> str:
+    def _sender_role(
+        self, *, sender_id: str | None, sender_type: str | None, raw: dict[str, Any]
+    ) -> str:
         lowered_type = (sender_type or "").lower()
         if raw.get("sent_by_agent") is True or raw.get("agent_message") is True:
             return "agent_message"
@@ -146,7 +172,9 @@ class ResourceProcessor:
         self.feishu_client = feishu_client
         self.config = config
         self.logger = logger
-        self.config_base_dir = Path(config_base_dir or Path.cwd()).expanduser().resolve()
+        self.config_base_dir = (
+            Path(config_base_dir or Path.cwd()).expanduser().resolve()
+        )
         self.policy = PolicyResolver(store)
         self.quota = ResourceQuotaGuard(config=config, base_dir=self.config_base_dir)
         self._quota_downloads_blocked = False
@@ -156,7 +184,10 @@ class ResourceProcessor:
             return
         resource_policy = self.policy.can_download_resources(message)
         for resource in message.resources:
-            if not resource_policy.allow and resource_policy.reason == "disabled_by_chat_policy":
+            if (
+                not resource_policy.allow
+                and resource_policy.reason == "disabled_by_chat_policy"
+            ):
                 self.store.upsert_resource(
                     resource,
                     download_status="skipped",
@@ -219,7 +250,9 @@ class ResourceProcessor:
             local_output = self.config_base_dir / output
             quota_preflight = self.quota.before_download()
             if not quota_preflight.allow:
-                self._record_quota_blocked(resource, run_id=run_id, decision=quota_preflight)
+                self._record_quota_blocked(
+                    resource, run_id=run_id, decision=quota_preflight
+                )
                 self._quota_downloads_blocked = True
                 continue
             self.logger.debug(
@@ -250,7 +283,11 @@ class ResourceProcessor:
                 self.logger.warning(
                     "resource_download_failed",
                     run_id=run_id,
-                    data={"message_id": resource.message_id, "file_key": resource.file_key, "error": str(exc)},
+                    data={
+                        "message_id": resource.message_id,
+                        "file_key": resource.file_key,
+                        "error": str(exc),
+                    },
                 )
                 continue
             if result.ok:
@@ -259,18 +296,29 @@ class ResourceProcessor:
                         resource,
                         download_status="missing_file",
                         path=output,
-                        raw={"result": result.json_data, "error": "download output file missing"},
+                        raw={
+                            "result": result.json_data,
+                            "error": "download output file missing",
+                        },
                     )
                     self.logger.warning(
                         "resource_download_missing_file",
                         run_id=run_id,
-                        data={"message_id": resource.message_id, "file_key": resource.file_key, "path": output},
+                        data={
+                            "message_id": resource.message_id,
+                            "file_key": resource.file_key,
+                            "path": output,
+                        },
                     )
                     continue
-                quota_result = self.quota.after_download(local_output, attempted_path=output)
+                quota_result = self.quota.after_download(
+                    local_output, attempted_path=output
+                )
                 if not quota_result.allow:
                     raw = {"result": result.json_data} | (quota_result.raw or {})
-                    self._record_quota_blocked(resource, run_id=run_id, decision=quota_result, raw=raw)
+                    self._record_quota_blocked(
+                        resource, run_id=run_id, decision=quota_result, raw=raw
+                    )
                     if quota_result.status == ResourceStatus.QUOTA_EXCEEDED.value:
                         self._quota_downloads_blocked = True
                     continue
@@ -280,12 +328,19 @@ class ResourceProcessor:
                         resource,
                         download_status="missing_file",
                         path=output,
-                        raw={"result": result.json_data, "error": "download output file missing"},
+                        raw={
+                            "result": result.json_data,
+                            "error": "download output file missing",
+                        },
                     )
                     self.logger.warning(
                         "resource_download_missing_file",
                         run_id=run_id,
-                        data={"message_id": resource.message_id, "file_key": resource.file_key, "path": output},
+                        data={
+                            "message_id": resource.message_id,
+                            "file_key": resource.file_key,
+                            "path": output,
+                        },
                     )
                     continue
                 self.store.upsert_resource(
@@ -312,7 +367,11 @@ class ResourceProcessor:
                     resource,
                     download_status=status,
                     path=output,
-                    raw={"error": result.error, "stderr": result.stderr, "stdout": result.stdout},
+                    raw={
+                        "error": result.error,
+                        "stderr": result.stderr,
+                        "stdout": result.stdout,
+                    },
                 )
                 self.logger.warning(
                     "resource_download_unavailable",
@@ -361,7 +420,9 @@ class ResourceQuotaGuard:
     def __init__(self, *, config: AppConfig, base_dir: Path):
         self.config = config
         self.base_dir = base_dir
-        self.resource_root = (base_dir / config.storage.resource_dir).resolve(strict=False)
+        self.resource_root = (base_dir / config.storage.resource_dir).resolve(
+            strict=False
+        )
 
     def before_download(self) -> ResourceQuotaDecision:
         usage = self.resource_dir_usage_bytes()
@@ -377,7 +438,9 @@ class ResourceQuotaGuard:
             )
         return ResourceQuotaDecision(allow=True)
 
-    def after_download(self, path: Path, *, attempted_path: str) -> ResourceQuotaDecision:
+    def after_download(
+        self, path: Path, *, attempted_path: str
+    ) -> ResourceQuotaDecision:
         size = path.stat().st_size
         if size > self.config.storage.max_resource_bytes:
             delete_error = self.delete_downloaded_file(path)
@@ -457,11 +520,19 @@ class IngestionService:
         self.config = config
         self.logger = logger
         self.normalizer = MessageNormalizer(owner_open_id=config.owner.open_id)
-        self.config_base_dir = Path(config_base_dir or Path.cwd()).expanduser().resolve()
-        self.agent_working_dir = resolve_agent_working_dir(config.agent_backend.working_dir, self.config_base_dir)
-        self.router = router or MessageRouter(store=store, closed_recall_days=config.lifecycle.closed_recall_days)
+        self.config_base_dir = (
+            Path(config_base_dir or Path.cwd()).expanduser().resolve()
+        )
+        self.agent_working_dir = resolve_agent_working_dir(
+            config.agent_backend.working_dir, self.config_base_dir
+        )
+        self.router = router or MessageRouter(
+            store=store, closed_recall_days=config.lifecycle.closed_recall_days
+        )
         self.task_processor = task_processor
-        self.approval_service = approval_service or (task_processor.approvals if task_processor is not None else None)
+        self.approval_service = approval_service or (
+            task_processor.approvals if task_processor is not None else None
+        )
         self.resources = ResourceProcessor(
             store=store,
             feishu_client=feishu_client,
@@ -471,7 +542,9 @@ class IngestionService:
         )
         if self.task_processor is not None:
             self.task_processor.set_resource_retry_func(
-                lambda message, retry_run_id: self.resources.process(message, run_id=retry_run_id)
+                lambda message, retry_run_id: self.resources.process(
+                    message, run_id=retry_run_id
+                )
             )
         self.clock = clock
 
@@ -487,14 +560,21 @@ class IngestionService:
     def run_approval_inbox(self, *, run_id: str) -> StageResult:
         if self.approval_service is None:
             return self.run_approval_inbox_placeholder(run_id=run_id)
-        bot_open_id = _bot_open_id_from_auth(self.feishu_client.auth_status(verify=True).json_data)
+        bot_open_id = _bot_open_id_from_auth(
+            self.feishu_client.auth_status(verify=True).json_data
+        )
         if not bot_open_id:
             raise RuntimeError("bot open_id is missing from lark-cli auth status")
         start, end = self._window("approval_inbox")
         self.logger.debug(
             "ingestion_window_selected",
             run_id=run_id,
-            data={"source": "approval_inbox", "checkpoint_key": "approval_inbox", "start": start, "end": end},
+            data={
+                "source": "approval_inbox",
+                "checkpoint_key": "approval_inbox",
+                "start": start,
+                "end": end,
+            },
         )
         raws = self._drain(
             lambda token: self.feishu_client.list_p2p_messages(
@@ -559,13 +639,20 @@ class IngestionService:
                 self.logger.debug(
                     "ingestion_window_selected",
                     run_id=run_id,
-                    data={"source": "active_watch", "checkpoint_key": key, "start": start, "end": end},
+                    data={
+                        "source": "active_watch",
+                        "checkpoint_key": key,
+                        "start": start,
+                        "end": end,
+                    },
                 )
                 raws = self._drain(
-                    lambda token: self.feishu_client.list_thread_messages(
-                        thread_id=thread_id,
-                        page_token=token,
-                        page_size=PAGE_SIZE,
+                    lambda token, thread_id=thread_id: (
+                        self.feishu_client.list_thread_messages(
+                            thread_id=thread_id,
+                            page_token=token,
+                            page_size=PAGE_SIZE,
+                        )
                     ),
                     run_id=run_id,
                     source="active_watch_thread",
@@ -577,15 +664,22 @@ class IngestionService:
                 self.logger.debug(
                     "ingestion_window_selected",
                     run_id=run_id,
-                    data={"source": "active_watch", "checkpoint_key": key, "start": start, "end": end},
+                    data={
+                        "source": "active_watch",
+                        "checkpoint_key": key,
+                        "start": start,
+                        "end": end,
+                    },
                 )
                 raws = self._drain(
-                    lambda token: self.feishu_client.list_chat_messages(
-                        chat_id=chat_id,
-                        start=start,
-                        end=end,
-                        page_token=token,
-                        page_size=PAGE_SIZE,
+                    lambda token, chat_id=chat_id, start=start, end=end: (
+                        self.feishu_client.list_chat_messages(
+                            chat_id=chat_id,
+                            start=start,
+                            end=end,
+                            page_token=token,
+                            page_size=PAGE_SIZE,
+                        )
                     ),
                     run_id=run_id,
                     source="active_watch_chat",
@@ -617,7 +711,12 @@ class IngestionService:
         self.logger.debug(
             "ingestion_window_selected",
             run_id=run_id,
-            data={"source": name, "checkpoint_key": checkpoint_key, "start": start, "end": end},
+            data={
+                "source": name,
+                "checkpoint_key": checkpoint_key,
+                "start": start,
+                "end": end,
+            },
         )
         raws = self._drain(
             lambda token: self.feishu_client.search_messages(
@@ -670,13 +769,17 @@ class IngestionService:
         run_id: str,
     ) -> RoutingResult | None:
         try:
-            message = self.normalizer.normalize(raw, default_chat_type=default_chat_type)
+            message = self.normalizer.normalize(
+                raw, default_chat_type=default_chat_type
+            )
         except Exception as exc:
             self.logger.error(
                 "message_normalize_failed",
                 run_id=run_id,
                 data={
-                    "raw_message_id": _first_string(raw, "message_id", "messageId", "id"),
+                    "raw_message_id": _first_string(
+                        raw, "message_id", "messageId", "id"
+                    ),
                     "source": source,
                     "default_chat_type": default_chat_type,
                     "error": str(exc),
@@ -688,10 +791,17 @@ class IngestionService:
             "info",
             "message_ingested",
             run_id=run_id,
-            data={"message_id": message.message_id, "source": source, "inserted": inserted},
+            data={
+                "message_id": message.message_id,
+                "source": source,
+                "inserted": inserted,
+            },
         )
         if source == "approval_inbox":
-            if self.approval_service is not None and message.sender_role == "owner_message":
+            if (
+                self.approval_service is not None
+                and message.sender_role == "owner_message"
+            ):
                 result = self.approval_service.apply_command(message=message)
                 self.logger.emit(
                     "info",
@@ -733,7 +843,10 @@ class IngestionService:
             self.logger.debug(
                 "message_resources_processing_started",
                 run_id=run_id,
-                data={"message_id": message.message_id, "resource_count": len(message.resources)},
+                data={
+                    "message_id": message.message_id,
+                    "resource_count": len(message.resources),
+                },
             )
             self.resources.process(message, run_id=run_id)
         elif message.resources:
@@ -846,7 +959,9 @@ class IngestionService:
         return [
             raw
             for raw in raws
-            if self._matches_active_watch_key(raw, default_chat_type=default_chat_type, now=now)
+            if self._matches_active_watch_key(
+                raw, default_chat_type=default_chat_type, now=now
+            )
         ]
 
     def _matches_active_watch_key(
@@ -886,7 +1001,12 @@ def _content(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def _message_text(raw: dict[str, Any], content: dict[str, Any]) -> str:
-    for value in (raw.get("text"), raw.get("message"), content.get("text"), content.get("title")):
+    for value in (
+        raw.get("text"),
+        raw.get("message"),
+        content.get("text"),
+        content.get("title"),
+    ):
         if isinstance(value, str):
             return value
     return ""
@@ -894,13 +1014,20 @@ def _message_text(raw: dict[str, Any], content: dict[str, Any]) -> str:
 
 def _mentions(raw: dict[str, Any], content: dict[str, Any]) -> list[str]:
     mentions: list[str] = []
-    for source in (raw.get("mentions"), raw.get("ats"), content.get("mentions"), content.get("ats")):
+    for source in (
+        raw.get("mentions"),
+        raw.get("ats"),
+        content.get("mentions"),
+        content.get("ats"),
+    ):
         if isinstance(source, list):
             for item in source:
                 if isinstance(item, str):
                     _append_unique(mentions, item)
                 elif isinstance(item, dict):
-                    value = _first_string(item, "open_id", "openId", "user_id", "userId", "id")
+                    value = _first_string(
+                        item, "open_id", "openId", "user_id", "userId", "id"
+                    )
                     if value:
                         _append_unique(mentions, value)
     for user_id in AT_USER_ID_PATTERN.findall(_message_text(raw, content)):
@@ -926,26 +1053,42 @@ def _append_unique(values: list[str], value: str) -> None:
         values.append(value)
 
 
-def _resources(message_id: str, raw: dict[str, Any], content: dict[str, Any]) -> list[ResourceRef]:
+def _resources(
+    message_id: str, raw: dict[str, Any], content: dict[str, Any]
+) -> list[ResourceRef]:
     resources: dict[tuple[str, str], ResourceRef] = {}
     for node in _walk([raw, content]):
         if isinstance(node, dict):
             image_key = _first_string(node, "image_key", "imageKey")
             if image_key:
-                resources[("image", image_key)] = ResourceRef(message_id, image_key, "image", node)
+                resources[("image", image_key)] = ResourceRef(
+                    message_id, image_key, "image", node
+                )
             file_key = _first_string(node, "file_key", "fileKey")
             if file_key:
-                resources[("file", file_key)] = ResourceRef(message_id, file_key, "file", node)
+                resources[("file", file_key)] = ResourceRef(
+                    message_id, file_key, "file", node
+                )
         elif isinstance(node, str):
             for image_key in IMAGE_KEY_PATTERN.findall(node):
                 resources.setdefault(
                     ("image", image_key),
-                    ResourceRef(message_id, image_key, "image", {"source": "text", "file_key": image_key}),
+                    ResourceRef(
+                        message_id,
+                        image_key,
+                        "image",
+                        {"source": "text", "file_key": image_key},
+                    ),
                 )
             for file_key in FILE_KEY_PATTERN.findall(node):
                 resources.setdefault(
                     ("file", file_key),
-                    ResourceRef(message_id, file_key, "file", {"source": "text", "file_key": file_key}),
+                    ResourceRef(
+                        message_id,
+                        file_key,
+                        "file",
+                        {"source": "text", "file_key": file_key},
+                    ),
                 )
     return list(resources.values())
 
@@ -997,14 +1140,18 @@ def _raw_sort_key(raw: dict[str, Any]) -> tuple[str, str]:
     )
 
 
-def _filter_raws_in_window(raws: list[dict[str, Any]], *, start: str, end: str) -> list[dict[str, Any]]:
+def _filter_raws_in_window(
+    raws: list[dict[str, Any]], *, start: str, end: str
+) -> list[dict[str, Any]]:
     start_dt = _parse_dt_or_none(start)
     end_dt = _parse_dt_or_none(end)
     if start_dt is None or end_dt is None:
         return raws
     filtered: list[dict[str, Any]] = []
     for raw in raws:
-        sent_at = _first_string(raw, "create_time", "created_at", "sent_at", "timestamp")
+        sent_at = _first_string(
+            raw, "create_time", "created_at", "sent_at", "timestamp"
+        )
         sent_dt = _parse_dt_or_none(sent_at) if sent_at is not None else None
         if sent_dt is None or start_dt <= sent_dt <= end_dt:
             filtered.append(raw)
@@ -1020,7 +1167,11 @@ def _should_process_resources(
 ) -> bool:
     if not message.resources:
         return False
-    if message.is_self_message or message.sender_role == "owner_message" or message.at_all:
+    if (
+        message.is_self_message
+        or message.sender_role == "owner_message"
+        or message.at_all
+    ):
         return False
     eligible_routes = {"new_task", "attach_task", "reopen_task", "ambiguous"}
     if result.decision.route in eligible_routes:
@@ -1034,11 +1185,19 @@ def _should_process_resources(
 
 
 def _minus_seconds(value: str, seconds: int) -> str:
-    return (_parse_dt(value) - timedelta(seconds=seconds)).astimezone().isoformat(timespec="seconds")
+    return (
+        (_parse_dt(value) - timedelta(seconds=seconds))
+        .astimezone()
+        .isoformat(timespec="seconds")
+    )
 
 
 def _plus_minutes(value: str, minutes: int) -> str:
-    return (_parse_dt(value) + timedelta(minutes=minutes)).astimezone().isoformat(timespec="seconds")
+    return (
+        (_parse_dt(value) + timedelta(minutes=minutes))
+        .astimezone()
+        .isoformat(timespec="seconds")
+    )
 
 
 def _parse_dt(value: str) -> datetime:
@@ -1058,11 +1217,15 @@ def _parse_dt_or_none(value: str) -> datetime | None:
 def _resource_output(resource: ResourceRef, resource_dir: str) -> str:
     message_part = _safe_path_part(resource.message_id)
     key_hash = sha256(resource.file_key.encode("utf-8")).hexdigest()[:12]
-    return PurePosixPath(resource_dir, message_part, f"{resource.resource_type}_{key_hash}.bin").as_posix()
+    return PurePosixPath(
+        resource_dir, message_part, f"{resource.resource_type}_{key_hash}.bin"
+    ).as_posix()
 
 
 def _safe_path_part(value: str) -> str:
-    return "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in value)[:120]
+    return "".join(
+        char if char.isalnum() or char in {"-", "_"} else "_" for char in value
+    )[:120]
 
 
 def _sha256_if_exists(path: str | Path) -> str | None:
@@ -1077,5 +1240,8 @@ def _sha256_if_exists(path: str | Path) -> str | None:
 
 
 def _bot_invisible_error(result: Any) -> bool:
-    text = " ".join(str(part) for part in (getattr(result, "error", ""), getattr(result, "stderr", "")))
+    text = " ".join(
+        str(part)
+        for part in (getattr(result, "error", ""), getattr(result, "stderr", ""))
+    )
     return "234002" in text or "234040" in text or "invisible" in text.lower()

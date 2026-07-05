@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from .agent_backend import AgentRunResult
 from .jsonl import JSONLLogger
@@ -122,7 +122,9 @@ class AgentInvoker:
                         "timed_out": result.timed_out,
                     },
                 )
-                return AgentAttemptOutcome(result=result, attempt_count=attempt, last_error=last_error)
+                return AgentAttemptOutcome(
+                    result=result, attempt_count=attempt, last_error=last_error
+                )
             if attempt < self.max_attempts:
                 self.logger.warning(
                     "agent_call_retrying",
@@ -152,7 +154,9 @@ class AgentInvoker:
                         "timed_out": result.timed_out,
                     },
                 )
-        return AgentAttemptOutcome(result=last_result, attempt_count=attempts, last_error=last_error)
+        return AgentAttemptOutcome(
+            result=last_result, attempt_count=attempts, last_error=last_error
+        )
 
     def _sleep_before_retry(self, attempt: int) -> None:
         if attempt <= 0 or not self.retry_delays_seconds:
@@ -171,7 +175,10 @@ def agent_result_error(result: AgentRunResult) -> str:
         f"exit_code={result.exit_code}" if result.exit_code is not None else None,
         "timed_out=True" if result.timed_out else None,
     ]
-    return " ".join(str(part).strip() for part in parts if part).strip() or "Agent backend call failed"
+    return (
+        " ".join(str(part).strip() for part in parts if part).strip()
+        or "Agent backend call failed"
+    )
 
 
 def is_retryable_agent_result(result: AgentRunResult) -> bool:
@@ -193,4 +200,4 @@ def truncate_error(value: str | None, *, limit: int = 1000) -> str | None:
     cleaned = " ".join(str(value).split())
     if len(cleaned) <= limit:
         return cleaned
-    return f"{cleaned[:limit - 3]}..."
+    return f"{cleaned[: limit - 3]}..."

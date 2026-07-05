@@ -3,21 +3,38 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Annotated
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+)
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
 from .config import LoadedConfig
-from .console_security import bearer_token_valid, host_header_allowed, validate_console_bind_host
+from .console_security import (
+    bearer_token_valid,
+    host_header_allowed,
+    validate_console_bind_host,
+)
 from .dispatcher import Dispatcher
 from .feishu.lark_cli import LarkCliClient
 from .jsonl import JSONLLogger
 from .operator_commands import DispatchReadbackMarker, OperatorCommandService
-from .operator_query import OperatorQueryReadError, OperatorQueryService, OperatorQueryUnavailable
+from .operator_query import (
+    OperatorQueryReadError,
+    OperatorQueryService,
+    OperatorQueryUnavailable,
+)
 from .paths import resolve_relative_path
 from .settings_catalog import settings_catalog
 from .store.sqlite_store import SQLiteStore
@@ -153,10 +170,14 @@ def create_console_app(
                 str(detail.get("message") or exc.detail),
                 details=_details_dict(detail.get("details")),
             )
-        return _error_response(exc.status_code, _status_code_name(exc.status_code), str(exc.detail))
+        return _error_response(
+            exc.status_code, _status_code_name(exc.status_code), str(exc.detail)
+        )
 
     @app.exception_handler(RequestValidationError)
-    async def validation_exception_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
+    async def validation_exception_handler(
+        _: Request, exc: RequestValidationError
+    ) -> JSONResponse:
         return _error_response(
             400,
             "validation_failed",
@@ -171,7 +192,9 @@ def create_console_app(
     def query_service() -> OperatorQueryService:
         return OperatorQueryService(store, policy_import_source=loaded_config.config)
 
-    def command_service(*, needs_readback_marker: bool = False) -> OperatorCommandService:
+    def command_service(
+        *, needs_readback_marker: bool = False
+    ) -> OperatorCommandService:
         marker = None
         if needs_readback_marker:
             marker = readback_marker or _build_dispatch_readback_marker(
@@ -181,7 +204,9 @@ def create_console_app(
         return OperatorCommandService(
             store,
             readback_marker=marker,
-            keep_watching_until_factory=lambda: _watch_until_from_now(loaded_config.config.lifecycle.watch_minutes),
+            keep_watching_until_factory=lambda: _watch_until_from_now(
+                loaded_config.config.lifecycle.watch_minutes
+            ),
         )
 
     api = APIRouter(prefix="/api", dependencies=[Depends(require_token)])
@@ -237,13 +262,17 @@ def create_console_app(
         status: Annotated[list[ActionStatus] | None, Query()] = None,
     ) -> list[dict[str, Any]]:
         statuses = None if status is None else tuple(item.value for item in status)
-        return query_service().list_dispatch_actions(statuses=statuses, limit=limit, offset=offset)
+        return query_service().list_dispatch_actions(
+            statuses=statuses, limit=limit, offset=offset
+        )
 
     @api.get("/dispatch/actions/{action_id}")
     def dispatch_action_detail(action_id: int) -> dict[str, Any]:
         detail = query_service().dispatch_action_detail(action_id)
         if detail is None:
-            _raise_api_error(404, "not_found", f"Dispatch action not found: {action_id}")
+            _raise_api_error(
+                404, "not_found", f"Dispatch action not found: {action_id}"
+            )
         return detail
 
     @api.get("/settings/catalog")
@@ -298,12 +327,16 @@ def create_console_app(
         body: Annotated[CommandRequest | None, Body()] = None,
     ) -> dict[str, Any]:
         payload = body or CommandRequest()
-        return command_service().approve(
-            approval_id,
-            actor=LOCAL_CONSOLE_ACTOR,
-            reason=payload.reason,
-            command_id=payload.command_id,
-        ).as_dict()
+        return (
+            command_service()
+            .approve(
+                approval_id,
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=payload.reason,
+                command_id=payload.command_id,
+            )
+            .as_dict()
+        )
 
     @api.post("/approvals/{approval_id}/reject")
     def reject_approval(
@@ -311,12 +344,16 @@ def create_console_app(
         body: Annotated[CommandRequest | None, Body()] = None,
     ) -> dict[str, Any]:
         payload = body or CommandRequest()
-        return command_service().reject(
-            approval_id,
-            actor=LOCAL_CONSOLE_ACTOR,
-            reason=payload.reason,
-            command_id=payload.command_id,
-        ).as_dict()
+        return (
+            command_service()
+            .reject(
+                approval_id,
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=payload.reason,
+                command_id=payload.command_id,
+            )
+            .as_dict()
+        )
 
     @api.post("/tasks/{task_id}/send")
     def send_task(
@@ -325,13 +362,17 @@ def create_console_app(
     ) -> dict[str, Any]:
         payload = body or CommandRequest()
         final_reply = _required_text(payload.final_reply, field="final_reply")
-        return command_service().send(
-            task_id,
-            final_reply,
-            actor=LOCAL_CONSOLE_ACTOR,
-            reason=payload.reason,
-            command_id=payload.command_id,
-        ).as_dict()
+        return (
+            command_service()
+            .send(
+                task_id,
+                final_reply,
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=payload.reason,
+                command_id=payload.command_id,
+            )
+            .as_dict()
+        )
 
     @api.post("/tasks/{task_id}/close")
     def close_task(
@@ -339,11 +380,15 @@ def create_console_app(
         body: Annotated[CommandRequest | None, Body()] = None,
     ) -> dict[str, Any]:
         payload = body or CommandRequest()
-        return command_service().close_task(
-            task_id,
-            actor=LOCAL_CONSOLE_ACTOR,
-            reason=payload.reason,
-        ).as_dict()
+        return (
+            command_service()
+            .close_task(
+                task_id,
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=payload.reason,
+            )
+            .as_dict()
+        )
 
     @api.post("/tasks/{task_id}/reopen")
     def reopen_task(
@@ -351,20 +396,32 @@ def create_console_app(
         body: Annotated[CommandRequest | None, Body()] = None,
     ) -> dict[str, Any]:
         payload = body or CommandRequest()
-        return command_service().reopen_task(
-            task_id,
-            watch_until=_watch_until_from_now(loaded_config.config.lifecycle.watch_minutes),
-            actor=LOCAL_CONSOLE_ACTOR,
-            reason=payload.reason,
-        ).as_dict()
+        return (
+            command_service()
+            .reopen_task(
+                task_id,
+                watch_until=_watch_until_from_now(
+                    loaded_config.config.lifecycle.watch_minutes
+                ),
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=payload.reason,
+            )
+            .as_dict()
+        )
 
     @api.post("/maintenance/expire-approvals")
-    def expire_approvals(body: Annotated[CommandRequest | None, Body()] = None) -> dict[str, Any]:
+    def expire_approvals(
+        body: Annotated[CommandRequest | None, Body()] = None,
+    ) -> dict[str, Any]:
         payload = body or CommandRequest()
-        return command_service().expire_approvals(
-            actor=LOCAL_CONSOLE_ACTOR,
-            reason=payload.reason,
-        ).as_dict()
+        return (
+            command_service()
+            .expire_approvals(
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=payload.reason,
+            )
+            .as_dict()
+        )
 
     @api.post("/dispatch/actions/{action_id}/retry")
     def retry_dispatch_action(
@@ -372,11 +429,15 @@ def create_console_app(
         body: Annotated[CommandRequest | None, Body()] = None,
     ) -> dict[str, Any]:
         payload = body or CommandRequest()
-        return command_service().retry_dispatch_action(
-            action_id,
-            actor=LOCAL_CONSOLE_ACTOR,
-            reason=payload.reason,
-        ).as_dict()
+        return (
+            command_service()
+            .retry_dispatch_action(
+                action_id,
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=payload.reason,
+            )
+            .as_dict()
+        )
 
     @api.post("/dispatch/actions/{action_id}/cancel")
     def cancel_dispatch_action(
@@ -384,11 +445,15 @@ def create_console_app(
         body: Annotated[CommandRequest | None, Body()] = None,
     ) -> dict[str, Any]:
         payload = body or CommandRequest()
-        return command_service().cancel_dispatch_action(
-            action_id,
-            actor=LOCAL_CONSOLE_ACTOR,
-            reason=payload.reason,
-        ).as_dict()
+        return (
+            command_service()
+            .cancel_dispatch_action(
+                action_id,
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=payload.reason,
+            )
+            .as_dict()
+        )
 
     @api.post("/dispatch/actions/{action_id}/mark-sent")
     def mark_dispatch_sent(
@@ -396,7 +461,9 @@ def create_console_app(
         body: Annotated[CommandRequest | None, Body()] = None,
     ) -> dict[str, Any]:
         payload = body or CommandRequest()
-        sent_message_id = _required_text(payload.sent_message_id, field="sent_message_id")
+        sent_message_id = _required_text(
+            payload.sent_message_id, field="sent_message_id"
+        )
         try:
             service = command_service(needs_readback_marker=True)
         except Exception as exc:
@@ -415,37 +482,60 @@ def create_console_app(
         ).as_dict()
 
     @api.post("/policy/import-config")
-    def import_policy_config(body: Annotated[PolicyImportRequest | None, Body()] = None) -> dict[str, Any]:
+    def import_policy_config(
+        body: Annotated[PolicyImportRequest | None, Body()] = None,
+    ) -> dict[str, Any]:
         payload = body or PolicyImportRequest()
-        return command_service().import_policy_config(
-            loaded_config.config,
-            replace=payload.replace,
-            used_defaults=loaded_config.reply_policy_used_defaults,
-            actor=LOCAL_CONSOLE_ACTOR,
-            reason=payload.reason,
-        ).as_dict()
+        return (
+            command_service()
+            .import_policy_config(
+                loaded_config.config,
+                replace=payload.replace,
+                used_defaults=loaded_config.reply_policy_used_defaults,
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=payload.reason,
+            )
+            .as_dict()
+        )
 
     @api.patch("/policy/global")
     def update_global_policy(body: GlobalPolicyUpdateRequest) -> dict[str, Any]:
-        return command_service().update_global_policy(
-            body.changes(),
-            actor=LOCAL_CONSOLE_ACTOR,
-            reason=body.reason,
-        ).as_dict()
+        return (
+            command_service()
+            .update_global_policy(
+                body.changes(),
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=body.reason,
+            )
+            .as_dict()
+        )
 
     @api.patch("/policy/chats/{chat_id}")
-    def update_chat_policy(chat_id: str, body: ChatPolicyUpdateRequest) -> dict[str, Any]:
-        return command_service().update_chat_policy(
-            chat_id,
-            body.changes(),
-            actor=LOCAL_CONSOLE_ACTOR,
-            reason=body.reason,
-        ).as_dict()
+    def update_chat_policy(
+        chat_id: str, body: ChatPolicyUpdateRequest
+    ) -> dict[str, Any]:
+        return (
+            command_service()
+            .update_chat_policy(
+                chat_id,
+                body.changes(),
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=body.reason,
+            )
+            .as_dict()
+        )
 
-    @api.api_route("", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
-    @api.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
+    @api.api_route(
+        "", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
+    )
+    @api.api_route(
+        "/{path:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    )
     def api_not_found(path: str = "") -> None:
-        _raise_api_error(404, "not_found", f"API route not found: /api/{path}".rstrip("/"))
+        _raise_api_error(
+            404, "not_found", f"API route not found: /api/{path}".rstrip("/")
+        )
 
     app.include_router(api)
     _install_static_routes(app, resolved_static_dir)
@@ -458,7 +548,9 @@ def _build_dispatch_readback_marker(
     store: SQLiteStore,
 ) -> Dispatcher:
     config = loaded_config.config
-    jsonl_path = resolve_relative_path(config.logging.jsonl_path, loaded_config.base_dir)
+    jsonl_path = resolve_relative_path(
+        config.logging.jsonl_path, loaded_config.base_dir
+    )
     text_path = (
         None
         if config.logging.text_path is None
@@ -511,7 +603,9 @@ def _index_path(static_dir: Path) -> Path:
     return static_dir / "index.html"
 
 
-def _raise_api_error(status_code: int, code: str, message: str, *, details: dict[str, Any] | None = None) -> None:
+def _raise_api_error(
+    status_code: int, code: str, message: str, *, details: dict[str, Any] | None = None
+) -> None:
     raise HTTPException(
         status_code=status_code,
         detail={
@@ -534,7 +628,11 @@ def _required_text(value: str | None, *, field: str) -> str:
 
 
 def _watch_until_from_now(minutes: int) -> str:
-    return (_parse_dt(utc_now_iso()) + timedelta(minutes=minutes)).astimezone().isoformat(timespec="seconds")
+    return (
+        (_parse_dt(utc_now_iso()) + timedelta(minutes=minutes))
+        .astimezone()
+        .isoformat(timespec="seconds")
+    )
 
 
 def _parse_dt(value: str) -> datetime:

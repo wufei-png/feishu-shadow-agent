@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 from feishu_shadow_agent.config import ConfigService, LoadedConfig
-from feishu_shadow_agent.health import HermesCliChecker, HermesHealthChecker, REQUIRED_USER_SCOPES, HealthSuite
+from feishu_shadow_agent.health import (
+    REQUIRED_USER_SCOPES,
+    HealthSuite,
+    HermesCliChecker,
+    HermesHealthChecker,
+)
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import HealthCheckResult, LarkCliResult
 
@@ -18,7 +23,9 @@ class FakeFeishuClient:
         self.owner_message_dry_runs: list[bool] = []
 
     def version(self) -> LarkCliResult:
-        return LarkCliResult(["lark-cli", "--version"], 0, stdout="lark-cli version 1.0.56\n")
+        return LarkCliResult(
+            ["lark-cli", "--version"], 0, stdout="lark-cli version 1.0.56\n"
+        )
 
     def auth_status(self, *, verify: bool = True) -> LarkCliResult:
         return LarkCliResult(
@@ -45,7 +52,9 @@ class FakeFeishuClient:
         dry_run: bool = True,
     ) -> LarkCliResult:
         self.owner_message_dry_runs.append(dry_run)
-        return LarkCliResult(["lark-cli", "im", "+messages-send"], 0, json_data={"ok": True})
+        return LarkCliResult(
+            ["lark-cli", "im", "+messages-send"], 0, json_data={"ok": True}
+        )
 
 
 def ok_hermes(loaded: LoadedConfig) -> HealthCheckResult:
@@ -65,7 +74,9 @@ def _initialized_store(tmp_path: Path, loaded: LoadedConfig) -> SQLiteStore:
     return store
 
 
-def test_http_hermes_health_mode_still_checks_cli_runtime_backend(tmp_path: Path) -> None:
+def test_http_hermes_health_mode_still_checks_cli_runtime_backend(
+    tmp_path: Path,
+) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
@@ -84,19 +95,27 @@ agent_backend:
 
     def cli_checker(loaded: LoadedConfig) -> list[HealthCheckResult]:
         calls.append("cli")
-        return [HealthCheckResult("hermes_cli_version", "critical", "failed", "missing")]
+        return [
+            HealthCheckResult("hermes_cli_version", "critical", "failed", "missing")
+        ]
 
     def http_checker(loaded: LoadedConfig) -> HealthCheckResult:
         calls.append("http")
         return HealthCheckResult("hermes_reachable", "critical", "ok", "ok")
 
-    results = HermesHealthChecker(cli_checker=cli_checker, http_checker=http_checker)(loaded)
+    results = HermesHealthChecker(cli_checker=cli_checker, http_checker=http_checker)(
+        loaded
+    )
 
     assert calls == ["cli", "http"]
-    assert "hermes_cli_version" in {result.name for result in results if result.is_critical_failure}
+    assert "hermes_cli_version" in {
+        result.name for result in results if result.is_critical_failure
+    }
 
 
-def test_doctor_all_green_and_default_owner_notification_is_dry_run(tmp_path: Path) -> None:
+def test_doctor_all_green_and_default_owner_notification_is_dry_run(
+    tmp_path: Path,
+) -> None:
     loaded = ConfigService().load(FIXTURE)
     store = _initialized_store(tmp_path, loaded)
     client = FakeFeishuClient()
@@ -114,7 +133,9 @@ def test_doctor_all_green_and_default_owner_notification_is_dry_run(tmp_path: Pa
     assert client.owner_message_dry_runs == [True]
 
 
-def test_doctor_fails_when_product_policy_store_is_not_initialized(tmp_path: Path) -> None:
+def test_doctor_fails_when_product_policy_store_is_not_initialized(
+    tmp_path: Path,
+) -> None:
     loaded = ConfigService().load(FIXTURE)
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     client = FakeFeishuClient()
@@ -129,7 +150,9 @@ def test_doctor_fails_when_product_policy_store_is_not_initialized(tmp_path: Pat
     results = suite.run(send_test=False)
 
     failed = {result.name: result for result in results if result.is_critical_failure}
-    assert failed["product_policy_initialized"].details["missing"] == ["global:reply_policy"]
+    assert failed["product_policy_initialized"].details["missing"] == [
+        "global:reply_policy"
+    ]
     assert "policy import-config" in failed["product_policy_initialized"].message
 
 
@@ -172,7 +195,9 @@ def test_send_test_owner_notification_is_not_dry_run(tmp_path: Path) -> None:
     assert client.owner_message_dry_runs == [False]
 
 
-def test_doctor_warns_when_enabled_reply_postprocess_owner_profile_is_missing(tmp_path: Path) -> None:
+def test_doctor_warns_when_enabled_reply_postprocess_owner_profile_is_missing(
+    tmp_path: Path,
+) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
@@ -198,13 +223,19 @@ reply_postprocess:
 
     results = suite.run(send_test=False)
 
-    warning = next(result for result in results if result.name == "reply_postprocess_owner_style_profile")
+    warning = next(
+        result
+        for result in results
+        if result.name == "reply_postprocess_owner_style_profile"
+    )
     assert warning.severity == "warning"
     assert warning.status == "failed"
     assert not [result for result in results if result.is_critical_failure]
 
 
-def test_doctor_warns_when_enabled_reply_postprocess_humanizer_skill_is_missing(tmp_path: Path) -> None:
+def test_doctor_warns_when_enabled_reply_postprocess_humanizer_skill_is_missing(
+    tmp_path: Path,
+) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
@@ -230,7 +261,11 @@ reply_postprocess:
 
     results = suite.run(send_test=False)
 
-    warning = next(result for result in results if result.name == "reply_postprocess_humanizer_zh_skill")
+    warning = next(
+        result
+        for result in results
+        if result.name == "reply_postprocess_humanizer_zh_skill"
+    )
     assert warning.severity == "warning"
     assert warning.status == "failed"
     assert not [result for result in results if result.is_critical_failure]
@@ -269,7 +304,9 @@ def test_hermes_unreachable_is_critical_failure(tmp_path: Path) -> None:
 
     results = suite.run(send_test=False)
 
-    assert "hermes_reachable" in {result.name for result in results if result.is_critical_failure}
+    assert "hermes_reachable" in {
+        result.name for result in results if result.is_critical_failure
+    }
 
 
 def test_runtime_critical_health_includes_agent_backend(tmp_path: Path) -> None:
@@ -286,7 +323,9 @@ def test_runtime_critical_health_includes_agent_backend(tmp_path: Path) -> None:
 
     results = suite.run_runtime_critical()
 
-    assert "hermes_reachable" in {result.name for result in results if result.is_critical_failure}
+    assert "hermes_reachable" in {
+        result.name for result in results if result.is_critical_failure
+    }
     assert client.owner_message_dry_runs == []
 
 
@@ -299,7 +338,9 @@ def test_hermes_cli_checker_version_critical_and_status_warning(
     def fake_run(argv, **kwargs):
         calls.append(list(argv))
         if argv[1] == "--version":
-            return subprocess.CompletedProcess(argv, 0, stdout="Hermes Agent v0.16.0\n", stderr="")
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="Hermes Agent v0.16.0\n", stderr=""
+            )
         if argv[1:3] == ["chat", "--help"]:
             return subprocess.CompletedProcess(
                 argv,
@@ -322,7 +363,11 @@ def test_hermes_cli_checker_version_critical_and_status_warning(
     assert results[1].severity == "warning"
     assert results[1].status == "failed"
     assert results[2].status == "ok"
-    assert calls == [["hermes", "--version"], ["hermes", "status"], ["hermes", "chat", "--help"]]
+    assert calls == [
+        ["hermes", "--version"],
+        ["hermes", "status"],
+        ["hermes", "chat", "--help"],
+    ]
 
 
 def test_hermes_cli_checker_fails_when_full_access_yolo_is_missing(
@@ -342,7 +387,9 @@ tool_permissions: full_access
 
     def fake_run(argv, **kwargs):
         if argv[1] == "--version":
-            return subprocess.CompletedProcess(argv, 0, stdout="Hermes Agent v0.16.0\n", stderr="")
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="Hermes Agent v0.16.0\n", stderr=""
+            )
         if argv[1:3] == ["chat", "--help"]:
             return subprocess.CompletedProcess(
                 argv,
@@ -356,7 +403,9 @@ tool_permissions: full_access
 
     results = HermesCliChecker()(loaded)
 
-    permissions = next(result for result in results if result.name == "hermes_tool_permissions")
+    permissions = next(
+        result for result in results if result.name == "hermes_tool_permissions"
+    )
     assert permissions.is_critical_failure
     assert permissions.details["missing_flags"] == ["--yolo"]
 
@@ -368,18 +417,27 @@ def test_hermes_cli_checker_fails_when_default_context_flags_are_missing(
 
     def fake_run(argv, **kwargs):
         if argv[1] == "--version":
-            return subprocess.CompletedProcess(argv, 0, stdout="Hermes Agent v0.15.0\n", stderr="")
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="Hermes Agent v0.15.0\n", stderr=""
+            )
         if argv[1:3] == ["chat", "--help"]:
-            return subprocess.CompletedProcess(argv, 0, stdout="usage: hermes chat [--toolsets TOOLSETS]\n", stderr="")
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="usage: hermes chat [--toolsets TOOLSETS]\n", stderr=""
+            )
         return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     results = HermesCliChecker()(loaded)
 
-    permissions = next(result for result in results if result.name == "hermes_tool_permissions")
+    permissions = next(
+        result for result in results if result.name == "hermes_tool_permissions"
+    )
     assert permissions.is_critical_failure
-    assert permissions.details["missing_flags"] == ["--ignore-user-config", "--ignore-rules"]
+    assert permissions.details["missing_flags"] == [
+        "--ignore-user-config",
+        "--ignore-rules",
+    ]
 
 
 def test_hermes_cli_checker_requires_skills_flag_only_when_skills_are_configured(
@@ -402,7 +460,9 @@ agent_backend:
 
     def fake_run(argv, **kwargs):
         if argv[1] == "--version":
-            return subprocess.CompletedProcess(argv, 0, stdout="Hermes Agent v0.16.0\n", stderr="")
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="Hermes Agent v0.16.0\n", stderr=""
+            )
         if argv[1:3] == ["chat", "--help"]:
             return subprocess.CompletedProcess(
                 argv,
@@ -416,7 +476,9 @@ agent_backend:
 
     results = HermesCliChecker()(loaded)
 
-    permissions = next(result for result in results if result.name == "hermes_tool_permissions")
+    permissions = next(
+        result for result in results if result.name == "hermes_tool_permissions"
+    )
     assert permissions.is_critical_failure
     assert permissions.details["missing_flags"] == ["--skills"]
 
@@ -441,7 +503,9 @@ agent_backend:
 
     def fake_run(argv, **kwargs):
         if argv[1] == "--version":
-            return subprocess.CompletedProcess(argv, 0, stdout="Hermes Agent v0.16.0\n", stderr="")
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="Hermes Agent v0.16.0\n", stderr=""
+            )
         if argv[1:3] == ["chat", "--help"]:
             return subprocess.CompletedProcess(
                 argv,
@@ -455,7 +519,9 @@ agent_backend:
 
     results = HermesCliChecker()(loaded)
 
-    permissions = next(result for result in results if result.name == "hermes_tool_permissions")
+    permissions = next(
+        result for result in results if result.name == "hermes_tool_permissions"
+    )
     assert permissions.is_critical_failure
     assert permissions.details["missing_flags"] == ["--model", "--provider"]
 
@@ -486,7 +552,9 @@ agent_backend:
 
     results = suite.run(send_test=False)
 
-    explicit_skills = next(result for result in results if result.name == "agent_explicit_skills")
+    explicit_skills = next(
+        result for result in results if result.name == "agent_explicit_skills"
+    )
     assert explicit_skills.severity == "warning"
     assert explicit_skills.status == "failed"
     assert explicit_skills.details["missing"] == [str(tmp_path / "skills" / "missing")]
@@ -521,7 +589,9 @@ agent_backend:
 
     results = suite.run(send_test=False)
 
-    explicit_skills = next(result for result in results if result.name == "agent_explicit_skills")
+    explicit_skills = next(
+        result for result in results if result.name == "agent_explicit_skills"
+    )
     assert explicit_skills.status == "ok"
     assert explicit_skills.details["resolved"] == [str(skill_dir)]
 
@@ -556,6 +626,8 @@ agent_backend:
 
     results = suite.run(send_test=False)
 
-    explicit_skills = next(result for result in results if result.name == "agent_explicit_skills")
+    explicit_skills = next(
+        result for result in results if result.name == "agent_explicit_skills"
+    )
     assert explicit_skills.status == "ok"
     assert explicit_skills.details["resolved"] == [str(skill_dir)]

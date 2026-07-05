@@ -40,7 +40,9 @@ def _store(tmp_path: Path) -> SQLiteStore:
 
 def _seed_legacy_0001_store_without_agent_working_dir(store: SQLiteStore) -> None:
     store.path.parent.mkdir(parents=True, exist_ok=True)
-    migration = resources.files("feishu_shadow_agent.store").joinpath("migrations/0001_foundation.sql")
+    migration = resources.files("feishu_shadow_agent.store").joinpath(
+        "migrations/0001_foundation.sql"
+    )
     with store.connect() as conn:
         conn.executescript(migration.read_text(encoding="utf-8"))
         conn.execute(
@@ -52,7 +54,16 @@ def _seed_legacy_0001_store_without_agent_working_dir(store: SQLiteStore) -> Non
             INSERT INTO tasks(short_id, status, chat_id, chat_type, root_message_id, task_label, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            ("t_legacy", "watching", "oc_legacy", "p2p", "om_legacy", "legacy", "now", "now"),
+            (
+                "t_legacy",
+                "watching",
+                "oc_legacy",
+                "p2p",
+                "om_legacy",
+                "legacy",
+                "now",
+                "now",
+            ),
         )
 
 
@@ -102,15 +113,23 @@ def test_console_help_shows_console_command(capsys) -> None:
     assert "--port" in output
 
 
-def test_console_command_defaults_to_loopback_and_prints_token_url(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_console_command_defaults_to_loopback_and_prints_token_url(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
     config = _write_config(tmp_path)
     called: dict[str, object] = {}
 
-    monkeypatch.setattr("feishu_shadow_agent.cli.console_static_ready", lambda static_dir: True)
-    monkeypatch.setattr("feishu_shadow_agent.cli.generate_console_token", lambda: "fixed-token")
+    monkeypatch.setattr(
+        "feishu_shadow_agent.cli.console_static_ready", lambda static_dir: True
+    )
+    monkeypatch.setattr(
+        "feishu_shadow_agent.cli.generate_console_token", lambda: "fixed-token"
+    )
     monkeypatch.setattr(
         "feishu_shadow_agent.cli._run_console_server",
-        lambda app, *, host, port: called.update({"app": app, "host": host, "port": port}),
+        lambda app, *, host, port: called.update(
+            {"app": app, "host": host, "port": port}
+        ),
     )
 
     assert main(["console", "--config", str(config)]) == 0
@@ -130,11 +149,17 @@ def test_console_command_migrates_legacy_store_before_starting_server(
     _seed_legacy_0001_store_without_agent_working_dir(store)
     called: dict[str, object] = {}
 
-    monkeypatch.setattr("feishu_shadow_agent.cli.console_static_ready", lambda static_dir: True)
-    monkeypatch.setattr("feishu_shadow_agent.cli.generate_console_token", lambda: "fixed-token")
+    monkeypatch.setattr(
+        "feishu_shadow_agent.cli.console_static_ready", lambda static_dir: True
+    )
+    monkeypatch.setattr(
+        "feishu_shadow_agent.cli.generate_console_token", lambda: "fixed-token"
+    )
     monkeypatch.setattr(
         "feishu_shadow_agent.cli._run_console_server",
-        lambda app, *, host, port: called.update({"app": app, "host": host, "port": port}),
+        lambda app, *, host, port: called.update(
+            {"app": app, "host": host, "port": port}
+        ),
     )
 
     assert main(["console", "--config", str(config)]) == 0
@@ -142,7 +167,9 @@ def test_console_command_migrates_legacy_store_before_starting_server(
     assert called["host"] == "127.0.0.1"
     assert "Operator Console:" in capsys.readouterr().out
     with store.connect() as conn:
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+        }
         task = conn.execute("SELECT short_id, agent_working_dir FROM tasks").fetchone()
     assert "agent_working_dir" in columns
     assert task["short_id"] == "t_legacy"
@@ -254,7 +281,9 @@ def test_dashboard_redacts_health_warning_paths(tmp_path: Path) -> None:
     assert payload["recent_health_warnings"][0]["message"] == "Hermes failed at [path]"
 
 
-def test_settings_catalog_and_runtime_routes_are_readonly_product_maps(tmp_path: Path) -> None:
+def test_settings_catalog_and_runtime_routes_are_readonly_product_maps(
+    tmp_path: Path,
+) -> None:
     client = _client(tmp_path)
 
     catalog = client.get("/api/settings/catalog", headers=_auth()).json()
@@ -282,7 +311,9 @@ def test_static_renderer_assets_are_served(tmp_path: Path) -> None:
     assert "console.log" in asset.text
 
 
-def test_incomplete_static_assets_fail_ready_check_and_do_not_fall_back_to_index(tmp_path: Path) -> None:
+def test_incomplete_static_assets_fail_ready_check_and_do_not_fall_back_to_index(
+    tmp_path: Path,
+) -> None:
     static_dir = tmp_path / "broken_static"
     static_dir.mkdir()
     (static_dir / "index.html").write_text(
@@ -307,9 +338,13 @@ def test_incomplete_static_assets_fail_ready_check_and_do_not_fall_back_to_index
     assert response.json()["error"]["code"] == "not_found"
 
 
-def test_message_detail_reports_store_unavailable_separately_from_missing_message(tmp_path: Path) -> None:
+def test_message_detail_reports_store_unavailable_separately_from_missing_message(
+    tmp_path: Path,
+) -> None:
     unavailable_client = _client(tmp_path / "unavailable")
-    unavailable = unavailable_client.get("/api/messages/om_missing/detail", headers=_auth())
+    unavailable = unavailable_client.get(
+        "/api/messages/om_missing/detail", headers=_auth()
+    )
 
     ready_tmp = tmp_path / "ready"
     ready_tmp.mkdir()
@@ -333,7 +368,16 @@ def test_message_detail_api_is_service_backed_and_read_only(tmp_path: Path) -> N
             INSERT INTO tasks(short_id, status, chat_id, chat_type, root_message_id, task_label, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            ("t_msg", "watching", "oc_1", "p2p", "om_1", "message detail", "now", "now"),
+            (
+                "t_msg",
+                "watching",
+                "oc_1",
+                "p2p",
+                "om_1",
+                "message detail",
+                "now",
+                "now",
+            ),
         ).lastrowid
         conn.execute(
             """
@@ -382,7 +426,11 @@ def test_message_detail_api_is_service_backed_and_read_only(tmp_path: Path) -> N
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_1",
-        payload={"reply_target_message_id": "om_1", "text": "reply", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_1",
+            "text": "reply",
+            "identity": "user",
+        },
     )
     assert action_id is not None
     before = _message_detail_state(store, action_id)
@@ -428,7 +476,9 @@ def test_message_detail_api_is_service_backed_and_read_only(tmp_path: Path) -> N
         ("GET", "/api/health/issues"),
     ],
 )
-def test_core_console_routes_require_token(tmp_path: Path, method: str, path: str) -> None:
+def test_core_console_routes_require_token(
+    tmp_path: Path, method: str, path: str
+) -> None:
     client = _client(tmp_path)
 
     response = client.request(method, path, json={})
@@ -437,20 +487,30 @@ def test_core_console_routes_require_token(tmp_path: Path, method: str, path: st
     assert response.json()["error"]["code"] == "unauthorized"
 
 
-def test_core_read_routes_use_operator_query_filters_and_details(tmp_path: Path) -> None:
+def test_core_read_routes_use_operator_query_filters_and_details(
+    tmp_path: Path,
+) -> None:
     client = _client(tmp_path)
     store = _store(tmp_path)
     task_id = _seed_task_with_message(store)
     approval_id = store.create_send_reply_approval(
         task_id=task_id,
         preview="draft reply",
-        payload={"reply_target_message_id": "om_1", "text": "draft reply", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_1",
+            "text": "draft reply",
+            "identity": "user",
+        },
         approval_timeout_hours=None,
     )
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_1",
-        payload={"reply_target_message_id": "om_1", "text": "draft reply", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_1",
+            "text": "draft reply",
+            "identity": "user",
+        },
         approval_id=approval_id,
     )
     assert action_id is not None
@@ -459,9 +519,13 @@ def test_core_read_routes_use_operator_query_filters_and_details(tmp_path: Path)
             "SELECT short_id FROM approvals WHERE id = ?",
             (approval_id,),
         ).fetchone()["short_id"]
-        task_short_id = conn.execute("SELECT short_id FROM tasks WHERE id = ?", (task_id,)).fetchone()["short_id"]
+        task_short_id = conn.execute(
+            "SELECT short_id FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()["short_id"]
 
-    approvals = client.get("/api/approvals?status=pending&limit=10&offset=0", headers=_auth())
+    approvals = client.get(
+        "/api/approvals?status=pending&limit=10&offset=0", headers=_auth()
+    )
     approval_detail = client.get(f"/api/approvals/{approval_short_id}", headers=_auth())
     tasks = client.get("/api/tasks?status=watching&chat_id=oc_1", headers=_auth())
     task_detail = client.get(f"/api/tasks/{task_short_id}", headers=_auth())
@@ -493,7 +557,9 @@ def test_core_read_routes_use_operator_query_filters_and_details(tmp_path: Path)
         "/api/tasks?offset=-1",
     ],
 )
-def test_core_read_routes_return_standard_validation_errors(tmp_path: Path, path: str) -> None:
+def test_core_read_routes_return_standard_validation_errors(
+    tmp_path: Path, path: str
+) -> None:
     client = _client(tmp_path)
 
     response = client.get(path, headers=_auth())
@@ -502,14 +568,20 @@ def test_core_read_routes_return_standard_validation_errors(tmp_path: Path, path
     assert response.json()["error"]["code"] == "validation_failed"
 
 
-def test_approval_and_task_command_routes_return_command_results(tmp_path: Path) -> None:
+def test_approval_and_task_command_routes_return_command_results(
+    tmp_path: Path,
+) -> None:
     client = _client(tmp_path)
     store = _store(tmp_path)
     task_id = _seed_task_with_message(store, task_short_id="t_api_cmd")
     approval_id = store.create_send_reply_approval(
         task_id=task_id,
         preview="approve me",
-        payload={"reply_target_message_id": "om_1", "text": "approve me", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_1",
+            "text": "approve me",
+            "identity": "user",
+        },
         approval_timeout_hours=None,
     )
     with store.connect() as conn:
@@ -526,9 +598,15 @@ def test_approval_and_task_command_routes_return_command_results(tmp_path: Path)
     send = client.post(
         "/api/tasks/t_api_cmd/send",
         headers=_auth(),
-        json={"final_reply": "operator final", "reason": "manual close", "command_id": "cmd_send_api"},
+        json={
+            "final_reply": "operator final",
+            "reason": "manual close",
+            "command_id": "cmd_send_api",
+        },
     )
-    invalid_send = client.post("/api/tasks/t_api_cmd/send", headers=_auth(), json={"final_reply": "   "})
+    invalid_send = client.post(
+        "/api/tasks/t_api_cmd/send", headers=_auth(), json={"final_reply": "   "}
+    )
 
     assert approve.status_code == 200
     approve_payload = approve.json()
@@ -545,10 +623,18 @@ def test_approval_and_task_command_routes_return_command_results(tmp_path: Path)
     send = client.post(
         "/api/tasks/t_api_send/send",
         headers=_auth(),
-        json={"final_reply": "operator final", "reason": "manual close", "command_id": "cmd_send_api_2"},
+        json={
+            "final_reply": "operator final",
+            "reason": "manual close",
+            "command_id": "cmd_send_api_2",
+        },
     )
-    close = client.post("/api/tasks/t_api_send/close", headers=_auth(), json={"reason": "done"})
-    reopen = client.post("/api/tasks/t_api_send/reopen", headers=_auth(), json={"reason": "again"})
+    close = client.post(
+        "/api/tasks/t_api_send/close", headers=_auth(), json={"reason": "done"}
+    )
+    reopen = client.post(
+        "/api/tasks/t_api_send/reopen", headers=_auth(), json={"reason": "again"}
+    )
     send_payload = send.json()
     assert conflict["status"] == "conflict"
     assert send_payload["status"] == "applied"
@@ -566,21 +652,37 @@ def test_approval_and_task_command_routes_return_command_results(tmp_path: Path)
     assert invalid_send.json()["error"]["code"] == "validation_failed"
 
 
-def test_maintenance_and_dispatch_command_routes_return_command_results(tmp_path: Path) -> None:
+def test_maintenance_and_dispatch_command_routes_return_command_results(
+    tmp_path: Path,
+) -> None:
     client = _client(tmp_path)
     store = _store(tmp_path)
     task_id = _seed_task_with_message(store)
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_1",
-        payload={"reply_target_message_id": "om_1", "text": "recover me", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_1",
+            "text": "recover me",
+            "identity": "user",
+        },
     )
     assert action_id is not None
     store.finish_action(action_id, status="failed", result={"error_stage": "send"})
 
-    retry = client.post(f"/api/dispatch/actions/{action_id}/retry", headers=_auth(), json={"reason": "try again"})
-    cancel = client.post(f"/api/dispatch/actions/{action_id}/cancel", headers=_auth(), json={"reason": "stop"})
-    expire = client.post("/api/maintenance/expire-approvals", headers=_auth(), json={"reason": "sweep"})
+    retry = client.post(
+        f"/api/dispatch/actions/{action_id}/retry",
+        headers=_auth(),
+        json={"reason": "try again"},
+    )
+    cancel = client.post(
+        f"/api/dispatch/actions/{action_id}/cancel",
+        headers=_auth(),
+        json={"reason": "stop"},
+    )
+    expire = client.post(
+        "/api/maintenance/expire-approvals", headers=_auth(), json={"reason": "sweep"}
+    )
 
     assert retry.status_code == 200
     assert retry.json()["status"] == "applied"
@@ -600,10 +702,16 @@ def test_dispatch_mark_sent_route_uses_readback_marker(tmp_path: Path) -> None:
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_1",
-        payload={"reply_target_message_id": "om_1", "text": "sent already", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_1",
+            "text": "sent already",
+            "identity": "user",
+        },
     )
     assert action_id is not None
-    store.finish_action(action_id, status="failed_needs_review", result={"error_stage": "send"})
+    store.finish_action(
+        action_id, status="failed_needs_review", result={"error_stage": "send"}
+    )
 
     class FakeReadbackMarker:
         calls: list[dict[str, Any]]
@@ -628,10 +736,17 @@ def test_dispatch_mark_sent_route_uses_readback_marker(tmp_path: Path) -> None:
             store.mark_action_sent_after_evidence(
                 action_id,
                 sent_message_id=sent_message_id,
-                result={"readback": {"ok": True, "message_id": sent_message_id}, "warnings": []},
+                result={
+                    "readback": {"ok": True, "message_id": sent_message_id},
+                    "warnings": [],
+                },
                 run_id=run_id,
             )
-            return {"status": "sent", "action_id": action_id, "sent_message_id": sent_message_id}
+            return {
+                "status": "sent",
+                "action_id": action_id,
+                "sent_message_id": sent_message_id,
+            }
 
     marker = FakeReadbackMarker()
     client = _client(tmp_path, readback_marker=marker)
@@ -641,7 +756,9 @@ def test_dispatch_mark_sent_route_uses_readback_marker(tmp_path: Path) -> None:
         headers=_auth(),
         json={"sent_message_id": "om_sent", "reason": "verified in Feishu"},
     )
-    missing = client.post(f"/api/dispatch/actions/{action_id}/mark-sent", headers=_auth(), json={})
+    missing = client.post(
+        f"/api/dispatch/actions/{action_id}/mark-sent", headers=_auth(), json={}
+    )
 
     assert response.status_code == 200
     payload = response.json()
@@ -657,7 +774,9 @@ def test_dispatch_mark_sent_route_uses_readback_marker(tmp_path: Path) -> None:
     assert missing.json()["error"]["code"] == "validation_failed"
 
 
-def test_policy_routes_use_command_facade_and_settings_runtime_read_model(tmp_path: Path) -> None:
+def test_policy_routes_use_command_facade_and_settings_runtime_read_model(
+    tmp_path: Path,
+) -> None:
     client = _client(tmp_path)
     store = _store(tmp_path)
 
@@ -759,16 +878,24 @@ def test_health_issues_route_validates_limit(tmp_path: Path) -> None:
     assert response.json()["error"]["code"] == "validation_failed"
 
 
-def test_dispatch_mark_sent_route_reports_marker_construction_failure(tmp_path: Path, monkeypatch) -> None:
+def test_dispatch_mark_sent_route_reports_marker_construction_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
     store = _store(tmp_path)
     task_id = _seed_task_with_message(store)
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_1",
-        payload={"reply_target_message_id": "om_1", "text": "sent already", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_1",
+            "text": "sent already",
+            "identity": "user",
+        },
     )
     assert action_id is not None
-    store.finish_action(action_id, status="failed_needs_review", result={"error_stage": "send"})
+    store.finish_action(
+        action_id, status="failed_needs_review", result={"error_stage": "send"}
+    )
     monkeypatch.setattr(
         "feishu_shadow_agent.console_api._build_dispatch_readback_marker",
         lambda **_: (_ for _ in ()).throw(OSError("log path unavailable")),
@@ -841,9 +968,16 @@ def _seed_task_with_message(
 
 def _message_detail_state(store: SQLiteStore, action_id: int) -> dict[str, object]:
     with store.connect() as conn:
-        approval = conn.execute("SELECT status, resolved_at FROM approvals WHERE short_id = ?", ("a_msg",)).fetchone()
-        action = conn.execute("SELECT status, result_json FROM actions WHERE id = ?", (action_id,)).fetchone()
-        attempts = conn.execute("SELECT COUNT(*) AS count FROM dispatch_attempts WHERE action_id = ?", (action_id,)).fetchone()
+        approval = conn.execute(
+            "SELECT status, resolved_at FROM approvals WHERE short_id = ?", ("a_msg",)
+        ).fetchone()
+        action = conn.execute(
+            "SELECT status, result_json FROM actions WHERE id = ?", (action_id,)
+        ).fetchone()
+        attempts = conn.execute(
+            "SELECT COUNT(*) AS count FROM dispatch_attempts WHERE action_id = ?",
+            (action_id,),
+        ).fetchone()
     return {
         "approval_status": approval["status"],
         "approval_resolved_at": approval["resolved_at"],

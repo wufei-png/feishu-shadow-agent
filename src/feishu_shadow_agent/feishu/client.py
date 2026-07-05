@@ -6,11 +6,9 @@ from ..types import LarkCliResult, MessagePage
 
 
 class FeishuClient(Protocol):
-    def version(self) -> LarkCliResult:
-        ...
+    def version(self) -> LarkCliResult: ...
 
-    def auth_status(self, *, verify: bool = True) -> LarkCliResult:
-        ...
+    def auth_status(self, *, verify: bool = True) -> LarkCliResult: ...
 
     def owner_message(
         self,
@@ -19,8 +17,7 @@ class FeishuClient(Protocol):
         text: str,
         idempotency_key: str,
         dry_run: bool = True,
-    ) -> LarkCliResult:
-        ...
+    ) -> LarkCliResult: ...
 
     def reply_message(
         self,
@@ -30,16 +27,14 @@ class FeishuClient(Protocol):
         text: str,
         idempotency_key: str,
         dry_run: bool = True,
-    ) -> LarkCliResult:
-        ...
+    ) -> LarkCliResult: ...
 
     def get_messages(
         self,
         *,
         as_identity: str,
         message_ids: list[str],
-    ) -> MessagePage:
-        ...
+    ) -> MessagePage: ...
 
     def search_messages(
         self,
@@ -51,8 +46,7 @@ class FeishuClient(Protocol):
         page_token: str | None = None,
         query: str = "",
         page_size: int = 50,
-    ) -> MessagePage:
-        ...
+    ) -> MessagePage: ...
 
     def search_owner_messages(
         self,
@@ -60,8 +54,7 @@ class FeishuClient(Protocol):
         sender: str,
         start: str | None,
         end: str | None,
-    ) -> MessagePage:
-        ...
+    ) -> MessagePage: ...
 
     def list_chat_messages(
         self,
@@ -71,8 +64,7 @@ class FeishuClient(Protocol):
         end: str | None,
         page_token: str | None = None,
         page_size: int = 50,
-    ) -> MessagePage:
-        ...
+    ) -> MessagePage: ...
 
     def list_p2p_messages(
         self,
@@ -82,8 +74,7 @@ class FeishuClient(Protocol):
         end: str | None,
         page_token: str | None = None,
         page_size: int = 50,
-    ) -> MessagePage:
-        ...
+    ) -> MessagePage: ...
 
     def list_thread_messages(
         self,
@@ -91,8 +82,7 @@ class FeishuClient(Protocol):
         thread_id: str,
         page_token: str | None = None,
         page_size: int = 50,
-    ) -> MessagePage:
-        ...
+    ) -> MessagePage: ...
 
     def download_resource(
         self,
@@ -101,5 +91,4 @@ class FeishuClient(Protocol):
         file_key: str,
         resource_type: str,
         output: str,
-    ) -> LarkCliResult:
-        ...
+    ) -> LarkCliResult: ...

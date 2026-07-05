@@ -67,7 +67,9 @@ class FakeBackend:
         self.prompts: list[str] = []
         self.cwds: list[str | None] = []
 
-    def task_router(self, prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
+    def task_router(
+        self, prompt: str, *, cwd: str | Path | None = None
+    ) -> AgentRunResult:
         raise AssertionError("task_router should not be called")
 
     def task_session(
@@ -79,10 +81,14 @@ class FakeBackend:
     ) -> AgentRunResult:
         raise AssertionError("task_session should not be called")
 
-    def reply_postprocess(self, prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
+    def reply_postprocess(
+        self, prompt: str, *, cwd: str | Path | None = None
+    ) -> AgentRunResult:
         raise AssertionError("reply_postprocess should not be called")
 
-    def owner_style_refresh(self, prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
+    def owner_style_refresh(
+        self, prompt: str, *, cwd: str | Path | None = None
+    ) -> AgentRunResult:
         self.prompts.append(prompt)
         self.cwds.append(None if cwd is None else str(cwd))
         output = self.outputs.pop(0)
@@ -97,7 +103,9 @@ def _config(*, min_samples: int = 2, max_samples: int = 5) -> AppConfig:
         reply_postprocess=ReplyPostprocessConfig(
             owner_style=ReplyPostprocessOwnerStyleConfig(
                 profile_path="data/owner_style.zh.md",
-                refresh=OwnerStyleRefreshConfig(min_samples=min_samples, max_samples=max_samples),
+                refresh=OwnerStyleRefreshConfig(
+                    min_samples=min_samples, max_samples=max_samples
+                ),
             )
         ),
     )
@@ -113,7 +121,13 @@ def _raw(message_id: str, text: str) -> dict[str, Any]:
     }
 
 
-def _refresher(tmp_path: Path, *, items: list[dict[str, Any]], backend: FakeBackend, config: AppConfig | None = None) -> ReplyStyleRefresher:
+def _refresher(
+    tmp_path: Path,
+    *,
+    items: list[dict[str, Any]],
+    backend: FakeBackend,
+    config: AppConfig | None = None,
+) -> ReplyStyleRefresher:
     return ReplyStyleRefresher(
         config=config or _config(),
         base_dir=tmp_path,
@@ -126,7 +140,9 @@ def _refresher(tmp_path: Path, *, items: list[dict[str, Any]], backend: FakeBack
     )
 
 
-def test_reply_style_refresh_dry_run_filters_samples_without_hermes_or_write(tmp_path: Path) -> None:
+def test_reply_style_refresh_dry_run_filters_samples_without_hermes_or_write(
+    tmp_path: Path,
+) -> None:
     backend = FakeBackend()
     items = [
         _raw("om_1", "可以，晚点我看下"),
@@ -149,7 +165,9 @@ def test_reply_style_refresh_dry_run_filters_samples_without_hermes_or_write(tmp
     assert not (tmp_path / "data" / "owner_style.zh.md").exists()
 
 
-def test_reply_style_refresh_fails_without_replacing_old_profile_when_samples_are_low(tmp_path: Path) -> None:
+def test_reply_style_refresh_fails_without_replacing_old_profile_when_samples_are_low(
+    tmp_path: Path,
+) -> None:
     profile = tmp_path / "data" / "owner_style.zh.md"
     profile.parent.mkdir()
     profile.write_text("old profile\n", encoding="utf-8")
@@ -165,7 +183,12 @@ def test_reply_style_refresh_fails_without_replacing_old_profile_when_samples_ar
 
 def test_reply_style_refresh_success_writes_profile(tmp_path: Path) -> None:
     backend = FakeBackend()
-    backend.outputs.append({"status": "ok", "profile_markdown": "# Owner Reply Style Profile\n\n## Style Summary\n自然。"})
+    backend.outputs.append(
+        {
+            "status": "ok",
+            "profile_markdown": "# Owner Reply Style Profile\n\n## Style Summary\n自然。",
+        }
+    )
     refresher = _refresher(
         tmp_path,
         items=[_raw("om_1", "可以，晚点我看下"), _raw("om_2", "先按这个方向推进")],

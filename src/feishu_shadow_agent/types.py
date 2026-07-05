@@ -9,7 +9,9 @@ from uuid import uuid4
 ChatType = Literal["group", "p2p"]
 HealthSeverity = Literal["critical", "warning"]
 HealthStatus = Literal["ok", "warning", "failed"]
-SenderRole = Literal["external_user_message", "owner_message", "bot_message", "agent_message"]
+SenderRole = Literal[
+    "external_user_message", "owner_message", "bot_message", "agent_message"
+]
 
 
 class TaskStatus(StrEnum):
@@ -104,7 +106,12 @@ class ResourceStatus(StrEnum):
 
 
 CHAT_TYPES = ("group", "p2p")
-SENDER_ROLES = ("external_user_message", "owner_message", "bot_message", "agent_message")
+SENDER_ROLES = (
+    "external_user_message",
+    "owner_message",
+    "bot_message",
+    "agent_message",
+)
 
 
 def enum_values(enum_type: type[StrEnum]) -> tuple[str, ...]:

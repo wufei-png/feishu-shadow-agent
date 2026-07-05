@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 from hashlib import sha256
 from importlib import resources
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from ..config import AppConfig, ChatPolicyConfig, ReplyPolicyConfig
 from ..types import (
-    ActionRecord,
     ActionKind,
+    ActionRecord,
     ActionStatus,
     ApprovalKind,
     ApprovalStatus,
@@ -51,7 +52,9 @@ class SQLiteStore:
     def migrate(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
-            migration_dir = resources.files("feishu_shadow_agent.store").joinpath("migrations")
+            migration_dir = resources.files("feishu_shadow_agent.store").joinpath(
+                "migrations"
+            )
             for migration in sorted(
                 path for path in migration_dir.iterdir() if path.name.endswith(".sql")
             ):
@@ -80,7 +83,9 @@ class SQLiteStore:
         with self.connect() as conn:
             conn.execute("SELECT 1").fetchone()
 
-    def get_product_policy(self, key: str = PRODUCT_POLICY_KEY) -> dict[str, Any] | None:
+    def get_product_policy(
+        self, key: str = PRODUCT_POLICY_KEY
+    ) -> dict[str, Any] | None:
         self.migrate()
         with self.connect() as conn:
             row = conn.execute(
@@ -141,7 +146,9 @@ class SQLiteStore:
     ) -> dict[str, Any]:
         self.migrate()
         now = utc_now_iso()
-        audit_reason = reason or ("policy import-config --replace" if replace else "policy import-config")
+        audit_reason = reason or (
+            "policy import-config --replace" if replace else "policy import-config"
+        )
         result: dict[str, Any] = {
             "status": "imported",
             "mode": "replace" if replace else "fill_missing",
@@ -262,7 +269,9 @@ class SQLiteStore:
                 "SELECT policy_json FROM product_policies WHERE key = ?",
                 (PRODUCT_POLICY_KEY,),
             ).fetchone()
-            old_policy = None if existing is None else json.loads(existing["policy_json"])
+            old_policy = (
+                None if existing is None else json.loads(existing["policy_json"])
+            )
             if old_policy == new_policy:
                 return {
                     "scope": "global",
@@ -543,7 +552,11 @@ class SQLiteStore:
                   value_json = excluded.value_json,
                   updated_at = excluded.updated_at
                 """,
-                (key, json.dumps(value, ensure_ascii=False, default=str), utc_now_iso()),
+                (
+                    key,
+                    json.dumps(value, ensure_ascii=False, default=str),
+                    utc_now_iso(),
+                ),
             )
 
     def get_checkpoint(self, key: str) -> dict[str, Any] | None:
@@ -616,7 +629,9 @@ class SQLiteStore:
             target_task_id = row["target_task_id"] or row["task_id"]
             task = None
             if target_task_id is not None:
-                task_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (target_task_id,)).fetchone()
+                task_row = conn.execute(
+                    "SELECT * FROM tasks WHERE id = ?", (target_task_id,)
+                ).fetchone()
                 if task_row is not None:
                     task = _task_from_row(task_row)
             decision = RouteDecision(
@@ -727,7 +742,9 @@ class SQLiteStore:
                 ),
             )
 
-    def count_prunable_message_raw_json(self, *, cutoff: str, replacement_json: str) -> int:
+    def count_prunable_message_raw_json(
+        self, *, cutoff: str, replacement_json: str
+    ) -> int:
         self.migrate()
         with self.connect() as conn:
             row = conn.execute(
@@ -858,14 +875,20 @@ class SQLiteStore:
                 router_called=router_called,
                 matched_by=matched_by,
             )
-            self._record_routing_audit(conn, message_id=message.message_id, decision=decision)
+            self._record_routing_audit(
+                conn, message_id=message.message_id, decision=decision
+            )
         return task, decision
 
-    def attach_message_to_task(self, task_id: int, message: NormalizedMessage, *, watch_until: str) -> None:
+    def attach_message_to_task(
+        self, task_id: int, message: NormalizedMessage, *, watch_until: str
+    ) -> None:
         self.migrate()
         now = utc_now_iso()
         with self.connect() as conn:
-            self._attach_message_to_task(conn, task_id, message, watch_until=watch_until, now=now)
+            self._attach_message_to_task(
+                conn, task_id, message, watch_until=watch_until, now=now
+            )
 
     def attach_message_to_task_and_audit(
         self,
@@ -888,8 +911,12 @@ class SQLiteStore:
             matched_by=matched_by,
         )
         with self.connect() as conn:
-            self._attach_message_to_task(conn, task.id, message, watch_until=watch_until, now=now)
-            self._record_routing_audit(conn, message_id=message.message_id, decision=decision)
+            self._attach_message_to_task(
+                conn, task.id, message, watch_until=watch_until, now=now
+            )
+            self._record_routing_audit(
+                conn, message_id=message.message_id, decision=decision
+            )
         return decision
 
     def close_task_for_owner_takeover(self, task_id: int) -> None:
@@ -913,7 +940,9 @@ class SQLiteStore:
                     "expired_approvals": 0,
                     "cancelled_actions": 0,
                 }
-            expired_approvals, cancelled_actions = self._close_task_by_operator_locked(conn, task.id, now=now)
+            expired_approvals, cancelled_actions = self._close_task_by_operator_locked(
+                conn, task.id, now=now
+            )
             updated = self._get_task_by_id(conn, task.id)
         return {
             "changed": True,
@@ -923,7 +952,9 @@ class SQLiteStore:
             "cancelled_actions": cancelled_actions,
         }
 
-    def reopen_task_by_operator(self, task_id: int | str, *, watch_until: str) -> dict[str, Any]:
+    def reopen_task_by_operator(
+        self, task_id: int | str, *, watch_until: str
+    ) -> dict[str, Any]:
         self.migrate()
         now = utc_now_iso()
         with self.connect() as conn:
@@ -968,7 +999,9 @@ class SQLiteStore:
         )
         with self.connect() as conn:
             self._close_task_for_owner_takeover(conn, task.id, now=now)
-            self._record_routing_audit(conn, message_id=message.message_id, decision=decision)
+            self._record_routing_audit(
+                conn, message_id=message.message_id, decision=decision
+            )
         return decision
 
     def get_task_by_id(self, task_id: int) -> TaskRecord:
@@ -1024,7 +1057,9 @@ class SQLiteStore:
             ).fetchall()
         return [_task_from_row(row) for row in rows]
 
-    def get_recent_closed_tasks(self, chat_id: str, *, limit: int = 20) -> list[TaskRecord]:
+    def get_recent_closed_tasks(
+        self, chat_id: str, *, limit: int = 20
+    ) -> list[TaskRecord]:
         self.migrate()
         with self.connect() as conn:
             rows = conn.execute(
@@ -1165,7 +1200,9 @@ class SQLiteStore:
         self.migrate()
         now = utc_now_iso()
         with self.connect() as conn:
-            self._record_agent_message_for_task(conn, task_id, message, watch_until=watch_until, now=now)
+            self._record_agent_message_for_task(
+                conn, task_id, message, watch_until=watch_until, now=now
+            )
 
     def record_agent_message_for_task_and_audit(
         self,
@@ -1191,7 +1228,9 @@ class SQLiteStore:
                 watch_until=watch_until,
                 now=now,
             )
-            self._record_routing_audit(conn, message_id=message.message_id, decision=decision)
+            self._record_routing_audit(
+                conn, message_id=message.message_id, decision=decision
+            )
         return decision
 
     def list_active_watch_targets(self, *, now: str) -> list[dict[str, str | None]]:
@@ -1292,7 +1331,9 @@ class SQLiteStore:
             ).fetchone()
         return int(row["count"])
 
-    def list_dispatchable_actions(self, *, limit: int = 50, kind: str | None = None) -> list[ActionRecord]:
+    def list_dispatchable_actions(
+        self, *, limit: int = 50, kind: str | None = None
+    ) -> list[ActionRecord]:
         self.migrate()
         with self.connect() as conn:
             if kind is None:
@@ -1324,10 +1365,14 @@ class SQLiteStore:
     def get_action(self, action_id: int) -> ActionRecord | None:
         self.migrate()
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM actions WHERE id = ?", (action_id,)
+            ).fetchone()
         return None if row is None else _action_from_row(row)
 
-    def claim_action_for_dispatch(self, action_id: int, *, run_id: str | None = None) -> DispatchClaim | None:
+    def claim_action_for_dispatch(
+        self, action_id: int, *, run_id: str | None = None
+    ) -> DispatchClaim | None:
         self.migrate()
         now = utc_now_iso()
         claim_token = new_run_id("claim")
@@ -1355,14 +1400,18 @@ class SQLiteStore:
                     now,
                 ),
             )
-            row = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM actions WHERE id = ?", (action_id,)
+            ).fetchone()
             attempt = conn.execute(
                 "SELECT * FROM dispatch_attempts WHERE id = ?",
                 (int(attempt_cursor.lastrowid),),
             ).fetchone()
         if row is None or attempt is None:
             return None
-        return DispatchClaim(action=_action_from_row(row), attempt=_dispatch_attempt_from_row(attempt))
+        return DispatchClaim(
+            action=_action_from_row(row), attempt=_dispatch_attempt_from_row(attempt)
+        )
 
     def list_dispatch_attempts(self, action_id: int) -> list[DispatchAttemptRecord]:
         self.migrate()
@@ -1421,7 +1470,9 @@ class SQLiteStore:
                 f"UPDATE dispatch_attempts SET {', '.join(assignments)} WHERE id = ?",
                 params,
             )
-            row = conn.execute("SELECT * FROM dispatch_attempts WHERE id = ?", (attempt_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM dispatch_attempts WHERE id = ?", (attempt_id,)
+            ).fetchone()
         if row is None:
             raise KeyError(f"dispatch attempt not found: {attempt_id}")
         return _dispatch_attempt_from_row(row)
@@ -1429,7 +1480,9 @@ class SQLiteStore:
     def get_dispatch_inspection(self, action_id: int) -> dict[str, Any] | None:
         self.migrate()
         with self.connect() as conn:
-            action = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+            action = conn.execute(
+                "SELECT * FROM actions WHERE id = ?", (action_id,)
+            ).fetchone()
             if action is None:
                 return None
             attempts = conn.execute(
@@ -1443,10 +1496,15 @@ class SQLiteStore:
             ).fetchall()
         return {
             "action": _action_record_dict(_action_from_row(action)),
-            "attempts": [_dispatch_attempt_dict(_dispatch_attempt_from_row(row)) for row in attempts],
+            "attempts": [
+                _dispatch_attempt_dict(_dispatch_attempt_from_row(row))
+                for row in attempts
+            ],
         }
 
-    def find_stale_sending_actions(self, *, stale_after_seconds: int = 900, now: str | None = None) -> list[ActionRecord]:
+    def find_stale_sending_actions(
+        self, *, stale_after_seconds: int = 900, now: str | None = None
+    ) -> list[ActionRecord]:
         self.migrate()
         cutoff = _minus_seconds(now or utc_now_iso(), stale_after_seconds)
         with self.connect() as conn:
@@ -1506,7 +1564,9 @@ class SQLiteStore:
                             "UPDATE dispatch_attempts SET finished_at = ? WHERE id = ?",
                             (effective_now, latest["id"]),
                         )
-                    recovered.append({"action_id": action_id, "status": ActionStatus.SENT.value})
+                    recovered.append(
+                        {"action_id": action_id, "status": ActionStatus.SENT.value}
+                    )
                     continue
 
                 result = _stale_needs_review_result(row, latest)
@@ -1553,18 +1613,30 @@ class SQLiteStore:
                             latest["id"],
                         ),
                     )
-                recovered.append({"action_id": action_id, "status": ActionStatus.FAILED_NEEDS_REVIEW.value})
+                recovered.append(
+                    {
+                        "action_id": action_id,
+                        "status": ActionStatus.FAILED_NEEDS_REVIEW.value,
+                    }
+                )
         return recovered
 
     def retry_dispatch_action(self, action_id: int) -> ActionRecord:
         self.migrate()
         now = utc_now_iso()
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM actions WHERE id = ?", (action_id,)
+            ).fetchone()
             if row is None:
                 raise ValueError(f"action not found: {action_id}")
-            if row["status"] not in {ActionStatus.FAILED.value, ActionStatus.FAILED_NEEDS_REVIEW.value}:
-                raise ValueError("dispatch retry only accepts failed or failed_needs_review actions")
+            if row["status"] not in {
+                ActionStatus.FAILED.value,
+                ActionStatus.FAILED_NEEDS_REVIEW.value,
+            }:
+                raise ValueError(
+                    "dispatch retry only accepts failed or failed_needs_review actions"
+                )
             if (
                 row["kind"] == ActionKind.SEND_REPLY.value
                 and row["task_id"] is not None
@@ -1576,7 +1648,9 @@ class SQLiteStore:
                     exclude_action_id=action_id,
                 )
             ):
-                raise ValueError("active send action already exists for this task and reply target")
+                raise ValueError(
+                    "active send action already exists for this task and reply target"
+                )
             conn.execute(
                 """
                 UPDATE actions
@@ -1585,7 +1659,9 @@ class SQLiteStore:
                 """,
                 (ActionStatus.PENDING.value, 1, now, action_id),
             )
-            updated = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+            updated = conn.execute(
+                "SELECT * FROM actions WHERE id = ?", (action_id,)
+            ).fetchone()
         if updated is None:
             raise ValueError(f"action not found: {action_id}")
         return _action_from_row(updated)
@@ -1594,7 +1670,9 @@ class SQLiteStore:
         self.migrate()
         now = utc_now_iso()
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM actions WHERE id = ?", (action_id,)
+            ).fetchone()
             if row is None:
                 raise ValueError(f"action not found: {action_id}")
             if row["status"] == ActionStatus.SENT.value:
@@ -1608,7 +1686,9 @@ class SQLiteStore:
                     """,
                     (ActionStatus.CANCELLED.value, now, action_id),
                 )
-            updated = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+            updated = conn.execute(
+                "SELECT * FROM actions WHERE id = ?", (action_id,)
+            ).fetchone()
         if updated is None:
             raise ValueError(f"action not found: {action_id}")
         return _action_from_row(updated)
@@ -1631,7 +1711,9 @@ class SQLiteStore:
             raise ValueError("readback evidence is required before marking sent")
         now = utc_now_iso()
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM actions WHERE id = ?", (action_id,)
+            ).fetchone()
             if row is None:
                 raise ValueError(f"action not found: {action_id}")
             if row["status"] == ActionStatus.CANCELLED.value:
@@ -1640,7 +1722,9 @@ class SQLiteStore:
             result_with_id["sent_message_id"] = sent_message_id
             if readback_message is not None:
                 readback_result = dict(readback)
-                readback_result["inserted"] = self._upsert_message_locked(conn, readback_message, now=now)
+                readback_result["inserted"] = self._upsert_message_locked(
+                    conn, readback_message, now=now
+                )
                 result_with_id["readback"] = readback_result
                 readback = readback_result
                 if (
@@ -1704,7 +1788,9 @@ class SQLiteStore:
                     action_id,
                 ),
             )
-            updated = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+            updated = conn.execute(
+                "SELECT * FROM actions WHERE id = ?", (action_id,)
+            ).fetchone()
         if updated is None:
             raise ValueError(f"action not found: {action_id}")
         return _action_from_row(updated)
@@ -1718,7 +1804,11 @@ class SQLiteStore:
                 SET result_json = ?, updated_at = ?
                 WHERE id = ? AND status = 'pending'
                 """,
-                (json.dumps(result, ensure_ascii=False, default=str), utc_now_iso(), action_id),
+                (
+                    json.dumps(result, ensure_ascii=False, default=str),
+                    utc_now_iso(),
+                    action_id,
+                ),
             )
 
     def finish_action(
@@ -1772,7 +1862,9 @@ class SQLiteStore:
             )
             if cursor.rowcount != 1:
                 return None
-            row = conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM actions WHERE id = ?", (action_id,)
+            ).fetchone()
         return None if row is None else _action_from_row(row)
 
     def expire_pending_approvals(self, *, now: str | None = None) -> int:
@@ -1883,9 +1975,15 @@ class SQLiteStore:
                 """,
                 (f"-{stale_after_seconds} seconds",),
             ).fetchall()
-        last_run_data = _json_row_dict(last_run, "health_summary_json", "last_tick_summary_json") if last_run else None
+        last_run_data = (
+            _json_row_dict(last_run, "health_summary_json", "last_tick_summary_json")
+            if last_run
+            else None
+        )
         daemon_run_data = (
-            _json_row_dict(latest_daemon_run, "health_summary_json", "last_tick_summary_json")
+            _json_row_dict(
+                latest_daemon_run, "health_summary_json", "last_tick_summary_json"
+            )
             if latest_daemon_run
             else None
         )
@@ -1897,18 +1995,29 @@ class SQLiteStore:
             ),
             "last_run": last_run_data,
             "pending_approvals": [
-                _approval_read_model(row, now=effective_now) for row in pending_approvals
+                _approval_read_model(row, now=effective_now)
+                for row in pending_approvals
             ],
-            "recent_expired_approvals": [_row_dict(row) for row in recent_expired_approvals],
-            "failed_approval_commands": [_json_row_dict(row, "result_json") for row in failed_commands],
+            "recent_expired_approvals": [
+                _row_dict(row) for row in recent_expired_approvals
+            ],
+            "failed_approval_commands": [
+                _json_row_dict(row, "result_json") for row in failed_commands
+            ],
             "active_tasks": [_row_dict(row) for row in active_tasks],
-            "pending_actions": [_json_row_dict(row, "result_json") for row in pending_actions],
+            "pending_actions": [
+                _json_row_dict(row, "result_json") for row in pending_actions
+            ],
             "stale_sending_actions": [_row_dict(row) for row in stale_sending],
-            "recent_failed_actions": [_json_row_dict(row, "result_json") for row in failed_actions],
+            "recent_failed_actions": [
+                _json_row_dict(row, "result_json") for row in failed_actions
+            ],
             "recent_health_warnings": [_row_dict(row) for row in recent_health],
         }
 
-    def replay_summary(self, message_id: str, *, now: str | None = None) -> dict[str, Any] | None:
+    def replay_summary(
+        self, message_id: str, *, now: str | None = None
+    ) -> dict[str, Any] | None:
         self.migrate()
         effective_now = now or utc_now_iso()
         with self.connect() as conn:
@@ -1962,10 +2071,14 @@ class SQLiteStore:
             "routing_audits": [_row_dict(row) for row in audits],
             "task_ids": task_ids,
             "approvals": [
-                _approval_read_model(row, now=effective_now, json_columns=("payload_json",))
+                _approval_read_model(
+                    row, now=effective_now, json_columns=("payload_json",)
+                )
                 for row in approvals
             ],
-            "actions": [_json_row_dict(row, "payload_json", "result_json") for row in actions],
+            "actions": [
+                _json_row_dict(row, "payload_json", "result_json") for row in actions
+            ],
         }
 
     def list_task_message_ids(self, task_id: int) -> list[str]:
@@ -1977,7 +2090,9 @@ class SQLiteStore:
             ).fetchall()
         return [row["message_id"] for row in rows]
 
-    def count_task_messages_by_task_ids(self, task_ids: Iterable[int]) -> dict[int, int]:
+    def count_task_messages_by_task_ids(
+        self, task_ids: Iterable[int]
+    ) -> dict[int, int]:
         ids = list(dict.fromkeys(int(task_id) for task_id in task_ids))
         if not ids:
             return {}
@@ -1996,7 +2111,9 @@ class SQLiteStore:
         counts = {int(row["task_id"]): int(row["message_count"]) for row in rows}
         return {task_id: counts.get(task_id, 0) for task_id in ids}
 
-    def list_resources_for_messages(self, message_ids: Iterable[str]) -> list[sqlite3.Row]:
+    def list_resources_for_messages(
+        self, message_ids: Iterable[str]
+    ) -> list[sqlite3.Row]:
         self.migrate()
         ids = list(dict.fromkeys(message_ids))
         if not ids:
@@ -2101,12 +2218,20 @@ class SQLiteStore:
                     request_type,
                     task_id,
                     agent_session_id,
-                    json.dumps(list(input_message_ids), ensure_ascii=False, default=str),
-                    json.dumps(list(input_resource_ids), ensure_ascii=False, default=str),
-                    None if response is None else json.dumps(response, ensure_ascii=False, default=str),
+                    json.dumps(
+                        list(input_message_ids), ensure_ascii=False, default=str
+                    ),
+                    json.dumps(
+                        list(input_resource_ids), ensure_ascii=False, default=str
+                    ),
+                    None
+                    if response is None
+                    else json.dumps(response, ensure_ascii=False, default=str),
                     error,
                     latency_ms,
-                    None if prompt is None else json.dumps(prompt, ensure_ascii=False, default=str),
+                    None
+                    if prompt is None
+                    else json.dumps(prompt, ensure_ascii=False, default=str),
                     tool_permissions_profile,
                     utc_now_iso(),
                 ),
@@ -2159,9 +2284,15 @@ class SQLiteStore:
     ) -> int:
         self.migrate()
         now = utc_now_iso()
-        expires_at = None if approval_timeout_hours is None else _plus_hours(now, approval_timeout_hours)
+        expires_at = (
+            None
+            if approval_timeout_hours is None
+            else _plus_hours(now, approval_timeout_hours)
+        )
         with self.connect() as conn:
-            short_id = self._unique_short_id_in_table(conn, "approvals", "a", f"{task_id}:{preview}:{now}")
+            short_id = self._unique_short_id_in_table(
+                conn, "approvals", "a", f"{task_id}:{preview}:{now}"
+            )
             cursor = conn.execute(
                 """
                 INSERT INTO approvals(short_id, task_id, kind, status, payload_json, preview, created_at, expires_at)
@@ -2221,7 +2352,10 @@ class SQLiteStore:
                 (message_id,),
             ).fetchone()
             if existing is not None:
-                return {"status": "duplicate", "result": json.loads(existing["result_json"] or "{}")}
+                return {
+                    "status": "duplicate",
+                    "result": json.loads(existing["result_json"] or "{}"),
+                }
 
             conn.execute("SAVEPOINT approval_command")
             try:
@@ -2292,7 +2426,9 @@ class SQLiteStore:
             if cursor.rowcount != 1:
                 continue
             expired += 1
-            self._cancel_pending_actions_for_approvals_locked(conn, approval_ids=[int(row["id"])], now=now)
+            self._cancel_pending_actions_for_approvals_locked(
+                conn, approval_ids=[int(row["id"])], now=now
+            )
         return expired
 
     def _apply_approval_command_locked(
@@ -2312,23 +2448,35 @@ class SQLiteStore:
                     (target_id,),
                 ).fetchone()
                 if task is not None:
-                    pending = self._list_pending_approvals_locked(conn, task_id=int(task["id"]))
+                    pending = self._list_pending_approvals_locked(
+                        conn, task_id=int(task["id"])
+                    )
                     if len(pending) > 1:
-                        return self._create_approval_command_conflict_notification_locked(
-                            conn,
-                            task_id=int(task["id"]),
-                            task_short_id=target_id,
-                            verb=verb,
-                            pending=pending,
-                            now=now,
+                        return (
+                            self._create_approval_command_conflict_notification_locked(
+                                conn,
+                                task_id=int(task["id"]),
+                                task_short_id=target_id,
+                                verb=verb,
+                                pending=pending,
+                                now=now,
+                            )
                         )
             approval = self._resolve_pending_approval_locked(conn, target_id)
             if approval is None:
-                raise ValueError(f"pending approval not found or ambiguous: {target_id}")
-            resolved_status = ApprovalStatus.APPROVED.value if verb == "approve" else ApprovalStatus.REJECTED.value
+                raise ValueError(
+                    f"pending approval not found or ambiguous: {target_id}"
+                )
+            resolved_status = (
+                ApprovalStatus.APPROVED.value
+                if verb == "approve"
+                else ApprovalStatus.REJECTED.value
+            )
             task = None
             if approval["task_id"] is not None:
-                task = conn.execute("SELECT * FROM tasks WHERE id = ?", (approval["task_id"],)).fetchone()
+                task = conn.execute(
+                    "SELECT * FROM tasks WHERE id = ?", (approval["task_id"],)
+                ).fetchone()
             if verb == "approve" and not _task_is_watching(task):
                 raise ValueError("approval task is not watching")
             payload = json.loads(approval["payload_json"] or "{}")
@@ -2341,11 +2489,16 @@ class SQLiteStore:
                 (resolved_status, now, approval["id"]),
             )
             if verb == "reject":
-                if payload.get("keep_watching_on_reject") is True and approval["task_id"] is not None:
-                    cancelled_actions = self._cancel_pending_actions_for_approvals_locked(
-                        conn,
-                        approval_ids=[int(approval["id"])],
-                        now=now,
+                if (
+                    payload.get("keep_watching_on_reject") is True
+                    and approval["task_id"] is not None
+                ):
+                    cancelled_actions = (
+                        self._cancel_pending_actions_for_approvals_locked(
+                            conn,
+                            approval_ids=[int(approval["id"])],
+                            now=now,
+                        )
                     )
                     conn.execute(
                         """
@@ -2356,7 +2509,12 @@ class SQLiteStore:
                             watch_until = COALESCE(?, watch_until)
                         WHERE id = ?
                         """,
-                        (TaskStatus.WATCHING.value, now, keep_watching_until, int(approval["task_id"])),
+                        (
+                            TaskStatus.WATCHING.value,
+                            now,
+                            keep_watching_until,
+                            int(approval["task_id"]),
+                        ),
                     )
                     return {
                         "approval_id": approval["short_id"],
@@ -2372,10 +2530,16 @@ class SQLiteStore:
                         rejected_approval_id=int(approval["id"]),
                         now=now,
                     )
-                return {"approval_id": approval["short_id"], "task_id": approval["task_id"], "action_id": None}
+                return {
+                    "approval_id": approval["short_id"],
+                    "task_id": approval["task_id"],
+                    "action_id": None,
+                }
             if payload.get("approvable") is False:
                 raise ValueError("approval requires /send final reply")
-            target_message_id = payload.get("reply_target_message_id") or payload.get("target_message_id")
+            target_message_id = payload.get("reply_target_message_id") or payload.get(
+                "target_message_id"
+            )
             if not isinstance(target_message_id, str) or not target_message_id:
                 raise ValueError("approval payload is missing reply_target_message_id")
             text = payload.get("text")
@@ -2390,9 +2554,17 @@ class SQLiteStore:
                 now=now,
             )
             if action_id is None:
-                raise ValueError("active send action already exists for this task and reply target")
-            self._mark_task_watching_after_send_locked(conn, task_id=int(approval["task_id"]), now=now)
-            return {"approval_id": approval["short_id"], "task_id": approval["task_id"], "action_id": action_id}
+                raise ValueError(
+                    "active send action already exists for this task and reply target"
+                )
+            self._mark_task_watching_after_send_locked(
+                conn, task_id=int(approval["task_id"]), now=now
+            )
+            return {
+                "approval_id": approval["short_id"],
+                "task_id": approval["task_id"],
+                "action_id": action_id,
+            }
 
         if verb == "send":
             if not target_id.startswith("t_"):
@@ -2408,7 +2580,9 @@ class SQLiteStore:
             reply_text = final_reply or ""
             if not reply_text.strip():
                 raise ValueError("/send requires final reply text")
-            pending = self._list_pending_send_reply_approvals_locked(conn, task_id=int(task["id"]))
+            pending = self._list_pending_send_reply_approvals_locked(
+                conn, task_id=int(task["id"])
+            )
             if len(pending) > 1:
                 return self._create_approval_command_conflict_notification_locked(
                     conn,
@@ -2423,12 +2597,16 @@ class SQLiteStore:
             approval_short_id: str
             if len(pending) == 1:
                 previous_payload = json.loads(pending[0]["payload_json"] or "{}")
-                target_message_id = previous_payload.get("reply_target_message_id") or previous_payload.get("target_message_id")
+                target_message_id = previous_payload.get(
+                    "reply_target_message_id"
+                ) or previous_payload.get("target_message_id")
                 approval_id = int(pending[0]["id"])
                 approval_short_id = pending[0]["short_id"]
             else:
                 target_message_id = task["root_message_id"]
-                approval_short_id = self._unique_short_id_in_table(conn, "approvals", "a", f"{target_id}:{reply_text}:{now}")
+                approval_short_id = self._unique_short_id_in_table(
+                    conn, "approvals", "a", f"{target_id}:{reply_text}:{now}"
+                )
                 approval_id = 0
             if not isinstance(target_message_id, str) or not target_message_id:
                 raise ValueError("task does not have a reply target")
@@ -2481,9 +2659,17 @@ class SQLiteStore:
                 now=now,
             )
             if action_id is None:
-                raise ValueError("active send action already exists for this task and reply target")
-            self._mark_task_watching_after_send_locked(conn, task_id=int(task["id"]), now=now)
-            return {"approval_id": approval_short_id, "task_id": task["id"], "action_id": action_id}
+                raise ValueError(
+                    "active send action already exists for this task and reply target"
+                )
+            self._mark_task_watching_after_send_locked(
+                conn, task_id=int(task["id"]), now=now
+            )
+            return {
+                "approval_id": approval_short_id,
+                "task_id": task["id"],
+                "action_id": action_id,
+            }
 
         raise ValueError(f"unsupported command: {verb}")
 
@@ -2507,9 +2693,15 @@ class SQLiteStore:
             if approval is None or approval["task_id"] is None:
                 return None
             payload = _loads_json_object(approval["payload_json"])
-            return int(approval["task_id"]) if payload.get("keep_watching_on_reject") is True else None
+            return (
+                int(approval["task_id"])
+                if payload.get("keep_watching_on_reject") is True
+                else None
+            )
         if target_id.startswith("t_"):
-            task = conn.execute("SELECT * FROM tasks WHERE short_id = ?", (target_id,)).fetchone()
+            task = conn.execute(
+                "SELECT * FROM tasks WHERE short_id = ?", (target_id,)
+            ).fetchone()
             if task is None:
                 return None
             pending = self._list_pending_approvals_locked(conn, task_id=int(task["id"]))
@@ -2836,7 +3028,12 @@ class SQLiteStore:
         seed = (
             str(dedupe_key)
             if isinstance(dedupe_key, str) and dedupe_key
-            else json.dumps({"task_id": task_id, "payload": payload}, ensure_ascii=False, sort_keys=True, default=str)
+            else json.dumps(
+                {"task_id": task_id, "payload": payload},
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
         )
         idempotency_key = f"owner-{sha256(seed.encode('utf-8')).hexdigest()[:16]}"
         cursor = conn.execute(
@@ -2864,7 +3061,9 @@ class SQLiteStore:
             (idempotency_key,),
         ).fetchone()
         if row is None:
-            raise RuntimeError("owner notification action was not inserted and no existing action was found")
+            raise RuntimeError(
+                "owner notification action was not inserted and no existing action was found"
+            )
         if row["status"] == ActionStatus.FAILED.value:
             conn.execute(
                 """
@@ -2911,7 +3110,9 @@ class SQLiteStore:
                     task_id,
                     kind,
                     status,
-                    None if result is None else json.dumps(result, ensure_ascii=False, default=str),
+                    None
+                    if result is None
+                    else json.dumps(result, ensure_ascii=False, default=str),
                     now,
                     now,
                 ),
@@ -3028,15 +3229,23 @@ class SQLiteStore:
             raise KeyError(f"task not found: {task_id}")
         return _task_from_row(row)
 
-    def _get_task_by_lookup(self, conn: sqlite3.Connection, task_id: int | str) -> TaskRecord | None:
+    def _get_task_by_lookup(
+        self, conn: sqlite3.Connection, task_id: int | str
+    ) -> TaskRecord | None:
         if isinstance(task_id, int):
-            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
         else:
             text = str(task_id)
             if text.isdigit():
-                row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(text),)).fetchone()
+                row = conn.execute(
+                    "SELECT * FROM tasks WHERE id = ?", (int(text),)
+                ).fetchone()
             else:
-                row = conn.execute("SELECT * FROM tasks WHERE short_id = ?", (text,)).fetchone()
+                row = conn.execute(
+                    "SELECT * FROM tasks WHERE short_id = ?", (text,)
+                ).fetchone()
         return None if row is None else _task_from_row(row)
 
     def _create_task_for_message(
@@ -3191,7 +3400,12 @@ class SQLiteStore:
             SET status = ?, updated_at = ?
             WHERE task_id = ? AND kind = ? AND status = 'pending'
             """,
-            (ActionStatus.CANCELLED.value, now, task_id, ActionKind.OWNER_NOTIFICATION.value),
+            (
+                ActionStatus.CANCELLED.value,
+                now,
+                task_id,
+                ActionKind.OWNER_NOTIFICATION.value,
+            ),
         )
         approval_action_count = self._cancel_pending_actions_for_approvals_locked(
             conn,
@@ -3199,7 +3413,9 @@ class SQLiteStore:
             now=now,
         )
         return int(approval_cursor.rowcount), (
-            int(send_cursor.rowcount) + int(owner_cursor.rowcount) + approval_action_count
+            int(send_cursor.rowcount)
+            + int(owner_cursor.rowcount)
+            + approval_action_count
         )
 
     def _record_agent_message_for_task(
@@ -3212,7 +3428,9 @@ class SQLiteStore:
         now: str,
     ) -> None:
         self._add_task_message(conn, task_id, message.message_id, "agent_reply", now)
-        self._add_watch_keys(conn, task_id, _agent_reply_watch_keys_for_message(message), now)
+        self._add_watch_keys(
+            conn, task_id, _agent_reply_watch_keys_for_message(message), now
+        )
         conn.execute(
             """
             UPDATE tasks
@@ -3512,7 +3730,9 @@ def _chat_policy_from_config(chat_id: str, config: ChatPolicyConfig) -> dict[str
 
 
 def _normalize_global_product_policy(policy: dict[str, Any]) -> dict[str, Any]:
-    reply_policy = ReplyPolicyConfig.model_validate(policy.get("reply_policy")).model_dump(mode="json")
+    reply_policy = ReplyPolicyConfig.model_validate(
+        policy.get("reply_policy")
+    ).model_dump(mode="json")
     default_chat_policy = ChatPolicyConfig.model_validate(
         {
             "name": "",
@@ -3582,7 +3802,9 @@ def _approval_read_model(
     now: str,
     json_columns: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    data = _json_row_dict(row, *json_columns) if json_columns else (_row_dict(row) or {})
+    data = (
+        _json_row_dict(row, *json_columns) if json_columns else (_row_dict(row) or {})
+    )
     if data.get("status") == ApprovalStatus.PENDING.value:
         overdue_seconds = _approval_overdue_seconds(data.get("expires_at"), now=now)
         data["is_overdue"] = overdue_seconds > 0
@@ -3636,7 +3858,11 @@ def _daemon_liveness(
     heartbeat_dt = _parse_datetime_or_none(heartbeat)
     now_dt = _parse_datetime_or_none(now)
     if heartbeat_dt is None or now_dt is None:
-        return base | {"status": "stale", "stale": True, "reason": "missing_or_invalid_heartbeat"}
+        return base | {
+            "status": "stale",
+            "stale": True,
+            "reason": "missing_or_invalid_heartbeat",
+        }
     age_seconds = max(0, int((now_dt - heartbeat_dt).total_seconds()))
     stale = age_seconds > stale_after_seconds
     return base | {
@@ -3682,7 +3908,7 @@ def _truncate(text: str, limit: int = 100) -> str:
     cleaned = " ".join(text.split())
     if len(cleaned) <= limit:
         return cleaned
-    return f"{cleaned[:limit - 3]}..."
+    return f"{cleaned[: limit - 3]}..."
 
 
 def _task_is_watching(row: sqlite3.Row | None) -> bool:
@@ -3702,10 +3928,14 @@ def _minus_seconds(value: str, seconds: int) -> str:
         base = datetime.fromisoformat(value)
     except ValueError:
         base = datetime.now().astimezone()
-    return (base - timedelta(seconds=seconds)).astimezone().isoformat(timespec="seconds")
+    return (
+        (base - timedelta(seconds=seconds)).astimezone().isoformat(timespec="seconds")
+    )
 
 
-def _action_idempotency_key(task_id: int, target_message_id: str, payload: dict[str, Any]) -> str:
+def _action_idempotency_key(
+    task_id: int, target_message_id: str, payload: dict[str, Any]
+) -> str:
     seed = json.dumps(
         {
             "task_id": task_id,
@@ -3769,10 +3999,15 @@ def _has_sent_send_reply_action_for_payload(
         """,
         (task_id, target_message_id),
     ).fetchall()
-    return any(_payload_send_text(_loads_json_object(row["payload_json"])) == text for row in rows)
+    return any(
+        _payload_send_text(_loads_json_object(row["payload_json"])) == text
+        for row in rows
+    )
 
 
-def _latest_dispatch_attempt_locked(conn: sqlite3.Connection, *, action_id: int) -> sqlite3.Row | None:
+def _latest_dispatch_attempt_locked(
+    conn: sqlite3.Connection, *, action_id: int
+) -> sqlite3.Row | None:
     return conn.execute(
         """
         SELECT *
@@ -3809,7 +4044,9 @@ def _stale_sent_result(action: sqlite3.Row, attempt: sqlite3.Row) -> dict[str, A
     return result
 
 
-def _stale_needs_review_result(action: sqlite3.Row, attempt: sqlite3.Row | None) -> dict[str, Any]:
+def _stale_needs_review_result(
+    action: sqlite3.Row, attempt: sqlite3.Row | None
+) -> dict[str, Any]:
     result = _loads_json_object(action["result_json"])
     result["error_stage"] = DispatchErrorStage.RECOVERY.value
     result["recovery_reason"] = "stale_sending_uncertain"
@@ -3947,8 +4184,10 @@ def _owner_notification_source_payload(
 ) -> dict[str, Any]:
     return {
         "task_label": None if task is None else task["task_label"],
-        "chat_id": _row_value(message, "chat_id") or (None if task is None else task["chat_id"]),
-        "chat_type": _row_value(message, "chat_type") or (None if task is None else task["chat_type"]),
+        "chat_id": _row_value(message, "chat_id")
+        or (None if task is None else task["chat_id"]),
+        "chat_type": _row_value(message, "chat_type")
+        or (None if task is None else task["chat_type"]),
         "sender_name": _row_value(message, "sender_name"),
         "sender_id": _row_value(message, "sender_id"),
         "sent_at": _row_value(message, "sent_at"),
@@ -4008,7 +4247,9 @@ def _action_result_refs_message(result_json: str | None, message_id: str) -> boo
     if _message_ref_matches(result, {"sent_message_id", "sentMessageId"}, message_id):
         return True
     if isinstance(result, dict) and isinstance(result.get("data"), dict):
-        return _message_ref_matches(result["data"], {"message_id", "messageId"}, message_id)
+        return _message_ref_matches(
+            result["data"], {"message_id", "messageId"}, message_id
+        )
     return False
 
 

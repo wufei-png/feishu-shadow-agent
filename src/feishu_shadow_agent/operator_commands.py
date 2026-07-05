@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from pydantic import ValidationError
 
@@ -10,7 +11,6 @@ from .config import AppConfig, ChatPolicyConfig, ReplyPolicyConfig
 from .operator_query import OperatorQueryService
 from .store.sqlite_store import SQLiteStore
 from .types import ActionRecord, new_run_id
-
 
 SUCCESS_STATUSES = {"applied", "no_change"}
 GLOBAL_POLICY_UPDATE_FIELDS = {
@@ -38,8 +38,7 @@ class DispatchReadbackMarker(Protocol):
         *,
         sent_message_id: str,
         run_id: str,
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -72,7 +71,12 @@ class CommandResult:
 
 
 class ApprovalCommandService:
-    def __init__(self, store: SQLiteStore, *, keep_watching_until_factory: Callable[[], str] | None = None):
+    def __init__(
+        self,
+        store: SQLiteStore,
+        *,
+        keep_watching_until_factory: Callable[[], str] | None = None,
+    ):
         self.store = store
         self.keep_watching_until_factory = keep_watching_until_factory
 
@@ -84,7 +88,9 @@ class ApprovalCommandService:
         reason: str | None = None,
         command_id: str | None = None,
     ) -> CommandResult:
-        return self._apply("approve", target_id, actor=actor, reason=reason, command_id=command_id)
+        return self._apply(
+            "approve", target_id, actor=actor, reason=reason, command_id=command_id
+        )
 
     def reject(
         self,
@@ -94,7 +100,9 @@ class ApprovalCommandService:
         reason: str | None = None,
         command_id: str | None = None,
     ) -> CommandResult:
-        return self._apply("reject", target_id, actor=actor, reason=reason, command_id=command_id)
+        return self._apply(
+            "reject", target_id, actor=actor, reason=reason, command_id=command_id
+        )
 
     def send(
         self,
@@ -124,7 +132,11 @@ class ApprovalCommandService:
         command_id: str | None,
         final_reply: str | None = None,
     ) -> CommandResult:
-        command_text = f"/{verb} {target_id}" if final_reply is None else f"/{verb} {target_id} {final_reply}"
+        command_text = (
+            f"/{verb} {target_id}"
+            if final_reply is None
+            else f"/{verb} {target_id} {final_reply}"
+        )
         raw = self.store.apply_approval_command(
             message_id=command_id or new_run_id(f"operator_{verb}"),
             command=command_text,
@@ -156,7 +168,12 @@ class ApprovalCommandService:
 
 
 class DispatchCommandService:
-    def __init__(self, store: SQLiteStore, *, readback_marker: DispatchReadbackMarker | None = None):
+    def __init__(
+        self,
+        store: SQLiteStore,
+        *,
+        readback_marker: DispatchReadbackMarker | None = None,
+    ):
         self.store = store
         self.readback_marker = readback_marker
 
@@ -213,7 +230,11 @@ class DispatchCommandService:
         raw_status = str(raw.get("status", "failed"))
         result = dict(raw)
         result["dispatch_command_status"] = raw_status
-        status = "applied" if raw_status == "sent" else _dispatch_error_status(str(raw.get("error", "")))
+        status = (
+            "applied"
+            if raw_status == "sent"
+            else _dispatch_error_status(str(raw.get("error", "")))
+        )
         warnings = _mark_sent_warnings(raw)
         return CommandResult(
             status=status,
@@ -395,7 +416,9 @@ class PolicyCommandService:
             reason=reason,
         )
         audit_count = int(raw.get("audit_count") or 0)
-        diff = OperatorQueryService(self.store, policy_import_source=config).policy_status()["policy_import_diff"]
+        diff = OperatorQueryService(
+            self.store, policy_import_source=config
+        ).policy_status()["policy_import_diff"]
         return CommandResult(
             status="applied" if audit_count > 0 else "no_change",
             command="policy.import_config",
@@ -404,7 +427,9 @@ class PolicyCommandService:
             target={"type": "product_policy_store", "mode": raw.get("mode")},
             changed=audit_count > 0,
             result=raw,
-            next_actions=[{"command": "status", "target": {"type": "operator_dashboard"}}],
+            next_actions=[
+                {"command": "status", "target": {"type": "operator_dashboard"}}
+            ],
             extra={
                 "audit_count": audit_count,
                 "policy_import_diff": diff,
@@ -420,7 +445,9 @@ class PolicyCommandService:
     ) -> CommandResult:
         target = {"type": "global_policy", "key": "reply_policy"}
         try:
-            normalized_changes = _policy_changes(changes, allowed_fields=GLOBAL_POLICY_UPDATE_FIELDS)
+            normalized_changes = _policy_changes(
+                changes, allowed_fields=GLOBAL_POLICY_UPDATE_FIELDS
+            )
         except ValueError as exc:
             return _error_result(
                 status="validation_failed",
@@ -484,7 +511,9 @@ class PolicyCommandService:
         normalized_chat_id = chat_id.strip()
         target = {"type": "chat_policy", "chat_id": normalized_chat_id}
         try:
-            normalized_changes = _policy_changes(changes, allowed_fields=CHAT_POLICY_UPDATE_FIELDS)
+            normalized_changes = _policy_changes(
+                changes, allowed_fields=CHAT_POLICY_UPDATE_FIELDS
+            )
         except ValueError as exc:
             return _error_result(
                 status="validation_failed",
@@ -522,7 +551,10 @@ class PolicyCommandService:
                 error="global Product Policy is not initialized; run `policy import-config` first",
             )
         old_policy = self.store.get_chat_product_policy(normalized_chat_id)
-        base_policy = old_policy or {"chat_id": normalized_chat_id, **ChatPolicyConfig().model_dump(mode="json")}
+        base_policy = old_policy or {
+            "chat_id": normalized_chat_id,
+            **ChatPolicyConfig().model_dump(mode="json"),
+        }
         try:
             new_policy = _merged_chat_policy(base_policy, normalized_changes)
         except (TypeError, ValidationError, ValueError) as exc:
@@ -556,7 +588,9 @@ class OperatorCommandService:
         readback_marker: DispatchReadbackMarker | None = None,
         keep_watching_until_factory: Callable[[], str] | None = None,
     ):
-        self.approvals = ApprovalCommandService(store, keep_watching_until_factory=keep_watching_until_factory)
+        self.approvals = ApprovalCommandService(
+            store, keep_watching_until_factory=keep_watching_until_factory
+        )
         self.dispatch = DispatchCommandService(store, readback_marker=readback_marker)
         self.maintenance = MaintenanceCommandService(store)
         self.tasks = TaskCommandService(store)
@@ -570,7 +604,9 @@ class OperatorCommandService:
         reason: str | None = None,
         command_id: str | None = None,
     ) -> CommandResult:
-        return self.approvals.approve(target_id, actor=actor, reason=reason, command_id=command_id)
+        return self.approvals.approve(
+            target_id, actor=actor, reason=reason, command_id=command_id
+        )
 
     def reject(
         self,
@@ -580,7 +616,9 @@ class OperatorCommandService:
         reason: str | None = None,
         command_id: str | None = None,
     ) -> CommandResult:
-        return self.approvals.reject(target_id, actor=actor, reason=reason, command_id=command_id)
+        return self.approvals.reject(
+            target_id, actor=actor, reason=reason, command_id=command_id
+        )
 
     def send(
         self,
@@ -591,7 +629,9 @@ class OperatorCommandService:
         reason: str | None = None,
         command_id: str | None = None,
     ) -> CommandResult:
-        return self.approvals.send(task_id, final_reply, actor=actor, reason=reason, command_id=command_id)
+        return self.approvals.send(
+            task_id, final_reply, actor=actor, reason=reason, command_id=command_id
+        )
 
     def inspect_dispatch_action(
         self,
@@ -610,7 +650,9 @@ class OperatorCommandService:
         actor: str = "operator",
         reason: str | None = None,
     ) -> CommandResult:
-        return self.dispatch.mark_sent(action_id, sent_message_id=sent_message_id, actor=actor, reason=reason)
+        return self.dispatch.mark_sent(
+            action_id, sent_message_id=sent_message_id, actor=actor, reason=reason
+        )
 
     def retry_dispatch_action(
         self,
@@ -630,7 +672,9 @@ class OperatorCommandService:
     ) -> CommandResult:
         return self.dispatch.cancel(action_id, actor=actor, reason=reason)
 
-    def expire_approvals(self, *, actor: str = "operator", reason: str | None = None) -> CommandResult:
+    def expire_approvals(
+        self, *, actor: str = "operator", reason: str | None = None
+    ) -> CommandResult:
         return self.maintenance.expire_approvals(actor=actor, reason=reason)
 
     def close_task(
@@ -650,7 +694,9 @@ class OperatorCommandService:
         actor: str = "operator",
         reason: str | None = None,
     ) -> CommandResult:
-        return self.tasks.reopen(task_id, watch_until=watch_until, actor=actor, reason=reason)
+        return self.tasks.reopen(
+            task_id, watch_until=watch_until, actor=actor, reason=reason
+        )
 
     def import_policy_config(
         self,
@@ -702,7 +748,9 @@ def command_exit_code(result: CommandResult) -> int:
     return 0 if result.status in SUCCESS_STATUSES else 2
 
 
-def _policy_changes(changes: dict[str, Any], *, allowed_fields: set[str]) -> dict[str, Any]:
+def _policy_changes(
+    changes: dict[str, Any], *, allowed_fields: set[str]
+) -> dict[str, Any]:
     normalized = {key: value for key, value in changes.items() if value is not None}
     unsupported = sorted(set(normalized) - allowed_fields)
     if unsupported:
@@ -710,7 +758,9 @@ def _policy_changes(changes: dict[str, Any], *, allowed_fields: set[str]) -> dic
     return normalized
 
 
-def _merged_global_policy(old_policy: dict[str, Any], changes: dict[str, Any]) -> dict[str, Any]:
+def _merged_global_policy(
+    old_policy: dict[str, Any], changes: dict[str, Any]
+) -> dict[str, Any]:
     new_policy = copy.deepcopy(old_policy)
     reply_policy = dict(new_policy.get("reply_policy") or {})
     default_chat_policy = dict(new_policy.get("default_chat_policy") or {})
@@ -719,7 +769,9 @@ def _merged_global_policy(old_policy: dict[str, Any], changes: dict[str, Any]) -
             reply_policy[key] = value
         else:
             default_chat_policy[key] = value
-    reply_policy = ReplyPolicyConfig.model_validate(reply_policy).model_dump(mode="json")
+    reply_policy = ReplyPolicyConfig.model_validate(reply_policy).model_dump(
+        mode="json"
+    )
     validated_default = ChatPolicyConfig.model_validate(
         {
             "name": "",
@@ -741,7 +793,9 @@ def _merged_global_policy(old_policy: dict[str, Any], changes: dict[str, Any]) -
     }
 
 
-def _merged_chat_policy(old_policy: dict[str, Any], changes: dict[str, Any]) -> dict[str, Any]:
+def _merged_chat_policy(
+    old_policy: dict[str, Any], changes: dict[str, Any]
+) -> dict[str, Any]:
     new_policy = {**old_policy, **changes}
     chat_id = str(new_policy.get("chat_id", "")).strip()
     if not chat_id:
@@ -785,7 +839,10 @@ def _approval_command_status(raw_status: str, result: dict[str, Any]) -> str:
         return "applied"
     if raw_status == "duplicate":
         return "no_change"
-    if result.get("pending_approval_ids") is not None or result.get("notification_action_id") is not None:
+    if (
+        result.get("pending_approval_ids") is not None
+        or result.get("notification_action_id") is not None
+    ):
         return "conflict"
     return _approval_error_status(str(result.get("error", "")))
 
@@ -794,9 +851,17 @@ def _approval_error_status(error: str) -> str:
     lowered = error.lower()
     if "not found" in lowered:
         return "not_found"
-    if "ambiguous" in lowered or "multiple pending" in lowered or "active send action already exists" in lowered:
+    if (
+        "ambiguous" in lowered
+        or "multiple pending" in lowered
+        or "active send action already exists" in lowered
+    ):
         return "conflict"
-    if "requires" in lowered or "unsupported command" in lowered or "missing" in lowered:
+    if (
+        "requires" in lowered
+        or "unsupported command" in lowered
+        or "missing" in lowered
+    ):
         return "validation_failed"
     if "not watching" in lowered:
         return "conflict"

@@ -31,7 +31,9 @@ class FakeHealthSuite:
 
 class FakeFeishuClient:
     def __init__(self):
-        self.search_pages: dict[tuple[str, bool, str | None], MessagePage | Exception] = {}
+        self.search_pages: dict[
+            tuple[str, bool, str | None], MessagePage | Exception
+        ] = {}
         self.chat_pages: dict[tuple[str, str | None], MessagePage | Exception] = {}
         self.thread_pages: dict[tuple[str, str | None], MessagePage | Exception] = {}
         self.downloads: list[dict[str, str]] = []
@@ -39,7 +41,9 @@ class FakeFeishuClient:
         self.write_download_files = True
 
     def version(self) -> LarkCliResult:
-        return LarkCliResult(["lark-cli", "--version"], 0, stdout="lark-cli version 1.0.56")
+        return LarkCliResult(
+            ["lark-cli", "--version"], 0, stdout="lark-cli version 1.0.56"
+        )
 
     def auth_status(self, *, verify: bool = True) -> LarkCliResult:
         return LarkCliResult(["lark-cli", "auth"], 0, json_data={})
@@ -66,7 +70,9 @@ class FakeFeishuClient:
         page_size: int = 50,
     ) -> MessagePage:
         self.calls.append(f"search:{chat_type}:{is_at_me}:{page_token}")
-        value = self.search_pages.get((chat_type, is_at_me, page_token), MessagePage([]))
+        value = self.search_pages.get(
+            (chat_type, is_at_me, page_token), MessagePage([])
+        )
         if isinstance(value, Exception):
             raise value
         return value
@@ -119,7 +125,9 @@ class FakeFeishuClient:
             path = Path(output)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"resource")
-        return LarkCliResult(["lark-cli", "im", "+messages-resources-download"], 0, json_data={})
+        return LarkCliResult(
+            ["lark-cli", "im", "+messages-resources-download"], 0, json_data={}
+        )
 
 
 class FailingOnceRouter:
@@ -251,7 +259,9 @@ def test_normalizer_marks_mentions_sender_roles_and_resources() -> None:
         default_chat_type="group",
     )
     markdown_resources = normalizer.normalize(
-        _message("om_6", text="![Image](img_v3_0212t_abc-123)\n[file](file_v2_xyz-456)"),
+        _message(
+            "om_6", text="![Image](img_v3_0212t_abc-123)\n[file](file_v2_xyz-456)"
+        ),
         default_chat_type="group",
     )
 
@@ -268,27 +278,48 @@ def test_normalizer_marks_mentions_sender_roles_and_resources() -> None:
     assert owner.sender_role == "owner_message"
     assert bot.sender_role == "bot_message"
     assert app_bot.sender_role == "bot_message"
-    assert {(resource.resource_type, resource.file_key) for resource in markdown_resources.resources} == {
+    assert {
+        (resource.resource_type, resource.file_key)
+        for resource in markdown_resources.resources
+    } == {
         ("image", "img_v3_0212t_abc-123"),
         ("file", "file_v2_xyz-456"),
     }
 
 
-def test_group_ingest_drains_pages_sorts_dedupes_and_advances_checkpoint(tmp_path: Path) -> None:
+def test_group_ingest_drains_pages_sorts_dedupes_and_advances_checkpoint(
+    tmp_path: Path,
+) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     fake = FakeFeishuClient()
     fake.search_pages[("group", True, None)] = MessagePage(
         [
-            _message("om_2", create_time="2026-06-22T10:02:00+08:00", mentions=[{"open_id": "ou_owner"}]),
-            _message("om_1", create_time="2026-06-22T10:01:00+08:00", mentions=[{"open_id": "ou_owner"}]),
+            _message(
+                "om_2",
+                create_time="2026-06-22T10:02:00+08:00",
+                mentions=[{"open_id": "ou_owner"}],
+            ),
+            _message(
+                "om_1",
+                create_time="2026-06-22T10:01:00+08:00",
+                mentions=[{"open_id": "ou_owner"}],
+            ),
         ],
         next_page_token="p2",
         has_more=True,
     )
     fake.search_pages[("group", True, "p2")] = MessagePage(
         [
-            _message("om_1", create_time="2026-06-22T10:01:00+08:00", mentions=[{"open_id": "ou_owner"}]),
-            _message("om_3", create_time="2026-06-22T10:03:00+08:00", mentions=[{"open_id": "ou_owner"}]),
+            _message(
+                "om_1",
+                create_time="2026-06-22T10:01:00+08:00",
+                mentions=[{"open_id": "ou_owner"}],
+            ),
+            _message(
+                "om_3",
+                create_time="2026-06-22T10:03:00+08:00",
+                mentions=[{"open_id": "ou_owner"}],
+            ),
         ]
     )
     service = IngestionService(
@@ -302,11 +333,16 @@ def test_group_ingest_drains_pages_sorts_dedupes_and_advances_checkpoint(tmp_pat
     result = service.ingest_group_at_me(run_id="run_1")
 
     assert result.processed == 4
-    assert store.get_checkpoint("ingest.group_at_me") == {"last_success_at": "2026-06-22T10:10:00+08:00"}
+    assert store.get_checkpoint("ingest.group_at_me") == {
+        "last_success_at": "2026-06-22T10:10:00+08:00"
+    }
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"] == 3
         assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 1
-        routes = [row["route"] for row in conn.execute("SELECT route FROM routing_audits ORDER BY id")]
+        routes = [
+            row["route"]
+            for row in conn.execute("SELECT route FROM routing_audits ORDER BY id")
+        ]
     assert routes == ["new_task", "ignore", "ambiguous", "ambiguous"]
 
 
@@ -337,7 +373,9 @@ def test_failed_pagination_does_not_advance_checkpoint(tmp_path: Path) -> None:
     assert store.get_checkpoint("ingest.p2p") is None
 
 
-def test_existing_message_without_route_audit_is_routed_on_retry(tmp_path: Path) -> None:
+def test_existing_message_without_route_audit_is_routed_on_retry(
+    tmp_path: Path,
+) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     router = FailingOnceRouter(store)
     service = IngestionService(
@@ -351,7 +389,9 @@ def test_existing_message_without_route_audit_is_routed_on_retry(tmp_path: Path)
     raw = _message("om_retry", chat_type="p2p", sender_id="ou_a")
 
     try:
-        service.process_raw_message(raw, source="p2p", default_chat_type="p2p", run_id="run_1")
+        service.process_raw_message(
+            raw, source="p2p", default_chat_type="p2p", run_id="run_1"
+        )
     except RuntimeError:
         pass
     else:  # pragma: no cover - defensive
@@ -359,9 +399,14 @@ def test_existing_message_without_route_audit_is_routed_on_retry(tmp_path: Path)
 
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"] == 1
-        assert conn.execute("SELECT COUNT(*) AS c FROM routing_audits").fetchone()["c"] == 0
+        assert (
+            conn.execute("SELECT COUNT(*) AS c FROM routing_audits").fetchone()["c"]
+            == 0
+        )
 
-    retried = service.process_raw_message(raw, source="p2p", default_chat_type="p2p", run_id="run_1")
+    retried = service.process_raw_message(
+        raw, source="p2p", default_chat_type="p2p", run_id="run_1"
+    )
 
     assert retried is not None
     assert retried.decision.route == "new_task"
@@ -386,14 +431,21 @@ def test_route_audit_failure_rolls_back_task_mutation(tmp_path: Path) -> None:
     raw = _message("om_audit_retry", chat_type="p2p", sender_id="ou_a")
 
     with pytest.raises(RuntimeError, match="audit failed"):
-        service.process_raw_message(raw, source="p2p", default_chat_type="p2p", run_id="run_1")
+        service.process_raw_message(
+            raw, source="p2p", default_chat_type="p2p", run_id="run_1"
+        )
 
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"] == 1
         assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 0
-        assert conn.execute("SELECT COUNT(*) AS c FROM routing_audits").fetchone()["c"] == 0
+        assert (
+            conn.execute("SELECT COUNT(*) AS c FROM routing_audits").fetchone()["c"]
+            == 0
+        )
 
-    retried = service.process_raw_message(raw, source="p2p", default_chat_type="p2p", run_id="run_1")
+    retried = service.process_raw_message(
+        raw, source="p2p", default_chat_type="p2p", run_id="run_1"
+    )
 
     assert retried is not None
     assert retried.decision.route == "new_task"
@@ -422,13 +474,20 @@ def test_resource_store_failure_is_retried_for_duplicate_message(
         logger=JSONLLogger(tmp_path / "agent.jsonl"),
         clock=lambda: "2026-06-22T10:10:00+08:00",
     )
-    raw = _message("om_resource_retry", mentions=[{"open_id": "ou_owner"}], image_key="img_retry")
+    raw = _message(
+        "om_resource_retry", mentions=[{"open_id": "ou_owner"}], image_key="img_retry"
+    )
 
     with pytest.raises(RuntimeError, match="resource store failed"):
-        service.process_raw_message(raw, source="group_at_me", default_chat_type="group", run_id="run_1")
+        service.process_raw_message(
+            raw, source="group_at_me", default_chat_type="group", run_id="run_1"
+        )
 
     with store.connect() as conn:
-        assert conn.execute("SELECT COUNT(*) AS c FROM routing_audits").fetchone()["c"] == 1
+        assert (
+            conn.execute("SELECT COUNT(*) AS c FROM routing_audits").fetchone()["c"]
+            == 1
+        )
         assert conn.execute("SELECT COUNT(*) AS c FROM resources").fetchone()["c"] == 0
     assert len(fake.downloads) == 1
 
@@ -450,7 +509,9 @@ def test_resource_store_failure_is_retried_for_duplicate_message(
     assert resource["download_status"] == "downloaded"
 
 
-def test_p2p_single_active_sender_candidate_uses_router_placeholder(tmp_path: Path) -> None:
+def test_p2p_single_active_sender_candidate_uses_router_placeholder(
+    tmp_path: Path,
+) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     service = IngestionService(
         store=store,
@@ -477,7 +538,9 @@ def test_p2p_single_active_sender_candidate_uses_router_placeholder(tmp_path: Pa
     assert second is not None and second.decision.route == "ambiguous"
     assert second.decision.reason == "router_placeholder"
     with store.connect() as conn:
-        assert conn.execute("SELECT COUNT(*) AS c FROM task_messages").fetchone()["c"] == 1
+        assert (
+            conn.execute("SELECT COUNT(*) AS c FROM task_messages").fetchone()["c"] == 1
+        )
 
 
 def test_p2p_single_active_without_candidate_creates_new_task(tmp_path: Path) -> None:
@@ -595,7 +658,13 @@ def test_owner_takeover_closes_task_and_cancels_pending_work(tmp_path: Path) -> 
     store.insert_approval_for_test(short_id="a_1", task_id=created.task.id)
 
     takeover = service.process_raw_message(
-        _message("om_owner", chat_id="ou_chat", chat_type="p2p", sender_id="ou_owner", reply_to="om_1"),
+        _message(
+            "om_owner",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_owner",
+            reply_to="om_1",
+        ),
         source="p2p",
         default_chat_type="p2p",
         run_id="run_1",
@@ -603,9 +672,15 @@ def test_owner_takeover_closes_task_and_cancels_pending_work(tmp_path: Path) -> 
 
     assert takeover is not None and takeover.decision.route == "human_taken_over"
     with store.connect() as conn:
-        task = conn.execute("SELECT status FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
-        action = conn.execute("SELECT status FROM actions WHERE idempotency_key = ?", ("reply_1",)).fetchone()
-        approval = conn.execute("SELECT status FROM approvals WHERE short_id = ?", ("a_1",)).fetchone()
+        task = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (created.task.id,)
+        ).fetchone()
+        action = conn.execute(
+            "SELECT status FROM actions WHERE idempotency_key = ?", ("reply_1",)
+        ).fetchone()
+        approval = conn.execute(
+            "SELECT status FROM approvals WHERE short_id = ?", ("a_1",)
+        ).fetchone()
     assert task["status"] == "human_taken_over"
     assert action["status"] == "cancelled"
     assert approval["status"] == "expired"
@@ -641,7 +716,13 @@ def test_owner_takeover_cancels_pending_approval_notification(tmp_path: Path) ->
     assert notification["approval_id"] == approval_id
 
     takeover = service.process_raw_message(
-        _message("om_owner", chat_id="ou_chat", chat_type="p2p", sender_id="ou_owner", reply_to="om_1"),
+        _message(
+            "om_owner",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_owner",
+            reply_to="om_1",
+        ),
         source="p2p",
         default_chat_type="p2p",
         run_id="run_1",
@@ -650,7 +731,9 @@ def test_owner_takeover_cancels_pending_approval_notification(tmp_path: Path) ->
     assert takeover is not None and takeover.decision.route == "human_taken_over"
     dispatchable_ids = {action.id for action in store.list_dispatchable_actions()}
     with store.connect() as conn:
-        approval = conn.execute("SELECT status FROM approvals WHERE id = ?", (approval_id,)).fetchone()
+        approval = conn.execute(
+            "SELECT status FROM approvals WHERE id = ?", (approval_id,)
+        ).fetchone()
         notification_after = conn.execute(
             "SELECT status FROM actions WHERE id = ?",
             (notification["id"],),
@@ -676,10 +759,18 @@ def test_owner_takeover_expires_tool_action_pending_approval(tmp_path: Path) -> 
         run_id="run_1",
     )
     assert created is not None and created.task is not None
-    store.insert_approval_for_test(short_id="a_tool", task_id=created.task.id, kind="tool_action")
+    store.insert_approval_for_test(
+        short_id="a_tool", task_id=created.task.id, kind="tool_action"
+    )
 
     takeover = service.process_raw_message(
-        _message("om_owner", chat_id="ou_chat", chat_type="p2p", sender_id="ou_owner", reply_to="om_1"),
+        _message(
+            "om_owner",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_owner",
+            reply_to="om_1",
+        ),
         source="p2p",
         default_chat_type="p2p",
         run_id="run_1",
@@ -687,13 +778,19 @@ def test_owner_takeover_expires_tool_action_pending_approval(tmp_path: Path) -> 
 
     assert takeover is not None and takeover.decision.route == "human_taken_over"
     with store.connect() as conn:
-        task = conn.execute("SELECT status FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
-        approval = conn.execute("SELECT status FROM approvals WHERE short_id = ?", ("a_tool",)).fetchone()
+        task = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (created.task.id,)
+        ).fetchone()
+        approval = conn.execute(
+            "SELECT status FROM approvals WHERE short_id = ?", ("a_tool",)
+        ).fetchone()
     assert task["status"] == "human_taken_over"
     assert approval["status"] == "expired"
 
 
-def test_p2p_owner_message_without_structural_match_does_not_take_over(tmp_path: Path) -> None:
+def test_p2p_owner_message_without_structural_match_does_not_take_over(
+    tmp_path: Path,
+) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     service = IngestionService(
         store=store,
@@ -723,9 +820,15 @@ def test_p2p_owner_message_without_structural_match_does_not_take_over(tmp_path:
     assert result.decision.route == "ignore"
     assert result.decision.reason == "owner_message_not_task_intervention"
     with store.connect() as conn:
-        task = conn.execute("SELECT status FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
-        action = conn.execute("SELECT status FROM actions WHERE idempotency_key = ?", ("reply_1",)).fetchone()
-        approval = conn.execute("SELECT status FROM approvals WHERE short_id = ?", ("a_1",)).fetchone()
+        task = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (created.task.id,)
+        ).fetchone()
+        action = conn.execute(
+            "SELECT status FROM actions WHERE idempotency_key = ?", ("reply_1",)
+        ).fetchone()
+        approval = conn.execute(
+            "SELECT status FROM approvals WHERE short_id = ?", ("a_1",)
+        ).fetchone()
     assert task["status"] == "watching"
     assert action["status"] == "pending"
     assert approval["status"] == "pending"
@@ -760,11 +863,15 @@ def test_owner_takeover_accepts_top_level_reply_to_string(tmp_path: Path) -> Non
     assert takeover is not None
     assert takeover.decision.route == "human_taken_over"
     with store.connect() as conn:
-        task = conn.execute("SELECT status FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
+        task = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (created.task.id,)
+        ).fetchone()
     assert task["status"] == "human_taken_over"
 
 
-def test_owner_takeover_matches_thread_watch_key_without_task_thread_id(tmp_path: Path) -> None:
+def test_owner_takeover_matches_thread_watch_key_without_task_thread_id(
+    tmp_path: Path,
+) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     service = IngestionService(
         store=store,
@@ -910,11 +1017,15 @@ def test_lifecycle_watch_minutes_controls_new_task_watch_until(tmp_path: Path) -
 
     assert created is not None and created.task is not None
     with store.connect() as conn:
-        task = conn.execute("SELECT watch_until FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
+        task = conn.execute(
+            "SELECT watch_until FROM tasks WHERE id = ?", (created.task.id,)
+        ).fetchone()
     assert task["watch_until"] == "2026-06-22T10:15:00+08:00"
 
 
-def test_lifecycle_closed_recall_days_bounds_historical_candidates(tmp_path: Path) -> None:
+def test_lifecycle_closed_recall_days_bounds_historical_candidates(
+    tmp_path: Path,
+) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     service = IngestionService(
         store=store,
@@ -1038,11 +1149,18 @@ def test_reply_to_closed_task_enters_recall_placeholder(tmp_path: Path) -> None:
         assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 1
 
 
-def test_resource_status_downloaded_and_bot_not_joined(tmp_path: Path, monkeypatch) -> None:
+def test_resource_status_downloaded_and_bot_not_joined(
+    tmp_path: Path, monkeypatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     fake = FakeFeishuClient()
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    cfg = _config(chats={"oc_1": ChatPolicyConfig(bot_joined=True), "oc_2": ChatPolicyConfig(bot_joined=False)})
+    cfg = _config(
+        chats={
+            "oc_1": ChatPolicyConfig(bot_joined=True),
+            "oc_2": ChatPolicyConfig(bot_joined=False),
+        }
+    )
     _seed_policy(store, cfg)
     service = IngestionService(
         store=store,
@@ -1066,7 +1184,12 @@ def test_resource_status_downloaded_and_bot_not_joined(tmp_path: Path, monkeypat
         clock=lambda: "2026-06-22T10:10:00+08:00",
     )
     service_no_bot.process_raw_message(
-        _message("om_img_2", chat_id="oc_2", mentions=[{"open_id": "ou_owner"}], image_key="img_2"),
+        _message(
+            "om_img_2",
+            chat_id="oc_2",
+            mentions=[{"open_id": "ou_owner"}],
+            image_key="img_2",
+        ),
         source="group_at_me",
         default_chat_type="group",
         run_id="run_1",
@@ -1089,7 +1212,9 @@ def test_resource_status_downloaded_and_bot_not_joined(tmp_path: Path, monkeypat
     assert not Path(stored_path).is_absolute()
 
 
-def test_unknown_group_resource_download_is_independent_from_auto_reply(tmp_path: Path, monkeypatch) -> None:
+def test_unknown_group_resource_download_is_independent_from_auto_reply(
+    tmp_path: Path, monkeypatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     cfg = _config()
@@ -1103,7 +1228,12 @@ def test_unknown_group_resource_download_is_independent_from_auto_reply(tmp_path
     )
 
     service.process_raw_message(
-        _message("om_unknown_img", chat_id="oc_unknown", mentions=[{"open_id": "ou_owner"}], image_key="img_unknown"),
+        _message(
+            "om_unknown_img",
+            chat_id="oc_unknown",
+            mentions=[{"open_id": "ou_owner"}],
+            image_key="img_unknown",
+        ),
         source="group_at_me",
         default_chat_type="group",
         run_id="run_1",
@@ -1118,13 +1248,19 @@ def test_unknown_group_resource_download_is_independent_from_auto_reply(tmp_path
     assert "unknown_group" in resource["raw_json"]
 
 
-def test_resource_download_disabled_skips_even_when_auto_reply_enabled(tmp_path: Path, monkeypatch) -> None:
+def test_resource_download_disabled_skips_even_when_auto_reply_enabled(
+    tmp_path: Path, monkeypatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     fake = FakeFeishuClient()
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     cfg = _config(
         reply_policy=ReplyPolicyConfig(unknown_group_auto_reply=True),
-        chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True, resource_download=False)},
+        chats={
+            "oc_1": ChatPolicyConfig(
+                auto_reply=True, bot_joined=True, resource_download=False
+            )
+        },
     )
     _seed_policy(store, cfg)
     service = IngestionService(
@@ -1136,7 +1272,9 @@ def test_resource_download_disabled_skips_even_when_auto_reply_enabled(tmp_path:
     )
 
     service.process_raw_message(
-        _message("om_img_skip", mentions=[{"open_id": "ou_owner"}], image_key="img_skip"),
+        _message(
+            "om_img_skip", mentions=[{"open_id": "ou_owner"}], image_key="img_skip"
+        ),
         source="group_at_me",
         default_chat_type="group",
         run_id="run_1",
@@ -1159,8 +1297,12 @@ def test_resource_download_policy_uses_db_instead_of_runtime_yaml_config(
     monkeypatch.chdir(tmp_path)
     fake = FakeFeishuClient()
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    db_policy = _config(chats={"oc_1": ChatPolicyConfig(bot_joined=True, resource_download=False)})
-    runtime_config = _config(chats={"oc_1": ChatPolicyConfig(bot_joined=True, resource_download=True)})
+    db_policy = _config(
+        chats={"oc_1": ChatPolicyConfig(bot_joined=True, resource_download=False)}
+    )
+    runtime_config = _config(
+        chats={"oc_1": ChatPolicyConfig(bot_joined=True, resource_download=True)}
+    )
     _seed_policy(store, db_policy)
     service = IngestionService(
         store=store,
@@ -1171,7 +1313,11 @@ def test_resource_download_policy_uses_db_instead_of_runtime_yaml_config(
     )
 
     service.process_raw_message(
-        _message("om_db_policy_img", mentions=[{"open_id": "ou_owner"}], image_key="img_db_policy"),
+        _message(
+            "om_db_policy_img",
+            mentions=[{"open_id": "ou_owner"}],
+            image_key="img_db_policy",
+        ),
         source="group_at_me",
         default_chat_type="group",
         run_id="run_1",
@@ -1188,7 +1334,9 @@ def test_resource_download_policy_uses_db_instead_of_runtime_yaml_config(
     assert "disabled_by_chat_policy" in resource["raw_json"]
 
 
-def test_resource_download_success_without_file_records_missing_file(tmp_path: Path, monkeypatch) -> None:
+def test_resource_download_success_without_file_records_missing_file(
+    tmp_path: Path, monkeypatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     fake = FakeFeishuClient()
     fake.write_download_files = False
@@ -1204,7 +1352,11 @@ def test_resource_download_success_without_file_records_missing_file(tmp_path: P
     )
 
     service.process_raw_message(
-        _message("om_missing_file", mentions=[{"open_id": "ou_owner"}], image_key="img_missing"),
+        _message(
+            "om_missing_file",
+            mentions=[{"open_id": "ou_owner"}],
+            image_key="img_missing",
+        ),
         source="group_at_me",
         default_chat_type="group",
         run_id="run_1",
@@ -1240,7 +1392,9 @@ def test_oversized_resource_download_is_deleted_and_marked_too_large(
     )
 
     service.process_raw_message(
-        _message("om_too_large", mentions=[{"open_id": "ou_owner"}], image_key="img_large"),
+        _message(
+            "om_too_large", mentions=[{"open_id": "ou_owner"}], image_key="img_large"
+        ),
         source="group_at_me",
         default_chat_type="group",
         run_id="run_1",
@@ -1277,7 +1431,9 @@ def test_resource_dir_quota_deletes_download_and_blocks_following_resources(
         logger=JSONLLogger(tmp_path / "agent.jsonl"),
         clock=lambda: "2026-06-22T10:10:00+08:00",
     )
-    raw = _message("om_quota", mentions=[{"open_id": "ou_owner"}], image_key="img_quota")
+    raw = _message(
+        "om_quota", mentions=[{"open_id": "ou_owner"}], image_key="img_quota"
+    )
     raw["content"]["file_key"] = "file_quota"
 
     service.process_raw_message(
@@ -1322,13 +1478,21 @@ def test_resource_dir_quota_blocks_following_message_in_same_service(
     )
 
     service.process_raw_message(
-        _message("om_quota_first", mentions=[{"open_id": "ou_owner"}], image_key="img_quota_first"),
+        _message(
+            "om_quota_first",
+            mentions=[{"open_id": "ou_owner"}],
+            image_key="img_quota_first",
+        ),
         source="group_at_me",
         default_chat_type="group",
         run_id="run_1",
     )
     service.process_raw_message(
-        _message("om_quota_second", mentions=[{"open_id": "ou_owner"}], image_key="img_quota_second"),
+        _message(
+            "om_quota_second",
+            mentions=[{"open_id": "ou_owner"}],
+            image_key="img_quota_second",
+        ),
         source="group_at_me",
         default_chat_type="group",
         run_id="run_1",
@@ -1389,7 +1553,9 @@ def test_active_watch_ignores_unmatched_resource_message_without_download(
         assert conn.execute("SELECT COUNT(*) AS c FROM resources").fetchone()["c"] == 0
 
 
-def test_active_watch_suppresses_real_rendered_at_all_from_watched_sender(tmp_path: Path) -> None:
+def test_active_watch_suppresses_real_rendered_at_all_from_watched_sender(
+    tmp_path: Path,
+) -> None:
     fake = FakeFeishuClient()
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     service = IngestionService(
@@ -1465,7 +1631,9 @@ def test_group_active_watch_only_processes_watch_key_followups(tmp_path: Path) -
     assert store.get_message("om_new_at") is None
 
 
-def test_group_active_watch_leaves_new_direct_mention_for_group_ingest(tmp_path: Path) -> None:
+def test_group_active_watch_leaves_new_direct_mention_for_group_ingest(
+    tmp_path: Path,
+) -> None:
     fake = FakeFeishuClient()
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     service = IngestionService(
@@ -1534,7 +1702,9 @@ def test_thread_active_watch_filters_by_checkpoint_window(tmp_path: Path) -> Non
         run_id="run_1",
     )
     assert created is not None and created.task is not None
-    store.set_checkpoint("active_watch.thread.omt_1", {"last_success_at": "2026-06-22T10:10:00+08:00"})
+    store.set_checkpoint(
+        "active_watch.thread.omt_1", {"last_success_at": "2026-06-22T10:10:00+08:00"}
+    )
     fake.thread_pages[("omt_1", None)] = MessagePage(
         [
             _message(
@@ -1560,7 +1730,9 @@ def test_thread_active_watch_filters_by_checkpoint_window(tmp_path: Path) -> Non
     assert store.get_message("om_new_thread") is not None
 
 
-def test_thread_active_watch_target_comes_from_watch_key_without_task_thread_id(tmp_path: Path) -> None:
+def test_thread_active_watch_target_comes_from_watch_key_without_task_thread_id(
+    tmp_path: Path,
+) -> None:
     fake = FakeFeishuClient()
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     service = IngestionService(

@@ -91,7 +91,11 @@ def test_dry_run_preview_keeps_action_pending(tmp_path: Path) -> None:
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_target",
-        payload={"reply_target_message_id": "om_target", "text": "hello", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+        },
     )
     assert action_id is not None
     fake.reply_results.append(LarkCliResult(["dry"], 0, json_data={"api": []}))
@@ -110,13 +114,19 @@ def test_dry_run_preview_keeps_action_pending(tmp_path: Path) -> None:
     assert [call["dry_run"] for call in fake.reply_calls] == [True]
 
 
-def test_actual_dispatch_dry_run_failure_marks_failed_without_send(tmp_path: Path) -> None:
+def test_actual_dispatch_dry_run_failure_marks_failed_without_send(
+    tmp_path: Path,
+) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_target",
-        payload={"reply_target_message_id": "om_target", "text": "hello", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+        },
     )
     assert action_id is not None
     fake.reply_results.append(LarkCliResult(["dry"], 1, error="bad dry-run"))
@@ -140,13 +150,19 @@ def test_actual_dispatch_dry_run_failure_marks_failed_without_send(tmp_path: Pat
     assert attempts[0].dry_run_result["ok"] is False
 
 
-def test_actual_dispatch_dry_run_exception_marks_failed_without_stuck_sending(tmp_path: Path) -> None:
+def test_actual_dispatch_dry_run_exception_marks_failed_without_stuck_sending(
+    tmp_path: Path,
+) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_target",
-        payload={"reply_target_message_id": "om_target", "text": "hello", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+        },
     )
     assert action_id is not None
     fake.raise_reply_dry_run = True
@@ -168,13 +184,19 @@ def test_actual_dispatch_dry_run_exception_marks_failed_without_stuck_sending(tm
     assert attempts[0].error_stage == "dry_run"
 
 
-def test_actual_dispatch_send_rejection_marks_failed_without_stuck_sending(tmp_path: Path) -> None:
+def test_actual_dispatch_send_rejection_marks_failed_without_stuck_sending(
+    tmp_path: Path,
+) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_target",
-        payload={"reply_target_message_id": "om_target", "text": "hello", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+        },
     )
     assert action_id is not None
     fake.reply_results.extend(
@@ -201,10 +223,16 @@ def test_actual_dispatch_send_rejection_marks_failed_without_stuck_sending(tmp_p
     assert attempts[0].error_stage == "send"
 
 
-def test_actual_dispatch_transient_nonzero_send_failure_needs_review_and_is_not_auto_revived(tmp_path: Path) -> None:
+def test_actual_dispatch_transient_nonzero_send_failure_needs_review_and_is_not_auto_revived(
+    tmp_path: Path,
+) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
-    payload = {"reply_target_message_id": "om_target", "text": "hello", "identity": "user"}
+    payload = {
+        "reply_target_message_id": "om_target",
+        "text": "hello",
+        "identity": "user",
+    }
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_target",
@@ -237,7 +265,11 @@ def test_actual_dispatch_transient_nonzero_send_failure_needs_review_and_is_not_
         target_message_id="om_target",
         payload=payload,
     )
-    different_payload = {"reply_target_message_id": "om_target", "text": "different", "identity": "user"}
+    different_payload = {
+        "reply_target_message_id": "om_target",
+        "text": "different",
+        "identity": "user",
+    }
     different_blocked = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_target",
@@ -256,13 +288,19 @@ def test_actual_dispatch_transient_nonzero_send_failure_needs_review_and_is_not_
     assert after_cancel is not None
 
 
-def test_actual_dispatch_send_exception_after_boundary_needs_review(tmp_path: Path) -> None:
+def test_actual_dispatch_send_exception_after_boundary_needs_review(
+    tmp_path: Path,
+) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_target",
-        payload={"reply_target_message_id": "om_target", "text": "hello", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+        },
     )
     assert action_id is not None
     fake.reply_results.append(LarkCliResult(["dry"], 0, json_data={"api": []}))
@@ -291,7 +329,11 @@ def test_actual_dispatch_send_timeout_needs_review(tmp_path: Path) -> None:
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_target",
-        payload={"reply_target_message_id": "om_target", "text": "hello", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+        },
     )
     assert action_id is not None
     fake.reply_results.extend(
@@ -321,7 +363,11 @@ def test_actual_dispatch_missing_sent_message_id_needs_review(tmp_path: Path) ->
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_target",
-        payload={"reply_target_message_id": "om_target", "text": "hello", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+        },
     )
     assert action_id is not None
     fake.reply_results.extend(
@@ -353,7 +399,9 @@ def test_actual_dispatch_records_sent_id_and_associates_readback(
     monkeypatch.setattr(
         dispatcher_module,
         "_watch_until",
-        lambda watch_minutes: watch_minutes_seen.append(watch_minutes) or "custom-watch-until",
+        lambda watch_minutes: (
+            watch_minutes_seen.append(watch_minutes) or "custom-watch-until"
+        ),
     )
     store, dispatcher, fake = _dispatcher(
         tmp_path,
@@ -412,12 +460,16 @@ def test_actual_dispatch_records_sent_id_and_associates_readback(
     assert attempts[0].send_result["ok"] is True
     assert attempts[0].readback_result["ok"] is True
     with store.connect() as conn:
-        message = conn.execute("SELECT sender_role FROM messages WHERE message_id = ?", ("om_sent",)).fetchone()
+        message = conn.execute(
+            "SELECT sender_role FROM messages WHERE message_id = ?", ("om_sent",)
+        ).fetchone()
         task_message = conn.execute(
             "SELECT role FROM task_messages WHERE task_id = ? AND message_id = ?",
             (task_id, "om_sent"),
         ).fetchone()
-        task = conn.execute("SELECT watch_until FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        task = conn.execute(
+            "SELECT watch_until FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
     assert message["sender_role"] == "agent_message"
     assert task_message["role"] == "agent_reply"
     assert task["watch_until"] == "custom-watch-until"
@@ -432,7 +484,11 @@ def test_readback_exception_after_send_marks_sent_with_warning(tmp_path: Path) -
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_target",
-        payload={"reply_target_message_id": "om_target", "text": "hello", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+        },
     )
     assert action_id is not None
     fake.reply_results.extend(
@@ -462,13 +518,19 @@ def test_readback_exception_after_send_marks_sent_with_warning(tmp_path: Path) -
     assert attempts[0].error_stage == "readback"
 
 
-def test_readback_target_mismatch_marks_attempt_send_ok_with_warning(tmp_path: Path) -> None:
+def test_readback_target_mismatch_marks_attempt_send_ok_with_warning(
+    tmp_path: Path,
+) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_target",
-        payload={"reply_target_message_id": "om_target", "text": "hello", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+        },
     )
     assert action_id is not None
     fake.reply_results.extend(
@@ -509,13 +571,19 @@ def test_readback_target_mismatch_marks_attempt_send_ok_with_warning(tmp_path: P
     assert attempts[0].error_stage == "readback"
 
 
-def test_actual_send_without_readback_still_marks_sent_with_warning(tmp_path: Path) -> None:
+def test_actual_send_without_readback_still_marks_sent_with_warning(
+    tmp_path: Path,
+) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_target",
-        payload={"reply_target_message_id": "om_target", "text": "hello", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+        },
     )
     assert action_id is not None
     fake.reply_results.extend(
@@ -571,7 +639,11 @@ def test_owner_notification_can_be_sent_independently(tmp_path: Path) -> None:
                     "kind": "send_reply",
                     "reason": "needs_owner",
                     "preview": "first pending reply",
-                    "commands": ["/approve a_1", "/send t_1 <final reply>", "/reject a_1"],
+                    "commands": [
+                        "/approve a_1",
+                        "/send t_1 <final reply>",
+                        "/reject a_1",
+                    ],
                 }
             ],
             "statuses": {"missing_file": 1},
@@ -584,7 +656,9 @@ def test_owner_notification_can_be_sent_independently(tmp_path: Path) -> None:
     fake.owner_results.extend(
         [
             LarkCliResult(["dry"], 0, json_data={"api": []}),
-            LarkCliResult(["send"], 0, json_data={"data": {"message_id": "om_owner_sent"}}),
+            LarkCliResult(
+                ["send"], 0, json_data={"data": {"message_id": "om_owner_sent"}}
+            ),
         ]
     )
     fake.readback_pages.append(
@@ -628,7 +702,10 @@ def test_owner_notification_can_be_sent_independently(tmp_path: Path) -> None:
     assert "attempt_count: 3" in sent_text
     assert "pending_approval_ids: a_1, a_2" in sent_text
     assert "pending_approvals:" in sent_text
-    assert "- a_1 | send_reply | reason: needs_owner | preview: first pending reply" in sent_text
+    assert (
+        "- a_1 | send_reply | reason: needs_owner | preview: first pending reply"
+        in sent_text
+    )
     assert "commands: /approve a_1, /send t_1 <final reply>, /reject a_1" in sent_text
     assert 'statuses: {"missing_file": 1}' in sent_text
     assert "error: session exploded" in sent_text
@@ -646,35 +723,41 @@ def test_owner_notification_neutralizes_freeform_mentions(tmp_path: Path) -> Non
             "type": "approval_required",
             "task_id": "t_1",
             "approval_id": "a_1",
-            "reason": "needs_owner <at user_id=\"ou_x\">owner</at> @所有人 @ALL",
+            "reason": 'needs_owner <at user_id="ou_x">owner</at> @所有人 @ALL',
             "source": {
                 "chat_id": "oc_1",
                 "chat_type": "group",
-                "sender_name": "Mallory <at user_id=\"ou_x\">owner</at> @All",
+                "sender_name": 'Mallory <at user_id="ou_x">owner</at> @All',
                 "task_label": "classification @all",
             },
             "incoming_message": {
                 "message_id": "om_target",
-                "text": "please notify <at user_id=\"ou_all\">all</at> @_ALL",
+                "text": 'please notify <at user_id="ou_all">all</at> @_ALL',
             },
             "pending_approvals": [
                 {
                     "approval_id": "a_1",
                     "kind": "send_reply",
-                    "reason": "<at user_id=\"ou_x\">owner</at>",
+                    "reason": '<at user_id="ou_x">owner</at>',
                     "preview": "reply @所有人 @_All",
-                    "commands": ["/approve a_1", "/send t_1 <final reply>", "/reject a_1"],
+                    "commands": [
+                        "/approve a_1",
+                        "/send t_1 <final reply>",
+                        "/reject a_1",
+                    ],
                 }
             ],
-            "suggested_reply": "done <at user_id=\"ou_x\">owner</at> @all",
-            "preview": "preview <at user_id=\"ou_x\">owner</at> @_all @ALL",
+            "suggested_reply": 'done <at user_id="ou_x">owner</at> @all',
+            "preview": 'preview <at user_id="ou_x">owner</at> @_all @ALL',
             "commands": ["/send t_1 <final reply>", "/reject a_1"],
         },
     )
     fake.owner_results.extend(
         [
             LarkCliResult(["dry"], 0, json_data={"api": []}),
-            LarkCliResult(["send"], 0, json_data={"data": {"message_id": "om_owner_sent"}}),
+            LarkCliResult(
+                ["send"], 0, json_data={"data": {"message_id": "om_owner_sent"}}
+            ),
         ]
     )
     fake.readback_pages.append(MessagePage([]))
@@ -703,13 +786,19 @@ def test_owner_notification_neutralizes_freeform_mentions(tmp_path: Path) -> Non
     assert "/send t_1 <final reply>" in sent_text
 
 
-def test_stale_sending_is_marked_failed_needs_review_without_resend(tmp_path: Path) -> None:
+def test_stale_sending_is_marked_failed_needs_review_without_resend(
+    tmp_path: Path,
+) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_target",
-        payload={"reply_target_message_id": "om_target", "text": "hello", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+        },
     )
     assert action_id is not None
     claim = store.claim_action_for_dispatch(action_id, run_id="run_stale")
@@ -737,7 +826,9 @@ def test_stale_sending_is_marked_failed_needs_review_without_resend(tmp_path: Pa
     assert attempts[0].error_stage == "recovery"
 
 
-def test_owner_notification_actual_has_budget_beyond_blocked_send_reply_previews(tmp_path: Path) -> None:
+def test_owner_notification_actual_has_budget_beyond_blocked_send_reply_previews(
+    tmp_path: Path,
+) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
     for index in range(50):
@@ -754,12 +845,18 @@ def test_owner_notification_actual_has_budget_beyond_blocked_send_reply_previews
         assert action_id is not None
     owner_action_id = store.create_owner_notification_action(
         task_id=task_id,
-        payload={"type": "approval_required", "task_id": "t_1", "commands": ["/approve a_1"]},
+        payload={
+            "type": "approval_required",
+            "task_id": "t_1",
+            "commands": ["/approve a_1"],
+        },
     )
     fake.owner_results.extend(
         [
             LarkCliResult(["dry"], 0, json_data={"api": []}),
-            LarkCliResult(["send"], 0, json_data={"data": {"message_id": "om_owner_sent"}}),
+            LarkCliResult(
+                ["send"], 0, json_data={"data": {"message_id": "om_owner_sent"}}
+            ),
         ]
     )
     fake.readback_pages.append(

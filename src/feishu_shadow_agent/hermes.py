@@ -4,12 +4,19 @@ import json
 import re
 import subprocess
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any
 
 from .agent_backend import AgentRunResult
-from .config import AutoContextMode, ConfigScopeMode, HermesConfig, ReplyPostprocessConfig, ToolPermissionsProfile
+from .config import (
+    AutoContextMode,
+    ConfigScopeMode,
+    HermesConfig,
+    ReplyPostprocessConfig,
+    ToolPermissionsProfile,
+)
 
 HermesRunner = Callable[[list[str], int], AgentRunResult]
 SESSION_ID_RE = re.compile(r"session_id:\s*([^\s]+)")
@@ -104,9 +111,13 @@ class HermesCliClient:
             argv.extend(["--provider", effective_provider])
         return argv
 
-    def task_router(self, prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
+    def task_router(
+        self, prompt: str, *, cwd: str | Path | None = None
+    ) -> AgentRunResult:
         return self._run(
-            self.build_chat_command(prompt=prompt, max_turns=self.config.router_max_turns),
+            self.build_chat_command(
+                prompt=prompt, max_turns=self.config.router_max_turns
+            ),
             cwd=cwd,
         )
 
@@ -127,7 +138,9 @@ class HermesCliClient:
             cwd=cwd,
         )
 
-    def reply_postprocess(self, prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
+    def reply_postprocess(
+        self, prompt: str, *, cwd: str | Path | None = None
+    ) -> AgentRunResult:
         return self._run(
             self.build_chat_command(
                 prompt=prompt,
@@ -139,7 +152,9 @@ class HermesCliClient:
             cwd=cwd,
         )
 
-    def owner_style_refresh(self, prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
+    def owner_style_refresh(
+        self, prompt: str, *, cwd: str | Path | None = None
+    ) -> AgentRunResult:
         return self._run(
             self.build_chat_command(
                 prompt=prompt,
@@ -188,7 +203,9 @@ class HermesCliClient:
         )
 
 
-def _run_subprocess(argv: Sequence[str], timeout_seconds: int, *, cwd: Path | None = None) -> AgentRunResult:
+def _run_subprocess(
+    argv: Sequence[str], timeout_seconds: int, *, cwd: Path | None = None
+) -> AgentRunResult:
     started = time.monotonic()
     try:
         completed = subprocess.run(
@@ -225,7 +242,9 @@ def _run_subprocess(argv: Sequence[str], timeout_seconds: int, *, cwd: Path | No
             stdout=completed.stdout,
             stderr=completed.stderr,
             session_id=_parse_session_id(completed.stderr),
-            error=completed.stderr.strip() or completed.stdout.strip() or "command failed",
+            error=completed.stderr.strip()
+            or completed.stdout.strip()
+            or "command failed",
             latency_ms=_latency_ms(started),
             backend_provider="hermes",
         )

@@ -24,7 +24,9 @@ class ContextAccessBuilder:
             return None
         context["query_scope"] = {
             "current_message_id": message.message_id,
-            "active_tasks": [context_task_card(candidate.task) for candidate in active_candidates],
+            "active_tasks": [
+                context_task_card(candidate.task) for candidate in active_candidates
+            ],
             "historical_tasks": [context_task_card(task) for task in historical],
         }
         return context
@@ -35,7 +37,9 @@ class ContextAccessBuilder:
         active_candidates: list[Any],
         historical: list[TaskRecord],
     ) -> dict[int, int]:
-        task_ids = [candidate.task.id for candidate in active_candidates] + [task.id for task in historical]
+        task_ids = [candidate.task.id for candidate in active_candidates] + [
+            task.id for task in historical
+        ]
         return self.store.count_task_messages_by_task_ids(task_ids)
 
     def task_session_context_access(
@@ -63,7 +67,13 @@ class ContextAccessBuilder:
             "backend": "sqlite",
             "mode": "live_read_only",
             "read_only_uri": f"{path.resolve().as_uri()}?mode=ro",
-            "allowed_tables": ["tasks", "task_messages", "messages", "resources", "routing_audits"],
+            "allowed_tables": [
+                "tasks",
+                "task_messages",
+                "messages",
+                "resources",
+                "routing_audits",
+            ],
         }
 
 

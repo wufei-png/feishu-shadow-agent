@@ -51,7 +51,9 @@ class RetentionSummary:
             "resources_candidates": self.resources_candidates,
             "resources_deleted": self.resources_deleted,
             "resources_expired": self.resources_expired,
-            "resources_skipped": [resource.as_dict() for resource in self.resources_skipped],
+            "resources_skipped": [
+                resource.as_dict() for resource in self.resources_skipped
+            ],
         }
 
 
@@ -129,7 +131,9 @@ class RetentionService:
             resources_skipped=skipped,
         )
         if self.logger is not None:
-            self.logger.emit("info", "retention_pruned", run_id=run_id, data=summary.as_dict())
+            self.logger.emit(
+                "info", "retention_pruned", run_id=run_id, data=summary.as_dict()
+            )
         return summary
 
     def _resolve_resource_path(self, stored_path: Any) -> Path | str:
@@ -138,7 +142,9 @@ class RetentionService:
         relative_path = Path(stored_path)
         if relative_path.is_absolute() or ".." in relative_path.parts:
             return "unsafe_path"
-        resource_root = (self.base_dir / self.config.storage.resource_dir).resolve(strict=False)
+        resource_root = (self.base_dir / self.config.storage.resource_dir).resolve(
+            strict=False
+        )
         candidate = self.base_dir / relative_path
         resolved_candidate = candidate.resolve(strict=False)
         try:

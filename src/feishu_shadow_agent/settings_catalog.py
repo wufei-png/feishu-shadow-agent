@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 CONFIG_VALUE_PATHS: dict[str, str] = {
     "lifecycle.approval_timeout_hours": "lifecycle.approval_timeout_hours",
     "lifecycle.watch_minutes": "lifecycle.watch_minutes",

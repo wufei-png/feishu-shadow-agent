@@ -12,9 +12,18 @@ from .feishu.client import FeishuClient
 from .ingestion import MessageNormalizer
 from .jsonl import JSONLLogger
 from .store.sqlite_store import SQLiteStore
-from .types import ActionRecord, ActionStatus, DispatchAttemptStatus, DispatchErrorStage, LarkCliResult, NormalizedMessage
+from .types import (
+    ActionRecord,
+    ActionStatus,
+    DispatchAttemptStatus,
+    DispatchErrorStage,
+    LarkCliResult,
+    NormalizedMessage,
+)
 
-EXPECTED_MENTION_RE = re.compile(r"<at\s+[^>]*user_id=[\"']([^\"']+)[\"'][^>]*>", re.IGNORECASE)
+EXPECTED_MENTION_RE = re.compile(
+    r"<at\s+[^>]*user_id=[\"']([^\"']+)[\"'][^>]*>", re.IGNORECASE
+)
 NOTIFICATION_AT_SPAN_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE | re.DOTALL)
 NOTIFICATION_AT_TAG_RE = re.compile(r"</?at\b[^>]*>", re.IGNORECASE)
 NOTIFICATION_GROUP_MENTION_RE = re.compile(r"@所有人|@_?all\b", re.IGNORECASE)
@@ -79,7 +88,9 @@ class Dispatcher:
             seen_action_ids = {action.id for action in actions}
             actions.extend(
                 action
-                for action in self.store.list_dispatchable_actions(limit=limit, kind="owner_notification")
+                for action in self.store.list_dispatchable_actions(
+                    limit=limit, kind="owner_notification"
+                )
                 if action.id not in seen_action_ids
             )
         self.logger.debug(
@@ -107,7 +118,11 @@ class Dispatcher:
                     self.logger.warning(
                         "dispatch_action_claim_skipped",
                         run_id=run_id,
-                        data={"action_id": action.id, "kind": action.kind, "reason": "claim_failed"},
+                        data={
+                            "action_id": action.id,
+                            "kind": action.kind,
+                            "reason": "claim_failed",
+                        },
                     )
                     summary = _bump(summary, skipped=1)
                     continue
@@ -160,20 +175,28 @@ class Dispatcher:
                             "warnings": result.get("warnings", []),
                         },
                     )
-                summary = _bump(summary, processed=1, sent=1 if sent else 0, failed=0 if sent else 1)
+                summary = _bump(
+                    summary, processed=1, sent=1 if sent else 0, failed=0 if sent else 1
+                )
                 continue
 
             self.preview_action_record(
                 action,
                 run_id=run_id,
-                blocked_actual_reason=blocked_send_reply_reason if action.kind == "send_reply" else None,
+                blocked_actual_reason=blocked_send_reply_reason
+                if action.kind == "send_reply"
+                else None,
             )
             summary = _bump(summary, processed=1, previewed=1)
         return summary
 
     def preview_action(self, action_id: int, *, run_id: str) -> dict[str, Any] | None:
         action = self.store.get_action(action_id)
-        if action is None or action.status != "pending" or action.kind not in {"send_reply", "owner_notification"}:
+        if (
+            action is None
+            or action.status != "pending"
+            or action.kind not in {"send_reply", "owner_notification"}
+        ):
             return None
         return self.preview_action_record(action, run_id=run_id)
 
@@ -231,7 +254,9 @@ class Dispatcher:
             return {"status": "failed", "error": "sent_message_id is required"}
         result = _empty_result()
         result["sent_message_id"] = sent_message_id
-        outcome = self._readback_outcome(action, sent_message_id=sent_message_id, run_id=run_id)
+        outcome = self._readback_outcome(
+            action, sent_message_id=sent_message_id, run_id=run_id
+        )
         result["readback"] = outcome.result
         result["warnings"].extend(outcome.warnings)
         evidence_error = _mark_sent_evidence_error(
@@ -254,7 +279,9 @@ class Dispatcher:
                 result=result,
                 run_id=run_id,
                 readback_message=outcome.message,
-                watch_until=_watch_until(self.config.lifecycle.watch_minutes) if outcome.message is not None else None,
+                watch_until=_watch_until(self.config.lifecycle.watch_minutes)
+                if outcome.message is not None
+                else None,
             )
         except ValueError as exc:
             return {
@@ -270,7 +297,9 @@ class Dispatcher:
             "result": updated.result,
         }
 
-    def _execute_actual(self, action: ActionRecord, *, attempt_id: int, run_id: str) -> tuple[dict[str, Any], str]:
+    def _execute_actual(
+        self, action: ActionRecord, *, attempt_id: int, run_id: str
+    ) -> tuple[dict[str, Any], str]:
         result = _empty_result()
         try:
             dry_run = self._dry_run(action)
@@ -350,7 +379,9 @@ class Dispatcher:
             sent_message_id=sent_message_id,
         )
         try:
-            readback = self._readback(action, sent_message_id=sent_message_id, run_id=run_id)
+            readback = self._readback(
+                action, sent_message_id=sent_message_id, run_id=run_id
+            )
         except Exception as exc:
             result["readback"] = _exception_readback_result(sent_message_id, exc)
             result["warnings"].append("readback_exception")
@@ -367,11 +398,17 @@ class Dispatcher:
         else:
             result["readback"] = readback["result"]
             result["warnings"].extend(readback["warnings"])
-        readback_ok = _readback_attempt_verified(action, readback=result["readback"], warnings=result["warnings"])
+        readback_ok = _readback_attempt_verified(
+            action, readback=result["readback"], warnings=result["warnings"]
+        )
         self.store.update_dispatch_attempt(
             attempt_id,
-            status=DispatchAttemptStatus.READBACK_OK.value if readback_ok else DispatchAttemptStatus.SEND_OK.value,
-            readback_result=result["readback"] if isinstance(result["readback"], dict) else None,
+            status=DispatchAttemptStatus.READBACK_OK.value
+            if readback_ok
+            else DispatchAttemptStatus.SEND_OK.value,
+            readback_result=result["readback"]
+            if isinstance(result["readback"], dict)
+            else None,
             sent_message_id=sent_message_id,
             error_stage=None if readback_ok else DispatchErrorStage.READBACK.value,
             finish=True,
@@ -425,8 +462,12 @@ class Dispatcher:
             )
         return _local_error(action, f"unsupported action kind: {action.kind}")
 
-    def _readback(self, action: ActionRecord, *, sent_message_id: str | None, run_id: str) -> dict[str, Any]:
-        outcome = self._readback_outcome(action, sent_message_id=sent_message_id, run_id=run_id)
+    def _readback(
+        self, action: ActionRecord, *, sent_message_id: str | None, run_id: str
+    ) -> dict[str, Any]:
+        outcome = self._readback_outcome(
+            action, sent_message_id=sent_message_id, run_id=run_id
+        )
         if outcome.message is not None:
             result = dict(outcome.result or {})
             result["inserted"] = self._persist_readback_message(action, outcome.message)
@@ -444,13 +485,21 @@ class Dispatcher:
             self.logger.warning(
                 "dispatch_readback_skipped",
                 run_id=run_id,
-                data={"action_id": action.id, "kind": action.kind, "reason": "sent_message_id_missing"},
+                data={
+                    "action_id": action.id,
+                    "kind": action.kind,
+                    "reason": "sent_message_id_missing",
+                },
             )
-            return ReadbackOutcome(result=None, warnings=["readback_skipped_no_sent_message_id"])
+            return ReadbackOutcome(
+                result=None, warnings=["readback_skipped_no_sent_message_id"]
+            )
         identity = _payload_identity(action) if action.kind == "send_reply" else "bot"
         warnings: list[str] = []
         try:
-            page = self.feishu.get_messages(as_identity=identity, message_ids=[sent_message_id])
+            page = self.feishu.get_messages(
+                as_identity=identity, message_ids=[sent_message_id]
+            )
         except Exception as exc:
             self.logger.warning(
                 "dispatch_readback_failed",
@@ -471,7 +520,11 @@ class Dispatcher:
             self.logger.warning(
                 "dispatch_readback_message_missing",
                 run_id=run_id,
-                data={"action_id": action.id, "kind": action.kind, "sent_message_id": sent_message_id},
+                data={
+                    "action_id": action.id,
+                    "kind": action.kind,
+                    "sent_message_id": sent_message_id,
+                },
             )
             return ReadbackOutcome(
                 result={"ok": False, "message_id": sent_message_id, "raw": page.raw},
@@ -482,7 +535,11 @@ class Dispatcher:
         message = self.normalizer.normalize(raw)
         if action.kind == "send_reply":
             target = _target_message_id(action)
-            if message.reply_to_message_id and target and message.reply_to_message_id != target:
+            if (
+                message.reply_to_message_id
+                and target
+                and message.reply_to_message_id != target
+            ):
                 warnings.append("readback_reply_target_mismatch")
             elif not message.reply_to_message_id:
                 warnings.append("readback_reply_target_unavailable")
@@ -505,7 +562,9 @@ class Dispatcher:
             message=message,
         )
 
-    def _persist_readback_message(self, action: ActionRecord, message: NormalizedMessage) -> bool:
+    def _persist_readback_message(
+        self, action: ActionRecord, message: NormalizedMessage
+    ) -> bool:
         inserted = self.store.upsert_message(message)
         if action.kind == "send_reply" and action.task_id is not None:
             self.store.record_agent_message_for_task(
@@ -540,7 +599,9 @@ def _command_result(result: LarkCliResult) -> dict[str, Any]:
     }
 
 
-def _exception_command_result(action: ActionRecord, stage: str, exc: Exception) -> dict[str, Any]:
+def _exception_command_result(
+    action: ActionRecord, stage: str, exc: Exception
+) -> dict[str, Any]:
     return {
         "ok": False,
         "argv": ["dispatch", action.kind, str(action.id), stage],
@@ -554,7 +615,9 @@ def _exception_command_result(action: ActionRecord, stage: str, exc: Exception) 
     }
 
 
-def _exception_readback_result(sent_message_id: str | None, exc: Exception) -> dict[str, Any]:
+def _exception_readback_result(
+    sent_message_id: str | None, exc: Exception
+) -> dict[str, Any]:
     return {
         "ok": False,
         "message_id": sent_message_id,
@@ -575,7 +638,11 @@ def _send_failure_proves_not_sent(result: LarkCliResult) -> bool:
     if not isinstance(result.error, str):
         return False
     error = result.error.strip().lower()
-    return error == "send rejected" or error.startswith("api rejected") or error.startswith("feishu api rejected")
+    return (
+        error == "send rejected"
+        or error.startswith("api rejected")
+        or error.startswith("feishu api rejected")
+    )
 
 
 def _mark_sent_evidence_error(
@@ -590,22 +657,33 @@ def _mark_sent_evidence_error(
     if readback.get("message_id") != sent_message_id:
         return "readback message_id did not match sent_message_id"
     if action.kind != "send_reply":
-        return _mark_sent_text_evidence_error(expected=_owner_notification_text(action.payload), readback=readback)
+        return _mark_sent_text_evidence_error(
+            expected=_owner_notification_text(action.payload), readback=readback
+        )
     target_message_id = _target_message_id(action)
-    if not target_message_id or readback.get("reply_to_message_id") != target_message_id:
+    if (
+        not target_message_id
+        or readback.get("reply_to_message_id") != target_message_id
+    ):
         return "readback reply_to_message_id did not match action target"
     blocking_warnings = {"readback_mentions_mismatch", "readback_mentions_unavailable"}
     if blocking_warnings & set(warnings):
         return "readback mentions did not match action text"
-    text_error = _mark_sent_text_evidence_error(expected=_payload_text(action), readback=readback)
+    text_error = _mark_sent_text_evidence_error(
+        expected=_payload_text(action), readback=readback
+    )
     if text_error is not None:
         return text_error
     return None
 
 
-def _mark_sent_text_evidence_error(*, expected: str, readback: dict[str, Any]) -> str | None:
+def _mark_sent_text_evidence_error(
+    *, expected: str, readback: dict[str, Any]
+) -> str | None:
     expected_text = _evidence_text(expected)
-    actual_text = _evidence_text(readback.get("text") if isinstance(readback.get("text"), str) else "")
+    actual_text = _evidence_text(
+        readback.get("text") if isinstance(readback.get("text"), str) else ""
+    )
     if expected_text and actual_text != expected_text:
         return "readback text did not match action payload"
     return None
@@ -615,7 +693,9 @@ def _evidence_text(value: str) -> str:
     return " ".join(EXPECTED_MENTION_RE.sub("", value).split())
 
 
-def _readback_attempt_verified(action: ActionRecord, *, readback: Any, warnings: list[str]) -> bool:
+def _readback_attempt_verified(
+    action: ActionRecord, *, readback: Any, warnings: list[str]
+) -> bool:
     if not isinstance(readback, dict) or readback.get("ok") is not True:
         return False
     if action.kind == "send_reply" and READBACK_BLOCKING_WARNINGS & set(warnings):
@@ -624,11 +704,17 @@ def _readback_attempt_verified(action: ActionRecord, *, readback: Any, warnings:
 
 
 def _local_error(action: ActionRecord, message: str) -> LarkCliResult:
-    return LarkCliResult(argv=["dispatch", action.kind, str(action.id)], exit_code=None, error=message)
+    return LarkCliResult(
+        argv=["dispatch", action.kind, str(action.id)], exit_code=None, error=message
+    )
 
 
 def _target_message_id(action: ActionRecord) -> str | None:
-    value = action.target_message_id or action.payload.get("reply_target_message_id") or action.payload.get("target_message_id")
+    value = (
+        action.target_message_id
+        or action.payload.get("reply_target_message_id")
+        or action.payload.get("target_message_id")
+    )
     return value if isinstance(value, str) and value else None
 
 
@@ -662,11 +748,21 @@ def _owner_notification_text(payload: dict[str, Any]) -> str:
             lines.append("suggested_reply: <none>")
     if "approvable" in payload:
         lines.append(f"approvable: {'yes' if payload.get('approvable') else 'no'}")
-    for key in ("stage", "target", "reply_target_message_id", "attempt_count", "pending_approval_ids", "statuses", "error"):
+    for key in (
+        "stage",
+        "target",
+        "reply_target_message_id",
+        "attempt_count",
+        "pending_approval_ids",
+        "statuses",
+        "error",
+    ):
         detail = _owner_notification_detail(payload.get(key))
         if detail:
             lines.append(f"{key}: {detail}")
-    pending_approvals = _owner_notification_pending_approvals(payload.get("pending_approvals"))
+    pending_approvals = _owner_notification_pending_approvals(
+        payload.get("pending_approvals")
+    )
     if pending_approvals:
         lines.append("pending_approvals:")
         lines.extend(pending_approvals)
@@ -685,16 +781,26 @@ def _owner_notification_source(value: Any) -> str:
         return _notification_display_text(value)
     if not isinstance(value, dict):
         return ""
-    chat = " ".join(_notification_display_text(str(part)) for part in (value.get("chat_type"), value.get("chat_id")) if part)
+    chat = " ".join(
+        _notification_display_text(str(part))
+        for part in (value.get("chat_type"), value.get("chat_id"))
+        if part
+    )
     sender = value.get("sender_name") or value.get("sender_id")
     task_label = value.get("task_label")
-    parts = [_notification_display_text(str(part)) for part in (chat, sender, task_label) if part]
+    parts = [
+        _notification_display_text(str(part))
+        for part in (chat, sender, task_label)
+        if part
+    ]
     return " / ".join(parts)
 
 
 def _owner_notification_incoming_message(value: Any) -> list[str]:
     if isinstance(value, str):
-        return [f"incoming: {_compact_notification_text(value)}"] if value.strip() else []
+        return (
+            [f"incoming: {_compact_notification_text(value)}"] if value.strip() else []
+        )
     if not isinstance(value, dict):
         return []
     lines: list[str] = []
@@ -713,7 +819,9 @@ def _owner_notification_detail(value: Any) -> str:
     if isinstance(value, list):
         return ", ".join(_notification_display_text(str(item)) for item in value)
     if isinstance(value, dict):
-        return _compact_notification_text(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))
+        return _compact_notification_text(
+            json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        )
     return _compact_notification_text(str(value))
 
 
@@ -724,7 +832,9 @@ def _owner_notification_pending_approvals(value: Any) -> list[str]:
     for item in value:
         if not isinstance(item, dict):
             continue
-        approval_id = _notification_display_text(str(item.get("approval_id") or "unknown"))
+        approval_id = _notification_display_text(
+            str(item.get("approval_id") or "unknown")
+        )
         kind = _notification_display_text(str(item.get("kind") or "unknown"))
         reason = _notification_display_text(str(item.get("reason") or ""))
         preview = item.get("preview")
@@ -744,12 +854,16 @@ def _compact_notification_text(value: str, *, limit: int = 500) -> str:
     compact = _notification_display_text(value)
     if len(compact) <= limit:
         return compact
-    return f"{compact[:limit - 3]}..."
+    return f"{compact[: limit - 3]}..."
 
 
 def _notification_display_text(value: str) -> str:
-    neutralized = NOTIFICATION_AT_SPAN_RE.sub(lambda match: _neutralize_at_token(match.group(0)), value)
-    neutralized = NOTIFICATION_AT_TAG_RE.sub(lambda match: _neutralize_at_token(match.group(0)), neutralized)
+    neutralized = NOTIFICATION_AT_SPAN_RE.sub(
+        lambda match: _neutralize_at_token(match.group(0)), value
+    )
+    neutralized = NOTIFICATION_AT_TAG_RE.sub(
+        lambda match: _neutralize_at_token(match.group(0)), neutralized
+    )
     neutralized = NOTIFICATION_GROUP_MENTION_RE.sub(
         lambda match: "＠" + match.group(0)[1:],
         neutralized,
@@ -785,7 +899,9 @@ def _find_key(value: Any, key: str) -> Any:
     return None
 
 
-def _find_message(items: list[dict[str, Any]], message_id: str) -> dict[str, Any] | None:
+def _find_message(
+    items: list[dict[str, Any]], message_id: str
+) -> dict[str, Any] | None:
     for item in items:
         found = item.get("message_id") or item.get("messageId") or item.get("id")
         if found == message_id:
@@ -800,7 +916,9 @@ def _expected_mentions(text: str) -> set[str]:
 
 
 def _watch_until(watch_minutes: int) -> str:
-    return (datetime.now().astimezone() + timedelta(minutes=watch_minutes)).isoformat(timespec="seconds")
+    return (datetime.now().astimezone() + timedelta(minutes=watch_minutes)).isoformat(
+        timespec="seconds"
+    )
 
 
 def _bump(

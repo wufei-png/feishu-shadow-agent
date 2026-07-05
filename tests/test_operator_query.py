@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from feishu_shadow_agent.config import AppConfig, ChatPolicyConfig, OwnerConfig, ReplyPolicyConfig
+from feishu_shadow_agent.config import (
+    AppConfig,
+    ChatPolicyConfig,
+    OwnerConfig,
+    ReplyPolicyConfig,
+)
 from feishu_shadow_agent.operator_query import OperatorQueryService
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import HealthCheckResult
@@ -56,7 +61,9 @@ def _insert_task(
     return int(cursor.lastrowid)
 
 
-def _insert_message(store: SQLiteStore, *, task_id: int, message_id: str = "om_root") -> None:
+def _insert_message(
+    store: SQLiteStore, *, task_id: int, message_id: str = "om_root"
+) -> None:
     store.migrate()
     with store.connect() as conn:
         conn.execute(
@@ -105,7 +112,9 @@ def _insert_approval(
                 task_id,
                 "send_reply",
                 "pending",
-                json.dumps(payload or {"reply_target_message_id": "om_root", "text": "reply"}),
+                json.dumps(
+                    payload or {"reply_target_message_id": "om_root", "text": "reply"}
+                ),
                 "reply",
                 "2026-06-22T08:00:00+08:00",
                 expires_at,
@@ -114,7 +123,9 @@ def _insert_approval(
     return int(cursor.lastrowid)
 
 
-def test_dashboard_snapshot_includes_policy_status_and_omits_policy_audits(tmp_path: Path) -> None:
+def test_dashboard_snapshot_includes_policy_status_and_omits_policy_audits(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
     config = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)})
     store.import_product_policy_from_config(config)
@@ -134,7 +145,9 @@ def test_dashboard_snapshot_includes_policy_status_and_omits_policy_audits(tmp_p
     json.dumps(snapshot)
 
 
-def test_operator_query_derives_overdue_approval_without_mutating_db(tmp_path: Path) -> None:
+def test_operator_query_derives_overdue_approval_without_mutating_db(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
     task_id = _insert_task(store)
     _insert_approval(
@@ -154,12 +167,17 @@ def test_operator_query_derives_overdue_approval_without_mutating_db(tmp_path: P
     assert detail["recommended_action"] == "expire"
     assert detail["available_commands"] == ["maintenance expire-approvals"]
     with store.connect() as conn:
-        row = conn.execute("SELECT status, resolved_at FROM approvals WHERE short_id = ?", ("a_overdue",)).fetchone()
+        row = conn.execute(
+            "SELECT status, resolved_at FROM approvals WHERE short_id = ?",
+            ("a_overdue",),
+        ).fetchone()
     assert row["status"] == "pending"
     assert row["resolved_at"] is None
 
 
-def test_approval_available_commands_respect_approvable_payload_without_exposing_payload(tmp_path: Path) -> None:
+def test_approval_available_commands_respect_approvable_payload_without_exposing_payload(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
     task_id = _insert_task(store)
     _insert_approval(
@@ -182,7 +200,9 @@ def test_approval_available_commands_respect_approvable_payload_without_exposing
     assert "payload" not in listed[0]
 
 
-def test_approval_dto_exposes_postprocess_badge_fields_without_full_payload(tmp_path: Path) -> None:
+def test_approval_dto_exposes_postprocess_badge_fields_without_full_payload(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
     task_id = _insert_task(store)
     _insert_approval(
@@ -213,7 +233,9 @@ def test_approval_dto_exposes_postprocess_badge_fields_without_full_payload(tmp_
     assert detail["payload"]["keep_watching_on_reject"] is True
 
 
-def test_task_detail_returns_related_read_models_and_effective_policy(tmp_path: Path) -> None:
+def test_task_detail_returns_related_read_models_and_effective_policy(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
     config = _config(
         chats={
@@ -233,7 +255,11 @@ def test_task_detail_returns_related_read_models_and_effective_policy(tmp_path: 
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_root",
-        payload={"reply_target_message_id": "om_root", "text": "reply", "identity": "bot"},
+        payload={
+            "reply_target_message_id": "om_root",
+            "text": "reply",
+            "identity": "bot",
+        },
     )
     assert action_id is not None
     query = OperatorQueryService(
@@ -247,7 +273,9 @@ def test_task_detail_returns_related_read_models_and_effective_policy(tmp_path: 
     assert detail is not None
     assert detail["task_id"] == "t_1"
     assert detail["message_count"] == 1
-    assert [message["message_id"] for message in detail["recent_messages"]] == ["om_root"]
+    assert [message["message_id"] for message in detail["recent_messages"]] == [
+        "om_root"
+    ]
     assert detail["pending_approvals"][0]["approval_id"] == "a_review"
     assert detail["actions"][0]["action_id"] == action_id
     assert detail["effective_policy"] == {
@@ -258,9 +286,14 @@ def test_task_detail_returns_related_read_models_and_effective_policy(tmp_path: 
         "allow_user_fallback": False,
         "resource_download": False,
     }
-    assert detail["recommended_actions"] == ["task close --task-id t_1", "review_pending_approvals"]
+    assert detail["recommended_actions"] == [
+        "task close --task-id t_1",
+        "review_pending_approvals",
+    ]
     with store.connect() as conn:
-        approval = conn.execute("SELECT status FROM approvals WHERE short_id = ?", ("a_review",)).fetchone()
+        approval = conn.execute(
+            "SELECT status FROM approvals WHERE short_id = ?", ("a_review",)
+        ).fetchone()
     assert approval["status"] == "pending"
 
 
@@ -276,10 +309,16 @@ def test_task_and_dispatch_lists_include_recommended_actions(tmp_path: Path) -> 
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_root",
-        payload={"reply_target_message_id": "om_root", "text": "reply", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_root",
+            "text": "reply",
+            "identity": "user",
+        },
     )
     assert action_id is not None
-    store.finish_action(action_id, status="failed_needs_review", result={"error_stage": "send"})
+    store.finish_action(
+        action_id, status="failed_needs_review", result={"error_stage": "send"}
+    )
     query = OperatorQueryService(store, now=lambda: "2026-06-22T10:00:00+08:00")
 
     tasks = query.list_tasks()
@@ -298,13 +337,19 @@ def test_task_and_dispatch_lists_include_recommended_actions(tmp_path: Path) -> 
     ]
 
 
-def test_dispatch_action_detail_reads_attempts_without_recovering_stale_sends(tmp_path: Path) -> None:
+def test_dispatch_action_detail_reads_attempts_without_recovering_stale_sends(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
     task_id = _insert_task(store)
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_root",
-        payload={"reply_target_message_id": "om_root", "text": "reply", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_root",
+            "text": "reply",
+            "identity": "user",
+        },
     )
     assert action_id is not None
     assert store.claim_action_for_dispatch(action_id, run_id="run_1") is not None
@@ -331,7 +376,9 @@ def test_dispatch_action_detail_reads_attempts_without_recovering_stale_sends(tm
     assert store.get_action(action_id).status == "sending"  # type: ignore[union-attr]
 
 
-def test_message_detail_returns_processing_context_without_preview_side_effects(tmp_path: Path) -> None:
+def test_message_detail_returns_processing_context_without_preview_side_effects(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
     task_id = _insert_task(store)
     _insert_message(store, task_id=task_id)
@@ -347,7 +394,11 @@ def test_message_detail_returns_processing_context_without_preview_side_effects(
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_root",
-        payload={"reply_target_message_id": "om_root", "text": "reply", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_root",
+            "text": "reply",
+            "identity": "user",
+        },
     )
     assert action_id is not None
     before = _message_detail_state(store, action_id)
@@ -369,9 +420,13 @@ def test_message_detail_returns_processing_context_without_preview_side_effects(
     assert _message_detail_state(store, action_id) == before
 
 
-def test_policy_import_diff_and_audit_history_are_focused_read_models(tmp_path: Path) -> None:
+def test_policy_import_diff_and_audit_history_are_focused_read_models(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
-    initial = _config(chats={"oc_replace": ChatPolicyConfig(name="Before", auto_reply=True)})
+    initial = _config(
+        chats={"oc_replace": ChatPolicyConfig(name="Before", auto_reply=True)}
+    )
     replacement = _config(
         reply_policy=ReplyPolicyConfig(p2p_auto_reply=False),
         chats={"oc_replace": ChatPolicyConfig(name="After", auto_reply=False)},
@@ -388,7 +443,9 @@ def test_policy_import_diff_and_audit_history_are_focused_read_models(tmp_path: 
     assert "drift" not in diff["message"].lower()
 
     store.import_product_policy_from_config(replacement, replace=True)
-    history = OperatorQueryService(store, policy_import_source=replacement).policy_audit_history(
+    history = OperatorQueryService(
+        store, policy_import_source=replacement
+    ).policy_audit_history(
         scope="chat",
         policy_key="chat:oc_replace",
         limit=1,
@@ -402,7 +459,9 @@ def test_policy_import_diff_and_audit_history_are_focused_read_models(tmp_path: 
     assert history[0]["new_summary"]["auto_reply"] is False
 
 
-def test_health_issues_reports_store_availability_without_migrating(tmp_path: Path) -> None:
+def test_health_issues_reports_store_availability_without_migrating(
+    tmp_path: Path,
+) -> None:
     missing = OperatorQueryService(_store(tmp_path / "missing")).health_issues()
 
     empty_db = tmp_path / "empty" / "agent.sqlite3"
@@ -429,7 +488,9 @@ def test_health_issues_reports_store_availability_without_migrating(tmp_path: Pa
     assert schema_incompatible["issues"][0]["id"] == "store-schema_incompatible"
 
 
-def test_health_issues_summary_count_is_not_truncated_by_list_limit(tmp_path: Path) -> None:
+def test_health_issues_summary_count_is_not_truncated_by_list_limit(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
     store.migrate()
     task_id = _insert_task(store)
@@ -437,7 +498,11 @@ def test_health_issues_summary_count_is_not_truncated_by_list_limit(tmp_path: Pa
         action_id = store.create_send_reply_action(
             task_id=task_id,
             target_message_id=target_message_id,
-            payload={"reply_target_message_id": target_message_id, "text": "reply", "identity": "user"},
+            payload={
+                "reply_target_message_id": target_message_id,
+                "text": "reply",
+                "identity": "user",
+            },
         )
         assert action_id is not None
         store.finish_action(action_id, status="failed", result={"error_stage": "send"})
@@ -458,21 +523,40 @@ def test_health_issues_only_counts_latest_health_check_status(tmp_path: Path) ->
             INSERT INTO health_checks(run_id, check_name, severity, status, message, details_json, checked_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (None, "hermes", "critical", "ok", "Hermes recovered", "{}", "2026-06-22T09:30:00+08:00"),
+            (
+                None,
+                "hermes",
+                "critical",
+                "ok",
+                "Hermes recovered",
+                "{}",
+                "2026-06-22T09:30:00+08:00",
+            ),
         )
         conn.execute(
             """
             INSERT INTO health_checks(run_id, check_name, severity, status, message, details_json, checked_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (None, "hermes", "critical", "failed", "Hermes failed", "{}", "2026-06-22T09:00:00+08:00"),
+            (
+                None,
+                "hermes",
+                "critical",
+                "failed",
+                "Hermes failed",
+                "{}",
+                "2026-06-22T09:00:00+08:00",
+            ),
         )
     query = OperatorQueryService(store, now=lambda: "2026-06-22T10:00:00+08:00")
 
     payload = query.health_issues()
 
     assert payload["summary"]["open_issue_count"] == 2
-    assert {issue["id"] for issue in payload["issues"]} == {"policy-uninitialized", "daemon-not-started"}
+    assert {issue["id"] for issue in payload["issues"]} == {
+        "policy-uninitialized",
+        "daemon-not-started",
+    }
 
 
 def test_health_issues_redacts_failed_approval_command_body(tmp_path: Path) -> None:
@@ -502,7 +586,10 @@ def test_health_issues_redacts_failed_approval_command_body(tmp_path: Path) -> N
     assert "/tmp/secret" not in serialized
     assert payload["recent_failed_commands"][0]["label"] == "/send t_secret"
     assert payload["recent_failed_commands"][0]["command"] == "/send t_secret"
-    assert payload["recent_failed_commands"][0]["result_summary"]["error"] == "failed at [path]"
+    assert (
+        payload["recent_failed_commands"][0]["result_summary"]["error"]
+        == "failed at [path]"
+    )
     assert payload["recent_failed_commands"][0]["verb"] == "send"
     assert payload["recent_failed_commands"][0]["target_id"] == "t_secret"
     assert payload["summary"]["open_issue_count"] == 2
@@ -515,10 +602,16 @@ def test_health_issues_dispatch_cancel_removes_open_issue(tmp_path: Path) -> Non
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_root",
-        payload={"reply_target_message_id": "om_root", "text": "reply", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_root",
+            "text": "reply",
+            "identity": "user",
+        },
     )
     assert action_id is not None
-    store.finish_action(action_id, status="failed_needs_review", result={"error_stage": "send"})
+    store.finish_action(
+        action_id, status="failed_needs_review", result={"error_stage": "send"}
+    )
     query = OperatorQueryService(store, now=lambda: "2026-06-22T10:00:00+08:00")
 
     before = query.health_issues()
@@ -527,20 +620,30 @@ def test_health_issues_dispatch_cancel_removes_open_issue(tmp_path: Path) -> Non
 
     assert f"dispatch-action-{action_id}" in {issue["id"] for issue in before["issues"]}
     assert before["summary"]["open_issue_count"] == 3
-    assert f"dispatch-action-{action_id}" not in {issue["id"] for issue in after["issues"]}
+    assert f"dispatch-action-{action_id}" not in {
+        issue["id"] for issue in after["issues"]
+    }
     assert after["summary"]["open_issue_count"] == 2
 
 
-def test_health_issues_derives_actionable_runtime_and_recovery_issues(tmp_path: Path) -> None:
+def test_health_issues_derives_actionable_runtime_and_recovery_issues(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
     task_id = _insert_task(store)
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_root",
-        payload={"reply_target_message_id": "om_root", "text": "reply", "identity": "user"},
+        payload={
+            "reply_target_message_id": "om_root",
+            "text": "reply",
+            "identity": "user",
+        },
     )
     assert action_id is not None
-    store.finish_action(action_id, status="failed_needs_review", result={"error_stage": "send"})
+    store.finish_action(
+        action_id, status="failed_needs_review", result={"error_stage": "send"}
+    )
     store.record_run_tick_started(run_id="run_stale", dry_run=True)
     store.record_health_results(
         run_id="run_stale",
@@ -604,7 +707,9 @@ def test_health_issues_derives_actionable_runtime_and_recovery_issues(tmp_path: 
         "cancel",
     ]
     assert all(issue["category"] != "approval_command" for issue in payload["issues"])
-    hermes_issue = next(issue for issue in payload["issues"] if issue["id"].startswith("health-hermes-"))
+    hermes_issue = next(
+        issue for issue in payload["issues"] if issue["id"].startswith("health-hermes-")
+    )
     assert "/tmp/secret" not in hermes_issue["detail"]
     assert "[path]" in hermes_issue["detail"]
     assert payload["recent_failed_dispatch_actions"][0]["action_id"] == action_id
@@ -617,7 +722,9 @@ def _message_detail_state(store: SQLiteStore, action_id: int) -> dict[str, objec
             "SELECT status, resolved_at FROM approvals WHERE short_id = ?",
             ("a_msg_detail",),
         ).fetchone()
-        action = conn.execute("SELECT status, result_json FROM actions WHERE id = ?", (action_id,)).fetchone()
+        action = conn.execute(
+            "SELECT status, result_json FROM actions WHERE id = ?", (action_id,)
+        ).fetchone()
         attempts = conn.execute(
             "SELECT COUNT(*) AS count FROM dispatch_attempts WHERE action_id = ?",
             (action_id,),

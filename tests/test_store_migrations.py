@@ -9,7 +9,6 @@ import pytest
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import HealthCheckResult, StateSchemaContract
 
-
 EXPECTED_TABLES = {
     "schema_migrations",
     "messages",
@@ -41,7 +40,9 @@ def test_migration_is_idempotent_and_creates_tables(tmp_path: Path) -> None:
     store.migrate()
 
     with store.connect() as conn:
-        rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
     assert EXPECTED_TABLES <= {row["name"] for row in rows}
 
 
@@ -77,8 +78,12 @@ def test_sqlite_connections_apply_busy_timeout(tmp_path: Path) -> None:
 def test_checkpoint_and_run_health_roundtrip(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
 
-    store.set_checkpoint("ingest.group_at_me", {"last_success_at": "2026-06-22T00:00:00+08:00"})
-    store.record_run_start(run_id="run_1", dry_run=True, git_commit="abc123", git_dirty=False)
+    store.set_checkpoint(
+        "ingest.group_at_me", {"last_success_at": "2026-06-22T00:00:00+08:00"}
+    )
+    store.record_run_start(
+        run_id="run_1", dry_run=True, git_commit="abc123", git_dirty=False
+    )
     store.record_health_results(
         run_id="run_1",
         results=[
@@ -91,14 +96,20 @@ def test_checkpoint_and_run_health_roundtrip(tmp_path: Path) -> None:
             )
         ],
     )
-    store.record_run_finish(run_id="run_1", status="ok", health_summary={"critical_failed": []})
+    store.record_run_finish(
+        run_id="run_1", status="ok", health_summary={"critical_failed": []}
+    )
 
     assert store.get_checkpoint("ingest.group_at_me") == {
         "last_success_at": "2026-06-22T00:00:00+08:00"
     }
     with store.connect() as conn:
-        run = conn.execute("SELECT status FROM runs WHERE run_id = ?", ("run_1",)).fetchone()
-        health = conn.execute("SELECT check_name FROM health_checks WHERE run_id = ?", ("run_1",)).fetchone()
+        run = conn.execute(
+            "SELECT status FROM runs WHERE run_id = ?", ("run_1",)
+        ).fetchone()
+        health = conn.execute(
+            "SELECT check_name FROM health_checks WHERE run_id = ?", ("run_1",)
+        ).fetchone()
     assert run["status"] == "ok"
     assert health["check_name"] == "config_schema"
 
@@ -109,34 +120,50 @@ def test_baseline_schema_includes_current_columns(tmp_path: Path) -> None:
 
     with store.connect() as conn:
         message_columns = {
-            row["name"] for row in conn.execute("PRAGMA table_info(messages)").fetchall()
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(messages)").fetchall()
         }
         task_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
         }
         approval_columns = {
-            row["name"] for row in conn.execute("PRAGMA table_info(approvals)").fetchall()
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(approvals)").fetchall()
         }
         audit_columns = {
-            row["name"] for row in conn.execute("PRAGMA table_info(agent_audits)").fetchall()
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(agent_audits)").fetchall()
         }
         indexes = {
-            row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
         }
         attempt_columns = {
-            row["name"] for row in conn.execute("PRAGMA table_info(dispatch_attempts)").fetchall()
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(dispatch_attempts)").fetchall()
         }
         run_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(runs)").fetchall()
         }
         product_policy_columns = {
-            row["name"] for row in conn.execute("PRAGMA table_info(product_policies)").fetchall()
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(product_policies)").fetchall()
         }
         policy_audit_columns = {
-            row["name"] for row in conn.execute("PRAGMA table_info(policy_audits)").fetchall()
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(policy_audits)").fetchall()
         }
 
-    assert {"thread_id", "reply_to_message_id", "sender_role", "direct_mention", "at_all", "text"} <= message_columns
+    assert {
+        "thread_id",
+        "reply_to_message_id",
+        "sender_role",
+        "direct_mention",
+        "at_all",
+        "text",
+    } <= message_columns
     assert {
         "chat_type",
         "thread_id",
@@ -149,7 +176,11 @@ def test_baseline_schema_includes_current_columns(tmp_path: Path) -> None:
     assert "hermes_session_id" not in task_columns
     assert "expires_at" in approval_columns
     assert "sender_name" in message_columns
-    assert {"backend_provider", "agent_session_id", "tool_permissions_profile"} <= audit_columns
+    assert {
+        "backend_provider",
+        "agent_session_id",
+        "tool_permissions_profile",
+    } <= audit_columns
     assert {
         "action_id",
         "run_id",
@@ -196,9 +227,20 @@ def test_send_reply_guard_and_failed_retry_use_current_baseline(tmp_path: Path) 
             INSERT INTO tasks(short_id, status, chat_id, root_message_id, task_label, agent_session_id, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            ("t_current", "watching", "oc_1", "om_1", "label", "sid_current", "now", "now"),
+            (
+                "t_current",
+                "watching",
+                "oc_1",
+                "om_1",
+                "label",
+                "sid_current",
+                "now",
+                "now",
+            ),
         )
-        task_id = conn.execute("SELECT id FROM tasks WHERE short_id = ?", ("t_current",)).fetchone()["id"]
+        task_id = conn.execute(
+            "SELECT id FROM tasks WHERE short_id = ?", ("t_current",)
+        ).fetchone()["id"]
     store.migrate()
 
     assert store.get_initialized_agent_session_id(task_id) == "sid_current"
@@ -212,7 +254,9 @@ def test_send_reply_guard_and_failed_retry_use_current_baseline(tmp_path: Path) 
         target_message_id="om_1",
         payload={"text": "two", "source": "auto_reply"},
     )
-    owner_action = store.create_owner_notification_action(task_id=task_id, payload={"text": "notify"})
+    owner_action = store.create_owner_notification_action(
+        task_id=task_id, payload={"text": "notify"}
+    )
 
     assert first is not None
     assert second is None
@@ -232,7 +276,9 @@ def test_send_reply_guard_and_failed_retry_use_current_baseline(tmp_path: Path) 
     assert retried_action.result == {}
 
 
-def test_claim_creates_dispatch_attempt_and_retry_preserves_idempotency_key(tmp_path: Path) -> None:
+def test_claim_creates_dispatch_attempt_and_retry_preserves_idempotency_key(
+    tmp_path: Path,
+) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.migrate()
     with store.connect() as conn:
@@ -243,7 +289,11 @@ def test_claim_creates_dispatch_attempt_and_retry_preserves_idempotency_key(tmp_
             """,
             ("t_dispatch", "watching", "oc_1", "om_1", "now", "now"),
         )
-        task_id = int(conn.execute("SELECT id FROM tasks WHERE short_id = ?", ("t_dispatch",)).fetchone()["id"])
+        task_id = int(
+            conn.execute(
+                "SELECT id FROM tasks WHERE short_id = ?", ("t_dispatch",)
+            ).fetchone()["id"]
+        )
 
     action_id = store.create_send_reply_action(
         task_id=task_id,
@@ -262,7 +312,9 @@ def test_claim_creates_dispatch_attempt_and_retry_preserves_idempotency_key(tmp_
     assert claim.attempt.run_id == "run_1"
     assert claim.attempt.claim_token
 
-    store.finish_action(action_id, status="failed_needs_review", result={"error_stage": "send"})
+    store.finish_action(
+        action_id, status="failed_needs_review", result={"error_stage": "send"}
+    )
     retried = store.retry_dispatch_action(action_id)
 
     assert retried.status == "pending"
@@ -281,7 +333,11 @@ def test_claim_aware_finish_does_not_overwrite_operator_cancel(tmp_path: Path) -
             """,
             ("t_cancel_claim", "watching", "oc_1", "om_1", "now", "now"),
         )
-        task_id = int(conn.execute("SELECT id FROM tasks WHERE short_id = ?", ("t_cancel_claim",)).fetchone()["id"])
+        task_id = int(
+            conn.execute(
+                "SELECT id FROM tasks WHERE short_id = ?", ("t_cancel_claim",)
+            ).fetchone()["id"]
+        )
 
     action_id = store.create_send_reply_action(
         task_id=task_id,
@@ -362,7 +418,10 @@ def test_state_schema_contract_accepts_all_enum_values(tmp_path: Path) -> None:
             ("action-for-attempts", "send_reply", "pending", "now", "now"),
         )
         action_id = int(
-            conn.execute("SELECT id FROM actions WHERE idempotency_key = ?", ("action-for-attempts",)).fetchone()["id"]
+            conn.execute(
+                "SELECT id FROM actions WHERE idempotency_key = ?",
+                ("action-for-attempts",),
+            ).fetchone()["id"]
         )
         for index, status in enumerate(StateSchemaContract.dispatch_attempt_statuses):
             conn.execute(
@@ -481,7 +540,9 @@ def test_state_schema_contract_accepts_all_enum_values(tmp_path: Path) -> None:
         ),
     ],
 )
-def test_invalid_state_values_fail_db_check(tmp_path: Path, sql: str, params: tuple[object, ...]) -> None:
+def test_invalid_state_values_fail_db_check(
+    tmp_path: Path, sql: str, params: tuple[object, ...]
+) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.migrate()
 
@@ -496,7 +557,9 @@ def test_invalid_state_values_fail_db_check(tmp_path: Path, sql: str, params: tu
         ("error_stage", "future_stage"),
     ],
 )
-def test_invalid_dispatch_attempt_values_fail_db_check(tmp_path: Path, column: str, value: str) -> None:
+def test_invalid_dispatch_attempt_values_fail_db_check(
+    tmp_path: Path, column: str, value: str
+) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.migrate()
 
@@ -509,7 +572,7 @@ def test_invalid_dispatch_attempt_values_fail_db_check(tmp_path: Path, column: s
             ("action-for-bad-attempt", "send_reply", "pending", "now", "now"),
         )
         action_id = int(conn.execute("SELECT id FROM actions").fetchone()["id"])
-        sql = f"""
+        sql = """
             INSERT INTO dispatch_attempts(action_id, claim_token, status, error_stage, started_at)
             VALUES (?, ?, ?, ?, ?)
             """
@@ -524,7 +587,9 @@ def test_invalid_dispatch_attempt_values_fail_db_check(tmp_path: Path, column: s
             conn.execute(sql, params)
 
 
-def test_send_reply_retry_does_not_revive_failed_action_when_same_text_was_sent(tmp_path: Path) -> None:
+def test_send_reply_retry_does_not_revive_failed_action_when_same_text_was_sent(
+    tmp_path: Path,
+) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.migrate()
 
@@ -590,19 +655,29 @@ def test_owner_notification_failed_action_is_reused_but_active_and_sent_are_not_
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     payload = {"type": "notify", "message": "same"}
 
-    active_action = store.create_owner_notification_action(task_id=None, payload=payload)
-    duplicate_pending = store.create_owner_notification_action(task_id=None, payload=payload)
+    active_action = store.create_owner_notification_action(
+        task_id=None, payload=payload
+    )
+    duplicate_pending = store.create_owner_notification_action(
+        task_id=None, payload=payload
+    )
     assert duplicate_pending == active_action
     assert store.claim_action_for_dispatch(active_action) is not None
 
-    duplicate_sending = store.create_owner_notification_action(task_id=None, payload=payload)
+    duplicate_sending = store.create_owner_notification_action(
+        task_id=None, payload=payload
+    )
     assert duplicate_sending == active_action
     sending_action = store.get_action(active_action)
     assert sending_action is not None
     assert sending_action.status == "sending"
 
-    store.finish_action(active_action, status="sent", result={"sent_message_id": "om_owner"})
-    duplicate_sent = store.create_owner_notification_action(task_id=None, payload=payload)
+    store.finish_action(
+        active_action, status="sent", result={"sent_message_id": "om_owner"}
+    )
+    duplicate_sent = store.create_owner_notification_action(
+        task_id=None, payload=payload
+    )
     assert duplicate_sent == active_action
     sent_action = store.get_action(active_action)
     assert sent_action is not None
@@ -610,10 +685,14 @@ def test_owner_notification_failed_action_is_reused_but_active_and_sent_are_not_
     assert sent_action.result == {"sent_message_id": "om_owner"}
 
     retry_payload = {"type": "notify", "message": "retry"}
-    failed_action = store.create_owner_notification_action(task_id=None, payload=retry_payload)
+    failed_action = store.create_owner_notification_action(
+        task_id=None, payload=retry_payload
+    )
     store.finish_action(failed_action, status="failed", result={"error_stage": "send"})
 
-    retried = store.create_owner_notification_action(task_id=None, payload=retry_payload)
+    retried = store.create_owner_notification_action(
+        task_id=None, payload=retry_payload
+    )
 
     assert retried == failed_action
     retried_action = store.get_action(failed_action)

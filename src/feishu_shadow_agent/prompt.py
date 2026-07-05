@@ -56,12 +56,14 @@ class StrictModel(BaseModel):
 
 
 class TaskRouterOutput(StrictModel):
-    route: Literal["new_task", "attach_task", "reopen_task", "ignore", "ambiguous"] = Field(
-        description=(
-            "Routing decision for the incoming message: new_task creates a new task; attach_task appends to "
-            "one active candidate; reopen_task resumes one historical closed candidate; ignore means no task work "
-            "is needed; ambiguous asks the owner because the target "
-            "or intent is unclear."
+    route: Literal["new_task", "attach_task", "reopen_task", "ignore", "ambiguous"] = (
+        Field(
+            description=(
+                "Routing decision for the incoming message: new_task creates a new task; attach_task appends to "
+                "one active candidate; reopen_task resumes one historical closed candidate; ignore means no task work "
+                "is needed; ambiguous asks the owner because the target "
+                "or intent is unclear."
+            )
         )
     )
     target_task_id: str | None = Field(
@@ -72,7 +74,9 @@ class TaskRouterOutput(StrictModel):
             "ignore, and ambiguous."
         ),
     )
-    reason: str = Field(default="", description="Short operator-readable reason for the decision.")
+    reason: str = Field(
+        default="", description="Short operator-readable reason for the decision."
+    )
 
     @model_validator(mode="after")
     def validate_target_for_route(self) -> TaskRouterOutput:
@@ -92,7 +96,9 @@ class BaseTaskSessionOutput(StrictModel):
             "privacy-sensitive content, writes or permission expansion, or unclear human responsibility."
         )
     )
-    proposed_reply: str = Field(default="", description="Plain reply text without Feishu @ mentions.")
+    proposed_reply: str = Field(
+        default="", description="Plain reply text without Feishu @ mentions."
+    )
     reply_target_message_id: str | None = Field(
         default=None,
         description="Message id to reply to; must be one of metadata.reply_target_message_ids.",
@@ -104,7 +110,9 @@ class BaseTaskSessionOutput(StrictModel):
 
 
 class InitialTaskSessionOutput(BaseTaskSessionOutput):
-    task_label: str = Field(description="Short task label for operator status views, based on the initial task.")
+    task_label: str = Field(
+        description="Short task label for operator status views, based on the initial task."
+    )
 
     @field_validator("task_label")
     @classmethod
@@ -117,13 +125,21 @@ class FollowupTaskSessionOutput(BaseTaskSessionOutput):
 
 
 class ReplyPostprocessOutput(StrictModel):
-    status: Literal["ok", "needs_owner"] = Field(description="ok when final_reply is safe to use; otherwise needs_owner.")
-    final_reply: str = Field(default="", description="Postprocessed reply text without Feishu @ mentions.")
+    status: Literal["ok", "needs_owner"] = Field(
+        description="ok when final_reply is safe to use; otherwise needs_owner."
+    )
+    final_reply: str = Field(
+        default="", description="Postprocessed reply text without Feishu @ mentions."
+    )
 
 
 class OwnerStyleRefreshOutput(StrictModel):
-    status: Literal["ok", "failed"] = Field(description="ok when profile_markdown is ready to write.")
-    profile_markdown: str = Field(default="", description="Generated Markdown owner style profile.")
+    status: Literal["ok", "failed"] = Field(
+        description="ok when profile_markdown is ready to write."
+    )
+    profile_markdown: str = Field(
+        default="", description="Generated Markdown owner style profile."
+    )
 
 
 def build_router_prompt(
@@ -147,7 +163,8 @@ def build_router_prompt(
             for candidate in active
         ],
         "historical_candidates": [
-            _task_card(task, message_count=_message_count_for(task, message_counts)) for task in historical
+            _task_card(task, message_count=_message_count_for(task, message_counts))
+            for task in historical
         ],
     }
     if context_access is not None:
@@ -290,11 +307,15 @@ def _task_card(task: TaskRecord, *, message_count: int | None = None) -> dict[st
     return card
 
 
-def _candidate_card(task: TaskRecord, matched_by: str, *, message_count: int | None = None) -> dict[str, Any]:
+def _candidate_card(
+    task: TaskRecord, matched_by: str, *, message_count: int | None = None
+) -> dict[str, Any]:
     return _task_card(task, message_count=message_count) | {"matched_by": matched_by}
 
 
-def _message_count_for(task: TaskRecord, message_counts: dict[int, int] | None) -> int | None:
+def _message_count_for(
+    task: TaskRecord, message_counts: dict[int, int] | None
+) -> int | None:
     if message_counts is None:
         return None
     return message_counts.get(task.id)

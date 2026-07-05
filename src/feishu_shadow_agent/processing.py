@@ -2,16 +2,23 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from html import escape
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from pydantic import ValidationError
 
 from .agent_backend import AgentBackend
-from .agent_invocation import AGENT_MAX_ATTEMPTS, AgentAttemptOutcome, AgentInvoker, agent_result_error, truncate_error
+from .agent_invocation import (
+    AGENT_MAX_ATTEMPTS,
+    AgentAttemptOutcome,
+    AgentInvoker,
+    agent_result_error,
+    truncate_error,
+)
 from .config import AppConfig
 from .context_access import ContextAccessBuilder
 from .jsonl import JSONLLogger
@@ -22,15 +29,27 @@ from .prompt import (
     TaskRouterOutput,
     build_router_prompt,
 )
-from .reply_postprocess import ReplyPostprocessResult, ReplyPostprocessor
-from .resource_preflight import ResourcePreflight, ResourcePreflightResult, resource_status_counts
+from .reply_postprocess import ReplyPostprocessor, ReplyPostprocessResult
+from .resource_preflight import (
+    ResourcePreflight,
+    ResourcePreflightResult,
+    resource_status_counts,
+)
 from .routing import CandidateCollector, RoutingResult
 from .store.sqlite_store import SQLiteStore
 from .task_session_runner import TaskSessionRunner
-from .types import LifecycleStatePolicy, MessageProcessingStatus, NormalizedMessage, RouteDecision, TaskRecord
+from .types import (
+    LifecycleStatePolicy,
+    MessageProcessingStatus,
+    NormalizedMessage,
+    RouteDecision,
+    TaskRecord,
+)
 
 AGENT_AT_SPAN_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE | re.DOTALL)
-FORBIDDEN_MENTION_RE = re.compile(r"<at\b[^>]*>|</at>|@所有人|@_all|@all", re.IGNORECASE)
+FORBIDDEN_MENTION_RE = re.compile(
+    r"<at\b[^>]*>|</at>|@所有人|@_all|@all", re.IGNORECASE
+)
 
 
 @dataclass(frozen=True)
@@ -61,15 +80,24 @@ class SendComposer:
         reply_target: Any,
         chat_type: str | None,
     ) -> ComposedReply:
-        had_forbidden = bool(AGENT_AT_SPAN_RE.search(proposed_reply) or FORBIDDEN_MENTION_RE.search(proposed_reply))
+        had_forbidden = bool(
+            AGENT_AT_SPAN_RE.search(proposed_reply)
+            or FORBIDDEN_MENTION_RE.search(proposed_reply)
+        )
         cleaned = AGENT_AT_SPAN_RE.sub("", proposed_reply)
         cleaned = FORBIDDEN_MENTION_RE.sub("", cleaned)
         cleaned = " ".join(cleaned.split())
         if chat_type == "group" and reply_target is not None:
             sender_id = reply_target["sender_id"]
             sender_role = reply_target["sender_role"]
-            if sender_id and sender_id != self.owner_open_id and sender_role not in {"bot_message", "agent_message"}:
-                display = _escape_mention_display(reply_target["sender_name"] or sender_id)
+            if (
+                sender_id
+                and sender_id != self.owner_open_id
+                and sender_role not in {"bot_message", "agent_message"}
+            ):
+                display = _escape_mention_display(
+                    reply_target["sender_name"] or sender_id
+                )
                 cleaned = f'<at user_id="{sender_id}">{display}</at> {cleaned}'.strip()
         return ComposedReply(text=cleaned, had_forbidden_mentions=had_forbidden)
 
@@ -118,7 +146,9 @@ class ApprovalService:
             "reason": reason,
             "preview": proposed_reply,
             "source": _notification_source(task=current_task, message=source_message),
-            "incoming_message": _notification_message(source_message, fallback_message_id=notification_message_id),
+            "incoming_message": _notification_message(
+                source_message, fallback_message_id=notification_message_id
+            ),
             "suggested_reply": payload_text,
             "approvable": approvable,
             "commands": commands,
@@ -133,20 +163,38 @@ class ApprovalService:
             approval_timeout_hours=self.config.lifecycle.approval_timeout_hours,
         )
 
-    def notify_owner(self, *, task: TaskRecord | None, reason: str, payload: dict[str, Any] | None = None) -> int:
+    def notify_owner(
+        self,
+        *,
+        task: TaskRecord | None,
+        reason: str,
+        payload: dict[str, Any] | None = None,
+    ) -> int:
         data = {"type": "owner_notification", "reason": reason} | (payload or {})
         current_task = self.store.get_task_by_id(task.id) if task is not None else None
         message_id = data.get("message_id")
-        source_message = self.store.get_message(message_id) if isinstance(message_id, str) and message_id else None
+        source_message = (
+            self.store.get_message(message_id)
+            if isinstance(message_id, str) and message_id
+            else None
+        )
         if task is not None:
             data["task_id"] = task.short_id
-        if "incoming_message" not in data and isinstance(message_id, str) and message_id:
-            data["incoming_message"] = _notification_message(source_message, fallback_message_id=message_id)
+        if (
+            "incoming_message" not in data
+            and isinstance(message_id, str)
+            and message_id
+        ):
+            data["incoming_message"] = _notification_message(
+                source_message, fallback_message_id=message_id
+            )
         if "source" not in data:
             source = _notification_source(task=current_task, message=source_message)
             if any(value for value in source.values()):
                 data["source"] = source
-        return self.store.create_owner_notification_action(task_id=None if task is None else task.id, payload=data)
+        return self.store.create_owner_notification_action(
+            task_id=None if task is None else task.id, payload=data
+        )
 
     def apply_command(self, *, message: NormalizedMessage) -> dict[str, Any] | None:
         command = message.text.strip()
@@ -164,7 +212,9 @@ class ApprovalService:
                 command=command,
                 verb=verb,
                 target_id=target_id,
-                keep_watching_until=_plus_minutes(message.sent_at, self.config.lifecycle.watch_minutes),
+                keep_watching_until=_plus_minutes(
+                    message.sent_at, self.config.lifecycle.watch_minutes
+                ),
             )
         if verb == "send" and target_id and final_reply is not None:
             return self.store.apply_approval_command(
@@ -173,7 +223,9 @@ class ApprovalService:
                 verb=verb,
                 target_id=target_id,
                 final_reply=final_reply,
-                keep_watching_until=_plus_minutes(message.sent_at, self.config.lifecycle.watch_minutes),
+                keep_watching_until=_plus_minutes(
+                    message.sent_at, self.config.lifecycle.watch_minutes
+                ),
             )
         return self.store.apply_approval_command(
             message_id=message.message_id,
@@ -200,8 +252,12 @@ class TaskProcessingService:
         self.store = store
         self.config = config
         self.agent_backend = agent_backend
-        self.agent_working_dir = Path(agent_working_dir) if agent_working_dir is not None else Path.cwd()
-        self.config_base_dir = Path(config_base_dir) if config_base_dir is not None else Path.cwd()
+        self.agent_working_dir = (
+            Path(agent_working_dir) if agent_working_dir is not None else Path.cwd()
+        )
+        self.config_base_dir = (
+            Path(config_base_dir) if config_base_dir is not None else Path.cwd()
+        )
         self.logger = logger
         self.collector = CandidateCollector(store)
         self.approvals = ApprovalService(store=store, config=config)
@@ -233,7 +289,9 @@ class TaskProcessingService:
             agent_invoker=self.agent_invoker,
         )
 
-    def set_resource_retry_func(self, func: Callable[[NormalizedMessage, str | None], None]) -> None:
+    def set_resource_retry_func(
+        self, func: Callable[[NormalizedMessage, str | None], None]
+    ) -> None:
         self.resource_preflight.set_retry_func(func)
 
     def process(
@@ -272,7 +330,10 @@ class TaskProcessingService:
                 },
             )
             return None
-        if route == "ambiguous" and reason in {"router_placeholder", "closed_recall_router_placeholder"}:
+        if route == "ambiguous" and reason in {
+            "router_placeholder",
+            "closed_recall_router_placeholder",
+        }:
             routed = self._run_task_router(
                 message=message,
                 source=source,
@@ -286,7 +347,10 @@ class TaskProcessingService:
             if routed is None or routed.task is None:
                 return None
             routing = routed
-        if routing.decision.route in {"new_task", "attach_task", "reopen_task"} and routing.task is not None:
+        if (
+            routing.decision.route in {"new_task", "attach_task", "reopen_task"}
+            and routing.task is not None
+        ):
             return self._run_task_session(
                 task=routing.task,
                 message=message,
@@ -460,7 +524,9 @@ class TaskProcessingService:
                 message,
                 since=_minus_days(now, self.config.lifecycle.closed_recall_days),
             )
-        active_target_short_ids = {candidate.task.short_id for candidate in active_candidates}
+        active_target_short_ids = {
+            candidate.task.short_id for candidate in active_candidates
+        }
         historical_target_short_ids = {task.short_id for task in historical}
         allowed_target_short_ids = active_target_short_ids | historical_target_short_ids
         self.logger.debug(
@@ -483,7 +549,9 @@ class TaskProcessingService:
                 active_candidates=active_candidates,
                 historical=historical,
             ),
-            message_counts=self._router_message_counts(active_candidates=active_candidates, historical=historical),
+            message_counts=self._router_message_counts(
+                active_candidates=active_candidates, historical=historical
+            ),
         )
         outcome = self._call_agent_with_retries(
             lambda: self.agent_backend.task_router(prompt, cwd=self.agent_working_dir),
@@ -499,7 +567,9 @@ class TaskProcessingService:
             agent_session_id=None if result is None else result.session_id,
             input_message_ids=[message.message_id],
             input_resource_ids=[resource.file_key for resource in message.resources],
-            response=result.json_data if result is not None and isinstance(result.json_data, dict) else None,
+            response=result.json_data
+            if result is not None and isinstance(result.json_data, dict)
+            else None,
             error=outcome.last_error if result is None else result.error,
             latency_ms=None if result is None else result.latency_ms,
             prompt={"text": prompt} if self.config.debug.save_full_agent_io else None,
@@ -507,7 +577,9 @@ class TaskProcessingService:
         )
         candidates_count = len(active_candidates) + len(historical)
         if result is None or not result.ok or not isinstance(result.json_data, dict):
-            last_error = outcome.last_error or (None if result is None else agent_result_error(result))
+            last_error = outcome.last_error or (
+                None if result is None else agent_result_error(result)
+            )
             self.logger.error(
                 "task_router_failed",
                 run_id=run_id,
@@ -539,7 +611,11 @@ class TaskProcessingService:
                 last_error=last_error,
                 reason="task_router_failed",
             )
-            return ProcessingResult("owner_notification_created", action_id=action_id, reason="task_router_failed")
+            return ProcessingResult(
+                "owner_notification_created",
+                action_id=action_id,
+                reason="task_router_failed",
+            )
         try:
             output = TaskRouterOutput.model_validate(result.json_data)
         except ValidationError as exc:
@@ -574,7 +650,11 @@ class TaskProcessingService:
                 last_error=last_error,
                 reason="task_router_schema_failed",
             )
-            return ProcessingResult("owner_notification_created", action_id=action_id, reason="task_router_schema_failed")
+            return ProcessingResult(
+                "owner_notification_created",
+                action_id=action_id,
+                reason="task_router_schema_failed",
+            )
         if output.route == "ambiguous":
             self.logger.warning(
                 "task_router_ambiguous",
@@ -595,14 +675,22 @@ class TaskProcessingService:
                     router_called=True,
                 ),
             )
-            action_id = self.approvals.notify_owner(task=None, reason="task_router_ambiguous", payload={"message_id": message.message_id})
+            action_id = self.approvals.notify_owner(
+                task=None,
+                reason="task_router_ambiguous",
+                payload={"message_id": message.message_id},
+            )
             self._mark_processing_processed(
                 message=message,
                 stage="task_router",
                 task_id=None,
                 attempt_count=outcome.attempt_count,
             )
-            return ProcessingResult("owner_notification_created", action_id=action_id, reason="task_router_ambiguous")
+            return ProcessingResult(
+                "owner_notification_created",
+                action_id=action_id,
+                reason="task_router_ambiguous",
+            )
         if output.route == "new_task":
             task, decision = self.store.create_task_for_message_and_audit(
                 message,
@@ -679,7 +767,11 @@ class TaskProcessingService:
                 task_id=None,
                 attempt_count=outcome.attempt_count,
             )
-            return ProcessingResult("owner_notification_created", action_id=action_id, reason="task_router_invalid_target")
+            return ProcessingResult(
+                "owner_notification_created",
+                action_id=action_id,
+                reason="task_router_invalid_target",
+            )
         target = self._resolve_router_target(output.target_task_id)
         if target is None:
             self.logger.warning(
@@ -702,7 +794,11 @@ class TaskProcessingService:
                 task_id=None,
                 attempt_count=outcome.attempt_count,
             )
-            return ProcessingResult("owner_notification_created", action_id=action_id, reason="task_router_invalid_target")
+            return ProcessingResult(
+                "owner_notification_created",
+                action_id=action_id,
+                reason="task_router_invalid_target",
+            )
         route_error = _router_target_route_error(
             route=output.route,
             target_task_id=output.target_task_id,
@@ -733,9 +829,15 @@ class TaskProcessingService:
                 task_id=None,
                 attempt_count=outcome.attempt_count,
             )
-            return ProcessingResult("owner_notification_created", action_id=action_id, reason="task_router_invalid_route")
+            return ProcessingResult(
+                "owner_notification_created",
+                action_id=action_id,
+                reason="task_router_invalid_route",
+            )
         if output.route in {"attach_task", "reopen_task"}:
-            self.store.attach_message_to_task(target.id, message, watch_until=watch_until)
+            self.store.attach_message_to_task(
+                target.id, message, watch_until=watch_until
+            )
             decision = RouteDecision(
                 output.route,
                 target_task_id=target.id,
@@ -745,9 +847,13 @@ class TaskProcessingService:
                 router_called=True,
                 matched_by="task_router",
             )
-            self.store.record_routing_audit(message_id=message.message_id, decision=decision)
+            self.store.record_routing_audit(
+                message_id=message.message_id, decision=decision
+            )
             if output.route == "reopen_task":
-                self.store.update_task_after_agent(task_id=target.id, status="watching", watch_until=watch_until)
+                self.store.update_task_after_agent(
+                    task_id=target.id, status="watching", watch_until=watch_until
+                )
             self._mark_processing_processed(
                 message=message,
                 stage="task_router",
@@ -765,7 +871,9 @@ class TaskProcessingService:
                     "task_short_id": target.short_id,
                 },
             )
-            return RoutingResult(decision=decision, task=self.store.get_task_by_id(target.id))
+            return RoutingResult(
+                decision=decision, task=self.store.get_task_by_id(target.id)
+            )
         return None
 
     def _run_task_session(
@@ -833,8 +941,13 @@ class TaskProcessingService:
                     "statuses": resource_status_counts(resources),
                 },
             )
-            processing_status = LifecycleStatePolicy.resource_blocker_status(preflight.reason)
-            if processing_status == MessageProcessingStatus.BLOCKED_WAITING_EXTERNAL.value:
+            processing_status = LifecycleStatePolicy.resource_blocker_status(
+                preflight.reason
+            )
+            if (
+                processing_status
+                == MessageProcessingStatus.BLOCKED_WAITING_EXTERNAL.value
+            ):
                 self._mark_processing_blocked_external(
                     message=message,
                     stage="resource_download",
@@ -860,7 +973,12 @@ class TaskProcessingService:
                 attempt_count=preflight.attempt_count,
                 last_error=preflight.last_error,
             )
-            return ProcessingResult("owner_notification_created", task.id, action_id=action_id, reason=preflight.reason)
+            return ProcessingResult(
+                "owner_notification_created",
+                task.id,
+                action_id=action_id,
+                reason=preflight.reason,
+            )
         self.logger.debug(
             "task_session_started",
             run_id=run_id,
@@ -888,17 +1006,25 @@ class TaskProcessingService:
             backend_provider=self.agent_backend.provider,
             request_type="task_session",
             task_id=task.id,
-            agent_session_id=session_plan.session_id if result is None else result.session_id or session_plan.session_id,
+            agent_session_id=session_plan.session_id
+            if result is None
+            else result.session_id or session_plan.session_id,
             input_message_ids=session_plan.prompt_message_ids,
             input_resource_ids=[row["file_key"] for row in resources],
-            response=result.json_data if result is not None and isinstance(result.json_data, dict) else None,
+            response=result.json_data
+            if result is not None and isinstance(result.json_data, dict)
+            else None,
             error=outcome.last_error if result is None else result.error,
             latency_ms=None if result is None else result.latency_ms,
-            prompt={"text": session_run.prompt} if self.config.debug.save_full_agent_io else None,
+            prompt={"text": session_run.prompt}
+            if self.config.debug.save_full_agent_io
+            else None,
             tool_permissions_profile=self.config.tool_permissions,
         )
         if result is None or not result.ok or not isinstance(result.json_data, dict):
-            last_error = outcome.last_error or (None if result is None else agent_result_error(result))
+            last_error = outcome.last_error or (
+                None if result is None else agent_result_error(result)
+            )
             self.logger.error(
                 "task_session_failed",
                 run_id=run_id,
@@ -926,7 +1052,12 @@ class TaskProcessingService:
                 last_error=last_error,
                 reason="agent_task_session_failed",
             )
-            return ProcessingResult("owner_notification_created", task.id, action_id=action_id, reason="agent_failed")
+            return ProcessingResult(
+                "owner_notification_created",
+                task.id,
+                action_id=action_id,
+                reason="agent_failed",
+            )
         if session_run.validation_error is not None:
             exc = session_run.validation_error
             last_error = str(exc)
@@ -957,10 +1088,17 @@ class TaskProcessingService:
                 last_error=last_error,
                 reason=f"agent_schema_failed: {exc.errors()[0]['msg']}",
             )
-            return ProcessingResult("owner_notification_created", task.id, action_id=action_id, reason="schema_failed")
+            return ProcessingResult(
+                "owner_notification_created",
+                task.id,
+                action_id=action_id,
+                reason="schema_failed",
+            )
         output = session_run.output
         if output is None:
-            raise RuntimeError("task session runner returned no output after successful validation")
+            raise RuntimeError(
+                "task session runner returned no output after successful validation"
+            )
         if result.session_id and result.session_id != session_plan.session_id:
             self.store.set_task_agent_session_id(task.id, result.session_id)
             self.logger.debug(
@@ -975,7 +1113,10 @@ class TaskProcessingService:
             )
 
         target_ids = set(session_plan.reply_target_message_ids)
-        if output.reply_target_message_id and output.reply_target_message_id not in target_ids:
+        if (
+            output.reply_target_message_id
+            and output.reply_target_message_id not in target_ids
+        ):
             self.logger.warning(
                 "task_session_invalid_reply_target",
                 run_id=run_id,
@@ -995,7 +1136,9 @@ class TaskProcessingService:
             )
             self.store.update_task_after_agent(
                 task_id=task.id,
-                task_label=output.task_label if isinstance(output, InitialTaskSessionOutput) else None,
+                task_label=output.task_label
+                if isinstance(output, InitialTaskSessionOutput)
+                else None,
                 status="watching",
                 watch_until=watch_until,
             )
@@ -1014,13 +1157,20 @@ class TaskProcessingService:
                 task_id=task.id,
                 attempt_count=outcome.attempt_count,
             )
-            return ProcessingResult("approval_created", task.id, approval_id=approval_id, reason="invalid_reply_target")
+            return ProcessingResult(
+                "approval_created",
+                task.id,
+                approval_id=approval_id,
+                reason="invalid_reply_target",
+            )
 
         if output.answerability == "no_reply":
             next_status = "closed" if output.watch_action == "close" else "watching"
             self.store.update_task_after_agent(
                 task_id=task.id,
-                task_label=output.task_label if isinstance(output, InitialTaskSessionOutput) else None,
+                task_label=output.task_label
+                if isinstance(output, InitialTaskSessionOutput)
+                else None,
                 status=next_status,
                 watch_until=watch_until if next_status == "watching" else None,
             )
@@ -1059,19 +1209,30 @@ class TaskProcessingService:
                 backend_provider=self.agent_backend.provider,
                 request_type="reply_postprocess",
                 task_id=task.id,
-                agent_session_id=None if audit_result is None else audit_result.session_id,
+                agent_session_id=None
+                if audit_result is None
+                else audit_result.session_id,
                 input_message_ids=postprocess.audit["input_message_ids"],
                 input_resource_ids=[],
-                response=audit_result.json_data if audit_result is not None and isinstance(audit_result.json_data, dict) else None,
+                response=audit_result.json_data
+                if audit_result is not None and isinstance(audit_result.json_data, dict)
+                else None,
                 error=_postprocess_audit_error(
                     postprocess=postprocess,
-                    backend_error=audit_outcome.last_error if audit_result is None else audit_result.error,
+                    backend_error=audit_outcome.last_error
+                    if audit_result is None
+                    else audit_result.error,
                 ),
                 latency_ms=None if audit_result is None else audit_result.latency_ms,
-                prompt={"text": postprocess.audit["prompt"]} if self.config.debug.save_full_agent_io else None,
+                prompt={"text": postprocess.audit["prompt"]}
+                if self.config.debug.save_full_agent_io
+                else None,
                 tool_permissions_profile="read_only",
             )
-        if self.config.reply_postprocess.enabled and postprocess.failure_reason is not None:
+        if (
+            self.config.reply_postprocess.enabled
+            and postprocess.failure_reason is not None
+        ):
             self.logger.error(
                 "reply_postprocess_failed",
                 run_id=run_id,
@@ -1089,7 +1250,9 @@ class TaskProcessingService:
             )
             self.store.update_task_after_agent(
                 task_id=task.id,
-                task_label=output.task_label if isinstance(output, InitialTaskSessionOutput) else None,
+                task_label=output.task_label
+                if isinstance(output, InitialTaskSessionOutput)
+                else None,
                 status="watching",
                 watch_until=watch_until,
             )
@@ -1100,7 +1263,9 @@ class TaskProcessingService:
                 proposed_reply=output.proposed_reply,
                 final_reply=composed_original.text,
                 reason=f"reply_postprocess_{postprocess.failure_reason or 'failed'}",
-                approvable=_can_directly_approve(output.proposed_reply, composed_original),
+                approvable=_can_directly_approve(
+                    output.proposed_reply, composed_original
+                ),
                 payload_extra={
                     "keep_watching_on_reject": True,
                     "postprocess": postprocess.metadata,
@@ -1146,7 +1311,9 @@ class TaskProcessingService:
             )
             self.store.update_task_after_agent(
                 task_id=task.id,
-                task_label=output.task_label if isinstance(output, InitialTaskSessionOutput) else None,
+                task_label=output.task_label
+                if isinstance(output, InitialTaskSessionOutput)
+                else None,
                 status="watching",
                 watch_until=watch_until,
             )
@@ -1158,7 +1325,9 @@ class TaskProcessingService:
                 final_reply=composed.text,
                 reason=gate["reason"],
                 approvable=_can_directly_approve(postprocess.reply, composed),
-                payload_extra={"postprocess": postprocess.metadata} if postprocess.applied else None,
+                payload_extra={"postprocess": postprocess.metadata}
+                if postprocess.applied
+                else None,
             )
             self._mark_processing_processed(
                 message=message,
@@ -1166,7 +1335,12 @@ class TaskProcessingService:
                 task_id=task.id,
                 attempt_count=outcome.attempt_count,
             )
-            return ProcessingResult("approval_created", task.id, approval_id=approval_id, reason=gate["reason"])
+            return ProcessingResult(
+                "approval_created",
+                task.id,
+                approval_id=approval_id,
+                reason=gate["reason"],
+            )
         payload = {
             "reply_target_message_id": reply_target_id,
             "text": composed.text,
@@ -1179,7 +1353,9 @@ class TaskProcessingService:
         next_status = "closed" if output.watch_action == "close" else "watching"
         self.store.update_task_after_agent(
             task_id=task.id,
-            task_label=output.task_label if isinstance(output, InitialTaskSessionOutput) else None,
+            task_label=output.task_label
+            if isinstance(output, InitialTaskSessionOutput)
+            else None,
             status=next_status,
             watch_until=watch_until if next_status == "watching" else None,
         )
@@ -1207,7 +1383,9 @@ class TaskProcessingService:
                 "policy_source": gate["policy_source"],
             },
         )
-        return ProcessingResult("send_action_created", task.id, action_id=action_id, reason="gate_passed")
+        return ProcessingResult(
+            "send_action_created", task.id, action_id=action_id, reason="gate_passed"
+        )
 
     def _reply_postprocess(
         self,
@@ -1257,7 +1435,9 @@ class TaskProcessingService:
             message=message,
             answerability=output.answerability,
             had_forbidden_mentions=composed.had_forbidden_mentions,
-            proposed_reply=output.proposed_reply if proposed_reply is None else proposed_reply,
+            proposed_reply=output.proposed_reply
+            if proposed_reply is None
+            else proposed_reply,
             final_reply=composed.text,
         )
         return {
@@ -1308,7 +1488,10 @@ class TaskProcessingService:
         reason: str = "task_router_invalid_target",
         payload: dict[str, Any] | None = None,
     ) -> int:
-        notification_payload = {"message_id": message.message_id, "target": target_task_id}
+        notification_payload = {
+            "message_id": message.message_id,
+            "target": target_task_id,
+        }
         if payload:
             notification_payload.update(payload)
         action_id = self.approvals.notify_owner(
@@ -1369,10 +1552,16 @@ def _agent_working_dir_error(path: Path) -> str | None:
 
 
 def _can_directly_approve(proposed_reply: str, composed: ComposedReply) -> bool:
-    return bool(proposed_reply.strip()) and bool(composed.text.strip()) and not composed.had_forbidden_mentions
+    return (
+        bool(proposed_reply.strip())
+        and bool(composed.text.strip())
+        and not composed.had_forbidden_mentions
+    )
 
 
-def _postprocess_audit_error(*, postprocess: ReplyPostprocessResult, backend_error: str | None) -> str | None:
+def _postprocess_audit_error(
+    *, postprocess: ReplyPostprocessResult, backend_error: str | None
+) -> str | None:
     if backend_error:
         return backend_error
     if postprocess.failure_reason is None:
@@ -1383,18 +1572,24 @@ def _postprocess_audit_error(*, postprocess: ReplyPostprocessResult, backend_err
     return postprocess.failure_reason
 
 
-def _notification_source(*, task: TaskRecord | None, message: Any | None) -> dict[str, Any]:
+def _notification_source(
+    *, task: TaskRecord | None, message: Any | None
+) -> dict[str, Any]:
     return {
         "task_label": None if task is None else task.task_label,
-        "chat_id": _row_value(message, "chat_id") or (None if task is None else task.chat_id),
-        "chat_type": _row_value(message, "chat_type") or (None if task is None else task.chat_type),
+        "chat_id": _row_value(message, "chat_id")
+        or (None if task is None else task.chat_id),
+        "chat_type": _row_value(message, "chat_type")
+        or (None if task is None else task.chat_type),
         "sender_name": _row_value(message, "sender_name"),
         "sender_id": _row_value(message, "sender_id"),
         "sent_at": _row_value(message, "sent_at"),
     }
 
 
-def _notification_message(message: Any | None, *, fallback_message_id: str) -> dict[str, Any]:
+def _notification_message(
+    message: Any | None, *, fallback_message_id: str
+) -> dict[str, Any]:
     return {
         "message_id": _row_value(message, "message_id") or fallback_message_id,
         "text": _row_value(message, "text") or "",
@@ -1424,7 +1619,9 @@ def _plus_minutes(value: str, minutes: int) -> str:
         base = datetime.fromisoformat(value)
     except ValueError:
         base = datetime.now().astimezone()
-    return (base + timedelta(minutes=minutes)).astimezone().isoformat(timespec="seconds")
+    return (
+        (base + timedelta(minutes=minutes)).astimezone().isoformat(timespec="seconds")
+    )
 
 
 def _minus_days(value: str, days: int) -> str:
