@@ -42,14 +42,14 @@ export function HealthScreen({ token }: { token: string }) {
     return <LoadingState title="Loading health issues" />;
   }
   if (health.error) {
-    return <ErrorState title="Logs / Health unavailable" error={health.error} />;
+    return <ErrorState title="Health unavailable" error={health.error} />;
   }
   if (!health.data) {
     return <EmptyState title="Health unavailable" detail="The local console did not return runtime health state." />;
   }
 
   return (
-    <section className="work-grid health-layout" aria-label="Logs / Health">
+    <section className="work-grid health-layout" aria-label="Health">
       <div className="work-main">
         <HealthSummaryPanel data={health.data} refreshing={health.isFetching && !health.isLoading} />
         <div className="queue-panel">
@@ -58,7 +58,7 @@ export function HealthScreen({ token }: { token: string }) {
             title="What needs inspection"
             badge={<Badge tone={issues.length ? issueTone(health.data.summary.highest_severity) : "success"}>{issues.length}</Badge>}
           >
-            <p className="section-note">Normalized runtime, policy, store, command, and dispatch issues from the local query boundary.</p>
+            <p className="section-note">Normalized runtime, policy, store, and dispatch issues from the local query boundary.</p>
           </SectionHeader>
           {issues.length ? (
             <div className="list-stack">
@@ -95,7 +95,7 @@ function HealthSummaryPanel({ data, refreshing }: { data: HealthIssuesResponse; 
   return (
     <div className="queue-panel">
       <SectionHeader
-        eyebrow="Logs / Health"
+        eyebrow="Health"
         title="Runtime diagnostics"
         badge={<Badge tone={refreshing ? "info" : data.summary.open_issue_count ? issueTone(data.summary.highest_severity) : "success"}>{refreshing ? "Refreshing" : data.summary.highest_severity}</Badge>}
       >

@@ -188,6 +188,13 @@ Rules:
 - The route handler must stay thin and call `OperatorQueryService`.
 - Store and schema availability problems must be surfaced as normalized store
   issues instead of becoming a renderer-side empty state or API 500.
+- `summary.open_issue_count` counts current actionable issues, not historical
+  failures. Runtime health issues use the latest row per `check_name`; if that
+  latest row is `ok`, older failures stay historical. Failed approval commands
+  appear in `recent_failed_commands[]` but do not count as open issues unless a
+  future command state gives them an explicit recovery path.
+- Dispatch actions in `failed` or `failed_needs_review` remain open issues until
+  the operator retries, cancels, or marks them sent through Dispatch recovery.
 - `runtime.last_run` and daemon liveness must use an allowlisted runtime summary;
   do not expose raw `runs` rows, `health_summary_json`, or
   `last_tick_summary_json`.

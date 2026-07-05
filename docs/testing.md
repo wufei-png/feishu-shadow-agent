@@ -222,13 +222,13 @@ python -m feishu_shadow_agent daemon --config config.yaml
 python -m feishu_shadow_agent maintenance expire-approvals --config config.yaml
 ```
 
-本地 Operator Console 可用于查看 Dashboard、Approvals、Tasks、Dispatch、Policy、Settings 和 Logs / Health，并通过本地 command facade 执行 approval、dispatch recovery、maintenance expiry 和 Product Policy import/update：
+本地 Operator Console 可用于查看 Dashboard、Approvals、Tasks、Dispatch、Policy、Settings 和 Health，并通过本地 command facade 执行 approval、dispatch recovery、maintenance expiry 和 Product Policy import/update：
 
 ```bash
 python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --port 8765
 ```
 
-启动后使用 stdout 中带 `token` 的本地 URL 打开浏览器。`/api/*` 只接受该进程生成的 bearer token；console 默认只绑定 loopback host，不写 `config.yaml`。Policy 页面仍通过 `OperatorCommandService` 调用与 CLI 一致的 `policy import-config` / policy update 命令边界。Logs / Health 展示规范化诊断 issue 和失败摘要，不作为 raw log viewer。
+启动后使用 stdout 中带 `token` 的本地 URL 打开浏览器。`/api/*` 只接受该进程生成的 bearer token；console 默认只绑定 loopback host，不写 `config.yaml`。Policy 页面仍通过 `OperatorCommandService` 调用与 CLI 一致的 `policy import-config` / policy update 命令边界。Health 展示规范化诊断 issue 和失败摘要，不作为 raw log viewer。
 
 发送后检查：
 

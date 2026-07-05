@@ -6,7 +6,7 @@ P18 completes the local Operator Console for release readiness after P16 and
 P17. It owns:
 
 ```text
-Logs / Health
+Health
 cross-screen visual QA
 static asset and Python package release validation
 GitHub tag/release artifact notes
@@ -77,7 +77,7 @@ OperatorQueryService.health_issues()
 
 Do not derive health only by combining `dashboard_snapshot()` fields. Some
 existing read models intentionally degrade unavailable store reads into empty
-lists or uninitialized status. Logs / Health must surface store and schema
+lists or uninitialized status. Health must surface store and schema
 availability problems explicitly.
 
 Suggested DTO shape:
@@ -120,7 +120,7 @@ The DTO should derive issues from existing operator read models where possible:
 - daemon liveness and last run summary
 - Product Policy initialization and invalid policy state
 - recent health warnings
-- failed approval commands
+- recent failed approval command summaries, not open issues
 - failed or `failed_needs_review` dispatch actions
 - stale sending actions
 - store unavailable or read errors
@@ -136,9 +136,9 @@ Store availability requirements:
   details.
 - Add tests for missing/unmigrated/unreadable store behavior where practical.
 
-### Logs / Health Screen
+### Health Screen
 
-Implement the final Logs / Health screen:
+Implement the final Health screen:
 
 - Current health issue list.
 - Health issue detail panel.
@@ -171,7 +171,7 @@ Run a final UI pass across all console screens:
 - Dispatch
 - Policy
 - Settings
-- Logs / Health
+- Health
 
 Required states:
 
@@ -287,7 +287,6 @@ Recommended issue categories:
 ```text
 daemon
 policy
-approval_command
 dispatch
 store
 runtime
@@ -341,7 +340,7 @@ Capture or record enough evidence to review the UI:
 - at least one empty state
 - at least one error state
 - at least one command result state
-- Logs / Health with at least one issue
+- Health with at least one issue
 - reduced-motion sanity check
 
 If automated browser tooling is not added, manual screenshots are acceptable for
@@ -381,8 +380,8 @@ git diff --check
 
 Browser verification:
 
-- Dashboard and Logs / Health agree on high-signal issues.
-- Logs / Health links open the intended detail screens.
+- Dashboard and Health agree on high-signal issues.
+- Health links open the intended detail screens.
 - Failed dispatch actions show inspect/retry/cancel/mark-sent options only when
   valid.
 - Policy uninitialized state appears as a policy health issue.
@@ -394,7 +393,7 @@ Browser verification:
 - `/api/health/issues` returns a token-protected, local-host-protected health
   DTO.
 - Health issues are derived through query boundaries, not direct route SQL.
-- Logs / Health screen is actionable and is not a raw log viewer.
+- Health screen is actionable and is not a raw log viewer.
 - All final console screens have loading, empty, error, and command feedback
   behavior.
 - Background refresh does not overwrite active edits.

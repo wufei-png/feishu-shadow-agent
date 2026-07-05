@@ -173,7 +173,7 @@ Tasks
 Dispatch
 Policy
 Settings
-Logs / Health
+Health
 ```
 
 Navigation intent:
@@ -184,7 +184,7 @@ Navigation intent:
 - `Dispatch` handles send recovery and readback evidence.
 - `Policy` manages Product Policy and chat policy.
 - `Settings` manages local console and runtime configuration.
-- `Logs / Health` is diagnostic and should not clutter the dashboard.
+- `Health` is diagnostic and should not clutter the dashboard.
 
 Do not create a landing or welcome page as the primary experience.
 
@@ -233,7 +233,7 @@ Use this pattern for:
 - Tasks: task list plus task timeline/detail.
 - Dispatch: action list plus attempts/readback/detail.
 - Policy: global/chat policy list plus editor/diff/audit.
-- Logs / Health: normalized issue list plus diagnostic detail; it is not a raw
+- Health: normalized issue list plus diagnostic detail; it is not a raw
   log viewer.
 
 Avoid full-page navigation for every selected object. Operators need to keep

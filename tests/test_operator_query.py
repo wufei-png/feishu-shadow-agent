@@ -432,13 +432,47 @@ def test_health_issues_reports_store_availability_without_migrating(tmp_path: Pa
 def test_health_issues_summary_count_is_not_truncated_by_list_limit(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.migrate()
+    task_id = _insert_task(store)
+    for target_message_id in ("om_failed_1", "om_failed_2"):
+        action_id = store.create_send_reply_action(
+            task_id=task_id,
+            target_message_id=target_message_id,
+            payload={"reply_target_message_id": target_message_id, "text": "reply", "identity": "user"},
+        )
+        assert action_id is not None
+        store.finish_action(action_id, status="failed", result={"error_stage": "send"})
     query = OperatorQueryService(store, now=lambda: "2026-06-22T10:00:00+08:00")
 
     payload = query.health_issues(limit=1)
 
     assert len(payload["issues"]) == 1
+    assert payload["summary"]["open_issue_count"] == 4
+
+
+def test_health_issues_only_counts_latest_health_check_status(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.migrate()
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO health_checks(run_id, check_name, severity, status, message, details_json, checked_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (None, "hermes", "critical", "ok", "Hermes recovered", "{}", "2026-06-22T09:30:00+08:00"),
+        )
+        conn.execute(
+            """
+            INSERT INTO health_checks(run_id, check_name, severity, status, message, details_json, checked_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (None, "hermes", "critical", "failed", "Hermes failed", "{}", "2026-06-22T09:00:00+08:00"),
+        )
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:00:00+08:00")
+
+    payload = query.health_issues()
+
     assert payload["summary"]["open_issue_count"] == 2
-    assert {issue["id"] for issue in payload["issues"]} <= {"policy-uninitialized", "daemon-not-started"}
+    assert {issue["id"] for issue in payload["issues"]} == {"policy-uninitialized", "daemon-not-started"}
 
 
 def test_health_issues_redacts_failed_approval_command_body(tmp_path: Path) -> None:
@@ -471,6 +505,30 @@ def test_health_issues_redacts_failed_approval_command_body(tmp_path: Path) -> N
     assert payload["recent_failed_commands"][0]["result_summary"]["error"] == "failed at [path]"
     assert payload["recent_failed_commands"][0]["verb"] == "send"
     assert payload["recent_failed_commands"][0]["target_id"] == "t_secret"
+    assert payload["summary"]["open_issue_count"] == 2
+    assert {issue["category"] for issue in payload["issues"]} == {"policy", "daemon"}
+
+
+def test_health_issues_dispatch_cancel_removes_open_issue(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    task_id = _insert_task(store)
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_root",
+        payload={"reply_target_message_id": "om_root", "text": "reply", "identity": "user"},
+    )
+    assert action_id is not None
+    store.finish_action(action_id, status="failed_needs_review", result={"error_stage": "send"})
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:00:00+08:00")
+
+    before = query.health_issues()
+    store.cancel_dispatch_action(action_id)
+    after = query.health_issues()
+
+    assert f"dispatch-action-{action_id}" in {issue["id"] for issue in before["issues"]}
+    assert before["summary"]["open_issue_count"] == 3
+    assert f"dispatch-action-{action_id}" not in {issue["id"] for issue in after["issues"]}
+    assert after["summary"]["open_issue_count"] == 2
 
 
 def test_health_issues_derives_actionable_runtime_and_recovery_issues(tmp_path: Path) -> None:
@@ -545,7 +603,7 @@ def test_health_issues_derives_actionable_runtime_and_recovery_issues(tmp_path: 
         "retry",
         "cancel",
     ]
-    assert issues["approval-command-cmd_failed"]["links"] == [{"type": "approval", "id": "a_missing"}]
+    assert all(issue["category"] != "approval_command" for issue in payload["issues"])
     hermes_issue = next(issue for issue in payload["issues"] if issue["id"].startswith("health-hermes-"))
     assert "/tmp/secret" not in hermes_issue["detail"]
     assert "[path]" in hermes_issue["detail"]

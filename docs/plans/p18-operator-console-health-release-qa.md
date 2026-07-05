@@ -2,7 +2,7 @@
 
 Date: 2026-07-01
 
-Scope: P18 Logs / Health, cross-screen release readiness, and bundled renderer
+Scope: P18 Health, cross-screen release readiness, and bundled renderer
 validation. Evidence was captured with the local Python console server and the
 Codex in-app browser against temporary SQLite/config fixtures under `/tmp`.
 Temporary fixture paths and screenshots are not release artifacts and are not
@@ -20,9 +20,10 @@ Fixture:
 
 Desktop viewport:
 
-- Logs / Health rendered 5 open issues.
+- Health rendered 5 open issues.
 - Current issue list showed policy, daemon, runtime, dispatch, and approval
-  command issues.
+  command issues. This was historical P18 QA evidence; current Health semantics
+  keep failed approval commands in recent summaries instead of open issue totals.
 - Detail panel showed the selected policy issue with recommended action.
 - Runtime panel showed daemon status `stale` and store `available`.
 - Page text check confirmed no temporary database or log path appeared.
@@ -56,7 +57,7 @@ Navigation:
 - Error state: verified by loading a console API-backed screen with an invalid
   token; the screen rendered the shared error state instead of stale data.
 - Empty state: verified with a clean health fixture with initialized policy and
-  live daemon heartbeat; Logs / Health rendered `No open health issues`.
+  live daemon heartbeat; Health rendered `No open health issues`.
 - Command result state: verified by running the Dashboard approval expiry command
   in the temporary fixture; the shared command result panel rendered the backend
   `CommandResult`.

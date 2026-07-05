@@ -39,7 +39,7 @@
 | Spec | `docs/specs/operator-console-screen-flows.md` | 固定最终 Operator Console 页面流、页面职责和分阶段页面实现顺序 |
 | P16 | `docs/plans/p16-operator-console-core-screens.md` | 实现 Dashboard / Approvals / Tasks / Message Detail / Dispatch 核心操作页面 |
 | P17 | `docs/plans/p17-operator-console-policy-settings.md` | 实现 Policy / Settings / Policy Import Diff / Policy Audit History 页面 |
-| P18 | `docs/plans/p18-operator-console-health-release.md` | 实现 Logs / Health 诊断页面、视觉 QA 和 GitHub Release readiness |
+| P18 | `docs/plans/p18-operator-console-health-release.md` | 实现 Health 诊断页面、视觉 QA 和 GitHub Release readiness |
 
 ## 3. Recommended Order
 
@@ -91,7 +91,7 @@
 - 不做 risk levels 或 confirmation-required 二次确认流程。
 - 不做动态 Settings schema engine；Settings Catalog 是稳定产品字段映射。
 - 不做 Electron、Tauri、PyInstaller 等二进制打包；后续等 UI 稳定后单独评估。
-- 不把 Logs / Health 做成默认 raw log viewer。
+- 不把 Health 做成默认 raw log viewer。
 
 ## 6. Fresh Context Contract
 

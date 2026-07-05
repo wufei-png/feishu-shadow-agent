@@ -196,13 +196,32 @@ class OperatorQueryService:
                 ).fetchall()
                 health_rows = conn.execute(
                     """
-                    SELECT check_name, severity, status, message, checked_at
-                    FROM health_checks
-                    WHERE status != 'ok'
-                    ORDER BY checked_at DESC, id DESC
-                    LIMIT ?
-                    """,
-                    (_coerce_limit(limit),),
+                    SELECT hc.check_name, hc.severity, hc.status, hc.message, hc.checked_at
+                    FROM health_checks hc
+                    WHERE hc.status != 'ok'
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM health_checks newer
+                          WHERE newer.check_name = hc.check_name
+                            AND (
+                                datetime(newer.checked_at) > datetime(hc.checked_at)
+                                OR (
+                                    datetime(newer.checked_at) = datetime(hc.checked_at)
+                                    AND newer.id > hc.id
+                                )
+                            )
+                      )
+                    ORDER BY datetime(hc.checked_at) DESC, hc.id DESC
+                    """
+                ).fetchall()
+                failed_dispatch_rows = conn.execute(
+                    """
+                    SELECT a.*, t.short_id AS task_short_id
+                    FROM actions a
+                    LEFT JOIN tasks t ON t.id = a.task_id
+                    WHERE a.status IN ('failed', 'failed_needs_review')
+                    ORDER BY a.updated_at DESC, a.id DESC
+                    """
                 ).fetchall()
                 stale_rows = conn.execute(
                     """
@@ -212,9 +231,8 @@ class OperatorQueryService:
                     WHERE a.status = 'sending'
                       AND datetime(a.updated_at) <= datetime(?)
                     ORDER BY a.updated_at, a.id
-                    LIMIT ?
                     """,
-                    (_minus_seconds(now, stale_after_seconds), _coerce_limit(limit)),
+                    (_minus_seconds(now, stale_after_seconds),),
                 ).fetchall()
         except sqlite3.DatabaseError as exc:
             issues.append(
@@ -246,13 +264,10 @@ class OperatorQueryService:
                 stale_after_seconds=daemon_stale_after_seconds,
             )
             policy_status = self.policy_status()
-            failed_dispatch_actions = self.list_dispatch_actions(
-                statuses=(ActionStatus.FAILED.value, ActionStatus.FAILED_NEEDS_REVIEW.value),
-                limit=limit,
-            )
+            failed_dispatch_actions = [_action_dto(row, include_payload=False) for row in failed_dispatch_rows]
             stale_sending_actions = [_action_dto(row, include_payload=False) for row in stale_rows]
             recent_failed_commands = [_approval_command_summary(row) for row in failed_commands]
-            recent_failed_dispatch_actions = failed_dispatch_actions
+            recent_failed_dispatch_actions = failed_dispatch_actions[: _coerce_limit(limit)]
 
             runtime |= {
                 "daemon_liveness": daemon_liveness,
@@ -296,8 +311,6 @@ class OperatorQueryService:
             issue = _health_check_issue(row)
             if issue is not None:
                 issues.append(issue)
-        for command in recent_failed_commands:
-            issues.append(_approval_command_issue(command, detected_at=now))
         for action in failed_dispatch_actions:
             issues.append(_dispatch_action_issue(action, detected_at=now))
         for action in stale_sending_actions:
@@ -1553,23 +1566,6 @@ def _health_warning_dto(row: sqlite3.Row) -> dict[str, Any]:
     return data
 
 
-def _approval_command_issue(command: dict[str, Any], *, detected_at: str) -> dict[str, Any]:
-    status = str(command.get("status") or "failed")
-    result_summary = command.get("result_summary") if isinstance(command.get("result_summary"), dict) else {}
-    error_detail = str(result_summary.get("error") or f"{command.get('label', 'Approval command')} ended with status {status}.")
-    target_link = _approval_command_link(command)
-    return _health_issue(
-        issue_id=f"approval-command-{_slug(str(command.get('message_id') or command.get('label') or 'unknown'))}",
-        severity="error",
-        category="approval_command",
-        title="Approval command failed",
-        detail=error_detail,
-        detected_at=command.get("updated_at") or detected_at,
-        links=[] if target_link is None else [target_link],
-        recommended_actions=["inspect"],
-    )
-
-
 def _approval_command_summary(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     if isinstance(row, sqlite3.Row):
         data = _json_row_dict(row, "result_json")
@@ -1665,17 +1661,6 @@ def _dispatch_action_names(status: str) -> list[str]:
     if status == ActionStatus.FAILED.value:
         return ["inspect", "retry", "cancel"]
     return ["inspect"]
-
-
-def _approval_command_link(command: dict[str, Any]) -> dict[str, str] | None:
-    target = command.get("target_id")
-    if not isinstance(target, str) or not target:
-        return None
-    if target.startswith("a_"):
-        return {"type": "approval", "id": target}
-    if target.startswith("t_"):
-        return {"type": "task", "id": target}
-    return None
 
 
 def _health_check_severity(severity: str, status: str) -> str:

@@ -58,7 +58,7 @@ Tasks
 Dispatch
 Policy
 Settings
-Logs / Health
+Health
 ```
 
 The shell layout remains:
@@ -436,11 +436,11 @@ GET /api/settings/catalog
 GET /api/settings/runtime
 ```
 
-## Logs / Health
+## Health
 
 Purpose:
 
-Logs / Health is diagnostic. It should explain runtime problems without turning
+Health is diagnostic. It should explain runtime problems without turning
 the console into a raw log viewer.
 
 Sections:
@@ -455,6 +455,9 @@ Rules:
 
 - Raw logs can appear in focused detail only when needed.
 - Health summaries should stay actionable.
+- Open issue counts should reflect current unresolved health, policy, daemon,
+  store, and dispatch recovery work. Historical failed approval commands remain
+  in recent summaries instead of increasing open issue totals.
 - Dashboard should show only high-signal health warnings.
 
 Primary API needs:
@@ -476,8 +479,8 @@ P16 Core Operator Screens:
 P17 Policy and Settings Screens:
   Policy editor, Policy Import Diff, audit history, Settings runtime/catalog
 
-P18 Health, Logs, and Release Readiness:
-  Logs / Health screen, visual QA, packaging/release workflow hardening
+P18 Health and Release Readiness:
+  Health screen, visual QA, packaging/release workflow hardening
 ```
 
 P16 should make the console useful for daily operator work. P17 should make

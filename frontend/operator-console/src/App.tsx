@@ -22,7 +22,7 @@ const navItems: Array<{ key: RouteKey; label: string; icon: typeof Home }> = [
   { key: "dispatch", label: "Dispatch", icon: Send },
   { key: "policy", label: "Policy", icon: ShieldCheck },
   { key: "settings", label: "Settings", icon: Settings },
-  { key: "health", label: "Logs / Health", icon: HeartPulse }
+  { key: "health", label: "Health", icon: HeartPulse }
 ];
 
 export function App() {
