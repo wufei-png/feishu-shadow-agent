@@ -27,13 +27,25 @@ def validate_console_bind_host(host: str) -> str:
     return normalized
 
 
+def _loopback_host_aliases(host: str) -> set[str]:
+    normalized = host.strip().lower()
+    aliases = {normalized}
+    if normalized in {"127.0.0.1", "localhost", "::1"}:
+        aliases.update({"127.0.0.1", "localhost", "::1"})
+    return aliases
+
+
 def allowed_host_headers(host: str, port: int) -> set[str]:
     normalized = validate_console_bind_host(host)
-    if ":" in normalized and not normalized.startswith("["):
-        host_header = f"[{normalized}]"
-    else:
-        host_header = normalized
-    return {host_header, f"{host_header}:{port}"}
+    headers: set[str] = set()
+    for alias in _loopback_host_aliases(normalized):
+        if ":" in alias and not alias.startswith("["):
+            host_header = f"[{alias}]"
+        else:
+            host_header = alias
+        headers.add(host_header)
+        headers.add(f"{host_header}:{port}")
+    return headers
 
 
 def host_header_allowed(host_header: str | None, *, host: str, port: int) -> bool:
