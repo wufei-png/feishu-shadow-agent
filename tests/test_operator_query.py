@@ -459,6 +459,34 @@ def test_policy_import_diff_and_audit_history_are_focused_read_models(
     assert history[0]["new_summary"]["auto_reply"] is False
 
 
+def test_policy_audit_history_summarizes_deleted_chat_policy(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.import_product_policy_from_config(
+        _config(
+            chats={"oc_delete": ChatPolicyConfig(name="Delete me", auto_reply=True)}
+        )
+    )
+    store.delete_chat_product_policy(
+        "oc_delete",
+        actor="test_operator",
+        reason="remove override",
+    )
+
+    history = OperatorQueryService(store).policy_audit_history(
+        scope="chat",
+        policy_key="chat:oc_delete",
+        limit=1,
+        offset=0,
+    )
+
+    assert len(history) == 1
+    assert history[0]["old_summary"]["chat_id"] == "oc_delete"
+    assert history[0]["old_summary"]["auto_reply"] is True
+    assert history[0]["new_summary"] == {}
+
+
 def test_health_issues_reports_store_availability_without_migrating(
     tmp_path: Path,
 ) -> None:

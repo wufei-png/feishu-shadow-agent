@@ -473,6 +473,7 @@ def test_message_detail_api_is_service_backed_and_read_only(tmp_path: Path) -> N
         ("POST", "/api/policy/import-config"),
         ("PATCH", "/api/policy/global"),
         ("PATCH", "/api/policy/chats/oc_policy"),
+        ("DELETE", "/api/policy/chats/oc_policy"),
         ("GET", "/api/health/issues"),
     ],
 )
@@ -836,6 +837,46 @@ def test_policy_routes_use_command_facade_and_settings_runtime_read_model(
     assert runtime_payload["chat_policies"][0]["chat_id"] == "oc_console"
     assert runtime_payload["policy_audit_history"][0]["scope"] == "chat"
     assert store.get_chat_product_policy("oc_console")["auto_reply"] is True
+
+
+def test_console_policy_delete_chat_removes_override_and_updates_runtime(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    store = _store(tmp_path)
+    imported = client.post("/api/policy/import-config", headers=_auth(), json={})
+    created = client.patch(
+        "/api/policy/chats/oc_console",
+        headers=_auth(),
+        json={"auto_reply": True, "reason": "open chat"},
+    )
+
+    deleted = client.request(
+        "DELETE",
+        "/api/policy/chats/oc_console",
+        headers=_auth(),
+        json={"reason": "remove override"},
+    )
+    audits = client.get(
+        "/api/policy/audits?limit=1&scope=chat&policy_key=chat:oc_console",
+        headers=_auth(),
+    )
+    runtime = client.get("/api/settings/runtime", headers=_auth())
+
+    assert imported.status_code == 200
+    assert created.status_code == 200
+    assert deleted.status_code == 200
+    payload = deleted.json()
+    assert payload["status"] == "applied"
+    assert payload["command"] == "policy.delete_chat"
+    assert payload["old_policy"]["auto_reply"] is True
+    assert payload["new_policy"] is None
+    assert payload["audit_count"] == 1
+    assert audits.status_code == 200
+    assert audits.json()[0]["new_summary"] == {}
+    assert runtime.status_code == 200
+    assert runtime.json()["chat_policies"] == []
+    assert store.get_chat_product_policy("oc_console") is None
 
 
 def test_policy_routes_return_standard_validation_errors(tmp_path: Path) -> None:

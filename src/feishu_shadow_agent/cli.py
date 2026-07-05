@@ -222,6 +222,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     policy_update_chat.add_argument("--reason", help="optional policy audit reason")
     policy_update_chat.set_defaults(handler=_handle_policy_update_chat)
+    policy_delete_chat = policy_subparsers.add_parser(
+        "delete-chat",
+        help="delete a Product Policy Store chat policy override",
+    )
+    _add_config_arg(policy_delete_chat)
+    policy_delete_chat.add_argument("--chat-id", required=True)
+    policy_delete_chat.add_argument("--reason", help="optional policy audit reason")
+    policy_delete_chat.set_defaults(handler=_handle_policy_delete_chat)
 
     dispatch = subparsers.add_parser("dispatch", help="dispatch recovery helpers")
     dispatch_subparsers = dispatch.add_subparsers(dest="dispatch_command")
@@ -641,6 +649,16 @@ def _handle_policy_update_chat(args: argparse.Namespace) -> int:
     result = OperatorCommandService(store).update_chat_policy(
         args.chat_id,
         _chat_policy_changes_from_args(args),
+        actor="local_cli",
+        reason=args.reason,
+    )
+    return _emit_command_result(result)
+
+
+def _handle_policy_delete_chat(args: argparse.Namespace) -> int:
+    _, store, _ = _load_runtime(args.config)
+    result = OperatorCommandService(store).delete_chat_policy(
+        args.chat_id,
         actor="local_cli",
         reason=args.reason,
     )

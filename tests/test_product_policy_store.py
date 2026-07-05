@@ -214,3 +214,49 @@ def test_direct_policy_updates_persist_actor_reason_and_audit(tmp_path: Path) ->
     ]
     assert audits[0]["old_json"]["auto_reply"] is True
     assert audits[0]["new_json"]["auto_reply"] is False
+
+
+def test_delete_chat_product_policy_removes_row_and_writes_null_new_audit(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.import_product_policy_from_config(
+        _config(
+            chats={"oc_delete": ChatPolicyConfig(name="Delete me", auto_reply=True)}
+        )
+    )
+
+    result = store.delete_chat_product_policy(
+        "oc_delete",
+        actor="test_operator",
+        reason="remove override",
+    )
+
+    assert result["changed"] is True
+    assert result["old_policy"]["chat_id"] == "oc_delete"
+    assert result["new_policy"] is None
+    assert store.get_chat_product_policy("oc_delete") is None
+    audit = store.list_policy_audits(limit=1)[0]
+    assert audit["actor"] == "test_operator"
+    assert audit["reason"] == "remove override"
+    assert audit["old_json"]["auto_reply"] is True
+    assert audit["new_json"] is None
+
+
+def test_delete_missing_chat_product_policy_does_not_write_audit(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.import_product_policy_from_config(_config())
+    audit_count = len(store.list_policy_audits(limit=10))
+
+    result = store.delete_chat_product_policy(
+        "oc_missing",
+        actor="test_operator",
+        reason="remove override",
+    )
+
+    assert result["changed"] is False
+    assert result["old_policy"] is None
+    assert result["new_policy"] is None
+    assert len(store.list_policy_audits(limit=10)) == audit_count

@@ -371,6 +371,59 @@ class SQLiteStore:
             "audit_id": audit_id,
         }
 
+    def delete_chat_product_policy(
+        self,
+        chat_id: str,
+        *,
+        actor: str,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        self.migrate()
+        now = utc_now_iso()
+        normalized_chat_id = chat_id.strip()
+        with self.connect() as conn:
+            existing = conn.execute(
+                """
+                SELECT chat_id, name, auto_reply, bot_joined, reply_identity,
+                       allow_user_fallback, resource_download
+                FROM chat_policies
+                WHERE chat_id = ?
+                """,
+                (normalized_chat_id,),
+            ).fetchone()
+            old_policy = None if existing is None else _chat_policy_from_row(existing)
+            if old_policy is None:
+                return {
+                    "scope": "chat",
+                    "policy_key": f"chat:{normalized_chat_id}",
+                    "changed": False,
+                    "old_policy": None,
+                    "new_policy": None,
+                    "audit_id": None,
+                }
+            conn.execute(
+                "DELETE FROM chat_policies WHERE chat_id = ?",
+                (normalized_chat_id,),
+            )
+            audit_id = self._record_policy_audit_locked(
+                conn,
+                scope="chat",
+                policy_key=f"chat:{normalized_chat_id}",
+                old_policy=old_policy,
+                new_policy=None,
+                actor=actor,
+                reason=reason or "policy delete-chat",
+                now=now,
+            )
+        return {
+            "scope": "chat",
+            "policy_key": f"chat:{normalized_chat_id}",
+            "changed": True,
+            "old_policy": old_policy,
+            "new_policy": None,
+            "audit_id": audit_id,
+        }
+
     def record_run_start(
         self,
         *,
@@ -3200,7 +3253,7 @@ class SQLiteStore:
         scope: str,
         policy_key: str,
         old_policy: dict[str, Any] | None,
-        new_policy: dict[str, Any],
+        new_policy: dict[str, Any] | None,
         actor: str,
         reason: str,
         now: str,
@@ -3216,7 +3269,7 @@ class SQLiteStore:
                 policy_key,
                 actor,
                 None if old_policy is None else _policy_json(old_policy),
-                _policy_json(new_policy),
+                None if new_policy is None else _policy_json(new_policy),
                 reason,
                 now,
             ),

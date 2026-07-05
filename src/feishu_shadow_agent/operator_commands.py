@@ -579,6 +579,46 @@ class PolicyCommandService:
             raw=raw,
         )
 
+    def delete_chat_policy(
+        self,
+        chat_id: str,
+        *,
+        actor: str,
+        reason: str | None = None,
+    ) -> CommandResult:
+        normalized_chat_id = chat_id.strip()
+        target = {"type": "chat_policy", "chat_id": normalized_chat_id}
+        if not normalized_chat_id:
+            return _error_result(
+                status="validation_failed",
+                command="policy.delete_chat",
+                actor=actor,
+                reason=reason,
+                target=target,
+                error="chat_id is required",
+            )
+        raw = self.store.delete_chat_product_policy(
+            normalized_chat_id,
+            actor=actor,
+            reason=reason,
+        )
+        if not raw.get("changed"):
+            return _error_result(
+                status="not_found",
+                command="policy.delete_chat",
+                actor=actor,
+                reason=reason,
+                target=target,
+                error=f"chat policy not found: {normalized_chat_id}",
+            )
+        return _policy_mutation_result(
+            command="policy.delete_chat",
+            actor=actor,
+            reason=reason,
+            target=target,
+            raw=raw,
+        )
+
 
 class OperatorCommandService:
     def __init__(
@@ -739,6 +779,19 @@ class OperatorCommandService:
         return self.policy.update_chat_policy(
             chat_id,
             changes,
+            actor=actor,
+            reason=reason,
+        )
+
+    def delete_chat_policy(
+        self,
+        chat_id: str,
+        *,
+        actor: str = "operator",
+        reason: str | None = None,
+    ) -> CommandResult:
+        return self.policy.delete_chat_policy(
+            chat_id,
             actor=actor,
             reason=reason,
         )

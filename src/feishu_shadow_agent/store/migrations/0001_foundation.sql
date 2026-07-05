@@ -188,7 +188,7 @@ CREATE TABLE IF NOT EXISTS policy_audits (
   policy_key TEXT NOT NULL,
   actor TEXT NOT NULL,
   old_json TEXT,
-  new_json TEXT NOT NULL,
+  new_json TEXT,
   reason TEXT,
   created_at TEXT NOT NULL
 );

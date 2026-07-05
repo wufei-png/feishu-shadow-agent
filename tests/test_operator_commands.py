@@ -486,6 +486,60 @@ def test_chat_policy_update_requires_initialized_global_policy(tmp_path: Path) -
     assert store.get_chat_product_policy("oc_missing_global") is None
 
 
+def test_chat_policy_delete_removes_override_without_global_policy(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.upsert_chat_product_policy(
+        {
+            "chat_id": "oc_delete",
+            "name": "Delete me",
+            "auto_reply": True,
+            "bot_joined": False,
+            "reply_identity": "bot_preferred",
+            "allow_user_fallback": True,
+            "resource_download": True,
+        },
+        actor="seed",
+    )
+    service = OperatorCommandService(store)
+
+    result = service.delete_chat_policy(
+        "  oc_delete  ",
+        actor="test_operator",
+        reason="remove override",
+    )
+    output = result.as_dict()
+
+    assert command_exit_code(result) == 0
+    assert output["status"] == "applied"
+    assert output["command"] == "policy.delete_chat"
+    assert output["target"] == {"type": "chat_policy", "chat_id": "oc_delete"}
+    assert output["old_policy"]["auto_reply"] is True
+    assert output["new_policy"] is None
+    assert output["audit_count"] == 1
+    assert store.get_product_policy() is None
+    assert store.get_chat_product_policy("oc_delete") is None
+    audit = store.list_policy_audits(limit=1)[0]
+    assert audit["actor"] == "test_operator"
+    assert audit["reason"] == "remove override"
+    assert audit["new_json"] is None
+
+
+def test_chat_policy_delete_missing_policy_returns_not_found(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    service = OperatorCommandService(store)
+
+    result = service.delete_chat_policy("oc_missing", actor="test_operator")
+
+    assert command_exit_code(result) == 2
+    assert result.as_dict()["status"] == "not_found"
+    assert "oc_missing" in result.as_dict()["result"]["error"]
+    assert store.list_policy_audits(limit=10) == []
+
+
 def test_chat_policy_update_normalizes_chat_id_before_lookup(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.import_product_policy_from_config(

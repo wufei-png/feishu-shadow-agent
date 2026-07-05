@@ -631,6 +631,54 @@ chats:
     assert audit["reason"] == "pause chat"
 
 
+def test_policy_delete_chat_removes_override_and_writes_audit(
+    tmp_path: Path, capsys
+) -> None:
+    config = _write_config(tmp_path)
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + """
+chats:
+  oc_policy:
+    name: Policy group
+    auto_reply: true
+""",
+        encoding="utf-8",
+    )
+    store = _store(tmp_path)
+    assert main(["policy", "import-config", "--config", str(config)]) == 0
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "policy",
+                "delete-chat",
+                "--config",
+                str(config),
+                "--chat-id",
+                "oc_policy",
+                "--reason",
+                "remove override",
+            ]
+        )
+        == 0
+    )
+
+    output = yaml.safe_load(capsys.readouterr().out)
+    assert output["status"] == "applied"
+    assert output["command"] == "policy.delete_chat"
+    assert output["target"] == {"type": "chat_policy", "chat_id": "oc_policy"}
+    assert output["old_policy"]["auto_reply"] is True
+    assert output["new_policy"] is None
+    assert output["audit_count"] == 1
+    assert store.get_chat_product_policy("oc_policy") is None
+    audit = store.list_policy_audits(limit=1)[0]
+    assert audit["actor"] == "local_cli"
+    assert audit["reason"] == "remove override"
+    assert audit["new_json"] is None
+
+
 def test_policy_update_chat_bot_joined_expansion_applies_directly(
     tmp_path: Path, capsys
 ) -> None:

@@ -1,8 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { FileDiff, History, MessageSquarePlus, Save, ShieldCheck, Upload } from "lucide-react";
-import { getSettingsCatalog, getSettingsRuntime, importPolicyConfig, listPolicyAudits, updateChatPolicy, updateGlobalPolicy } from "../api";
+import { FileDiff, History, MessageSquarePlus, Save, ShieldCheck, Trash2, Upload } from "lucide-react";
+import {
+  deleteChatPolicy,
+  getSettingsCatalog,
+  getSettingsRuntime,
+  importPolicyConfig,
+  listPolicyAudits,
+  updateChatPolicy,
+  updateGlobalPolicy
+} from "../api";
 import {
   Badge,
   Button,
@@ -179,6 +187,19 @@ export function PolicyScreen({ token, selectedId }: { token: string; selectedId:
     onSuccess: (result) => afterPolicyCommand(result, "chat"),
     onError: (error) => setCommandResult(errorResult("policy.update_chat", error))
   });
+  const deleteChat = useMutation({
+    mutationFn: () => deleteChatPolicy(token, activeChatId, { reason: clean(reason) }),
+    onSuccess: async (result) => {
+      await afterPolicyCommand(result, "chat");
+      if (result.status === "applied" || result.status === "no_change") {
+        setScope("global");
+        setChatForm(chatFormFromPolicy(null));
+        setChatIdDraft("");
+        setLastChatScope(null);
+      }
+    },
+    onError: (error) => setCommandResult(errorResult("policy.delete_chat", error))
+  });
 
   if (runtime.isLoading || catalog.isLoading) {
     return <LoadingState title="Loading policy" />;
@@ -232,7 +253,7 @@ export function PolicyScreen({ token, selectedId }: { token: string; selectedId:
         ) : (
           <ChatPolicyEditor
             changes={chatChanges}
-            disabled={!policyInitialized || !activeChatId || saveChat.isPending}
+            deleteDisabled={!activeChatId || deleteChat.isPending}
             entries={entries}
             form={chatForm}
             isNew={scope === "new-chat"}
@@ -244,7 +265,9 @@ export function PolicyScreen({ token, selectedId }: { token: string; selectedId:
               setChatDirty(true);
               setChatIdDraft(value);
             }}
+            onDelete={() => deleteChat.mutate()}
             onSave={() => saveChat.mutate()}
+            saveDisabled={!policyInitialized || !activeChatId || saveChat.isPending}
             selectedChatId={activeChatId}
           />
         )}
@@ -402,23 +425,27 @@ function GlobalPolicyEditor({
 
 function ChatPolicyEditor({
   changes,
-  disabled,
+  deleteDisabled,
   entries,
   form,
   isNew,
   onChange,
   onChatIdChange,
+  onDelete,
   onSave,
+  saveDisabled,
   selectedChatId
 }: {
   changes: Record<string, unknown>;
-  disabled: boolean;
+  deleteDisabled: boolean;
   entries: SettingsCatalogEntry[];
   form: ChatPolicyForm;
   isNew: boolean;
   onChange: (form: ChatPolicyForm) => void;
   onChatIdChange: (value: string) => void;
+  onDelete: () => void;
   onSave: () => void;
+  saveDisabled: boolean;
   selectedChatId: string;
 }) {
   return (
@@ -446,11 +473,19 @@ function ChatPolicyEditor({
         ))}
       </div>
       <ChangePreview changes={changes} entries={entries} fieldDefs={chatFields} />
-      <Button disabled={disabled || Object.keys(changes).length === 0} onClick={onSave} tone="success">
-        <Save aria-hidden="true" size={15} />
-        Save chat policy
-      </Button>
-      {!disabled ? null : <p className="detail-note">Chat policy updates require initialized Product Policy Store and a chat ID.</p>}
+      <div className="command-buttons">
+        <Button disabled={saveDisabled || Object.keys(changes).length === 0} onClick={onSave} tone="success">
+          <Save aria-hidden="true" size={15} />
+          Save chat policy
+        </Button>
+        {!isNew ? (
+          <Button disabled={deleteDisabled} onClick={onDelete} tone="danger">
+            <Trash2 aria-hidden="true" size={15} />
+            Delete chat policy
+          </Button>
+        ) : null}
+      </div>
+      {!saveDisabled ? null : <p className="detail-note">Chat policy updates require initialized Product Policy Store and a chat ID.</p>}
     </div>
   );
 }

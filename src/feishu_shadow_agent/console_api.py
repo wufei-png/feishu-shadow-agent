@@ -110,6 +110,12 @@ class ChatPolicyUpdateRequest(BaseModel):
         )
 
 
+class PolicyDeleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = None
+
+
 def default_console_static_dir() -> Path:
     return Path(__file__).with_name("console_static")
 
@@ -521,6 +527,20 @@ def create_console_app(
                 body.changes(),
                 actor=LOCAL_CONSOLE_ACTOR,
                 reason=body.reason,
+            )
+            .as_dict()
+        )
+
+    @api.delete("/policy/chats/{chat_id}")
+    def delete_chat_policy(
+        chat_id: str, body: Annotated[PolicyDeleteRequest | None, Body()] = None
+    ) -> dict[str, Any]:
+        return (
+            command_service()
+            .delete_chat_policy(
+                chat_id,
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=None if body is None else body.reason,
             )
             .as_dict()
         )

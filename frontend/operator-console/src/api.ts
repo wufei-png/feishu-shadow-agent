@@ -50,6 +50,10 @@ export type ChatPolicyUpdateBody = {
   resource_download?: boolean;
 };
 
+export type PolicyDeleteBody = {
+  reason?: string;
+};
+
 type ListParams = {
   limit?: number;
   offset?: number;
@@ -174,6 +178,10 @@ export function updateChatPolicy(token: string, chatId: string, body: ChatPolicy
   return patchCommand(`/api/policy/chats/${encodeURIComponent(chatId)}`, token, body);
 }
 
+export function deleteChatPolicy(token: string, chatId: string, body: PolicyDeleteBody): Promise<CommandResult> {
+  return deleteCommand(`/api/policy/chats/${encodeURIComponent(chatId)}`, token, body);
+}
+
 export function getSettingsCatalog(token: string): Promise<SettingsCatalog> {
   return fetchApi("/api/settings/catalog", token);
 }
@@ -192,6 +200,13 @@ async function postCommand(path: string, token: string, body: Record<string, unk
 async function patchCommand(path: string, token: string, body: Record<string, unknown>): Promise<CommandResult> {
   return fetchApi(path, token, {
     method: "PATCH",
+    body: JSON.stringify(body)
+  });
+}
+
+async function deleteCommand(path: string, token: string, body: Record<string, unknown>): Promise<CommandResult> {
+  return fetchApi(path, token, {
+    method: "DELETE",
     body: JSON.stringify(body)
   });
 }
