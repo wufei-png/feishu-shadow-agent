@@ -112,7 +112,6 @@ class ReplyStyleRefresher:
         prompt = build_owner_style_refresh_prompt(
             generated_at=generated_at,
             lookback_days=refresh_cfg.lookback_days,
-            sample_count=len(selected),
             samples=selected,
         )
         cwd = resolve_agent_working_dir(self.config.agent_backend.working_dir, self.base_dir)

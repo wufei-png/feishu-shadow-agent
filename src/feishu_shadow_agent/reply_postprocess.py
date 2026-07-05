@@ -69,7 +69,6 @@ class ReplyPostprocessor:
             )
         prompt = build_reply_postprocess_prompt(
             original_reply=original_reply,
-            enabled_guidance=guidance.enabled_guidance,
             owner_style_profile_path=None if guidance.owner_style_resolved_path is None else str(guidance.owner_style_resolved_path),
             humanizer_skill_path=None if guidance.humanizer_resolved_path is None else str(guidance.humanizer_resolved_path),
         )

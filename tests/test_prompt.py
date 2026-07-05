@@ -9,6 +9,8 @@ from feishu_shadow_agent.prompt import (
     FollowupTaskSessionOutput,
     InitialTaskSessionOutput,
     TaskRouterOutput,
+    build_owner_style_refresh_prompt,
+    build_reply_postprocess_prompt,
     build_router_prompt,
     build_task_session_prompt,
 )
@@ -249,3 +251,45 @@ def test_followup_task_session_prompt_omits_task_label_and_rejects_extra_label()
                 "watch_action": "keep_watching",
             }
         )
+
+
+def test_reply_postprocess_prompt_omits_metadata_only_guidance_summary() -> None:
+    prompt = json.loads(
+        build_reply_postprocess_prompt(
+            original_reply="raw reply",
+            owner_style_profile_path="/tmp/owner-style.md",
+            humanizer_skill_path="/tmp/humanizer/SKILL.md",
+        )
+    )
+
+    assert "enabled_guidance" not in prompt
+    assert prompt["candidate_reply"] == "raw reply"
+    assert prompt["guidance"] == [
+        {
+            "source": "owner_style",
+            "instruction": "Read this owner style profile path and align the expression with it.",
+            "path": "/tmp/owner-style.md",
+        },
+        {
+            "source": "humanizer_zh",
+            "instruction": "Read this skill guidance path and avoid common AI writing patterns.",
+            "path": "/tmp/humanizer/SKILL.md",
+        },
+    ]
+
+
+def test_owner_style_refresh_prompt_derives_sample_count_from_samples() -> None:
+    prompt = json.loads(
+        build_owner_style_refresh_prompt(
+            generated_at="2026-07-05T12:00:00+08:00",
+            lookback_days=30,
+            samples=["可以，晚点我看下", "先按这个方向推进"],
+        )
+    )
+
+    assert prompt["profile_format"]["metadata"] == {
+        "generated_at": "2026-07-05T12:00:00+08:00",
+        "lookback_days": 30,
+        "sample_count": 2,
+    }
+    assert prompt["samples"] == ["可以，晚点我看下", "先按这个方向推进"]

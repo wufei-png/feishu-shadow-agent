@@ -189,7 +189,6 @@ def build_task_session_prompt(
 def build_reply_postprocess_prompt(
     *,
     original_reply: str,
-    enabled_guidance: list[str],
     owner_style_profile_path: str | None = None,
     humanizer_skill_path: str | None = None,
 ) -> str:
@@ -212,7 +211,6 @@ def build_reply_postprocess_prompt(
         )
     payload = {
         "instruction": REPLY_POSTPROCESS_INSTRUCTION,
-        "enabled_guidance": enabled_guidance,
         "guidance": guidance,
         "output_schema": _schema_hint(ReplyPostprocessOutput),
         "candidate_reply": original_reply,
@@ -224,7 +222,6 @@ def build_owner_style_refresh_prompt(
     *,
     generated_at: str,
     lookback_days: int,
-    sample_count: int,
     samples: list[str],
 ) -> str:
     payload = {
@@ -235,7 +232,7 @@ def build_owner_style_refresh_prompt(
             "metadata": {
                 "generated_at": generated_at,
                 "lookback_days": lookback_days,
-                "sample_count": sample_count,
+                "sample_count": len(samples),
             },
             "sections": ["Style Summary", "Common Patterns", "Avoid", "Examples"],
         },
