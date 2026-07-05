@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from html import escape
+from pathlib import Path
 from typing import Any, Callable
 
 from pydantic import ValidationError
@@ -186,11 +187,13 @@ class TaskProcessingService:
         logger: JSONLLogger,
         agent_max_attempts: int = AGENT_MAX_ATTEMPTS,
         agent_retry_delays_seconds: tuple[float, ...] = (1.0, 3.0),
+        agent_working_dir: str | Path | None = None,
         sleep_func: Callable[[float], None] = time.sleep,
     ):
         self.store = store
         self.config = config
         self.agent_backend = agent_backend
+        self.agent_working_dir = Path(agent_working_dir) if agent_working_dir is not None else Path.cwd()
         self.logger = logger
         self.collector = CandidateCollector(store)
         self.approvals = ApprovalService(store=store, config=config)
@@ -401,6 +404,31 @@ class TaskProcessingService:
             },
         )
 
+    def _notify_agent_working_dir_blocked(
+        self,
+        *,
+        message: NormalizedMessage,
+        task: TaskRecord,
+        agent_working_dir: Path,
+        error: str,
+    ) -> int:
+        return self.approvals.notify_owner(
+            task=task,
+            reason="agent_working_dir_unavailable",
+            payload={
+                "type": "agent_working_dir_unavailable",
+                "message_id": message.message_id,
+                "stage": "task_session",
+                "error": error,
+                "target": str(agent_working_dir),
+                "message": "Task agent working directory is unavailable; task session agent was not called.",
+                "commands": [
+                    f"task close --task-id {task.short_id} --reason agent_working_dir_unavailable",
+                ],
+                "dedupe_key": f"owner-agent-working-dir:{message.message_id}:{task.short_id}",
+            },
+        )
+
     def _run_task_router(
         self,
         *,
@@ -444,7 +472,7 @@ class TaskProcessingService:
             message_counts=self._router_message_counts(active_candidates=active_candidates, historical=historical),
         )
         outcome = self._call_agent_with_retries(
-            lambda: self.agent_backend.task_router(prompt),
+            lambda: self.agent_backend.task_router(prompt, cwd=self.agent_working_dir),
             run_id=run_id,
             stage="task_router",
             message_id=message.message_id,
@@ -569,6 +597,7 @@ class TaskProcessingService:
                 candidates_count=candidates_count,
                 router_called=True,
                 matched_by="task_router",
+                agent_working_dir=str(self.agent_working_dir),
             )
             self._mark_processing_processed(
                 message=message,
@@ -734,6 +763,40 @@ class TaskProcessingService:
         watch_until: str,
         run_id: str,
     ) -> ProcessingResult:
+        agent_working_dir = self._task_agent_working_dir(task)
+        working_dir_error = _agent_working_dir_error(agent_working_dir)
+        if working_dir_error is not None:
+            self.logger.warning(
+                "task_session_agent_working_dir_blocked",
+                run_id=run_id,
+                task_id=str(task.id),
+                data={
+                    "message_id": message.message_id,
+                    "task_short_id": task.short_id,
+                    "agent_working_dir": str(agent_working_dir),
+                    "error": working_dir_error,
+                },
+            )
+            self._mark_processing_blocked_external(
+                message=message,
+                stage="task_session",
+                task_id=task.id,
+                attempt_count=0,
+                last_error=working_dir_error,
+                reason="agent_working_dir_unavailable",
+            )
+            action_id = self._notify_agent_working_dir_blocked(
+                message=message,
+                task=task,
+                agent_working_dir=agent_working_dir,
+                error=working_dir_error,
+            )
+            return ProcessingResult(
+                "owner_notification_created",
+                task.id,
+                action_id=action_id,
+                reason="agent_working_dir_unavailable",
+            )
         session_plan = self.task_sessions.build_plan(task=task, message=message)
         preflight = self._resource_preflight(
             task=task,
@@ -792,6 +855,7 @@ class TaskProcessingService:
                 "message_id": message.message_id,
                 "task_short_id": task.short_id,
                 "resuming_session": session_plan.session_id is not None,
+                "agent_working_dir": str(agent_working_dir),
                 "prompt_message_count": len(session_plan.prompt_message_ids),
                 "resource_count": len(resources),
             },
@@ -802,6 +866,7 @@ class TaskProcessingService:
             plan=session_plan,
             resources=resources,
             run_id=run_id,
+            cwd=agent_working_dir,
         )
         outcome = session_run.outcome
         result = outcome.result
@@ -1163,6 +1228,11 @@ class TaskProcessingService:
             ),
         )
 
+    def _task_agent_working_dir(self, task: TaskRecord) -> Path:
+        if task.agent_working_dir:
+            return Path(task.agent_working_dir).expanduser()
+        return self.agent_working_dir
+
 
 def _router_target_route_error(
     *,
@@ -1175,6 +1245,14 @@ def _router_target_route_error(
         return "attach_task_requires_active_target"
     if route == "reopen_task" and target_task_id not in historical_target_short_ids:
         return "reopen_task_requires_historical_target"
+    return None
+
+
+def _agent_working_dir_error(path: Path) -> str | None:
+    if not path.exists():
+        return f"agent working directory does not exist: {path}"
+    if not path.is_dir():
+        return f"agent working directory is not a directory: {path}"
     return None
 
 

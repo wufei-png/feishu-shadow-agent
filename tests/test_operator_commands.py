@@ -202,6 +202,75 @@ def test_operator_command_service_expire_approvals_reports_no_change(tmp_path: P
     }
 
 
+def test_operator_command_service_close_and_reopen_task_lifecycle(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    task_id = _insert_task(store, "t_lifecycle", "om_root")
+    approval_id = store.create_send_reply_approval(
+        task_id=task_id,
+        preview="draft",
+        payload={"reply_target_message_id": "om_root", "text": "draft", "identity": "user"},
+        approval_timeout_hours=None,
+    )
+    send_action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_root",
+        payload={"reply_target_message_id": "om_root", "text": "draft", "identity": "user"},
+        approval_id=approval_id,
+    )
+    notification_action_id = store.create_owner_notification_action(
+        task_id=task_id,
+        payload={"type": "needs_attention"},
+    )
+    assert send_action_id is not None
+    assert notification_action_id is not None
+    service = OperatorCommandService(store)
+
+    closed = service.close_task("t_lifecycle", actor="test_operator", reason="not needed")
+
+    assert command_exit_code(closed) == 0
+    assert closed.as_dict()["status"] == "applied"
+    assert closed.as_dict()["command"] == "task.close"
+    assert closed.as_dict()["reason"] == "not needed"
+    assert closed.as_dict()["result"]["expired_approvals"] == 1
+    assert closed.as_dict()["result"]["cancelled_actions"] == 2
+    with store.connect() as conn:
+        task = conn.execute("SELECT status, closed_at FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        approval = conn.execute("SELECT status, resolved_at FROM approvals WHERE id = ?", (approval_id,)).fetchone()
+        actions = conn.execute("SELECT status FROM actions WHERE task_id = ? ORDER BY id", (task_id,)).fetchall()
+    assert task["status"] == "closed_by_owner"
+    assert task["closed_at"] is not None
+    assert approval["status"] == "expired"
+    assert approval["resolved_at"] is not None
+    assert [row["status"] for row in actions] == ["cancelled", "cancelled"]
+
+    closed_again = service.close_task("t_lifecycle", actor="test_operator")
+    reopened = service.reopen_task(
+        "t_lifecycle",
+        watch_until="2026-06-22T12:00:00+08:00",
+        actor="test_operator",
+        reason="resume",
+    )
+
+    assert closed_again.status == "no_change"
+    assert reopened.status == "applied"
+    assert reopened.as_dict()["command"] == "task.reopen"
+    with store.connect() as conn:
+        task = conn.execute("SELECT status, closed_at, watch_until FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    assert task["status"] == "watching"
+    assert task["closed_at"] is None
+    assert task["watch_until"] == "2026-06-22T12:00:00+08:00"
+
+
+def test_operator_command_service_close_missing_task_reports_not_found(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+
+    result = OperatorCommandService(store).close_task("t_missing", actor="test_operator")
+
+    assert command_exit_code(result) == 2
+    assert result.status == "not_found"
+    assert result.changed is False
+
+
 def test_operator_command_service_policy_import_uses_facade_result_shape(tmp_path: Path) -> None:
     store = _store(tmp_path)
     service = OperatorCommandService(store)

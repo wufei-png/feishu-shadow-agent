@@ -302,6 +302,72 @@ class MaintenanceCommandService:
         )
 
 
+class TaskCommandService:
+    def __init__(self, store: SQLiteStore):
+        self.store = store
+
+    def close(
+        self,
+        task_id: str,
+        *,
+        actor: str,
+        reason: str | None = None,
+    ) -> CommandResult:
+        try:
+            raw = self.store.close_task_by_operator(task_id)
+        except KeyError as exc:
+            return _error_result(
+                status="not_found",
+                command="task.close",
+                actor=actor,
+                reason=reason,
+                target=_task_target(task_id),
+                error=str(exc),
+            )
+        changed = bool(raw.get("changed"))
+        return CommandResult(
+            status="applied" if changed else "no_change",
+            command="task.close",
+            actor=actor,
+            reason=reason,
+            target=_task_target(task_id),
+            changed=changed,
+            result=raw,
+            next_actions=_task_next_actions(raw.get("task")),
+        )
+
+    def reopen(
+        self,
+        task_id: str,
+        *,
+        watch_until: str,
+        actor: str,
+        reason: str | None = None,
+    ) -> CommandResult:
+        try:
+            raw = self.store.reopen_task_by_operator(task_id, watch_until=watch_until)
+        except KeyError as exc:
+            return _error_result(
+                status="not_found",
+                command="task.reopen",
+                actor=actor,
+                reason=reason,
+                target=_task_target(task_id),
+                error=str(exc),
+            )
+        changed = bool(raw.get("changed"))
+        return CommandResult(
+            status="applied" if changed else "no_change",
+            command="task.reopen",
+            actor=actor,
+            reason=reason,
+            target=_task_target(task_id),
+            changed=changed,
+            result=raw,
+            next_actions=_task_next_actions(raw.get("task")),
+        )
+
+
 class PolicyCommandService:
     def __init__(self, store: SQLiteStore):
         self.store = store
@@ -481,6 +547,7 @@ class OperatorCommandService:
         self.approvals = ApprovalCommandService(store)
         self.dispatch = DispatchCommandService(store, readback_marker=readback_marker)
         self.maintenance = MaintenanceCommandService(store)
+        self.tasks = TaskCommandService(store)
         self.policy = PolicyCommandService(store)
 
     def approve(
@@ -553,6 +620,25 @@ class OperatorCommandService:
 
     def expire_approvals(self, *, actor: str = "operator", reason: str | None = None) -> CommandResult:
         return self.maintenance.expire_approvals(actor=actor, reason=reason)
+
+    def close_task(
+        self,
+        task_id: str,
+        *,
+        actor: str = "operator",
+        reason: str | None = None,
+    ) -> CommandResult:
+        return self.tasks.close(task_id, actor=actor, reason=reason)
+
+    def reopen_task(
+        self,
+        task_id: str,
+        *,
+        watch_until: str,
+        actor: str = "operator",
+        reason: str | None = None,
+    ) -> CommandResult:
+        return self.tasks.reopen(task_id, watch_until=watch_until, actor=actor, reason=reason)
 
     def import_policy_config(
         self,
@@ -773,10 +859,23 @@ def _dispatch_target(action_id: int) -> dict[str, Any]:
     return {"type": "dispatch_action", "action_id": action_id}
 
 
+def _task_target(task_id: str) -> dict[str, Any]:
+    return {"type": "task", "id": task_id}
+
+
 def _dispatch_next_actions(action_id: int | None) -> list[dict[str, Any]]:
     if action_id is None:
         return []
     return [{"command": "dispatch.inspect", "target": _dispatch_target(action_id)}]
+
+
+def _task_next_actions(task: Any) -> list[dict[str, Any]]:
+    if not isinstance(task, dict):
+        return []
+    task_id = task.get("task_id")
+    if not task_id:
+        return []
+    return [{"command": "status", "target": {"type": "task", "id": task_id}}]
 
 
 def _mark_sent_warnings(raw: dict[str, Any]) -> list[str]:

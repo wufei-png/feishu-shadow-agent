@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { Bell, ClipboardList, MessageSquare, Send } from "lucide-react";
-import { getTask, listTasks } from "../api";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Bell, ClipboardList, MessageSquare, RotateCcw, Send, XCircle } from "lucide-react";
+import { closeTask, getTask, listTasks, reopenTask } from "../api";
 import {
   Badge,
+  Button,
+  CommandResultPanel,
   EmptyState,
   ErrorState,
   FieldList,
@@ -14,10 +16,11 @@ import {
   SectionHeader,
   SegmentedControl,
   shortText,
-  statusTone
+  statusTone,
+  TextareaField
 } from "../components/Primitives";
-import { queryKeys } from "../queryKeys";
-import type { TaskStatus } from "../types";
+import { invalidateAfterTaskCommand, queryKeys } from "../queryKeys";
+import type { CommandResult, TaskStatus } from "../types";
 import { MessageDetailPanel } from "./MessageDetailPanel";
 
 type TaskFilter = TaskStatus | "all";
@@ -31,9 +34,12 @@ const taskFilters: Array<{ value: TaskFilter; label: string }> = [
 ];
 
 export function TasksScreen({ token, selectedId }: { token: string; selectedId: string | null }) {
+  const queryClient = useQueryClient();
   const [filter, setFilter] = useState<TaskFilter>("watching");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(selectedId);
   const [messageId, setMessageId] = useState<string | null>(null);
+  const [reason, setReason] = useState("");
+  const [commandResult, setCommandResult] = useState<CommandResult | null>(null);
   const tasks = useQuery({
     queryKey: queryKeys.tasks({ status: filter, limit: 50, offset: 0 }),
     queryFn: () => listTasks(token, { status: filter === "all" ? undefined : filter, limit: 50, offset: 0 }),
@@ -61,7 +67,27 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
 
   useEffect(() => {
     setMessageId(null);
+    setCommandResult(null);
   }, [selectedTaskId]);
+
+  const close = useMutation({
+    mutationFn: () => closeTask(token, selectedTaskId ?? "", { reason: clean(reason) }),
+    onSuccess: async (result) => {
+      setCommandResult(result);
+      await invalidateAfterTaskCommand(queryClient);
+    },
+    onError: (error) => setCommandResult(errorResult("task.close", error))
+  });
+  const reopen = useMutation({
+    mutationFn: () => reopenTask(token, selectedTaskId ?? "", { reason: clean(reason) }),
+    onSuccess: async (result) => {
+      setCommandResult(result);
+      await invalidateAfterTaskCommand(queryClient);
+    },
+    onError: (error) => setCommandResult(errorResult("task.reopen", error))
+  });
+  const canClose = detail.data?.status === "watching";
+  const canReopen = detail.data ? ["closed", "closed_by_owner", "human_taken_over"].includes(detail.data.status) : false;
 
   if (tasks.isLoading) {
     return <LoadingState title="Loading tasks" />;
@@ -125,6 +151,7 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
                 <FactRow label="Task" value={detail.data.task_id} />
                 <FactRow label="Chat" value={detail.data.chat_id ?? "not recorded"} />
                 <FactRow label="Watch until" value={formatDate(detail.data.watch_until)} />
+                <FactRow label="Agent cwd" value={detail.data.agent_working_dir ?? "not recorded"} />
                 <FactRow label="Policy" value={detail.data.effective_policy.policy_source} />
               </FieldList>
               {detail.data.recommended_actions.length ? (
@@ -136,6 +163,23 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
                   ))}
                 </div>
               ) : null}
+            </div>
+
+            <div className="detail-panel">
+              <p className="eyebrow">Commands</p>
+              <h2>Task lifecycle</h2>
+              <TextareaField label="Reason" onChange={setReason} placeholder="Optional operator note" rows={2} value={reason} />
+              <div className="command-buttons">
+                <Button disabled={!canClose || close.isPending} onClick={() => close.mutate()} tone="danger">
+                  <XCircle aria-hidden="true" size={15} />
+                  Close
+                </Button>
+                <Button disabled={!canReopen || reopen.isPending} onClick={() => reopen.mutate()} tone="info">
+                  <RotateCcw aria-hidden="true" size={15} />
+                  Reopen
+                </Button>
+              </div>
+              <CommandResultPanel result={commandResult} />
             </div>
 
             <div className="detail-panel">
@@ -219,4 +263,23 @@ function FactRow({ label, value }: { label: string; value: ReactNode }) {
       <dd>{value}</dd>
     </div>
   );
+}
+
+function clean(value: string): string | undefined {
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function errorResult(command: string, error: unknown): CommandResult {
+  return {
+    status: "failed",
+    command,
+    actor: "local_console",
+    reason: null,
+    target: {},
+    changed: false,
+    result: { error: error instanceof Error ? error.message : "Request failed." },
+    warnings: [],
+    next_actions: []
+  };
 }

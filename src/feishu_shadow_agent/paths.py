@@ -15,3 +15,12 @@ def resolve_agent_skill_path(value: str | Path, base_dir: Path) -> Path:
     if path.name == "SKILL.md":
         return path.parent
     return path
+
+
+def resolve_agent_working_dir(value: str | Path | None, base_dir: Path) -> Path:
+    if value is None:
+        return base_dir.resolve(strict=False)
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = base_dir / path
+    return path.resolve(strict=False)

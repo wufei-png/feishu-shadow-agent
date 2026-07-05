@@ -78,6 +78,7 @@ class MessageRouter:
         now: str,
         watch_until: str,
         retry_incomplete_processing: bool = False,
+        agent_working_dir: str | None = None,
     ) -> RoutingResult:
         if not inserted and self.store.message_has_routing_audit(message.message_id):
             if retry_incomplete_processing:
@@ -155,6 +156,7 @@ class MessageRouter:
             task, decision = self.store.create_task_for_message_and_audit(
                 message,
                 watch_until=watch_until,
+                agent_working_dir=agent_working_dir,
             )
             return RoutingResult(decision=decision, task=task)
 

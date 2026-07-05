@@ -60,6 +60,20 @@ export function invalidateAfterMaintenanceCommand(queryClient: QueryClient): Pro
   ]);
 }
 
+export function invalidateAfterTaskCommand(queryClient: QueryClient): Promise<void[]> {
+  return Promise.all([
+    queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+    queryClient.invalidateQueries({ queryKey: ["health-issues"] }),
+    queryClient.invalidateQueries({ queryKey: ["tasks"] }),
+    queryClient.invalidateQueries({ queryKey: ["task"] }),
+    queryClient.invalidateQueries({ queryKey: ["approvals"] }),
+    queryClient.invalidateQueries({ queryKey: ["approval"] }),
+    queryClient.invalidateQueries({ queryKey: ["dispatch-actions"] }),
+    queryClient.invalidateQueries({ queryKey: ["dispatch-action"] }),
+    queryClient.invalidateQueries({ queryKey: ["message-detail"] })
+  ]);
+}
+
 export function invalidateAfterPolicyCommand(queryClient: QueryClient): Promise<void[]> {
   return Promise.all([
     queryClient.invalidateQueries({ queryKey: ["dashboard"] }),

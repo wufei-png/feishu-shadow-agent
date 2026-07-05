@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, Protocol
 
 AgentBackendProvider = Literal["hermes", "codex", "claude_code"]
@@ -27,8 +28,14 @@ class AgentRunResult:
 class AgentBackend(Protocol):
     provider: AgentBackendProvider | str
 
-    def task_router(self, prompt: str) -> AgentRunResult:
+    def task_router(self, prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
         ...
 
-    def task_session(self, prompt: str, *, session_id: str | None = None) -> AgentRunResult:
+    def task_session(
+        self,
+        prompt: str,
+        *,
+        session_id: str | None = None,
+        cwd: str | Path | None = None,
+    ) -> AgentRunResult:
         ...

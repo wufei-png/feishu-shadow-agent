@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
@@ -91,6 +92,7 @@ class TaskSessionRunner:
         plan: TaskSessionPromptPlan,
         resources: list[Any],
         run_id: str,
+        cwd: str | Path | None = None,
     ) -> TaskSessionRunResult:
         prompt = build_task_session_prompt(
             task=task,
@@ -107,7 +109,7 @@ class TaskSessionRunner:
             context_access=self.context_access.task_session_context_access(message=message, task=task),
         )
         outcome = self.agent_invoker.call_with_retries(
-            lambda: self.agent_backend.task_session(prompt, session_id=plan.session_id),
+            lambda: self.agent_backend.task_session(prompt, session_id=plan.session_id, cwd=cwd),
             run_id=run_id,
             stage="task_session",
             message_id=message.message_id,

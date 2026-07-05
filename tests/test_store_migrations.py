@@ -137,7 +137,15 @@ def test_baseline_schema_includes_current_columns(tmp_path: Path) -> None:
         }
 
     assert {"thread_id", "reply_to_message_id", "sender_role", "direct_mention", "at_all", "text"} <= message_columns
-    assert {"chat_type", "thread_id", "watch_until", "last_user_message", "last_agent_reply", "agent_session_id"} <= task_columns
+    assert {
+        "chat_type",
+        "thread_id",
+        "watch_until",
+        "last_user_message",
+        "last_agent_reply",
+        "agent_session_id",
+        "agent_working_dir",
+    } <= task_columns
     assert "hermes_session_id" not in task_columns
     assert "expires_at" in approval_columns
     assert "sender_name" in message_columns

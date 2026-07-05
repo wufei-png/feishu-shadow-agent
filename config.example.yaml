@@ -29,6 +29,8 @@ lark_cli:
 
 agent_backend:
   provider: hermes
+  # Agent subprocess working directory. null means the directory containing config.yaml.
+  working_dir: null
   config_scope: isolated
   auto_context: disabled
   explicit_context:

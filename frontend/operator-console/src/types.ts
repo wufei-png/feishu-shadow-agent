@@ -158,6 +158,7 @@ export type TaskSummary = {
   root_message_id: string | null;
   task_label: string | null;
   watch_until: string | null;
+  agent_working_dir: string | null;
   updated_at: string | null;
   message_count: number;
   recommended_actions: string[];

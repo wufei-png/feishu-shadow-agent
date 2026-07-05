@@ -212,6 +212,8 @@ GET /api/tasks/{task_id}
 POST /api/approvals/{approval_id}/approve
 POST /api/approvals/{approval_id}/reject
 POST /api/tasks/{task_id}/send
+POST /api/tasks/{task_id}/close
+POST /api/tasks/{task_id}/reopen
 POST /api/maintenance/expire-approvals
 ```
 

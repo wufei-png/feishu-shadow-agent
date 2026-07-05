@@ -11,6 +11,7 @@ from typing import Any, Callable
 from .config import AppConfig
 from .feishu.client import FeishuClient
 from .jsonl import JSONLLogger
+from .paths import resolve_agent_working_dir
 from .policy import PolicyResolver
 from .processing import ApprovalService, TaskProcessingService
 from .routing import MessageRouter, RoutingResult
@@ -456,6 +457,8 @@ class IngestionService:
         self.config = config
         self.logger = logger
         self.normalizer = MessageNormalizer(owner_open_id=config.owner.open_id)
+        self.config_base_dir = Path(config_base_dir or Path.cwd()).expanduser().resolve()
+        self.agent_working_dir = resolve_agent_working_dir(config.agent_backend.working_dir, self.config_base_dir)
         self.router = router or MessageRouter(store=store, closed_recall_days=config.lifecycle.closed_recall_days)
         self.task_processor = task_processor
         self.approval_service = approval_service or (task_processor.approvals if task_processor is not None else None)
@@ -706,6 +709,7 @@ class IngestionService:
             now=now,
             watch_until=watch_until,
             retry_incomplete_processing=self.task_processor is not None,
+            agent_working_dir=str(self.agent_working_dir),
         )
         self.logger.info(
             "message_routed",

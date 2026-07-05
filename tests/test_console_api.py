@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,24 @@ lifecycle:
 
 def _store(tmp_path: Path) -> SQLiteStore:
     return SQLiteStore(tmp_path / "agent.sqlite3")
+
+
+def _seed_legacy_0001_store_without_agent_working_dir(store: SQLiteStore) -> None:
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    migration = resources.files("feishu_shadow_agent.store").joinpath("migrations/0001_foundation.sql")
+    with store.connect() as conn:
+        conn.executescript(migration.read_text(encoding="utf-8"))
+        conn.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+            ("0001_foundation", "now"),
+        )
+        conn.execute(
+            """
+            INSERT INTO tasks(short_id, status, chat_id, chat_type, root_message_id, task_label, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("t_legacy", "watching", "oc_legacy", "p2p", "om_legacy", "legacy", "now", "now"),
+        )
 
 
 def _static_dir(tmp_path: Path) -> Path:
@@ -99,6 +118,35 @@ def test_console_command_defaults_to_loopback_and_prints_token_url(tmp_path: Pat
     assert called["host"] == "127.0.0.1"
     assert called["port"] == 8765
     assert "http://127.0.0.1:8765/?token=fixed-token" in capsys.readouterr().out
+
+
+def test_console_command_migrates_legacy_store_before_starting_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    config = _write_config(tmp_path)
+    store = _store(tmp_path)
+    _seed_legacy_0001_store_without_agent_working_dir(store)
+    called: dict[str, object] = {}
+
+    monkeypatch.setattr("feishu_shadow_agent.cli.console_static_ready", lambda static_dir: True)
+    monkeypatch.setattr("feishu_shadow_agent.cli.generate_console_token", lambda: "fixed-token")
+    monkeypatch.setattr(
+        "feishu_shadow_agent.cli._run_console_server",
+        lambda app, *, host, port: called.update({"app": app, "host": host, "port": port}),
+    )
+
+    assert main(["console", "--config", str(config)]) == 0
+
+    assert called["host"] == "127.0.0.1"
+    assert "Operator Console:" in capsys.readouterr().out
+    with store.connect() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+        task = conn.execute("SELECT short_id, agent_working_dir FROM tasks").fetchone()
+    assert "agent_working_dir" in columns
+    assert task["short_id"] == "t_legacy"
+    assert task["agent_working_dir"] is None
 
 
 def test_dashboard_rejects_missing_and_invalid_token(tmp_path: Path) -> None:
@@ -366,6 +414,8 @@ def test_message_detail_api_is_service_backed_and_read_only(tmp_path: Path) -> N
         ("POST", "/api/approvals/a_missing/approve"),
         ("POST", "/api/approvals/a_missing/reject"),
         ("POST", "/api/tasks/t_missing/send"),
+        ("POST", "/api/tasks/t_missing/close"),
+        ("POST", "/api/tasks/t_missing/reopen"),
         ("POST", "/api/maintenance/expire-approvals"),
         ("POST", "/api/dispatch/actions/1/retry"),
         ("POST", "/api/dispatch/actions/1/cancel"),
@@ -497,12 +547,21 @@ def test_approval_and_task_command_routes_return_command_results(tmp_path: Path)
         headers=_auth(),
         json={"final_reply": "operator final", "reason": "manual close", "command_id": "cmd_send_api_2"},
     )
+    close = client.post("/api/tasks/t_api_send/close", headers=_auth(), json={"reason": "done"})
+    reopen = client.post("/api/tasks/t_api_send/reopen", headers=_auth(), json={"reason": "again"})
     send_payload = send.json()
     assert conflict["status"] == "conflict"
     assert send_payload["status"] == "applied"
     assert send_payload["command"] == "approval.send"
     assert send_payload["actor"] == "local_console"
     assert send_payload["result"]["approval_command_status"] == "applied"
+    assert close.status_code == 200
+    assert close.json()["status"] == "applied"
+    assert close.json()["command"] == "task.close"
+    assert close.json()["actor"] == "local_console"
+    assert reopen.status_code == 200
+    assert reopen.json()["status"] == "applied"
+    assert reopen.json()["command"] == "task.reopen"
     assert invalid_send.status_code == 400
     assert invalid_send.json()["error"]["code"] == "validation_failed"
 

@@ -95,12 +95,19 @@ class HermesCliClient:
             argv.extend(["--provider", self.config.provider])
         return argv
 
-    def task_router(self, prompt: str) -> AgentRunResult:
+    def task_router(self, prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
         return self._run(
             self.build_chat_command(prompt=prompt, max_turns=self.config.router_max_turns),
+            cwd=cwd,
         )
 
-    def task_session(self, prompt: str, *, session_id: str | None = None) -> AgentRunResult:
+    def task_session(
+        self,
+        prompt: str,
+        *,
+        session_id: str | None = None,
+        cwd: str | Path | None = None,
+    ) -> AgentRunResult:
         return self._run(
             self.build_chat_command(
                 prompt=prompt,
@@ -108,13 +115,15 @@ class HermesCliClient:
                 session_id=session_id,
                 include_session_skills=True,
             ),
+            cwd=cwd,
         )
 
-    def _run(self, argv: list[str]) -> AgentRunResult:
+    def _run(self, argv: list[str], *, cwd: str | Path | None = None) -> AgentRunResult:
+        run_cwd = self.cwd if cwd is None else Path(cwd)
         if self._runner is not None:
             result = self._runner(argv, self.config.timeout_seconds)
         else:
-            result = _run_subprocess(argv, self.config.timeout_seconds, cwd=self.cwd)
+            result = _run_subprocess(argv, self.config.timeout_seconds, cwd=run_cwd)
         if not result.ok:
             return result
         # Hermes writes session metadata to stderr while stdout remains the strict

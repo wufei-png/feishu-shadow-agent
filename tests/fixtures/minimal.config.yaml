@@ -24,11 +24,12 @@ logging:
   text_path: logs/test.log
 
 lark_cli:
-  path: lark-cli
+  path: null
   timeout_seconds: 5
 
 agent_backend:
   provider: hermes
+  working_dir: null
   config_scope: isolated
   auto_context: disabled
   explicit_context:

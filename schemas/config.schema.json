@@ -10,6 +10,19 @@
           "title": "Provider",
           "type": "string"
         },
+        "working_dir": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Agent subprocess working directory; null uses the config file directory.",
+          "title": "Working Dir"
+        },
         "config_scope": {
           "default": "isolated",
           "description": "Whether agent CLI calls load user-global configuration or run isolated from it.",

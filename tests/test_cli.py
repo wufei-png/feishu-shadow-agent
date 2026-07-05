@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+from importlib import resources
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,24 @@ logging:
 
 def _store(tmp_path: Path) -> SQLiteStore:
     return SQLiteStore(tmp_path / "agent.sqlite3")
+
+
+def _seed_legacy_0001_store_without_agent_working_dir(store: SQLiteStore) -> None:
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    migration = resources.files("feishu_shadow_agent.store").joinpath("migrations/0001_foundation.sql")
+    with store.connect() as conn:
+        conn.executescript(migration.read_text(encoding="utf-8"))
+        conn.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+            ("0001_foundation", "now"),
+        )
+        conn.execute(
+            """
+            INSERT INTO tasks(short_id, status, chat_id, chat_type, root_message_id, task_label, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("t_legacy", "watching", "oc_legacy", "p2p", "om_legacy", "legacy", "now", "now"),
+        )
 
 
 def _insert_task(store: SQLiteStore, short_id: str, root_message_id: str) -> int:
@@ -250,6 +269,21 @@ logging:
     assert output["policy_status"]["policy_import_diff"]["status"] == "differs"
     assert not (tmp_path / "data" / "missing.sqlite3").exists()
     assert not (tmp_path / "logs" / "agent.jsonl").exists()
+
+
+def test_status_migrates_existing_legacy_store_before_querying_tasks(tmp_path: Path, capsys) -> None:
+    config = _write_config(tmp_path)
+    store = _store(tmp_path)
+    _seed_legacy_0001_store_without_agent_working_dir(store)
+
+    assert main(["status", "--config", str(config)]) == 0
+
+    output = yaml.safe_load(capsys.readouterr().out)
+    assert output["active_tasks"][0]["task_id"] == "t_legacy"
+    assert "agent_working_dir" in output["active_tasks"][0]
+    with store.connect() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+    assert "agent_working_dir" in columns
 
 
 def test_status_active_tasks_excludes_expired_watch_windows(tmp_path: Path, capsys) -> None:

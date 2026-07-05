@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Sequence
 
@@ -22,11 +23,11 @@ from .hermes import HermesCliClient
 from .jsonl import JSONLLogger
 from .operator_commands import CommandResult, OperatorCommandService, command_exit_code
 from .operator_query import OperatorQueryService
-from .paths import resolve_agent_skill_path, resolve_relative_path
+from .paths import resolve_agent_skill_path, resolve_agent_working_dir, resolve_relative_path
 from .processing import TaskProcessingService
 from .retention import RetentionService
 from .store.sqlite_store import SQLiteStore
-from .types import new_run_id
+from .types import new_run_id, utc_now_iso
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -188,6 +189,19 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("text", nargs=argparse.REMAINDER)
     send.set_defaults(handler=_handle_send)
 
+    task = subparsers.add_parser("task", help="task lifecycle helpers")
+    task_subparsers = task.add_subparsers(dest="task_command")
+    task_close = task_subparsers.add_parser("close", help="close a task without deleting history")
+    _add_config_arg(task_close)
+    task_close.add_argument("--task-id", required=True)
+    task_close.add_argument("--reason", help="optional operator audit reason")
+    task_close.set_defaults(handler=_handle_task_close)
+    task_reopen = task_subparsers.add_parser("reopen", help="reopen a closed task")
+    _add_config_arg(task_reopen)
+    task_reopen.add_argument("--task-id", required=True)
+    task_reopen.add_argument("--reason", help="optional operator audit reason")
+    task_reopen.set_defaults(handler=_handle_task_reopen)
+
     return parser
 
 
@@ -226,6 +240,7 @@ def _handle_daemon(args: argparse.Namespace) -> int:
     )
     suite = HealthSuite(loaded_config=loaded, store=store, feishu_client=client, run_id=run_id)
     backend_config = loaded.config.agent_backend
+    agent_working_dir = resolve_agent_working_dir(backend_config.working_dir, loaded.base_dir)
     session_skills = [
         resolve_agent_skill_path(skill, loaded.base_dir)
         for skill in backend_config.explicit_context.skills
@@ -236,13 +251,13 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         config_scope=backend_config.config_scope,
         auto_context=backend_config.auto_context,
         session_skills=session_skills,
-        cwd=loaded.base_dir,
     )
     task_processor = TaskProcessingService(
         store=store,
         config=loaded.config,
         agent_backend=agent_backend,
         logger=logger,
+        agent_working_dir=agent_working_dir,
     )
     daemon = Daemon(
         store=store,
@@ -280,6 +295,7 @@ def _handle_console(args: argparse.Namespace) -> int:
     loaded = ConfigService().load(args.config)
     sqlite_path = resolve_relative_path(loaded.config.storage.sqlite_path, loaded.base_dir)
     store = SQLiteStore(sqlite_path)
+    store.migrate()
     token = generate_console_token()
     app = create_console_app(
         loaded_config=loaded,
@@ -318,6 +334,8 @@ def _handle_status(args: argparse.Namespace) -> int:
     loaded = ConfigService().load(args.config)
     sqlite_path = resolve_relative_path(loaded.config.storage.sqlite_path, loaded.base_dir)
     store = SQLiteStore(sqlite_path)
+    if sqlite_path.exists():
+        store.migrate()
     snapshot = OperatorQueryService(store, policy_import_source=loaded.config).dashboard_snapshot()
     print(yaml.safe_dump(snapshot, allow_unicode=True, sort_keys=False), end="")
     return 0
@@ -342,6 +360,27 @@ def _handle_send(args: argparse.Namespace) -> int:
         target_id=args.task_id,
         final_reply=final_reply,
     )
+
+
+def _handle_task_close(args: argparse.Namespace) -> int:
+    _, store, _ = _load_runtime(args.config)
+    result = OperatorCommandService(store).close_task(
+        args.task_id,
+        actor="local_cli",
+        reason=args.reason,
+    )
+    return _emit_command_result(result)
+
+
+def _handle_task_reopen(args: argparse.Namespace) -> int:
+    loaded, store, _ = _load_runtime(args.config)
+    result = OperatorCommandService(store).reopen_task(
+        args.task_id,
+        watch_until=_watch_until_from_now(loaded.config.lifecycle.watch_minutes),
+        actor="local_cli",
+        reason=args.reason,
+    )
+    return _emit_command_result(result)
 
 
 def _handle_local_approval_command(
@@ -577,6 +616,14 @@ def _git_output(argv: list[str], cwd: Path) -> str | None:
     if completed.returncode != 0:
         return None
     return completed.stdout.strip()
+
+
+def _watch_until_from_now(minutes: int) -> str:
+    return (_parse_dt(utc_now_iso()) + timedelta(minutes=minutes)).astimezone().isoformat(timespec="seconds")
+
+
+def _parse_dt(value: str) -> datetime:
+    return datetime.fromisoformat(value)
 
 
 def _run_console_server(app: object, *, host: str, port: int) -> None:

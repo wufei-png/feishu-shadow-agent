@@ -13,7 +13,7 @@ from .config import AppConfig, ChatPolicyConfig
 from .policy import PolicyResolver, ProductPolicyInvalidError, ProductPolicyMissingError
 from .settings_catalog import CONFIG_VALUE_PATHS
 from .store.sqlite_store import PRODUCT_POLICY_KEY, RUN_HEARTBEAT_STALE_AFTER_SECONDS, SQLiteStore
-from .types import ActionStatus, ApprovalStatus, utc_now_iso
+from .types import ActionStatus, ApprovalStatus, TaskStatus, utc_now_iso
 
 
 _CORE_TABLES = frozenset(
@@ -400,6 +400,7 @@ class OperatorQueryService:
                     f"""
                     SELECT t.id, t.short_id, t.status, t.chat_id, t.chat_type, t.thread_id,
                            t.root_message_id, t.task_label, t.watch_until, t.updated_at,
+                           t.agent_working_dir,
                            COUNT(tm.message_id) AS message_count,
                            (
                              SELECT COUNT(*)
@@ -482,7 +483,12 @@ class OperatorQueryService:
             "pending_approvals": pending_approvals,
             "actions": actions,
             "effective_policy": self.effective_policy_summary(task["chat_id"], task["chat_type"]),
-            "recommended_actions": _task_recommended_actions(pending_approvals, actions),
+            "recommended_actions": _task_recommended_actions(
+                pending_approvals,
+                actions,
+                status=task_summary["status"],
+                task_id=task_summary["task_id"],
+            ),
         }
 
     def list_dispatch_actions(
@@ -586,6 +592,7 @@ class OperatorQueryService:
                     """
                     SELECT DISTINCT t.id, t.short_id, t.status, t.chat_id, t.chat_type, t.thread_id,
                            t.root_message_id, t.task_label, t.watch_until, t.updated_at,
+                           t.agent_working_dir,
                            COUNT(tm_all.message_id) AS message_count
                     FROM task_messages tm
                     JOIN tasks t ON t.id = tm.task_id
@@ -1186,6 +1193,8 @@ def _task_summary_dto(row: sqlite3.Row) -> dict[str, Any]:
     data = _row_dict(row)
     short_id = str(data["short_id"])
     recommended_actions = _summary_recommended_actions(
+        status=str(data["status"]),
+        task_id=short_id,
         pending_approval_count=int(data.get("pending_approval_count") or 0),
         overdue_approval_count=int(data.get("overdue_approval_count") or 0),
         failed_needs_review_action_count=int(data.get("failed_needs_review_action_count") or 0),
@@ -1203,6 +1212,7 @@ def _task_summary_dto(row: sqlite3.Row) -> dict[str, Any]:
         "root_message_id": data.get("root_message_id"),
         "task_label": data.get("task_label"),
         "watch_until": data.get("watch_until"),
+        "agent_working_dir": data.get("agent_working_dir"),
         "updated_at": data.get("updated_at"),
         "message_count": int(data.get("message_count") or 0),
         "recommended_actions": recommended_actions,
@@ -1310,8 +1320,20 @@ def _policy_summary(policy: dict[str, Any]) -> dict[str, Any]:
 def _task_recommended_actions(
     pending_approvals: list[dict[str, Any]],
     actions: list[dict[str, Any]],
+    *,
+    status: str | None = None,
+    task_id: str | None = None,
 ) -> list[str]:
     recommendations = []
+    if task_id:
+        if status == TaskStatus.WATCHING.value:
+            recommendations.append(f"task close --task-id {task_id}")
+        elif status in {
+            TaskStatus.CLOSED.value,
+            TaskStatus.CLOSED_BY_OWNER.value,
+            TaskStatus.HUMAN_TAKEN_OVER.value,
+        }:
+            recommendations.append(f"task reopen --task-id {task_id}")
     if any(approval["is_overdue"] for approval in pending_approvals):
         recommendations.append("expire_overdue_approvals")
     elif pending_approvals:
@@ -1325,12 +1347,22 @@ def _task_recommended_actions(
 
 def _summary_recommended_actions(
     *,
+    status: str,
+    task_id: str,
     pending_approval_count: int,
     overdue_approval_count: int,
     failed_needs_review_action_count: int,
     failed_action_count: int,
 ) -> list[str]:
     recommendations = []
+    if status == TaskStatus.WATCHING.value:
+        recommendations.append(f"task close --task-id {task_id}")
+    elif status in {
+        TaskStatus.CLOSED.value,
+        TaskStatus.CLOSED_BY_OWNER.value,
+        TaskStatus.HUMAN_TAKEN_OVER.value,
+    }:
+        recommendations.append(f"task reopen --task-id {task_id}")
     if overdue_approval_count > 0:
         recommendations.append("expire_overdue_approvals")
     elif pending_approval_count > 0:

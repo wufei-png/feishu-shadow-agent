@@ -61,6 +61,7 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `lark_cli.path` | string/null | `null` | 指定 `lark-cli` 路径；`null` 使用当前 `PATH`。 |
 | `lark_cli.timeout_seconds` | int `> 0` | `30` | `lark-cli` 子进程调用超时。 |
 | `agent_backend.provider` | `hermes` | `hermes` | Agent backend provider。当前版本配置只接受 `hermes`；内部保留的其他 backend 类型尚未对配置开放。 |
+| `agent_backend.working_dir` | string/null | `null` | Agent 子进程运行目录；`null` 表示 `config.yaml` 所在目录。相对路径基于配置文件目录解析。新 task 创建时会把解析后的绝对路径固化到 `tasks.agent_working_dir`；后续 follow-up/reopen 继续使用 task 内记录的目录，不随配置漂移。无 task 的 router 使用当前配置解析结果。 |
 | `agent_backend.config_scope` | `isolated`/`native` | `isolated` | 是否加载普通用户级配置；不等同于清除 credentials、managed policy 或 auth state。当前 Hermes backend 的 `isolated` 映射为 `--ignore-user-config`。 |
 | `agent_backend.auto_context` | `disabled`/`enabled` | `disabled` | 是否加载 CLI 自带规则、memory、默认 skill 等隐式上下文。当前 Hermes backend 的 `disabled` 映射为 `--ignore-rules`。 |
 | `agent_backend.explicit_context.skills` | list[string] | `[]` | 显式注入 task session 的 skill 目录或 `SKILL.md` 文件路径。相对路径基于配置文件目录解析；`SKILL.md` 文件路径会规范化为其父目录。当前只传给 Hermes task session，不传给 task router。 |
@@ -107,7 +108,7 @@ Product Policy Store 是运行时 Product Policy 真相来源，包含全局 `pr
 python -m feishu_shadow_agent maintenance expire-approvals --config config.yaml
 ```
 
-`approve`、`reject`、`send`、`dispatch inspect`、`dispatch mark-sent`、`dispatch retry`、`dispatch cancel`、`maintenance expire-approvals` 和 policy mutation 命令都通过 OperatorCommandService 返回同一类 YAML 命令结果。`changed` 表示目标 operator 动作是否实际推进，具体业务结果在 `result` 中；`dispatch inspect` 成功时是 `status: no_change`，因为它只读取恢复证据。
+`approve`、`reject`、`send`、`task close`、`task reopen`、`dispatch inspect`、`dispatch mark-sent`、`dispatch retry`、`dispatch cancel`、`maintenance expire-approvals` 和 policy mutation 命令都通过 OperatorCommandService 返回同一类 YAML 命令结果。`changed` 表示目标 operator 动作是否实际推进，具体业务结果在 `result` 中；`dispatch inspect` 成功时是 `status: no_change`，因为它只读取恢复证据。
 
 ## Operator Console
 

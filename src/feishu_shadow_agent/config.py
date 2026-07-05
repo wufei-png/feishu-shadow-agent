@@ -184,6 +184,10 @@ class AgentBackendConfig(StrictModel):
         default="hermes",
         description="Agent backend provider. Config currently accepts only hermes.",
     )
+    working_dir: str | None = Field(
+        default=None,
+        description="Agent subprocess working directory; null uses the config file directory.",
+    )
     config_scope: ConfigScopeMode = Field(
         default="isolated",
         description="Whether agent CLI calls load user-global configuration or run isolated from it.",
@@ -197,6 +201,16 @@ class AgentBackendConfig(StrictModel):
         description="Context explicitly injected by feishu-shadow-agent instead of discovered from user-global state.",
     )
     hermes: HermesConfig = Field(default_factory=HermesConfig, description="Hermes backend settings.")
+
+    @field_validator("working_dir")
+    @classmethod
+    def validate_working_dir(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("agent_backend.working_dir must not be empty")
+        return cleaned
 
 
 class ReplyPolicyConfig(StrictModel):

@@ -7,9 +7,17 @@ from typing import Any
 import pytest
 
 from feishu_shadow_agent.agent_backend import AgentRunResult
-from feishu_shadow_agent.config import AppConfig, ChatPolicyConfig, LifecycleConfig, OwnerConfig, ReplyPolicyConfig
+from feishu_shadow_agent.config import (
+    AgentBackendConfig,
+    AppConfig,
+    ChatPolicyConfig,
+    LifecycleConfig,
+    OwnerConfig,
+    ReplyPolicyConfig,
+)
 from feishu_shadow_agent.ingestion import IngestionService
 from feishu_shadow_agent.jsonl import JSONLLogger
+from feishu_shadow_agent.paths import resolve_agent_working_dir
 from feishu_shadow_agent.processing import ApprovalService, SendComposer, TaskProcessingService
 from feishu_shadow_agent.routing import RoutingResult
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
@@ -23,10 +31,13 @@ class FakeHermes:
         self.router_outputs: list[dict[str, Any] | AgentRunResult | Exception] = []
         self.session_outputs: list[dict[str, Any] | AgentRunResult | Exception] = []
         self.session_ids_seen: list[str | None] = []
+        self.router_cwds: list[str | None] = []
+        self.session_cwds: list[str | None] = []
         self.router_prompts: list[str] = []
         self.session_prompts: list[str] = []
 
-    def task_router(self, prompt: str) -> AgentRunResult:
+    def task_router(self, prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
+        self.router_cwds.append(None if cwd is None else str(cwd))
         self.router_prompts.append(prompt)
         output = self.router_outputs.pop(0)
         if isinstance(output, Exception):
@@ -35,7 +46,14 @@ class FakeHermes:
             return output
         return AgentRunResult(["hermes"], 0, json_data=output, session_id="router_sid")
 
-    def task_session(self, prompt: str, *, session_id: str | None = None) -> AgentRunResult:
+    def task_session(
+        self,
+        prompt: str,
+        *,
+        session_id: str | None = None,
+        cwd: str | Path | None = None,
+    ) -> AgentRunResult:
+        self.session_cwds.append(None if cwd is None else str(cwd))
         self.session_ids_seen.append(session_id)
         self.session_prompts.append(prompt)
         output = self.session_outputs.pop(0)
@@ -162,16 +180,26 @@ def _session_output(*, include_task_label: bool = True, **overrides: Any) -> dic
     return base | overrides
 
 
-def _service(tmp_path: Path, *, config: AppConfig | None = None, hermes: FakeHermes | None = None) -> tuple[SQLiteStore, IngestionService, FakeHermes]:
-    store = SQLiteStore(tmp_path / "agent.sqlite3")
+def _service(
+    tmp_path: Path,
+    *,
+    config: AppConfig | None = None,
+    hermes: FakeHermes | None = None,
+    store: SQLiteStore | None = None,
+    config_base_dir: Path | None = None,
+) -> tuple[SQLiteStore, IngestionService, FakeHermes]:
+    store = store or SQLiteStore(tmp_path / "agent.sqlite3")
     fake_hermes = hermes or FakeHermes()
     cfg = config or _config()
+    base_dir = config_base_dir or tmp_path
+    agent_working_dir = resolve_agent_working_dir(cfg.agent_backend.working_dir, base_dir)
     _seed_policy(store, cfg)
     processor = TaskProcessingService(
         store=store,
         config=cfg,
         agent_backend=fake_hermes,
         logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        agent_working_dir=agent_working_dir,
         agent_retry_delays_seconds=(0.0, 0.0),
     )
     service = IngestionService(
@@ -180,6 +208,7 @@ def _service(tmp_path: Path, *, config: AppConfig | None = None, hermes: FakeHer
         config=cfg,
         logger=JSONLLogger(tmp_path / "agent.jsonl"),
         task_processor=processor,
+        config_base_dir=base_dir,
         clock=lambda: "2026-06-22T10:10:00+08:00",
     )
     return store, service, fake_hermes
@@ -220,6 +249,166 @@ def test_gate_passed_p2p_creates_pending_send_and_persists_session(tmp_path: Pat
     assert action["status"] == "pending"
     assert payload["identity"] == "user"
     assert approvals == 0
+
+
+def test_new_task_stores_configured_agent_working_dir(tmp_path: Path) -> None:
+    agent_root = tmp_path / "agent-root"
+    agent_root.mkdir()
+    cfg = _config(agent_backend=AgentBackendConfig(working_dir="agent-root"))
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes, config_base_dir=tmp_path)
+
+    service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    expected = str(agent_root.resolve())
+    with store.connect() as conn:
+        task = conn.execute("SELECT agent_working_dir FROM tasks").fetchone()
+    assert task["agent_working_dir"] == expected
+    assert hermes.session_cwds == [expected]
+
+
+def test_existing_task_followup_uses_stored_agent_working_dir_after_config_change(tmp_path: Path) -> None:
+    old_root = tmp_path / "old-agent-root"
+    new_root = tmp_path / "new-agent-root"
+    old_root.mkdir()
+    new_root.mkdir()
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(_session_id="sid_1", reply_target_message_id="om_1"))
+    cfg_old = _config(agent_backend=AgentBackendConfig(working_dir="old-agent-root"))
+    store, service, _ = _service(
+        tmp_path,
+        config=cfg_old,
+        hermes=hermes,
+        store=store,
+        config_base_dir=tmp_path,
+    )
+
+    created = service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+
+    cfg_new = _config(agent_backend=AgentBackendConfig(working_dir="new-agent-root"))
+    hermes.router_outputs.append(
+        {
+            "route": "attach_task",
+            "target_task_id": created.task.short_id,
+            "reason": "same task",
+        }
+    )
+    hermes.session_outputs.append(
+        _session_output(include_task_label=False, _session_id="sid_1", reply_target_message_id="om_2")
+    )
+    _, service_after_change, _ = _service(
+        tmp_path,
+        config=cfg_new,
+        hermes=hermes,
+        store=store,
+        config_base_dir=tmp_path,
+    )
+
+    service_after_change.process_raw_message(
+        _message("om_2", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_2",
+    )
+
+    assert hermes.router_cwds[-1] == str(new_root.resolve())
+    assert hermes.session_cwds == [str(old_root.resolve()), str(old_root.resolve())]
+
+
+def test_missing_stored_agent_working_dir_blocks_only_task_session(tmp_path: Path) -> None:
+    old_root = tmp_path / "old-agent-root"
+    current_root = tmp_path / "current-agent-root"
+    old_root.mkdir()
+    current_root.mkdir()
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(_session_id="sid_1", reply_target_message_id="om_1"))
+    cfg_old = _config(agent_backend=AgentBackendConfig(working_dir="old-agent-root"))
+    store, service, _ = _service(
+        tmp_path,
+        config=cfg_old,
+        hermes=hermes,
+        store=store,
+        config_base_dir=tmp_path,
+    )
+    created = service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    old_root.rmdir()
+
+    cfg_current = _config(agent_backend=AgentBackendConfig(working_dir="current-agent-root"))
+    hermes.router_outputs.append(
+        {
+            "route": "attach_task",
+            "target_task_id": created.task.short_id,
+            "reason": "same task",
+        }
+    )
+    _, service_after_missing_cwd, _ = _service(
+        tmp_path,
+        config=cfg_current,
+        hermes=hermes,
+        store=store,
+        config_base_dir=tmp_path,
+    )
+
+    routed = service_after_missing_cwd.process_raw_message(
+        _message("om_2", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_2",
+    )
+
+    assert routed is not None
+    assert routed.decision.route == "ambiguous"
+    assert hermes.router_cwds[-1] == str(current_root.resolve())
+    assert hermes.session_cwds == [str(old_root.resolve())]
+    with store.connect() as conn:
+        route = conn.execute(
+            "SELECT route, route_reason, router_called FROM routing_audits WHERE message_id = ? ORDER BY id DESC LIMIT 1",
+            ("om_2",),
+        ).fetchone()
+        processing = conn.execute(
+            """
+            SELECT status, terminal_reason, last_error
+            FROM message_processing
+            WHERE message_id = ? AND stage = 'task_session'
+            """,
+            ("om_2",),
+        ).fetchone()
+        task = conn.execute("SELECT status FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
+        notification = conn.execute(
+            "SELECT kind, status, payload_json FROM actions WHERE kind = 'owner_notification' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    payload = json.loads(notification["payload_json"])
+    assert route["route"] == "attach_task"
+    assert route["router_called"] == 1
+    assert processing["status"] == "blocked_waiting_external"
+    assert processing["terminal_reason"] == "agent_working_dir_unavailable"
+    assert "does not exist" in processing["last_error"]
+    assert task["status"] == "watching"
+    assert notification["status"] == "pending"
+    assert payload["type"] == "agent_working_dir_unavailable"
+    assert payload["commands"] == [
+        f"task close --task-id {created.task.short_id} --reason agent_working_dir_unavailable"
+    ]
 
 
 def test_group_auto_reply_disabled_downgrades_to_approval(tmp_path: Path) -> None:

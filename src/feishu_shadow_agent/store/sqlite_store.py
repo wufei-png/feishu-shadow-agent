@@ -810,6 +810,7 @@ class SQLiteStore:
         *,
         watch_until: str,
         task_label: str | None = None,
+        agent_working_dir: str | None = None,
     ) -> TaskRecord:
         self.migrate()
         now = utc_now_iso()
@@ -819,6 +820,7 @@ class SQLiteStore:
                 message,
                 watch_until=watch_until,
                 task_label=task_label,
+                agent_working_dir=agent_working_dir,
                 now=now,
             )
         return self.get_task_by_id(task_id)
@@ -832,6 +834,7 @@ class SQLiteStore:
         candidates_count: int = 0,
         router_called: bool = False,
         matched_by: str = "new_trigger",
+        agent_working_dir: str | None = None,
     ) -> tuple[TaskRecord, RouteDecision]:
         self.migrate()
         now = utc_now_iso()
@@ -841,6 +844,7 @@ class SQLiteStore:
                 message,
                 watch_until=watch_until,
                 task_label=None,
+                agent_working_dir=agent_working_dir,
                 now=now,
             )
             task = self._get_task_by_id(conn, task_id)
@@ -893,6 +897,59 @@ class SQLiteStore:
         now = utc_now_iso()
         with self.connect() as conn:
             self._close_task_for_owner_takeover(conn, task_id, now=now)
+
+    def close_task_by_operator(self, task_id: int | str) -> dict[str, Any]:
+        self.migrate()
+        now = utc_now_iso()
+        with self.connect() as conn:
+            task = self._get_task_by_lookup(conn, task_id)
+            if task is None:
+                raise KeyError(f"task not found: {task_id}")
+            if task.status != TaskStatus.WATCHING.value:
+                return {
+                    "changed": False,
+                    "task": _task_command_summary(task),
+                    "previous_status": task.status,
+                    "expired_approvals": 0,
+                    "cancelled_actions": 0,
+                }
+            expired_approvals, cancelled_actions = self._close_task_by_operator_locked(conn, task.id, now=now)
+            updated = self._get_task_by_id(conn, task.id)
+        return {
+            "changed": True,
+            "task": _task_command_summary(updated),
+            "previous_status": task.status,
+            "expired_approvals": expired_approvals,
+            "cancelled_actions": cancelled_actions,
+        }
+
+    def reopen_task_by_operator(self, task_id: int | str, *, watch_until: str) -> dict[str, Any]:
+        self.migrate()
+        now = utc_now_iso()
+        with self.connect() as conn:
+            task = self._get_task_by_lookup(conn, task_id)
+            if task is None:
+                raise KeyError(f"task not found: {task_id}")
+            if task.status == TaskStatus.WATCHING.value:
+                return {
+                    "changed": False,
+                    "task": _task_command_summary(task),
+                    "previous_status": task.status,
+                }
+            conn.execute(
+                """
+                UPDATE tasks
+                SET status = ?, updated_at = ?, closed_at = NULL, watch_until = ?
+                WHERE id = ?
+                """,
+                (TaskStatus.WATCHING.value, now, watch_until, task.id),
+            )
+            updated = self._get_task_by_id(conn, task.id)
+        return {
+            "changed": True,
+            "task": _task_command_summary(updated),
+            "previous_status": task.status,
+        }
 
     def close_task_for_owner_takeover_and_audit(
         self,
@@ -2895,6 +2952,17 @@ class SQLiteStore:
             raise KeyError(f"task not found: {task_id}")
         return _task_from_row(row)
 
+    def _get_task_by_lookup(self, conn: sqlite3.Connection, task_id: int | str) -> TaskRecord | None:
+        if isinstance(task_id, int):
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        else:
+            text = str(task_id)
+            if text.isdigit():
+                row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(text),)).fetchone()
+            else:
+                row = conn.execute("SELECT * FROM tasks WHERE short_id = ?", (text,)).fetchone()
+        return None if row is None else _task_from_row(row)
+
     def _create_task_for_message(
         self,
         conn: sqlite3.Connection,
@@ -2902,6 +2970,7 @@ class SQLiteStore:
         *,
         watch_until: str,
         task_label: str | None,
+        agent_working_dir: str | None,
         now: str,
     ) -> int:
         short_id = self._unique_short_id(conn, "t", message.message_id)
@@ -2910,8 +2979,8 @@ class SQLiteStore:
             """
             INSERT INTO tasks(
               short_id, status, chat_id, root_message_id, task_label, agent_session_id,
-              created_at, updated_at, chat_type, thread_id, watch_until, last_user_message
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              agent_working_dir, created_at, updated_at, chat_type, thread_id, watch_until, last_user_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 short_id,
@@ -2920,6 +2989,7 @@ class SQLiteStore:
                 message.message_id,
                 label,
                 None,
+                agent_working_dir,
                 now,
                 now,
                 message.chat_type,
@@ -2997,6 +3067,63 @@ class SQLiteStore:
             conn,
             approval_ids=pending_approval_ids,
             now=now,
+        )
+
+    def _close_task_by_operator_locked(
+        self,
+        conn: sqlite3.Connection,
+        task_id: int,
+        *,
+        now: str,
+    ) -> tuple[int, int]:
+        pending_rows = conn.execute(
+            """
+            SELECT id
+            FROM approvals
+            WHERE task_id = ? AND status = 'pending'
+            """,
+            (task_id,),
+        ).fetchall()
+        pending_approval_ids = [int(row["id"]) for row in pending_rows]
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = ?, updated_at = ?, closed_at = ?
+            WHERE id = ?
+            """,
+            (TaskStatus.CLOSED_BY_OWNER.value, now, now, task_id),
+        )
+        approval_cursor = conn.execute(
+            """
+            UPDATE approvals
+            SET status = ?, resolved_at = ?
+            WHERE task_id = ? AND status = 'pending'
+            """,
+            (ApprovalStatus.EXPIRED.value, now, task_id),
+        )
+        send_cursor = conn.execute(
+            """
+            UPDATE actions
+            SET status = ?, updated_at = ?
+            WHERE task_id = ? AND kind = ? AND status IN ('pending', 'sending')
+            """,
+            (ActionStatus.CANCELLED.value, now, task_id, ActionKind.SEND_REPLY.value),
+        )
+        owner_cursor = conn.execute(
+            """
+            UPDATE actions
+            SET status = ?, updated_at = ?
+            WHERE task_id = ? AND kind = ? AND status = 'pending'
+            """,
+            (ActionStatus.CANCELLED.value, now, task_id, ActionKind.OWNER_NOTIFICATION.value),
+        )
+        approval_action_count = self._cancel_pending_actions_for_approvals_locked(
+            conn,
+            approval_ids=pending_approval_ids,
+            now=now,
+        )
+        return int(approval_cursor.rowcount), (
+            int(send_cursor.rowcount) + int(owner_cursor.rowcount) + approval_action_count
         )
 
     def _record_agent_message_for_task(
@@ -3202,7 +3329,21 @@ def _task_from_row(row: sqlite3.Row) -> TaskRecord:
         task_label=row["task_label"],
         watch_until=row["watch_until"],
         agent_session_id=row["agent_session_id"],
+        agent_working_dir=row["agent_working_dir"],
     )
+
+
+def _task_command_summary(task: TaskRecord) -> dict[str, Any]:
+    return {
+        "id": task.id,
+        "task_id": task.short_id,
+        "task_short_id": task.short_id,
+        "status": task.status,
+        "chat_id": task.chat_id,
+        "chat_type": task.chat_type,
+        "watch_until": task.watch_until,
+        "agent_working_dir": task.agent_working_dir,
+    }
 
 
 def _action_from_row(row: sqlite3.Row) -> ActionRecord:

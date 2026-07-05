@@ -6,13 +6,14 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Callable
 
 from .agent_backend import AgentRunResult
 from .config import LoadedConfig
 from .feishu.client import FeishuClient
 from .hermes import hermes_execution_policy
-from .paths import resolve_agent_skill_path
+from .paths import resolve_agent_skill_path, resolve_agent_working_dir
 from .store.sqlite_store import SQLiteStore
 from .types import HealthCheckResult, LarkCliResult, new_run_id
 
@@ -84,7 +85,8 @@ class HermesCliChecker:
     def __call__(self, loaded: LoadedConfig) -> list[HealthCheckResult]:
         hermes = loaded.config.agent_backend.hermes
         path = hermes.path or "hermes"
-        version = _run_hermes_command([path, "--version"], timeout_seconds=hermes.timeout_seconds)
+        cwd = resolve_agent_working_dir(loaded.config.agent_backend.working_dir, loaded.base_dir)
+        version = _run_hermes_command([path, "--version"], timeout_seconds=hermes.timeout_seconds, cwd=cwd)
         version_result = _hermes_command_result(
             "hermes_cli_version",
             version,
@@ -94,7 +96,7 @@ class HermesCliChecker:
         )
         if version_result.is_critical_failure:
             return [version_result]
-        status = _run_hermes_command([path, "status"], timeout_seconds=hermes.timeout_seconds)
+        status = _run_hermes_command([path, "status"], timeout_seconds=hermes.timeout_seconds, cwd=cwd)
         status_result = _hermes_command_result(
             "hermes_cli_status",
             status,
@@ -102,7 +104,7 @@ class HermesCliChecker:
             "Hermes CLI status command failed",
             severity="warning",
         )
-        chat_help = _run_hermes_command([path, "chat", "--help"], timeout_seconds=hermes.timeout_seconds)
+        chat_help = _run_hermes_command([path, "chat", "--help"], timeout_seconds=hermes.timeout_seconds, cwd=cwd)
         permissions_result = _hermes_tool_permissions_result(loaded, chat_help)
         return [version_result, status_result, permissions_result]
 
@@ -146,6 +148,7 @@ class HealthSuite:
             self._check_sqlite_writable(),
             self._check_product_policy_initialized(),
             self._check_lark_cli_version(),
+            self._check_agent_working_dir(),
         ]
         auth_result = self._check_auth_status()
         results.append(auth_result)
@@ -169,6 +172,7 @@ class HealthSuite:
             self._check_sqlite_writable(),
             self._check_product_policy_initialized(),
             self._check_lark_cli_version(),
+            self._check_agent_working_dir(),
         ]
         auth_result = self._check_auth_status()
         results.append(auth_result)
@@ -269,6 +273,37 @@ class HealthSuite:
                 "configured_path": configured_path,
                 "resolved_path": resolved_path,
             },
+        )
+
+    def _check_agent_working_dir(self) -> HealthCheckResult:
+        configured = self.loaded_config.config.agent_backend.working_dir
+        resolved = resolve_agent_working_dir(configured, self.loaded_config.base_dir)
+        details = {
+            "configured": configured,
+            "resolved": str(resolved),
+        }
+        if not resolved.exists():
+            return HealthCheckResult(
+                "agent_working_dir",
+                "critical",
+                "failed",
+                "agent working directory does not exist",
+                details,
+            )
+        if not resolved.is_dir():
+            return HealthCheckResult(
+                "agent_working_dir",
+                "critical",
+                "failed",
+                "agent working directory is not a directory",
+                details,
+            )
+        return HealthCheckResult(
+            "agent_working_dir",
+            "critical",
+            "ok",
+            "agent working directory is available",
+            details,
         )
 
     def _check_auth_status(self) -> HealthCheckResult:
@@ -441,11 +476,12 @@ def _command_failed(
     )
 
 
-def _run_hermes_command(argv: list[str], *, timeout_seconds: int) -> AgentRunResult:
+def _run_hermes_command(argv: list[str], *, timeout_seconds: int, cwd: Path | None = None) -> AgentRunResult:
     started = time.monotonic()
     try:
         completed = subprocess.run(
             argv,
+            cwd=cwd,
             capture_output=True,
             text=True,
             timeout=timeout_seconds,

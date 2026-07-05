@@ -227,7 +227,7 @@ def test_task_detail_returns_related_read_models_and_effective_policy(tmp_path: 
         "allow_user_fallback": False,
         "resource_download": False,
     }
-    assert detail["recommended_actions"] == ["review_pending_approvals"]
+    assert detail["recommended_actions"] == ["task close --task-id t_1", "review_pending_approvals"]
     with store.connect() as conn:
         approval = conn.execute("SELECT status FROM approvals WHERE short_id = ?", ("a_review",)).fetchone()
     assert approval["status"] == "pending"
@@ -255,6 +255,7 @@ def test_task_and_dispatch_lists_include_recommended_actions(tmp_path: Path) -> 
     actions = query.list_dispatch_actions()
 
     assert tasks[0]["recommended_actions"] == [
+        "task close --task-id t_1",
         "expire_overdue_approvals",
         "inspect_failed_needs_review_actions",
     ]

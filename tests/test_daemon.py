@@ -135,10 +135,16 @@ class FakeAgentBackend:
     def __init__(self):
         self.session_calls = 0
 
-    def task_router(self, prompt: str) -> AgentRunResult:
+    def task_router(self, prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
         return AgentRunResult(["hermes"], 0, json_data={"route": "ignore", "target_task_id": None, "reason": ""})
 
-    def task_session(self, prompt: str, *, session_id: str | None = None) -> AgentRunResult:
+    def task_session(
+        self,
+        prompt: str,
+        *,
+        session_id: str | None = None,
+        cwd: str | Path | None = None,
+    ) -> AgentRunResult:
         self.session_calls += 1
         target = "om_group" if self.session_calls == 1 else "om_p2p"
         return AgentRunResult(

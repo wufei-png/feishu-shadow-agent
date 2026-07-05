@@ -249,6 +249,13 @@ POST /api/approvals/{approval_id}/reject
 POST /api/tasks/{task_id}/send
 ```
 
+Task lifecycle commands:
+
+```text
+POST /api/tasks/{task_id}/close
+POST /api/tasks/{task_id}/reopen
+```
+
 Dispatch recovery commands:
 
 ```text

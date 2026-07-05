@@ -115,6 +115,14 @@ export function sendTask(token: string, taskId: string, body: CommandBody): Prom
   return postCommand(`/api/tasks/${encodeURIComponent(taskId)}/send`, token, body);
 }
 
+export function closeTask(token: string, taskId: string, body: CommandBody): Promise<CommandResult> {
+  return postCommand(`/api/tasks/${encodeURIComponent(taskId)}/close`, token, body);
+}
+
+export function reopenTask(token: string, taskId: string, body: CommandBody): Promise<CommandResult> {
+  return postCommand(`/api/tasks/${encodeURIComponent(taskId)}/reopen`, token, body);
+}
+
 export function expireApprovals(token: string, body: CommandBody): Promise<CommandResult> {
   return postCommand("/api/maintenance/expire-approvals", token, body);
 }

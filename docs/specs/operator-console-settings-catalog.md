@@ -191,6 +191,7 @@ runtime availability.
 | key | label | source | visibility | editable_v1 | requires_restart | audit_behavior | write_boundary |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `agent_backend.provider` | Agent provider | `config_yaml` | `readonly` | no | yes | none | none |
+| `agent_backend.working_dir` | Agent working directory | `config_yaml` | `advanced` | no | yes | future config audit | future `ConfigCommandService` |
 | `agent_backend.config_scope` | Agent config scope | `config_yaml` | `advanced` | no | yes | future config audit | future `ConfigCommandService` |
 | `agent_backend.auto_context` | Agent auto context | `config_yaml` | `advanced` | no | yes | future config audit | future `ConfigCommandService` |
 | `agent_backend.explicit_context.skills` | Explicit skills | `config_yaml` | `advanced` | no | yes | future config audit | future `ConfigCommandService` |

@@ -31,6 +31,7 @@ def test_load_minimal_config() -> None:
     assert loaded.config.lifecycle.closed_recall_days == 7
     assert loaded.config.lifecycle.approval_timeout_hours == 24
     assert loaded.config.agent_backend.provider == "hermes"
+    assert loaded.config.agent_backend.working_dir is None
     assert loaded.config.agent_backend.config_scope == "isolated"
     assert loaded.config.agent_backend.auto_context == "disabled"
     assert loaded.config.agent_backend.hermes.mode == "cli"
@@ -296,6 +297,39 @@ agent_backend:
     )
 
     with pytest.raises(ConfigError, match="health_url"):
+        ConfigService().load(config_path)
+
+
+def test_agent_backend_working_dir_strips_whitespace(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+agent_backend:
+  working_dir: " ./agent-root "
+""",
+        encoding="utf-8",
+    )
+
+    loaded = ConfigService().load(config_path)
+
+    assert loaded.config.agent_backend.working_dir == "./agent-root"
+
+
+def test_agent_backend_working_dir_rejects_empty_string(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+agent_backend:
+  working_dir: "  "
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="working_dir"):
         ConfigService().load(config_path)
 
 

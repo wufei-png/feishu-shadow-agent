@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Annotated
 
@@ -20,7 +21,7 @@ from .operator_query import OperatorQueryReadError, OperatorQueryService, Operat
 from .paths import resolve_relative_path
 from .settings_catalog import settings_catalog
 from .store.sqlite_store import SQLiteStore
-from .types import ActionStatus, ApprovalStatus, TaskStatus
+from .types import ActionStatus, ApprovalStatus, TaskStatus, utc_now_iso
 
 _ASSET_REF_PATTERN = re.compile(r"""(?:src|href)=["'](/assets/[^"']+)["']""")
 LOCAL_CONSOLE_ACTOR = "local_console"
@@ -331,6 +332,31 @@ def create_console_app(
             command_id=payload.command_id,
         ).as_dict()
 
+    @api.post("/tasks/{task_id}/close")
+    def close_task(
+        task_id: str,
+        body: Annotated[CommandRequest | None, Body()] = None,
+    ) -> dict[str, Any]:
+        payload = body or CommandRequest()
+        return command_service().close_task(
+            task_id,
+            actor=LOCAL_CONSOLE_ACTOR,
+            reason=payload.reason,
+        ).as_dict()
+
+    @api.post("/tasks/{task_id}/reopen")
+    def reopen_task(
+        task_id: str,
+        body: Annotated[CommandRequest | None, Body()] = None,
+    ) -> dict[str, Any]:
+        payload = body or CommandRequest()
+        return command_service().reopen_task(
+            task_id,
+            watch_until=_watch_until_from_now(loaded_config.config.lifecycle.watch_minutes),
+            actor=LOCAL_CONSOLE_ACTOR,
+            reason=payload.reason,
+        ).as_dict()
+
     @api.post("/maintenance/expire-approvals")
     def expire_approvals(body: Annotated[CommandRequest | None, Body()] = None) -> dict[str, Any]:
         payload = body or CommandRequest()
@@ -504,6 +530,14 @@ def _required_text(value: str | None, *, field: str) -> str:
             details={"field": field},
         )
     return value
+
+
+def _watch_until_from_now(minutes: int) -> str:
+    return (_parse_dt(utc_now_iso()) + timedelta(minutes=minutes)).astimezone().isoformat(timespec="seconds")
+
+
+def _parse_dt(value: str) -> datetime:
+    return datetime.fromisoformat(value)
 
 
 def _policy_request_changes(body: BaseModel, fields: tuple[str, ...]) -> dict[str, Any]:

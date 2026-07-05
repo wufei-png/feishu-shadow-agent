@@ -17,10 +17,16 @@ from feishu_shadow_agent.types import NormalizedMessage, ResourceRef, TaskRecord
 class FakeAgentBackend:
     provider = "hermes"
 
-    def task_router(self, prompt: str) -> AgentRunResult:
+    def task_router(self, prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
         raise AssertionError("not called")
 
-    def task_session(self, prompt: str, *, session_id: str | None = None) -> AgentRunResult:
+    def task_session(
+        self,
+        prompt: str,
+        *,
+        session_id: str | None = None,
+        cwd: str | Path | None = None,
+    ) -> AgentRunResult:
         raise AssertionError("not called")
 
 
