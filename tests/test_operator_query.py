@@ -362,6 +362,8 @@ def test_message_detail_returns_processing_context_without_preview_side_effects(
     assert detail["routing_audits"][0]["route"] == "new_task"
     assert detail["approvals"][0]["approval_id"] == "a_msg_detail"
     assert detail["actions"][0]["action_id"] == action_id
+    assert "payload" not in detail["approvals"][0]
+    assert "payload" not in detail["actions"][0]
     assert detail["recorded_dispatch_outcomes"][0]["attempts"] == []
     assert detail["recommended_actions"] == ["review_pending_approvals"]
     assert _message_detail_state(store, action_id) == before

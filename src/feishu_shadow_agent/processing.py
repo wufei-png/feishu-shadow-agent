@@ -1061,12 +1061,15 @@ class TaskProcessingService:
                 input_message_ids=postprocess.audit["input_message_ids"],
                 input_resource_ids=[],
                 response=audit_result.json_data if audit_result is not None and isinstance(audit_result.json_data, dict) else None,
-                error=audit_outcome.last_error if audit_result is None else audit_result.error,
+                error=_postprocess_audit_error(
+                    postprocess=postprocess,
+                    backend_error=audit_outcome.last_error if audit_result is None else audit_result.error,
+                ),
                 latency_ms=None if audit_result is None else audit_result.latency_ms,
                 prompt={"text": postprocess.audit["prompt"]} if self.config.debug.save_full_agent_io else None,
                 tool_permissions_profile="read_only",
             )
-        if self.config.reply_postprocess.enabled and not postprocess.applied:
+        if self.config.reply_postprocess.enabled and postprocess.failure_reason is not None:
             self.logger.error(
                 "reply_postprocess_failed",
                 run_id=run_id,
@@ -1365,6 +1368,17 @@ def _agent_working_dir_error(path: Path) -> str | None:
 
 def _can_directly_approve(proposed_reply: str, composed: ComposedReply) -> bool:
     return bool(proposed_reply.strip()) and bool(composed.text.strip()) and not composed.had_forbidden_mentions
+
+
+def _postprocess_audit_error(*, postprocess: ReplyPostprocessResult, backend_error: str | None) -> str | None:
+    if backend_error:
+        return backend_error
+    if postprocess.failure_reason is None:
+        return None
+    metadata_error = postprocess.metadata.get("error")
+    if isinstance(metadata_error, str) and metadata_error.strip():
+        return metadata_error
+    return postprocess.failure_reason
 
 
 def _notification_source(*, task: TaskRecord | None, message: Any | None) -> dict[str, Any]:

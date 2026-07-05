@@ -610,8 +610,8 @@ class OperatorQueryService:
         except sqlite3.OperationalError as exc:
             raise OperatorQueryReadError(str(exc)) from exc
 
-        approval_dtos = [_approval_dto(row, now=now, include_payload=True) for row in approvals]
-        action_dtos = [_action_dto(row, include_payload=True) for row in actions]
+        approval_dtos = [_approval_dto(row, now=now, include_payload=False) for row in approvals]
+        action_dtos = [_action_dto(row, include_payload=False) for row in actions]
         recorded_dispatch_outcomes = [
             _recorded_dispatch_outcome(action, attempts_by_action.get(int(action["id"]), []))
             for action in action_dtos

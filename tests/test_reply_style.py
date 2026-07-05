@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from feishu_shadow_agent.agent_backend import AgentRunResult
 from feishu_shadow_agent.agent_invocation import AgentInvoker
 from feishu_shadow_agent.config import (
@@ -196,4 +198,36 @@ def test_reply_style_refresh_failed_hermes_leaves_old_profile(tmp_path: Path) ->
 
     assert result.status == "failed"
     assert result.hermes_called is True
+    assert profile.read_text(encoding="utf-8") == "old profile\n"
+
+
+@pytest.mark.parametrize(
+    ("profile_markdown", "error"),
+    [
+        ("# Owner Reply Style Profile\n\nSee https://example.com/private\n", "URL"),
+        ("# Owner Reply Style Profile\n\nmessage om_secret1234\n", "Feishu identifier"),
+        ("# Owner Reply Style Profile\n\ncall 13812345678\n", "phone number"),
+    ],
+)
+def test_reply_style_refresh_rejects_profile_with_private_artifacts(
+    tmp_path: Path,
+    profile_markdown: str,
+    error: str,
+) -> None:
+    profile = tmp_path / "data" / "owner_style.zh.md"
+    profile.parent.mkdir()
+    profile.write_text("old profile\n", encoding="utf-8")
+    backend = FakeBackend()
+    backend.outputs.append({"status": "ok", "profile_markdown": profile_markdown})
+    refresher = _refresher(
+        tmp_path,
+        items=[_raw("om_1", "可以，晚点我看下"), _raw("om_2", "先按这个方向推进")],
+        backend=backend,
+    )
+
+    result = refresher.refresh(dry_run=False, run_id="run_1")
+
+    assert result.status == "failed"
+    assert result.hermes_called is True
+    assert error in (result.error or "")
     assert profile.read_text(encoding="utf-8") == "old profile\n"

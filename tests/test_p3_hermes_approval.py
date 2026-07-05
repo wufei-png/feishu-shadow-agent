@@ -594,6 +594,65 @@ def test_no_reply_does_not_run_reply_postprocess(tmp_path: Path) -> None:
         assert conn.execute("SELECT COUNT(*) AS c FROM actions").fetchone()["c"] == 0
 
 
+def test_reply_postprocess_skips_empty_auto_reply_candidate(tmp_path: Path) -> None:
+    (tmp_path / "owner_style.md").write_text("# style\n", encoding="utf-8")
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1", proposed_reply="   "))
+    cfg = _config(reply_postprocess=_postprocess_config())
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    assert hermes.postprocess_prompts == []
+    with store.connect() as conn:
+        approval = conn.execute("SELECT payload_json FROM approvals").fetchone()
+        send_count = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
+    payload = json.loads(approval["payload_json"])
+    assert payload["reason"] == "empty_proposed_reply"
+    assert payload["approvable"] is False
+    assert payload["text"] == ""
+    assert "postprocess" not in payload
+    assert send_count == 0
+
+
+def test_reply_postprocess_skips_empty_needs_owner_candidate(tmp_path: Path) -> None:
+    (tmp_path / "owner_style.md").write_text("# style\n", encoding="utf-8")
+    hermes = FakeHermes()
+    hermes.session_outputs.append(
+        _session_output(
+            answerability="needs_owner",
+            proposed_reply="",
+            reply_target_message_id="om_1",
+        )
+    )
+    cfg = _config(reply_postprocess=_postprocess_config())
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    assert hermes.postprocess_prompts == []
+    with store.connect() as conn:
+        approval = conn.execute("SELECT payload_json FROM approvals").fetchone()
+        notification = conn.execute("SELECT payload_json FROM actions WHERE kind = 'owner_notification'").fetchone()
+    payload = json.loads(approval["payload_json"])
+    notify_payload = json.loads(notification["payload_json"])
+    assert payload["reason"] == "needs_owner"
+    assert payload["approvable"] is False
+    assert payload["text"] == ""
+    assert notify_payload["suggested_reply"] == ""
+    assert "postprocess" not in payload
+
+
 def test_reply_postprocess_missing_profile_creates_keep_watching_approval_with_original_candidate(tmp_path: Path) -> None:
     hermes = FakeHermes()
     hermes.session_outputs.append(
@@ -706,10 +765,12 @@ def test_reply_postprocess_length_guard_routes_to_owner_review(tmp_path: Path) -
     with store.connect() as conn:
         approval = conn.execute("SELECT payload_json FROM approvals").fetchone()
         send_count = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
+        audit = conn.execute("SELECT error FROM agent_audits WHERE request_type = 'reply_postprocess'").fetchone()
     payload = json.loads(approval["payload_json"])
     assert send_count == 0
     assert payload["postprocess"]["failure_reason"] == "postprocess_length_growth"
     assert payload["postprocess"]["fallback"] == "original_candidate"
+    assert audit["error"] == "postprocess_length_growth"
 
 
 def test_needs_owner_notification_includes_context_without_suggested_reply(tmp_path: Path) -> None:

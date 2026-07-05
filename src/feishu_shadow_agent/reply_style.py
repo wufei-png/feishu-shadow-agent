@@ -23,6 +23,9 @@ MAX_SAMPLE_CHARS = 1000
 LINK_ONLY_RE = re.compile(r"^(?:https?://|www\.)\S+$", re.IGNORECASE)
 RESOURCE_PLACEHOLDER_RE = re.compile(r"^\s*(?:\[(?:图片|image|文件|file|附件|attachment)\]|<[^>]+>)\s*$", re.IGNORECASE)
 OPERATOR_COMMAND_RE = re.compile(r"^/(?:approve|reject|send|task|dispatch|maintenance|policy)\b", re.IGNORECASE)
+PROFILE_URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
+PROFILE_FEISHU_ID_RE = re.compile(r"\b(?:ou|oc|om|on)_[A-Za-z0-9_-]{4,}\b")
+PROFILE_PHONE_RE = re.compile(r"(?<!\d)(?:1[3-9]\d{9}|\+\d[\d -]{7,}\d)(?!\d)")
 
 
 @dataclass(frozen=True)
@@ -161,6 +164,19 @@ class ReplyStyleRefresher:
                 stats=stats,
                 error="owner style refresh did not return a profile",
             )
+        profile_error = _profile_privacy_error(profile_markdown)
+        if profile_error is not None:
+            return ReplyStyleRefreshResult(
+                status="failed",
+                pulled_count=len(page.items),
+                filtered_count=len(samples),
+                selected_count=len(selected),
+                profile_path=str(profile_path),
+                wrote_profile=False,
+                hermes_called=True,
+                stats=stats,
+                error=profile_error,
+            )
         _atomic_write_text(profile_path, profile_markdown + "\n")
         return ReplyStyleRefreshResult(
             status="written",
@@ -208,6 +224,16 @@ def _sample_stats(samples: list[str]) -> dict[str, Any]:
         "max_chars": max(lengths),
         "avg_chars": round(sum(lengths) / len(lengths), 1),
     }
+
+
+def _profile_privacy_error(profile_markdown: str) -> str | None:
+    if PROFILE_URL_RE.search(profile_markdown):
+        return "owner style profile contains a URL"
+    if PROFILE_FEISHU_ID_RE.search(profile_markdown):
+        return "owner style profile contains a Feishu identifier"
+    if PROFILE_PHONE_RE.search(profile_markdown):
+        return "owner style profile contains a phone number"
+    return None
 
 
 def _atomic_write_text(path: Path, text: str) -> None:

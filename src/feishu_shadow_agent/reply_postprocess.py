@@ -51,6 +51,12 @@ class ReplyPostprocessor:
         cfg = self.config.reply_postprocess
         if not cfg.enabled:
             return ReplyPostprocessResult(applied=False, reply=original_reply, metadata={"applied": False})
+        if not original_reply.strip():
+            return ReplyPostprocessResult(
+                applied=False,
+                reply=original_reply,
+                metadata={"applied": False, "skipped": True, "skip_reason": "empty_original_reply"},
+            )
         guidance = self._guidance_paths()
         if guidance.error is not None:
             return self._failed(
