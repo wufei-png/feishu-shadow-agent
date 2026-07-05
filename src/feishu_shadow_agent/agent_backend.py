@@ -39,3 +39,9 @@ class AgentBackend(Protocol):
         cwd: str | Path | None = None,
     ) -> AgentRunResult:
         ...
+
+    def reply_postprocess(self, prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
+        ...
+
+    def owner_style_refresh(self, prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
+        ...

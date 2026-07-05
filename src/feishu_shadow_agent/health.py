@@ -13,7 +13,7 @@ from .agent_backend import AgentRunResult
 from .config import LoadedConfig
 from .feishu.client import FeishuClient
 from .hermes import hermes_execution_policy
-from .paths import resolve_agent_skill_path, resolve_agent_working_dir
+from .paths import resolve_agent_skill_path, resolve_agent_working_dir, resolve_relative_path
 from .store.sqlite_store import SQLiteStore
 from .types import HealthCheckResult, LarkCliResult, new_run_id
 
@@ -163,6 +163,7 @@ class HealthSuite:
         else:
             results.append(hermes_results)
         results.append(self._check_agent_explicit_skills())
+        results.extend(self._check_reply_postprocess_guidance())
         self.store.record_health_results(run_id=self.run_id, results=results)
         return results
 
@@ -436,6 +437,35 @@ class HealthSuite:
             {"configured": skills, "resolved": resolved},
         )
 
+    def _check_reply_postprocess_guidance(self) -> list[HealthCheckResult]:
+        cfg = self.loaded_config.config.reply_postprocess
+        if not cfg.enabled:
+            return []
+        results: list[HealthCheckResult] = []
+        if cfg.owner_style.enabled:
+            path = resolve_relative_path(cfg.owner_style.profile_path, self.loaded_config.base_dir)
+            results.append(
+                _readable_file_result(
+                    name="reply_postprocess_owner_style_profile",
+                    path=path,
+                    configured=cfg.owner_style.profile_path,
+                    ok_message="reply postprocess owner style profile is readable",
+                    failed_message="reply postprocess owner style profile is missing or unreadable",
+                )
+            )
+        if cfg.humanizer_zh.enabled:
+            path = resolve_relative_path(cfg.humanizer_zh.skill_path, self.loaded_config.base_dir)
+            results.append(
+                _readable_file_result(
+                    name="reply_postprocess_humanizer_zh_skill",
+                    path=path,
+                    configured=cfg.humanizer_zh.skill_path,
+                    ok_message="reply postprocess humanizer-zh skill is readable",
+                    failed_message="reply postprocess humanizer-zh skill is missing or unreadable",
+                )
+            )
+        return results
+
 
 def has_critical_failure(results: list[HealthCheckResult]) -> bool:
     return any(result.is_critical_failure for result in results)
@@ -622,3 +652,17 @@ def _resolve_executable_path(path: str | None) -> str | None:
     if os.path.isabs(path):
         return path
     return shutil.which(path)
+
+
+def _readable_file_result(
+    *,
+    name: str,
+    path: Path,
+    configured: str,
+    ok_message: str,
+    failed_message: str,
+) -> HealthCheckResult:
+    details = {"configured": configured, "resolved": str(path)}
+    if path.is_file() and os.access(path, os.R_OK):
+        return HealthCheckResult(name, "warning", "ok", ok_message, details)
+    return HealthCheckResult(name, "warning", "failed", failed_message, details)

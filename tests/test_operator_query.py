@@ -182,6 +182,37 @@ def test_approval_available_commands_respect_approvable_payload_without_exposing
     assert "payload" not in listed[0]
 
 
+def test_approval_dto_exposes_postprocess_badge_fields_without_full_payload(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    task_id = _insert_task(store)
+    _insert_approval(
+        store,
+        task_id=task_id,
+        short_id="a_postprocess",
+        payload={
+            "reply_target_message_id": "om_root",
+            "text": "reply",
+            "keep_watching_on_reject": True,
+            "postprocess": {
+                "applied": False,
+                "status": "failed",
+                "failure_reason": "profile_missing",
+            },
+        },
+    )
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:00:00+08:00")
+
+    listed = query.list_approvals(status="pending")
+    detail = query.approval_detail("a_postprocess")
+
+    assert listed[0]["postprocess_status"] == "failed"
+    assert listed[0]["postprocess_applied"] is False
+    assert listed[0]["postprocess_failure_reason"] == "profile_missing"
+    assert "payload" not in listed[0]
+    assert detail is not None
+    assert detail["payload"]["keep_watching_on_reject"] is True
+
+
 def test_task_detail_returns_related_read_models_and_effective_policy(tmp_path: Path) -> None:
     store = _store(tmp_path)
     config = _config(

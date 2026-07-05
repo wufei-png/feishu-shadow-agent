@@ -53,6 +53,25 @@ reply_policy:
   p2p_auto_reply: true
   unknown_group_auto_reply: false
 
+reply_postprocess:
+  # Disabled by default. To enable, turn on this flag plus at least one guidance source below.
+  enabled: false
+  max_turns: 4
+  # null inherits agent_backend.hermes.model/provider.
+  model: null
+  provider: null
+  owner_style:
+    enabled: false
+    # Generate with: python -m feishu_shadow_agent reply-style refresh --config config.yaml
+    profile_path: data/owner_style.zh.md
+    refresh:
+      lookback_days: 30
+      max_samples: 300
+      min_samples: 20
+  humanizer_zh:
+    enabled: false
+    skill_path: /Users/wufei2/.agents/skills/humanizer-zh/SKILL.md
+
 chats:
   oc_xxx:
     name: 示例产品群

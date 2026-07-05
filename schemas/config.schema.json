@@ -417,6 +417,34 @@
       "title": "OwnerConfig",
       "type": "object"
     },
+    "OwnerStyleRefreshConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "lookback_days": {
+          "default": 30,
+          "description": "Days of owner replies to sample for style refresh.",
+          "minimum": 1,
+          "title": "Lookback Days",
+          "type": "integer"
+        },
+        "max_samples": {
+          "default": 300,
+          "description": "Maximum filtered owner reply samples to summarize.",
+          "minimum": 1,
+          "title": "Max Samples",
+          "type": "integer"
+        },
+        "min_samples": {
+          "default": 20,
+          "description": "Minimum filtered samples required before writing a profile.",
+          "minimum": 1,
+          "title": "Min Samples",
+          "type": "integer"
+        }
+      },
+      "title": "OwnerStyleRefreshConfig",
+      "type": "object"
+    },
     "ReplyPolicyConfig": {
       "additionalProperties": false,
       "properties": {
@@ -434,6 +462,102 @@
         }
       },
       "title": "ReplyPolicyConfig",
+      "type": "object"
+    },
+    "ReplyPostprocessConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Whether agent-generated reply candidates are postprocessed.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "max_turns": {
+          "default": 4,
+          "description": "Maximum Hermes turns for one-shot reply postprocess calls.",
+          "exclusiveMinimum": 0,
+          "title": "Max Turns",
+          "type": "integer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional model override; null inherits agent_backend.hermes.model.",
+          "title": "Model"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional provider override; null inherits agent_backend.hermes.provider.",
+          "title": "Provider"
+        },
+        "owner_style": {
+          "$ref": "#/$defs/ReplyPostprocessOwnerStyleConfig",
+          "description": "Owner reply style profile guidance."
+        },
+        "humanizer_zh": {
+          "$ref": "#/$defs/ReplyPostprocessHumanizerZhConfig",
+          "description": "Chinese humanizer guidance skill."
+        }
+      },
+      "title": "ReplyPostprocessConfig",
+      "type": "object"
+    },
+    "ReplyPostprocessHumanizerZhConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Whether to use the humanizer-zh guidance skill.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "skill_path": {
+          "default": "/Users/wufei2/.agents/skills/humanizer-zh/SKILL.md",
+          "description": "Path to the humanizer-zh SKILL.md guidance file.",
+          "title": "Skill Path",
+          "type": "string"
+        }
+      },
+      "title": "ReplyPostprocessHumanizerZhConfig",
+      "type": "object"
+    },
+    "ReplyPostprocessOwnerStyleConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Whether to use the owner style profile during reply postprocess.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "profile_path": {
+          "default": "data/owner_style.zh.md",
+          "description": "Markdown owner style profile path, resolved relative to config.yaml when not absolute.",
+          "title": "Profile Path",
+          "type": "string"
+        },
+        "refresh": {
+          "$ref": "#/$defs/OwnerStyleRefreshConfig",
+          "description": "Owner style refresh sampling settings."
+        }
+      },
+      "title": "ReplyPostprocessOwnerStyleConfig",
       "type": "object"
     },
     "RetentionConfig": {
@@ -524,6 +648,10 @@
     "reply_policy": {
       "$ref": "#/$defs/ReplyPolicyConfig",
       "description": "Global auto-reply policy used before chat-specific overrides."
+    },
+    "reply_postprocess": {
+      "$ref": "#/$defs/ReplyPostprocessConfig",
+      "description": "Optional one-shot postprocess for agent-generated reply candidates."
     },
     "chats": {
       "additionalProperties": {

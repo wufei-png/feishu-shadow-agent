@@ -12,6 +12,7 @@ from typing import Sequence
 
 import yaml
 
+from .agent_invocation import AgentInvoker
 from .config import ConfigError, ConfigService, LoadedConfig
 from .console_api import console_static_ready, create_console_app, default_console_static_dir
 from .console_security import console_access_url, generate_console_token, validate_console_bind_host
@@ -25,6 +26,7 @@ from .operator_commands import CommandResult, OperatorCommandService, command_ex
 from .operator_query import OperatorQueryService
 from .paths import resolve_agent_skill_path, resolve_agent_working_dir, resolve_relative_path
 from .processing import TaskProcessingService
+from .reply_style import ReplyStyleRefresher
 from .retention import RetentionService
 from .store.sqlite_store import SQLiteStore
 from .types import new_run_id, utc_now_iso
@@ -100,6 +102,13 @@ def build_parser() -> argparse.ArgumentParser:
     _add_config_arg(retention_prune)
     retention_prune.add_argument("--dry-run", action="store_true", help="preview retention cleanup")
     retention_prune.set_defaults(handler=_handle_retention_prune)
+
+    reply_style = subparsers.add_parser("reply-style", help="reply style profile helpers")
+    reply_style_subparsers = reply_style.add_subparsers(dest="reply_style_command")
+    reply_style_refresh = reply_style_subparsers.add_parser("refresh", help="refresh owner reply style profile")
+    _add_config_arg(reply_style_refresh)
+    reply_style_refresh.add_argument("--dry-run", action="store_true", help="pull and filter samples without calling Hermes or writing")
+    reply_style_refresh.set_defaults(handler=_handle_reply_style_refresh)
 
     maintenance = subparsers.add_parser("maintenance", help="explicit maintenance helpers")
     maintenance_subparsers = maintenance.add_subparsers(dest="maintenance_command")
@@ -250,6 +259,7 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         tool_permissions=loaded.config.tool_permissions,
         config_scope=backend_config.config_scope,
         auto_context=backend_config.auto_context,
+        reply_postprocess=loaded.config.reply_postprocess,
         session_skills=session_skills,
     )
     task_processor = TaskProcessingService(
@@ -258,6 +268,7 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         agent_backend=agent_backend,
         logger=logger,
         agent_working_dir=agent_working_dir,
+        config_base_dir=loaded.base_dir,
     )
     daemon = Daemon(
         store=store,
@@ -458,6 +469,33 @@ def _handle_retention_prune(args: argparse.Namespace) -> int:
     ).prune(run_id=new_run_id("retention"), dry_run=args.dry_run)
     print(yaml.safe_dump(summary.as_dict(), allow_unicode=True, sort_keys=False), end="")
     return 0
+
+
+def _handle_reply_style_refresh(args: argparse.Namespace) -> int:
+    loaded, _, logger = _load_runtime(args.config)
+    backend_config = loaded.config.agent_backend
+    client = LarkCliClient(
+        path=loaded.config.lark_cli.path,
+        timeout_seconds=loaded.config.lark_cli.timeout_seconds,
+        cwd=loaded.base_dir,
+    )
+    backend = HermesCliClient(
+        config=backend_config.hermes,
+        tool_permissions=loaded.config.tool_permissions,
+        config_scope=backend_config.config_scope,
+        auto_context=backend_config.auto_context,
+        reply_postprocess=loaded.config.reply_postprocess,
+    )
+    refresher = ReplyStyleRefresher(
+        config=loaded.config,
+        base_dir=loaded.base_dir,
+        feishu_client=client,
+        agent_backend=backend,
+        agent_invoker=AgentInvoker(logger=logger),
+    )
+    result = refresher.refresh(dry_run=args.dry_run, run_id=new_run_id("reply_style"))
+    print(yaml.safe_dump(result.as_dict(), allow_unicode=True, sort_keys=False), end="")
+    return 0 if result.status in {"dry_run", "written"} else 2
 
 
 def _handle_maintenance_expire_approvals(args: argparse.Namespace) -> int:

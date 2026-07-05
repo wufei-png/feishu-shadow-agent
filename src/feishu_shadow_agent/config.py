@@ -224,6 +224,80 @@ class ReplyPolicyConfig(StrictModel):
     )
 
 
+class OwnerStyleRefreshConfig(StrictModel):
+    lookback_days: int = Field(default=30, ge=1, description="Days of owner replies to sample for style refresh.")
+    max_samples: int = Field(default=300, ge=1, description="Maximum filtered owner reply samples to summarize.")
+    min_samples: int = Field(default=20, ge=1, description="Minimum filtered samples required before writing a profile.")
+
+    @model_validator(mode="after")
+    def validate_sample_window(self) -> "OwnerStyleRefreshConfig":
+        if self.min_samples > self.max_samples:
+            raise ValueError("reply_postprocess.owner_style.refresh.min_samples must be <= max_samples")
+        return self
+
+
+class ReplyPostprocessOwnerStyleConfig(StrictModel):
+    enabled: StrictBool = Field(default=False, description="Whether to use the owner style profile during reply postprocess.")
+    profile_path: str = Field(
+        default="data/owner_style.zh.md",
+        description="Markdown owner style profile path, resolved relative to config.yaml when not absolute.",
+    )
+    refresh: OwnerStyleRefreshConfig = Field(
+        default_factory=OwnerStyleRefreshConfig,
+        description="Owner style refresh sampling settings.",
+    )
+
+    @field_validator("profile_path")
+    @classmethod
+    def validate_profile_path(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("reply_postprocess.owner_style.profile_path must not be empty")
+        return cleaned
+
+
+class ReplyPostprocessHumanizerZhConfig(StrictModel):
+    enabled: StrictBool = Field(default=False, description="Whether to use the humanizer-zh guidance skill.")
+    skill_path: str = Field(
+        default="/Users/wufei2/.agents/skills/humanizer-zh/SKILL.md",
+        description="Path to the humanizer-zh SKILL.md guidance file.",
+    )
+
+    @field_validator("skill_path")
+    @classmethod
+    def validate_skill_path(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("reply_postprocess.humanizer_zh.skill_path must not be empty")
+        return cleaned
+
+
+class ReplyPostprocessConfig(StrictModel):
+    enabled: StrictBool = Field(default=False, description="Whether agent-generated reply candidates are postprocessed.")
+    max_turns: int = Field(default=4, gt=0, description="Maximum Hermes turns for one-shot reply postprocess calls.")
+    model: str | None = Field(default=None, description="Optional model override; null inherits agent_backend.hermes.model.")
+    provider: str | None = Field(
+        default=None,
+        description="Optional provider override; null inherits agent_backend.hermes.provider.",
+    )
+    owner_style: ReplyPostprocessOwnerStyleConfig = Field(
+        default_factory=ReplyPostprocessOwnerStyleConfig,
+        description="Owner reply style profile guidance.",
+    )
+    humanizer_zh: ReplyPostprocessHumanizerZhConfig = Field(
+        default_factory=ReplyPostprocessHumanizerZhConfig,
+        description="Chinese humanizer guidance skill.",
+    )
+
+    @model_validator(mode="after")
+    def validate_enabled_sources(self) -> "ReplyPostprocessConfig":
+        if self.enabled and not (self.owner_style.enabled or self.humanizer_zh.enabled):
+            raise ValueError(
+                "reply_postprocess.enabled requires owner_style.enabled or humanizer_zh.enabled"
+            )
+        return self
+
+
 class ChatPolicyConfig(StrictModel):
     name: str = Field(default="", description="Human-readable chat name for operators; not used as an identifier.")
     auto_reply: StrictBool = Field(default=False, description="Whether this chat may auto-reply when all gates pass.")
@@ -282,6 +356,10 @@ class AppConfig(StrictModel):
     reply_policy: ReplyPolicyConfig = Field(
         default_factory=ReplyPolicyConfig,
         description="Global auto-reply policy used before chat-specific overrides.",
+    )
+    reply_postprocess: ReplyPostprocessConfig = Field(
+        default_factory=ReplyPostprocessConfig,
+        description="Optional one-shot postprocess for agent-generated reply candidates.",
     )
     chats: dict[str, ChatPolicyConfig] = Field(
         default_factory=dict,

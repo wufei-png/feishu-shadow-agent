@@ -35,6 +35,18 @@ TASK_SESSION_INSTRUCTION = (
     "Return one strict JSON object that conforms to output_schema. "
     "Do not include Markdown, explanatory text, or @ mentions."
 )
+REPLY_POSTPROCESS_INSTRUCTION = (
+    "Rewrite only the expression of the provided Feishu reply candidate. Preserve meaning, facts, uncertainty, "
+    "commitments, times, conclusions, and action items exactly. Do not add facts, promises, deadlines, conclusions, "
+    "or next steps. Do not choose a reply target. Do not add Feishu @ mentions. "
+    "If you cannot safely rewrite without changing meaning, return status needs_owner. "
+    "Return one strict JSON object with status and final_reply only. Do not include Markdown or explanatory text."
+)
+OWNER_STYLE_REFRESH_INSTRUCTION = (
+    "Summarize the owner's natural Chinese reply style from the provided samples. Do not retain raw message ids, "
+    "chat ids, names, links, phone numbers, or full private conversation context. Keep at most three short "
+    "owner-like scenario examples. Return strict JSON with status and profile_markdown only."
+)
 
 
 class StrictModel(BaseModel):
@@ -104,6 +116,16 @@ class FollowupTaskSessionOutput(BaseTaskSessionOutput):
     pass
 
 
+class ReplyPostprocessOutput(StrictModel):
+    status: Literal["ok", "needs_owner"] = Field(description="ok when final_reply is safe to use; otherwise needs_owner.")
+    final_reply: str = Field(default="", description="Postprocessed reply text without Feishu @ mentions.")
+
+
+class OwnerStyleRefreshOutput(StrictModel):
+    status: Literal["ok", "failed"] = Field(description="ok when profile_markdown is ready to write.")
+    profile_markdown: str = Field(default="", description="Generated Markdown owner style profile.")
+
+
 def build_router_prompt(
     *,
     message: NormalizedMessage,
@@ -161,6 +183,64 @@ def build_task_session_prompt(
     }
     if context_access is not None:
         payload["context_access"] = context_access
+    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def build_reply_postprocess_prompt(
+    *,
+    original_reply: str,
+    enabled_guidance: list[str],
+    owner_style_profile_path: str | None = None,
+    humanizer_skill_path: str | None = None,
+) -> str:
+    guidance: list[dict[str, str]] = []
+    if owner_style_profile_path is not None:
+        guidance.append(
+            {
+                "source": "owner_style",
+                "instruction": "Read this owner style profile path and align the expression with it.",
+                "path": owner_style_profile_path,
+            }
+        )
+    if humanizer_skill_path is not None:
+        guidance.append(
+            {
+                "source": "humanizer_zh",
+                "instruction": "Read this skill guidance path and avoid common AI writing patterns.",
+                "path": humanizer_skill_path,
+            }
+        )
+    payload = {
+        "instruction": REPLY_POSTPROCESS_INSTRUCTION,
+        "enabled_guidance": enabled_guidance,
+        "guidance": guidance,
+        "output_schema": _schema_hint(ReplyPostprocessOutput),
+        "candidate_reply": original_reply,
+    }
+    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def build_owner_style_refresh_prompt(
+    *,
+    generated_at: str,
+    lookback_days: int,
+    sample_count: int,
+    samples: list[str],
+) -> str:
+    payload = {
+        "instruction": OWNER_STYLE_REFRESH_INSTRUCTION,
+        "output_schema": _schema_hint(OwnerStyleRefreshOutput),
+        "profile_format": {
+            "title": "Owner Reply Style Profile",
+            "metadata": {
+                "generated_at": generated_at,
+                "lookback_days": lookback_days,
+                "sample_count": sample_count,
+            },
+            "sections": ["Style Summary", "Common Patterns", "Avoid", "Examples"],
+        },
+        "samples": samples,
+    }
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 

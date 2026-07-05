@@ -14,6 +14,8 @@ python -m feishu_shadow_agent policy import-config --config config.yaml
 python -m feishu_shadow_agent policy import-config --config config.yaml --replace
 python -m feishu_shadow_agent policy update-global --config config.yaml --p2p-auto-reply false --reason "pause P2P auto replies"
 python -m feishu_shadow_agent policy update-chat --config config.yaml --chat-id oc_xxx --auto-reply false --reason "pause chat"
+python -m feishu_shadow_agent reply-style refresh --config config.yaml --dry-run
+python -m feishu_shadow_agent reply-style refresh --config config.yaml
 python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --port 8765
 ```
 
@@ -31,6 +33,7 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `lark_cli` | object | 见下表 | `lark-cli` 可执行文件和超时。 |
 | `agent_backend` | object | 见下表 | Agent backend 选择、上下文隔离策略和 provider 专属参数。 |
 | `reply_policy` | object | 见下表 | Policy Import Source 中的全局自动回复策略。 |
+| `reply_postprocess` | object | 见下表 | 可选的一次性回复表达改写；默认关闭，不改变现有回复路径。 |
 | `chats` | map | `{}` | Policy Import Source 中按 Feishu `chat_id` 声明的群级策略，例如 `oc_xxx`。 |
 | `tool_permissions` | enum | `guarded_write` | Agent backend 工具权限档位：`read_only`、`guarded_write`、`full_access`。当前仅 Hermes backend 实现映射。 |
 | `retention` | object | 见下表 | 本地数据保留时间。 |
@@ -77,6 +80,17 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `agent_backend.hermes.api_key_env` | string/null | `HERMES_API_KEY` | `agent_backend.hermes.mode: http` 时可选 Bearer token 环境变量名。Hermes 官方 API server 常用 `API_SERVER_KEY`；`/health` 端点通常无需认证，此字段主要留给需要鉴权的 health URL。 |
 | `reply_policy.p2p_auto_reply` | bool | `true` | 导入 Product Policy Store 后，P2P 私聊在回复 gate 通过时是否允许自动回复。 |
 | `reply_policy.unknown_group_auto_reply` | bool | `false` | 导入 Product Policy Store 后，未显式配置的群是否允许自动回复；不影响资源下载、bot 是否入群或 user fallback。 |
+| `reply_postprocess.enabled` | bool | `false` | 是否对 agent 生成的候选回复做一次性表达改写。关闭时不检查 profile/skill 路径，也不调用 Hermes postprocess。开启时至少需要启用 `owner_style` 或 `humanizer_zh` 之一。 |
+| `reply_postprocess.max_turns` | int `> 0` | `4` | 一次性 reply postprocess 和 owner style refresh 的 Hermes `--max-turns`，不影响 router/session。 |
+| `reply_postprocess.model` | string/null | `null` | postprocess/refresh 的模型覆盖；`null` 继承 `agent_backend.hermes.model`。 |
+| `reply_postprocess.provider` | string/null | `null` | postprocess/refresh 的 provider 覆盖；`null` 继承 `agent_backend.hermes.provider`。 |
+| `reply_postprocess.owner_style.enabled` | bool | `false` | 是否让 postprocess 读取 owner style profile 并贴近 owner 的自然回复习惯。 |
+| `reply_postprocess.owner_style.profile_path` | string | `data/owner_style.zh.md` | owner style Markdown profile 路径；相对路径基于配置文件目录解析。缺失或不可读时不自动发送，候选回复转 owner review。 |
+| `reply_postprocess.owner_style.refresh.lookback_days` | int `>= 1` | `30` | `reply-style refresh` 拉取 owner 回复样本的时间窗口。 |
+| `reply_postprocess.owner_style.refresh.max_samples` | int `>= 1` | `300` | refresh 送给 summarizer 的最大过滤后样本数。 |
+| `reply_postprocess.owner_style.refresh.min_samples` | int `>= 1` | `20` | refresh 写入 profile 前要求的最小过滤后样本数。 |
+| `reply_postprocess.humanizer_zh.enabled` | bool | `false` | 是否让 postprocess 读取 humanizer-zh skill guidance，避免常见 AI 写作痕迹。 |
+| `reply_postprocess.humanizer_zh.skill_path` | string | `/Users/wufei2/.agents/skills/humanizer-zh/SKILL.md` | humanizer-zh guidance 文件路径。缺失或不可读时不自动发送，候选回复转 owner review。 |
 | `chats.<chat_id>.name` | string | `""` | 方便 operator 识别的群名，不作为 chat_id。 |
 | `chats.<chat_id>.auto_reply` | bool | `false` | 该群在所有 gate 通过时是否允许自动回复。 |
 | `chats.<chat_id>.bot_joined` | bool | `false` | bot 是否已进群；影响 bot 回复和资源访问能力判断。 |
@@ -170,6 +184,16 @@ hermes chat -q <prompt> -Q --source <source> --toolsets <...> [--yolo] --max-tur
 - `--ignore-user-config`：默认由 `agent_backend.config_scope: isolated` 启用，避免用户全局配置改变后台服务行为。
 - `--ignore-rules`：默认由 `agent_backend.auto_context: disabled` 启用，跳过 `AGENTS.md`、`SOUL.md`、memory 和预加载 skill 的自动注入，避免仓库/编辑器规则污染飞书任务 prompt。
 - `--skills <path>`：只在 task session 中根据 `agent_backend.explicit_context.skills` 注入；task router 默认不加载 skill，保持路由决策更窄、更稳定。
+
+Reply postprocess 和 owner style refresh 也是 `hermes chat -q -Q` 一次性调用，但固定使用 read-only tool policy：
+
+```text
+--toolsets safe --max-turns reply_postprocess.max_turns
+```
+
+它们不传 `--resume`，不注入 `agent_backend.explicit_context.skills`，也不改变 task session。`reply_postprocess.model/provider` 为 `null` 时继承 `agent_backend.hermes.model/provider`。
+
+`reply-style refresh --dry-run` 只拉取和过滤 owner 样本，输出计数和基础字符统计，不调用 Hermes、不写 profile。非 dry-run 在样本数达到 `min_samples` 后调用 summarizer，成功后通过临时文件原子替换 `owner_style.profile_path`。
 
 ### `mode: http` 的范围
 

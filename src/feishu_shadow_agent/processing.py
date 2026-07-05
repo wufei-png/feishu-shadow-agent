@@ -22,6 +22,7 @@ from .prompt import (
     TaskRouterOutput,
     build_router_prompt,
 )
+from .reply_postprocess import ReplyPostprocessResult, ReplyPostprocessor
 from .resource_preflight import ResourcePreflight, ResourcePreflightResult, resource_status_counts
 from .routing import CandidateCollector, RoutingResult
 from .store.sqlite_store import SQLiteStore
@@ -88,6 +89,7 @@ class ApprovalService:
         reason: str,
         final_reply: str | None = None,
         approvable: bool = True,
+        payload_extra: dict[str, Any] | None = None,
     ) -> int:
         reply_text = proposed_reply if final_reply is None else final_reply
         payload_text = reply_text if approvable else ""
@@ -108,6 +110,8 @@ class ApprovalService:
             "reason": reason,
             "approvable": approvable,
         }
+        if payload_extra:
+            payload.update(payload_extra)
         notify = {
             "type": "approval_required",
             "task_id": task.short_id,
@@ -188,12 +192,14 @@ class TaskProcessingService:
         agent_max_attempts: int = AGENT_MAX_ATTEMPTS,
         agent_retry_delays_seconds: tuple[float, ...] = (1.0, 3.0),
         agent_working_dir: str | Path | None = None,
+        config_base_dir: str | Path | None = None,
         sleep_func: Callable[[float], None] = time.sleep,
     ):
         self.store = store
         self.config = config
         self.agent_backend = agent_backend
         self.agent_working_dir = Path(agent_working_dir) if agent_working_dir is not None else Path.cwd()
+        self.config_base_dir = Path(config_base_dir) if config_base_dir is not None else Path.cwd()
         self.logger = logger
         self.collector = CandidateCollector(store)
         self.approvals = ApprovalService(store=store, config=config)
@@ -217,6 +223,12 @@ class TaskProcessingService:
             agent_backend=agent_backend,
             agent_invoker=self.agent_invoker,
             context_access=self.context_access,
+        )
+        self.reply_postprocessor = ReplyPostprocessor(
+            config=config,
+            base_dir=self.config_base_dir,
+            agent_backend=agent_backend,
+            agent_invoker=self.agent_invoker,
         )
 
     def set_resource_retry_func(self, func: Callable[[NormalizedMessage, str | None], None]) -> None:
@@ -1030,8 +1042,79 @@ class TaskProcessingService:
 
         reply_target_id = output.reply_target_message_id or message.message_id
         reply_target = self.store.get_message(reply_target_id)
+        postprocess = self._reply_postprocess(
+            task=task,
+            message=message,
+            input_message_ids=session_plan.prompt_message_ids,
+            original_reply=output.proposed_reply,
+            run_id=run_id,
+            cwd=agent_working_dir,
+        )
+        if postprocess.audit is not None:
+            audit_result = postprocess.audit["result"]
+            audit_outcome = postprocess.audit["outcome"]
+            self.store.record_agent_audit(
+                backend_provider=self.agent_backend.provider,
+                request_type="reply_postprocess",
+                task_id=task.id,
+                agent_session_id=None if audit_result is None else audit_result.session_id,
+                input_message_ids=postprocess.audit["input_message_ids"],
+                input_resource_ids=[],
+                response=audit_result.json_data if audit_result is not None and isinstance(audit_result.json_data, dict) else None,
+                error=audit_outcome.last_error if audit_result is None else audit_result.error,
+                latency_ms=None if audit_result is None else audit_result.latency_ms,
+                prompt={"text": postprocess.audit["prompt"]} if self.config.debug.save_full_agent_io else None,
+                tool_permissions_profile="read_only",
+            )
+        if self.config.reply_postprocess.enabled and not postprocess.applied:
+            self.logger.error(
+                "reply_postprocess_failed",
+                run_id=run_id,
+                task_id=str(task.id),
+                data={
+                    "message_id": message.message_id,
+                    "task_short_id": task.short_id,
+                    "reason": postprocess.failure_reason,
+                },
+            )
+            composed_original = self.composer.compose(
+                proposed_reply=output.proposed_reply,
+                reply_target=reply_target,
+                chat_type=task.chat_type or message.chat_type,
+            )
+            self.store.update_task_after_agent(
+                task_id=task.id,
+                task_label=output.task_label if isinstance(output, InitialTaskSessionOutput) else None,
+                status="watching",
+                watch_until=watch_until,
+            )
+            approval_id = self.approvals.request_send_reply(
+                task=task,
+                reply_target_message_id=reply_target_id,
+                incoming_message_id=message.message_id,
+                proposed_reply=output.proposed_reply,
+                final_reply=composed_original.text,
+                reason=f"reply_postprocess_{postprocess.failure_reason or 'failed'}",
+                approvable=_can_directly_approve(output.proposed_reply, composed_original),
+                payload_extra={
+                    "keep_watching_on_reject": True,
+                    "postprocess": postprocess.metadata,
+                },
+            )
+            self._mark_processing_processed(
+                message=message,
+                stage="task_session",
+                task_id=task.id,
+                attempt_count=outcome.attempt_count,
+            )
+            return ProcessingResult(
+                "approval_created",
+                task.id,
+                approval_id=approval_id,
+                reason="reply_postprocess_failed",
+            )
         composed = self.composer.compose(
-            proposed_reply=output.proposed_reply,
+            proposed_reply=postprocess.reply,
             reply_target=reply_target,
             chat_type=task.chat_type or message.chat_type,
         )
@@ -1040,6 +1123,7 @@ class TaskProcessingService:
             message=message,
             output=output,
             composed=composed,
+            proposed_reply=postprocess.reply,
         )
         if not gate["allow"]:
             self.logger.warning(
@@ -1065,10 +1149,11 @@ class TaskProcessingService:
                 task=task,
                 reply_target_message_id=reply_target_id,
                 incoming_message_id=message.message_id,
-                proposed_reply=output.proposed_reply,
+                proposed_reply=postprocess.reply,
                 final_reply=composed.text,
                 reason=gate["reason"],
-                approvable=_can_directly_approve(output.proposed_reply, composed),
+                approvable=_can_directly_approve(postprocess.reply, composed),
+                payload_extra={"postprocess": postprocess.metadata} if postprocess.applied else None,
             )
             self._mark_processing_processed(
                 message=message,
@@ -1084,6 +1169,8 @@ class TaskProcessingService:
             "source": "auto_reply",
             "policy_source": gate["policy_source"],
         }
+        if postprocess.applied:
+            payload["postprocess"] = postprocess.metadata
         next_status = "closed" if output.watch_action == "close" else "watching"
         self.store.update_task_after_agent(
             task_id=task.id,
@@ -1117,6 +1204,25 @@ class TaskProcessingService:
         )
         return ProcessingResult("send_action_created", task.id, action_id=action_id, reason="gate_passed")
 
+    def _reply_postprocess(
+        self,
+        *,
+        task: TaskRecord,
+        message: NormalizedMessage,
+        input_message_ids: list[str],
+        original_reply: str,
+        run_id: str,
+        cwd: str | Path | None,
+    ) -> ReplyPostprocessResult:
+        return self.reply_postprocessor.run(
+            task=task,
+            message_id=message.message_id,
+            input_message_ids=input_message_ids,
+            original_reply=original_reply,
+            run_id=run_id,
+            cwd=cwd,
+        )
+
     def _resource_preflight(
         self,
         *,
@@ -1139,13 +1245,14 @@ class TaskProcessingService:
         message: NormalizedMessage,
         output: BaseTaskSessionOutput,
         composed: ComposedReply,
+        proposed_reply: str | None = None,
     ) -> dict[str, Any]:
         decision = self.policy.resolve_reply_policy(
             task=task,
             message=message,
             answerability=output.answerability,
             had_forbidden_mentions=composed.had_forbidden_mentions,
-            proposed_reply=output.proposed_reply,
+            proposed_reply=output.proposed_reply if proposed_reply is None else proposed_reply,
             final_reply=composed.text,
         )
         return {

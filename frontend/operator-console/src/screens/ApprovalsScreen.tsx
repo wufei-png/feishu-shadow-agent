@@ -136,6 +136,13 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
                   title={approval.approval_id}
                 >
                   <span className="row-preview">{shortText(approval.preview)}</span>
+                  {postprocessBadge(approval) ? (
+                    <span className="inline-badges row-actions">
+                      <Badge tone={approval.postprocess_status === "needs_owner" ? "warning" : "danger"}>
+                        {postprocessBadge(approval)}
+                      </Badge>
+                    </span>
+                  ) : null}
                 </ListRow>
               ))}
             </div>
@@ -165,6 +172,18 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
                 <FactRow label="Expires" value={formatDate(detail.data.expires_at)} />
                 <FactRow label="Recommended" value={detail.data.recommended_action} />
               </FieldList>
+              {postprocessInfo(detail.data.payload) ? (
+                <div className="subsection">
+                  <p className="eyebrow">Postprocess</p>
+                  <FieldList>
+                    <FactRow label="Status" value={String(postprocessInfo(detail.data.payload)?.status ?? "unknown")} />
+                    <FactRow label="Guidance" value={postprocessInfo(detail.data.payload)?.guidance || "none"} />
+                    <FactRow label="Failure" value={postprocessInfo(detail.data.payload)?.failure || "none"} />
+                    <FactRow label="Approve sends" value={postprocessInfo(detail.data.payload)?.approveBehavior || "payload text"} />
+                    <FactRow label="Reject behavior" value={postprocessInfo(detail.data.payload)?.rejectBehavior || "normal"} />
+                  </FieldList>
+                </div>
+              ) : null}
               <JsonBlock value={detail.data.payload ?? {}} />
             </div>
 
@@ -252,6 +271,38 @@ function FactRow({ label, value }: { label: string; value: ReactNode }) {
 function clean(value: string): string | undefined {
   const trimmed = value.trim();
   return trimmed || undefined;
+}
+
+function postprocessBadge(approval: ApprovalSummary): string | null {
+  if (approval.postprocess_status === "failed") {
+    return "postprocess_failed";
+  }
+  if (approval.postprocess_status === "needs_owner") {
+    return "postprocess_needs_owner";
+  }
+  return null;
+}
+
+function postprocessInfo(payload: Record<string, unknown> | undefined): {
+  status: unknown;
+  guidance: string;
+  failure: string;
+  approveBehavior: string;
+  rejectBehavior: string;
+} | null {
+  const value = payload?.postprocess;
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const postprocess = value as Record<string, unknown>;
+  const guidance = Array.isArray(postprocess.enabled_guidance) ? postprocess.enabled_guidance.join(", ") : "";
+  return {
+    status: postprocess.status,
+    guidance,
+    failure: typeof postprocess.failure_reason === "string" ? postprocess.failure_reason : "",
+    approveBehavior: typeof postprocess.fallback === "string" ? postprocess.fallback : "postprocessed_candidate",
+    rejectBehavior: payload?.keep_watching_on_reject === true ? "keeps task watching" : "normal"
+  };
 }
 
 async function listApprovalsForFilter(token: string, filter: ApprovalFilter): Promise<ApprovalSummary[]> {

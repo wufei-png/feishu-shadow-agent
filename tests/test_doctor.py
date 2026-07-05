@@ -172,6 +172,70 @@ def test_send_test_owner_notification_is_not_dry_run(tmp_path: Path) -> None:
     assert client.owner_message_dry_runs == [False]
 
 
+def test_doctor_warns_when_enabled_reply_postprocess_owner_profile_is_missing(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+reply_postprocess:
+  enabled: true
+  owner_style:
+    enabled: true
+    profile_path: missing-owner-style.md
+""",
+        encoding="utf-8",
+    )
+    loaded = ConfigService().load(config_path)
+    store = _initialized_store(tmp_path, loaded)
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        hermes_checker=ok_hermes,
+        run_id="doctor_1",
+    )
+
+    results = suite.run(send_test=False)
+
+    warning = next(result for result in results if result.name == "reply_postprocess_owner_style_profile")
+    assert warning.severity == "warning"
+    assert warning.status == "failed"
+    assert not [result for result in results if result.is_critical_failure]
+
+
+def test_doctor_warns_when_enabled_reply_postprocess_humanizer_skill_is_missing(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+reply_postprocess:
+  enabled: true
+  humanizer_zh:
+    enabled: true
+    skill_path: missing-humanizer.md
+""",
+        encoding="utf-8",
+    )
+    loaded = ConfigService().load(config_path)
+    store = _initialized_store(tmp_path, loaded)
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        hermes_checker=ok_hermes,
+        run_id="doctor_1",
+    )
+
+    results = suite.run(send_test=False)
+
+    warning = next(result for result in results if result.name == "reply_postprocess_humanizer_zh_skill")
+    assert warning.severity == "warning"
+    assert warning.status == "failed"
+    assert not [result for result in results if result.is_critical_failure]
+
+
 def test_missing_scope_is_critical_failure(tmp_path: Path) -> None:
     loaded = ConfigService().load(FIXTURE)
     store = _initialized_store(tmp_path, loaded)

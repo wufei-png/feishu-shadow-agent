@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from feishu_shadow_agent.agent_backend import AgentRunResult
-from feishu_shadow_agent.config import HermesConfig
+from feishu_shadow_agent.config import HermesConfig, ReplyPostprocessConfig
 from feishu_shadow_agent.hermes import HermesCliClient
 
 
@@ -116,3 +116,58 @@ def test_hermes_cli_rejects_non_json_stdout() -> None:
     assert not result.ok
     assert result.session_id == "sid"
     assert "not valid JSON" in (result.error or "")
+
+
+def test_reply_postprocess_uses_safe_toolset_without_resume_or_skills() -> None:
+    seen: list[list[str]] = []
+
+    def runner(argv: list[str], timeout: int) -> AgentRunResult:
+        seen.append(argv)
+        return AgentRunResult(argv=argv, exit_code=0, stdout='{"status":"ok","final_reply":"done"}')
+
+    client = HermesCliClient(
+        config=HermesConfig(path="/bin/hermes", session_max_turns=8, model="main-model", provider="main-provider"),
+        tool_permissions="full_access",
+        reply_postprocess=ReplyPostprocessConfig(max_turns=5),
+        session_skills=["/skills/task"],
+        runner=runner,
+    )
+
+    result = client.reply_postprocess("prompt")
+
+    argv = seen[0]
+    assert result.ok
+    assert argv[argv.index("--toolsets") + 1] == "safe"
+    assert "--yolo" not in argv
+    assert "--resume" not in argv
+    assert "--skills" not in argv
+    assert argv[argv.index("--max-turns") + 1] == "5"
+    assert argv[argv.index("--model") + 1] == "main-model"
+    assert argv[argv.index("--provider") + 1] == "main-provider"
+
+
+def test_owner_style_refresh_uses_safe_toolset_and_postprocess_overrides() -> None:
+    seen: list[list[str]] = []
+
+    def runner(argv: list[str], timeout: int) -> AgentRunResult:
+        seen.append(argv)
+        return AgentRunResult(argv=argv, exit_code=0, stdout='{"status":"ok","profile_markdown":"# Profile"}')
+
+    client = HermesCliClient(
+        config=HermesConfig(path="/bin/hermes", model="main-model", provider="main-provider"),
+        tool_permissions="guarded_write",
+        reply_postprocess=ReplyPostprocessConfig(max_turns=6, model="style-model", provider="style-provider"),
+        session_skills=["/skills/task"],
+        runner=runner,
+    )
+
+    result = client.owner_style_refresh("prompt")
+
+    argv = seen[0]
+    assert result.ok
+    assert argv[argv.index("--toolsets") + 1] == "safe"
+    assert "--resume" not in argv
+    assert "--skills" not in argv
+    assert argv[argv.index("--max-turns") + 1] == "6"
+    assert argv[argv.index("--model") + 1] == "style-model"
+    assert argv[argv.index("--provider") + 1] == "style-provider"

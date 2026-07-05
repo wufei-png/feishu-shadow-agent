@@ -2311,6 +2311,7 @@ class SQLiteStore:
                 task = conn.execute("SELECT * FROM tasks WHERE id = ?", (approval["task_id"],)).fetchone()
             if verb == "approve" and not _task_is_watching(task):
                 raise ValueError("approval task is not watching")
+            payload = json.loads(approval["payload_json"] or "{}")
             conn.execute(
                 """
                 UPDATE approvals
@@ -2320,6 +2321,27 @@ class SQLiteStore:
                 (resolved_status, now, approval["id"]),
             )
             if verb == "reject":
+                if payload.get("keep_watching_on_reject") is True and approval["task_id"] is not None:
+                    cancelled_actions = self._cancel_pending_actions_for_approvals_locked(
+                        conn,
+                        approval_ids=[int(approval["id"])],
+                        now=now,
+                    )
+                    conn.execute(
+                        """
+                        UPDATE tasks
+                        SET status = ?, updated_at = ?, closed_at = NULL
+                        WHERE id = ?
+                        """,
+                        (TaskStatus.WATCHING.value, now, int(approval["task_id"])),
+                    )
+                    return {
+                        "approval_id": approval["short_id"],
+                        "task_id": approval["task_id"],
+                        "action_id": None,
+                        "kept_watching": True,
+                        "cancelled_actions": cancelled_actions,
+                    }
                 if approval["task_id"] is not None:
                     self._close_task_after_reject_locked(
                         conn,
@@ -2328,7 +2350,6 @@ class SQLiteStore:
                         now=now,
                     )
                 return {"approval_id": approval["short_id"], "task_id": approval["task_id"], "action_id": None}
-            payload = json.loads(approval["payload_json"] or "{}")
             if payload.get("approvable") is False:
                 raise ValueError("approval requires /send final reply")
             target_message_id = payload.get("reply_target_message_id") or payload.get("target_message_id")

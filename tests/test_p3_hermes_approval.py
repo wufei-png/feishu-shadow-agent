@@ -13,6 +13,8 @@ from feishu_shadow_agent.config import (
     ChatPolicyConfig,
     LifecycleConfig,
     OwnerConfig,
+    ReplyPostprocessConfig,
+    ReplyPostprocessOwnerStyleConfig,
     ReplyPolicyConfig,
 )
 from feishu_shadow_agent.ingestion import IngestionService
@@ -30,11 +32,17 @@ class FakeHermes:
     def __init__(self):
         self.router_outputs: list[dict[str, Any] | AgentRunResult | Exception] = []
         self.session_outputs: list[dict[str, Any] | AgentRunResult | Exception] = []
+        self.postprocess_outputs: list[dict[str, Any] | AgentRunResult | Exception] = []
+        self.refresh_outputs: list[dict[str, Any] | AgentRunResult | Exception] = []
         self.session_ids_seen: list[str | None] = []
         self.router_cwds: list[str | None] = []
         self.session_cwds: list[str | None] = []
+        self.postprocess_cwds: list[str | None] = []
+        self.refresh_cwds: list[str | None] = []
         self.router_prompts: list[str] = []
         self.session_prompts: list[str] = []
+        self.postprocess_prompts: list[str] = []
+        self.refresh_prompts: list[str] = []
 
     def task_router(self, prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
         self.router_cwds.append(None if cwd is None else str(cwd))
@@ -64,6 +72,26 @@ class FakeHermes:
         output = dict(output)
         agent_session_id = output.pop("_session_id", "sid_1")
         return AgentRunResult(["hermes"], 0, json_data=output, session_id=agent_session_id)
+
+    def reply_postprocess(self, prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
+        self.postprocess_cwds.append(None if cwd is None else str(cwd))
+        self.postprocess_prompts.append(prompt)
+        output = self.postprocess_outputs.pop(0)
+        if isinstance(output, Exception):
+            raise output
+        if isinstance(output, AgentRunResult):
+            return output
+        return AgentRunResult(["hermes"], 0, json_data=output, session_id="post_sid")
+
+    def owner_style_refresh(self, prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
+        self.refresh_cwds.append(None if cwd is None else str(cwd))
+        self.refresh_prompts.append(prompt)
+        output = self.refresh_outputs.pop(0)
+        if isinstance(output, Exception):
+            raise output
+        if isinstance(output, AgentRunResult):
+            return output
+        return AgentRunResult(["hermes"], 0, json_data=output, session_id="refresh_sid")
 
 
 class FakeFeishu:
@@ -106,6 +134,13 @@ class FakeFeishu:
 
 def _config(**kwargs: Any) -> AppConfig:
     return AppConfig(owner=OwnerConfig(open_id="ou_owner", name="Owner"), **kwargs)
+
+
+def _postprocess_config(*, profile_path: str = "owner_style.md") -> ReplyPostprocessConfig:
+    return ReplyPostprocessConfig(
+        enabled=True,
+        owner_style=ReplyPostprocessOwnerStyleConfig(enabled=True, profile_path=profile_path),
+    )
 
 
 def _seed_policy(store: SQLiteStore, config: AppConfig) -> None:
@@ -200,6 +235,7 @@ def _service(
         agent_backend=fake_hermes,
         logger=JSONLLogger(tmp_path / "agent.jsonl"),
         agent_working_dir=agent_working_dir,
+        config_base_dir=base_dir,
         agent_retry_delays_seconds=(0.0, 0.0),
     )
     service = IngestionService(
@@ -469,6 +505,211 @@ def test_group_auto_reply_disabled_downgrades_to_approval(tmp_path: Path) -> Non
         action = conn.execute("SELECT payload_json FROM actions WHERE kind = 'send_reply'").fetchone()
     action_payload = json.loads(action["payload_json"])
     assert action_payload["text"] == '<at user_id="ou_ext">Ext</at> reply text'
+
+
+def test_reply_postprocess_success_updates_auto_reply_payload_before_composer(tmp_path: Path) -> None:
+    (tmp_path / "owner_style.md").write_text("# style\n", encoding="utf-8")
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1", proposed_reply="raw reply"))
+    hermes.postprocess_outputs.append({"status": "ok", "final_reply": "owner-like reply"})
+    cfg = _config(
+        reply_postprocess=_postprocess_config(),
+        chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)},
+    )
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    service.process_raw_message(
+        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        action = conn.execute("SELECT payload_json FROM actions WHERE kind = 'send_reply'").fetchone()
+        audit = conn.execute(
+            "SELECT request_type, tool_permissions_profile, prompt_json FROM agent_audits WHERE request_type = 'reply_postprocess'"
+        ).fetchone()
+    payload = json.loads(action["payload_json"])
+    assert payload["text"] == '<at user_id="ou_ext">Ext</at> owner-like reply'
+    assert payload["postprocess"]["applied"] is True
+    assert payload["postprocess"]["original_reply"] == "raw reply"
+    assert payload["postprocess"]["final_reply"] == "owner-like reply"
+    assert payload["postprocess"]["enabled_guidance"] == ["owner_style"]
+    assert hermes.postprocess_prompts
+    assert "owner_style.md" in hermes.postprocess_prompts[0]
+    assert audit["tool_permissions_profile"] == "read_only"
+    assert audit["prompt_json"] is None
+
+
+def test_reply_postprocess_success_updates_needs_owner_approval_preview(tmp_path: Path) -> None:
+    (tmp_path / "owner_style.md").write_text("# style\n", encoding="utf-8")
+    hermes = FakeHermes()
+    hermes.session_outputs.append(
+        _session_output(
+            answerability="needs_owner",
+            proposed_reply="raw needs owner",
+            reply_target_message_id="om_1",
+        )
+    )
+    hermes.postprocess_outputs.append({"status": "ok", "final_reply": "owner-ish needs owner"})
+    cfg = _config(reply_postprocess=_postprocess_config())
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    service.process_raw_message(
+        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        approval = conn.execute("SELECT preview, payload_json FROM approvals").fetchone()
+    payload = json.loads(approval["payload_json"])
+    assert approval["preview"] == "owner-ish needs owner"
+    assert payload["text"] == '<at user_id="ou_ext">Ext</at> owner-ish needs owner'
+    assert payload["postprocess"]["applied"] is True
+    assert payload["postprocess"]["original_reply"] == "raw needs owner"
+
+
+def test_no_reply_does_not_run_reply_postprocess(tmp_path: Path) -> None:
+    (tmp_path / "owner_style.md").write_text("# style\n", encoding="utf-8")
+    hermes = FakeHermes()
+    hermes.session_outputs.append(
+        _session_output(answerability="no_reply", proposed_reply="", reply_target_message_id=None)
+    )
+    cfg = _config(reply_postprocess=_postprocess_config())
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    assert hermes.postprocess_prompts == []
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()["c"] == 0
+        assert conn.execute("SELECT COUNT(*) AS c FROM actions").fetchone()["c"] == 0
+
+
+def test_reply_postprocess_missing_profile_creates_keep_watching_approval_with_original_candidate(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(
+        _session_output(reply_target_message_id="om_1", proposed_reply="raw reply", watch_action="close")
+    )
+    cfg = _config(
+        reply_postprocess=_postprocess_config(profile_path="missing.md"),
+        chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)},
+    )
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    service.process_raw_message(
+        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert hermes.postprocess_prompts == []
+    with store.connect() as conn:
+        approval = conn.execute("SELECT short_id, preview, payload_json FROM approvals").fetchone()
+        task = conn.execute("SELECT status, closed_at FROM tasks").fetchone()
+    payload = json.loads(approval["payload_json"])
+    assert approval["preview"] == "raw reply"
+    assert payload["text"] == '<at user_id="ou_ext">Ext</at> raw reply'
+    assert payload["keep_watching_on_reject"] is True
+    assert payload["postprocess"]["status"] == "failed"
+    assert payload["postprocess"]["failure_reason"] == "profile_missing"
+    assert task["status"] == "watching"
+    assert task["closed_at"] is None
+
+
+def test_rejecting_postprocess_failure_approval_keeps_task_and_other_pending_work(tmp_path: Path) -> None:
+    (tmp_path / "owner_style.md").write_text("# style\n", encoding="utf-8")
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1", proposed_reply="raw reply"))
+    hermes.postprocess_outputs.append({"status": "needs_owner", "final_reply": ""})
+    cfg = _config(reply_postprocess=_postprocess_config())
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    created = service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    approval_service = ApprovalService(store=store, config=cfg)
+    other_approval_id = approval_service.request_send_reply(
+        task=created.task,
+        reply_target_message_id="om_1",
+        proposed_reply="other reply",
+        reason="other",
+    )
+    other_action_id = store.create_send_reply_action(
+        task_id=created.task.id,
+        target_message_id="om_other",
+        payload={"reply_target_message_id": "om_other", "text": "other pending", "identity": "user"},
+        approval_id=other_approval_id,
+    )
+    assert other_action_id is not None
+    with store.connect() as conn:
+        postprocess_approval = conn.execute(
+            "SELECT short_id FROM approvals WHERE payload_json LIKE ?",
+            ('%"keep_watching_on_reject": true%',),
+        ).fetchone()
+        other_short_id = conn.execute("SELECT short_id FROM approvals WHERE id = ?", (other_approval_id,)).fetchone()["short_id"]
+
+    rejected = store.apply_approval_command(
+        message_id="om_reject_postprocess",
+        command=f"/reject {postprocess_approval['short_id']}",
+        verb="reject",
+        target_id=postprocess_approval["short_id"],
+    )
+
+    assert rejected["status"] == "applied"
+    assert rejected["result"]["kept_watching"] is True
+    with store.connect() as conn:
+        task = conn.execute("SELECT status, closed_at FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
+        approvals = {
+            row["short_id"]: row["status"]
+            for row in conn.execute("SELECT short_id, status FROM approvals ORDER BY id").fetchall()
+        }
+        other_action = conn.execute("SELECT status FROM actions WHERE id = ?", (other_action_id,)).fetchone()
+    assert task["status"] == "watching"
+    assert task["closed_at"] is None
+    assert approvals[postprocess_approval["short_id"]] == "rejected"
+    assert approvals[other_short_id] == "pending"
+    assert other_action["status"] == "pending"
+
+
+def test_reply_postprocess_length_guard_routes_to_owner_review(tmp_path: Path) -> None:
+    (tmp_path / "owner_style.md").write_text("# style\n", encoding="utf-8")
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1", proposed_reply="short"))
+    hermes.postprocess_outputs.append({"status": "ok", "final_reply": "x" * 301})
+    cfg = _config(
+        reply_postprocess=_postprocess_config(),
+        chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)},
+    )
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    service.process_raw_message(
+        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        approval = conn.execute("SELECT payload_json FROM approvals").fetchone()
+        send_count = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
+    payload = json.loads(approval["payload_json"])
+    assert send_count == 0
+    assert payload["postprocess"]["failure_reason"] == "postprocess_length_growth"
+    assert payload["postprocess"]["fallback"] == "original_candidate"
 
 
 def test_needs_owner_notification_includes_context_without_suggested_reply(tmp_path: Path) -> None:
@@ -3191,7 +3432,8 @@ def test_send_command_sending_action_conflict_rolls_back_temporary_approval(tmp_
 
 def test_send_command_preserves_owner_final_reply_format(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    cfg = _config()
+    (tmp_path / "owner_style.md").write_text("# style\n", encoding="utf-8")
+    cfg = _config(reply_postprocess=_postprocess_config())
     service = IngestionService(
         store=store,
         feishu_client=FakeFeishu(),
@@ -3237,4 +3479,6 @@ def test_send_command_preserves_owner_final_reply_format(tmp_path: Path) -> None
     action_payload = json.loads(action["payload_json"])
     assert approval_payload["text"] == final_reply
     assert action_payload["text"] == final_reply
+    assert "postprocess" not in approval_payload
+    assert "postprocess" not in action_payload
     assert stored_command["command"] == command

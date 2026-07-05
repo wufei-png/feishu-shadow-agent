@@ -35,6 +35,10 @@ def test_load_minimal_config() -> None:
     assert loaded.config.agent_backend.config_scope == "isolated"
     assert loaded.config.agent_backend.auto_context == "disabled"
     assert loaded.config.agent_backend.hermes.mode == "cli"
+    assert loaded.config.reply_postprocess.enabled is False
+    assert loaded.config.reply_postprocess.max_turns == 4
+    assert loaded.config.reply_postprocess.owner_style.enabled is False
+    assert loaded.config.reply_postprocess.humanizer_zh.enabled is False
 
 
 def test_tracked_config_schema_matches_generated_schema() -> None:
@@ -268,6 +272,51 @@ storage:
 
     with pytest.raises(ConfigError, match="max_resource_bytes"):
         ConfigService().load(config_path)
+
+
+def test_reply_postprocess_enabled_requires_guidance_source(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+reply_postprocess:
+  enabled: true
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="owner_style.enabled or humanizer_zh.enabled"):
+        ConfigService().load(config_path)
+
+
+def test_reply_postprocess_model_provider_can_inherit_main_hermes_settings(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+agent_backend:
+  hermes:
+    model: main-model
+    provider: main-provider
+reply_postprocess:
+  enabled: true
+  model: null
+  provider: null
+  owner_style:
+    enabled: true
+    profile_path: data/owner_style.zh.md
+""",
+        encoding="utf-8",
+    )
+
+    loaded = ConfigService().load(config_path)
+
+    assert loaded.config.reply_postprocess.model is None
+    assert loaded.config.reply_postprocess.provider is None
+    assert loaded.config.agent_backend.hermes.model == "main-model"
+    assert loaded.config.agent_backend.hermes.provider == "main-provider"
 
 
 def test_redacted_config_does_not_leak_env_secret(monkeypatch: pytest.MonkeyPatch) -> None:

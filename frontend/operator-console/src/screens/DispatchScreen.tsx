@@ -168,6 +168,17 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
                 <FactRow label="Target message" value={detail.data.action.target_message_id ?? "not recorded"} />
                 <FactRow label="Updated" value={formatDate(detail.data.action.updated_at)} />
               </FieldList>
+              {postprocessInfo(detail.data.action.payload) ? (
+                <div className="subsection">
+                  <p className="eyebrow">Postprocess</p>
+                  <FieldList>
+                    <FactRow label="Applied" value={postprocessInfo(detail.data.action.payload)?.applied ?? "unknown"} />
+                    <FactRow label="Guidance" value={postprocessInfo(detail.data.action.payload)?.guidance || "none"} />
+                    <FactRow label="Original" value={shortText(postprocessInfo(detail.data.action.payload)?.original, "not recorded")} />
+                    <FactRow label="Final" value={shortText(postprocessInfo(detail.data.action.payload)?.final, "not recorded")} />
+                  </FieldList>
+                </div>
+              ) : null}
               <JsonBlock value={detail.data.action.payload} />
             </div>
 
@@ -272,6 +283,26 @@ function numberOrNull(value: string | null): number | null {
 function clean(value: string): string | undefined {
   const trimmed = value.trim();
   return trimmed || undefined;
+}
+
+function postprocessInfo(payload: Record<string, unknown>): {
+  applied: string;
+  guidance: string;
+  original: string;
+  final: string;
+} | null {
+  const value = payload.postprocess;
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const postprocess = value as Record<string, unknown>;
+  const guidance = Array.isArray(postprocess.enabled_guidance) ? postprocess.enabled_guidance.join(", ") : "";
+  return {
+    applied: String(postprocess.applied ?? false),
+    guidance,
+    original: typeof postprocess.original_reply === "string" ? postprocess.original_reply : "",
+    final: typeof postprocess.final_reply === "string" ? postprocess.final_reply : ""
+  };
 }
 
 function errorResult(command: string, error: unknown): CommandResult {

@@ -138,6 +138,9 @@ export type ApprovalSummary = {
   overdue_seconds: number;
   recommended_action: string;
   available_commands: string[];
+  postprocess_status?: string | null;
+  postprocess_applied?: boolean | null;
+  postprocess_failure_reason?: string | null;
 };
 
 export type ApprovalDetail = ApprovalSummary & {

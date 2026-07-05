@@ -1126,6 +1126,8 @@ def _approval_dto(row: sqlite3.Row, *, now: str, include_payload: bool = False) 
     short_id = str(data["short_id"])
     overdue_seconds = _approval_overdue_seconds(data.get("expires_at"), now=now)
     is_pending = data["status"] == ApprovalStatus.PENDING.value
+    payload = _loads_json_object(data.get("payload_json"))
+    postprocess = _loads_json_object(payload.get("postprocess"))
     dto: dict[str, Any] = {
         "id": data["id"],
         "approval_id": short_id,
@@ -1146,11 +1148,14 @@ def _approval_dto(row: sqlite3.Row, *, now: str, include_payload: bool = False) 
             short_id,
             data["task_short_id"],
             overdue_seconds=overdue_seconds,
-            payload=_loads_json_object(data.get("payload_json")),
+            payload=payload,
         ),
+        "postprocess_status": postprocess.get("status"),
+        "postprocess_applied": postprocess.get("applied"),
+        "postprocess_failure_reason": postprocess.get("failure_reason"),
     }
     if include_payload:
-        dto["payload"] = _loads_json_object(data.get("payload_json"))
+        dto["payload"] = payload
     return dto
 
 

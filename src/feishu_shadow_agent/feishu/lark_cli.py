@@ -359,6 +359,25 @@ class LarkCliClient:
         )
         return _message_page_from_result(result)
 
+    def search_owner_messages(
+        self,
+        *,
+        sender: str,
+        start: str | None,
+        end: str | None,
+    ) -> MessagePage:
+        result = self.run_json(
+            self.build_messages_search(
+                sender=sender,
+                start=start,
+                end=end,
+                page_all=True,
+                query="",
+                no_reactions=True,
+            )
+        )
+        return _message_page_from_result(result)
+
     def list_chat_messages(
         self,
         *,

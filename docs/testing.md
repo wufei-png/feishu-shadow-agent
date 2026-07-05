@@ -29,6 +29,7 @@ python -m pytest -q tests/test_product_policy_store.py
 python -m pytest -q tests/test_policy_runtime.py
 python -m pytest -q tests/test_operator_query.py tests/test_operator_commands.py
 python -m pytest -q tests/test_console_api.py tests/test_operator_query.py
+python -m pytest -q tests/test_reply_style.py
 ```
 
 Operator Console 前端验证：
@@ -133,6 +134,18 @@ python -m feishu_shadow_agent policy update-chat --config config.yaml --chat-id 
 
 ```bash
 python -m feishu_shadow_agent policy update-global --config config.yaml --unknown-group-auto-reply true --reason "temporary trial"
+```
+
+如果启用 `reply_postprocess.owner_style`，先用 dry-run 检查 owner 样本数量和过滤结果；dry-run 不调用 Hermes，也不会写入 profile：
+
+```bash
+python -m feishu_shadow_agent reply-style refresh --config config.yaml --dry-run
+```
+
+样本数量满足 `reply_postprocess.owner_style.refresh.min_samples` 后再刷新 profile：
+
+```bash
+python -m feishu_shadow_agent reply-style refresh --config config.yaml
 ```
 
 再运行无副作用健康检查：

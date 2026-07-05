@@ -54,6 +54,15 @@ class FeishuClient(Protocol):
     ) -> MessagePage:
         ...
 
+    def search_owner_messages(
+        self,
+        *,
+        sender: str,
+        start: str | None,
+        end: str | None,
+    ) -> MessagePage:
+        ...
+
     def list_chat_messages(
         self,
         *,

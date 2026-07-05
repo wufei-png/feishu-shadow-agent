@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from .agent_backend import AgentRunResult
-from .config import AutoContextMode, ConfigScopeMode, HermesConfig, ToolPermissionsProfile
+from .config import AutoContextMode, ConfigScopeMode, HermesConfig, ReplyPostprocessConfig, ToolPermissionsProfile
 
 HermesRunner = Callable[[list[str], int], AgentRunResult]
 SESSION_ID_RE = re.compile(r"session_id:\s*([^\s]+)")
@@ -47,14 +47,17 @@ class HermesCliClient:
         tool_permissions: ToolPermissionsProfile = "guarded_write",
         config_scope: ConfigScopeMode = "isolated",
         auto_context: AutoContextMode = "disabled",
+        reply_postprocess: ReplyPostprocessConfig | None = None,
         session_skills: Sequence[str | Path] = (),
         cwd: str | Path | None = None,
         runner: HermesRunner | None = None,
     ):
         self.config = config
         self.execution_policy = hermes_execution_policy(tool_permissions)
+        self.read_only_execution_policy = hermes_execution_policy("read_only")
         self.config_scope = config_scope
         self.auto_context = auto_context
+        self.reply_postprocess_config = reply_postprocess or ReplyPostprocessConfig()
         self.session_skills = [str(skill) for skill in session_skills]
         self.path = config.path or "hermes"
         self.cwd = None if cwd is None else Path(cwd)
@@ -67,7 +70,11 @@ class HermesCliClient:
         max_turns: int,
         session_id: str | None = None,
         include_session_skills: bool = False,
+        execution_policy: HermesExecutionPolicy | None = None,
+        model: str | None = None,
+        provider: str | None = None,
     ) -> list[str]:
+        policy = execution_policy or self.execution_policy
         argv = [
             self.path,
             "chat",
@@ -76,7 +83,7 @@ class HermesCliClient:
             "-Q",
             "--source",
             self.config.source,
-            *self.execution_policy.cli_args(),
+            *policy.cli_args(),
             "--max-turns",
             str(max_turns),
         ]
@@ -89,10 +96,12 @@ class HermesCliClient:
                 argv.extend(["--skills", skill])
         if session_id:
             argv.extend(["--resume", session_id])
-        if self.config.model:
-            argv.extend(["--model", self.config.model])
-        if self.config.provider:
-            argv.extend(["--provider", self.config.provider])
+        effective_model = self.config.model if model is None else model
+        effective_provider = self.config.provider if provider is None else provider
+        if effective_model:
+            argv.extend(["--model", effective_model])
+        if effective_provider:
+            argv.extend(["--provider", effective_provider])
         return argv
 
     def task_router(self, prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
@@ -114,6 +123,30 @@ class HermesCliClient:
                 max_turns=self.config.session_max_turns,
                 session_id=session_id,
                 include_session_skills=True,
+            ),
+            cwd=cwd,
+        )
+
+    def reply_postprocess(self, prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
+        return self._run(
+            self.build_chat_command(
+                prompt=prompt,
+                max_turns=self.reply_postprocess_config.max_turns,
+                execution_policy=self.read_only_execution_policy,
+                model=self.reply_postprocess_config.model,
+                provider=self.reply_postprocess_config.provider,
+            ),
+            cwd=cwd,
+        )
+
+    def owner_style_refresh(self, prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
+        return self._run(
+            self.build_chat_command(
+                prompt=prompt,
+                max_turns=self.reply_postprocess_config.max_turns,
+                execution_policy=self.read_only_execution_policy,
+                model=self.reply_postprocess_config.model,
+                provider=self.reply_postprocess_config.provider,
             ),
             cwd=cwd,
         )

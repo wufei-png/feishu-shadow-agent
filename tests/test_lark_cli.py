@@ -181,6 +181,32 @@ def test_search_messages_returns_message_page() -> None:
     assert page.next_page_token == "next"
 
 
+def test_search_owner_messages_uses_sender_time_filters_page_all_and_no_reactions() -> None:
+    seen: list[list[str]] = []
+
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        seen.append(argv)
+        return LarkCliResult(argv=argv, exit_code=0, json_data={"data": {"items": [{"message_id": "om_1"}]}})
+
+    client = LarkCliClient(path="lark-cli", runner=runner)
+
+    page = client.search_owner_messages(
+        sender="ou_owner",
+        start="2026-06-01T00:00:00+08:00",
+        end="2026-07-01T00:00:00+08:00",
+    )
+
+    assert page.items == [{"message_id": "om_1"}]
+    argv = seen[0]
+    assert argv[:5] == ["lark-cli", "im", "+messages-search", "--as", "user"]
+    assert "--sender" in argv
+    assert "ou_owner" in argv
+    assert "--start" in argv
+    assert "--end" in argv
+    assert "--page-all" in argv
+    assert "--no-reactions" in argv
+
+
 def test_download_resource_uses_bot_identity_and_actual_download() -> None:
     seen: list[list[str]] = []
 
