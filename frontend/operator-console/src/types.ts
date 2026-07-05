@@ -18,6 +18,7 @@ export type CommandResult = {
 export type DashboardSnapshot = {
   daemon_liveness?: Record<string, unknown>;
   policy_status?: PolicyStatus;
+  health_issue_summary?: HealthIssueSummary;
   pending_approvals?: ApprovalSummary[];
   active_tasks?: TaskSummary[];
   pending_actions?: DispatchActionSummary[];
@@ -33,6 +34,11 @@ export type DashboardSnapshot = {
 };
 
 export type HealthSeverity = "info" | "warning" | "error" | "critical";
+
+export type HealthIssueSummary = {
+  highest_severity: HealthSeverity;
+  open_issue_count: number;
+};
 
 export type HealthIssueLink = {
   type: "task" | "message" | "approval" | "dispatch_action" | "policy" | "settings";
@@ -52,10 +58,7 @@ export type HealthIssue = {
 
 export type HealthIssuesResponse = {
   generated_at: string;
-  summary: {
-    highest_severity: HealthSeverity;
-    open_issue_count: number;
-  };
+  summary: HealthIssueSummary;
   runtime: {
     store?: Record<string, unknown>;
     daemon_liveness?: Record<string, unknown>;

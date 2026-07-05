@@ -110,6 +110,11 @@ class OperatorQueryService:
             limit=limit,
         )
         failed_commands = self._failed_approval_commands(limit=limit)
+        health_summary = self.health_issues(
+            limit=limit,
+            stale_after_seconds=stale_after_seconds,
+            daemon_stale_after_seconds=daemon_stale_after_seconds,
+        )["summary"]
         return {
             "daemon_liveness": _daemon_liveness(
                 _run_runtime_summary(daemon_run) if daemon_run else None,
@@ -128,6 +133,7 @@ class OperatorQueryService:
                 limit=limit,
             ),
             "failed_or_needs_review_actions": failed_or_needs_review,
+            "health_issue_summary": health_summary,
             "recent_health_warnings": self._recent_health_warnings(limit=limit),
             "recent_errors": _recent_errors(failed_commands, failed_or_needs_review),
             "last_run": _run_runtime_summary(last_run) if last_run else None,

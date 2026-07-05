@@ -193,6 +193,8 @@ Rules:
   latest row is `ok`, older failures stay historical. Failed approval commands
   appear in `recent_failed_commands[]` but do not count as open issues unless a
   future command state gives them an explicit recovery path.
+- `GET /api/dashboard` should reuse this summary for its Health issue metric
+  instead of recounting historical `recent_health_warnings`.
 - Dispatch actions in `failed` or `failed_needs_review` remain open issues until
   the operator retries, cancels, or marks them sent through Dispatch recovery.
 - `runtime.last_run` and daemon liveness must use an allowlisted runtime summary;

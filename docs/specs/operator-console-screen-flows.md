@@ -107,7 +107,7 @@ overdue approvals
 failed dispatch actions
 stale sending actions
 policy initialization/import diff
-daemon liveness and health warnings
+daemon liveness and open Health issues
 ```
 
 Avoid primary focus on:
@@ -458,7 +458,8 @@ Rules:
 - Open issue counts should reflect current unresolved health, policy, daemon,
   store, and dispatch recovery work. Historical failed approval commands remain
   in recent summaries instead of increasing open issue totals.
-- Dashboard should show only high-signal health warnings.
+- Dashboard should show the same open Health issue summary as Health, not a
+  separate count of historical warning rows.
 
 Primary API needs:
 

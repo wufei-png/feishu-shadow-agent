@@ -50,7 +50,7 @@ The operator opens it to:
 - Review pending or overdue approvals.
 - Understand why a task is blocked.
 - Recover failed or stale dispatch actions.
-- Inspect daemon liveness and health warnings.
+- Inspect daemon liveness and open Health issues.
 - Manage Product Policy and chat policy.
 - Review recent command results and policy audit history.
 
@@ -199,7 +199,7 @@ Priority order:
 1. Pending approvals and overdue approvals.
 2. Failed or stale dispatch actions.
 3. Product Policy initialization state and Policy Import Diff.
-4. Daemon liveness and health warnings.
+4. Daemon liveness and open Health issues.
 5. Recent command results and audit highlights.
 ```
 
@@ -215,7 +215,7 @@ Suggested composition:
 
 - Top runtime strip: daemon, policy, last tick, local API status.
 - Central action queue: approvals and dispatch recovery.
-- Secondary context: health warnings, recent audit, policy diff.
+- Secondary context: Health issue summary, recent audit, policy diff.
 - Empty state: clearly state that there are no pending operator actions while
   still showing daemon/policy status.
 

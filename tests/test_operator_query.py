@@ -145,6 +145,90 @@ def test_dashboard_snapshot_includes_policy_status_and_omits_policy_audits(
     json.dumps(snapshot)
 
 
+def test_dashboard_snapshot_health_summary_matches_open_health_issues(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    config = _config()
+    store.import_product_policy_from_config(config)
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO runs(
+              run_id, started_at, status, dry_run, last_heartbeat_at,
+              last_tick_started_at, last_tick_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "run_live",
+                "2026-06-22T09:58:00+08:00",
+                "running",
+                1,
+                "2026-06-22T09:59:00+08:00",
+                "2026-06-22T09:58:00+08:00",
+                "running",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO health_checks(run_id, check_name, severity, status, message, details_json, checked_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "run_live",
+                "lark",
+                "warning",
+                "failed",
+                "Lark failed",
+                "{}",
+                "2026-06-22T09:57:00+08:00",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO health_checks(run_id, check_name, severity, status, message, details_json, checked_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "run_live",
+                "hermes",
+                "warning",
+                "ok",
+                "Hermes recovered",
+                "{}",
+                "2026-06-22T09:56:00+08:00",
+            ),
+        )
+        for minute in range(37, 56):
+            conn.execute(
+                """
+                INSERT INTO health_checks(run_id, check_name, severity, status, message, details_json, checked_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "run_live",
+                    "hermes",
+                    "warning",
+                    "failed",
+                    "Hermes failed",
+                    "{}",
+                    f"2026-06-22T09:{minute:02d}:00+08:00",
+                ),
+            )
+    query = OperatorQueryService(
+        store,
+        policy_import_source=config,
+        now=lambda: "2026-06-22T10:00:00+08:00",
+    )
+
+    snapshot = query.dashboard_snapshot()
+    health = query.health_issues()
+
+    assert len(snapshot["recent_health_warnings"]) == 20
+    assert snapshot["health_issue_summary"] == health["summary"]
+    assert snapshot["health_issue_summary"]["open_issue_count"] == 1
+
+
 def test_operator_query_derives_overdue_approval_without_mutating_db(
     tmp_path: Path,
 ) -> None:

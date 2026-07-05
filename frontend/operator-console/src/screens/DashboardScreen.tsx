@@ -39,13 +39,15 @@ export function DashboardScreen({
   const recoveryActions = snapshot?.failed_or_needs_review_actions ?? [];
   const staleSendingActions = snapshot?.stale_sending_actions ?? [];
   const healthWarnings = snapshot?.recent_health_warnings ?? [];
+  const healthIssueSummary = snapshot?.health_issue_summary;
+  const healthIssueCount = healthIssueSummary?.open_issue_count ?? healthWarnings.length;
   const recentErrors = snapshot?.recent_errors ?? [];
   const policyStatus = snapshot?.policy_status;
   const policyDiff = policyStatus?.policy_import_diff;
   const policyNeedsAttention = policyStatus?.initialized === false || policyDiff?.status === "differs";
   const dispatchAttention = recoveryActions.length + staleSendingActions.length;
   const actionCount =
-    pendingApprovals.length + dispatchAttention + healthWarnings.length + (policyNeedsAttention ? 1 : 0);
+    pendingApprovals.length + dispatchAttention + healthIssueCount + (policyNeedsAttention ? 1 : 0);
 
   return (
     <section className="work-grid" aria-label="Dashboard">
@@ -62,7 +64,7 @@ export function DashboardScreen({
             <Metric label="Pending approvals" value={pendingApprovals.length} tone={pendingApprovals.length ? "warning" : "neutral"} />
             <Metric label="Overdue" value={overdueApprovals.length} tone={overdueApprovals.length ? "danger" : "neutral"} />
             <Metric label="Dispatch recovery" value={dispatchAttention} tone={dispatchAttention ? "danger" : "neutral"} />
-            <Metric label="Health warnings" value={healthWarnings.length} tone={healthWarnings.length ? "warning" : "neutral"} />
+            <Metric label="Health issues" value={healthIssueCount} tone={healthIssueCount ? healthIssueTone(healthIssueSummary?.highest_severity) : "neutral"} />
           </div>
           {actionCount === 0 ? (
             <EmptyState title="No pending operator actions" detail="Daemon and policy status remain visible for quick checks." />
@@ -155,6 +157,19 @@ function Metric({ label, value, tone }: { label: string; value: number; tone: st
       <strong>{value}</strong>
     </div>
   );
+}
+
+function healthIssueTone(severity: string | undefined): string {
+  if (severity === "critical" || severity === "error") {
+    return "danger";
+  }
+  if (severity === "warning") {
+    return "warning";
+  }
+  if (severity === "info") {
+    return "info";
+  }
+  return "neutral";
 }
 
 function PreviewList({
