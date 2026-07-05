@@ -401,8 +401,11 @@ def _handle_local_approval_command(
     target_id: str,
     final_reply: str | None = None,
 ) -> int:
-    _, store, _ = _load_runtime(config_path)
-    service = OperatorCommandService(store)
+    loaded, store, _ = _load_runtime(config_path)
+    service = OperatorCommandService(
+        store,
+        keep_watching_until_factory=lambda: _watch_until_from_now(loaded.config.lifecycle.watch_minutes),
+    )
     if verb == "approve":
         result = service.approve(target_id, actor="local_cli")
     elif verb == "reject":

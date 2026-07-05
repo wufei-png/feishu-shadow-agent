@@ -14,6 +14,7 @@ from feishu_shadow_agent.config import (
     LifecycleConfig,
     OwnerConfig,
     ReplyPostprocessConfig,
+    ReplyPostprocessHumanizerZhConfig,
     ReplyPostprocessOwnerStyleConfig,
     ReplyPolicyConfig,
 )
@@ -542,6 +543,66 @@ def test_reply_postprocess_success_updates_auto_reply_payload_before_composer(tm
     assert audit["prompt_json"] is None
 
 
+def test_reply_postprocess_humanizer_only_prompt_uses_skill_path(tmp_path: Path) -> None:
+    (tmp_path / "humanizer.md").write_text("# humanizer\n", encoding="utf-8")
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1", proposed_reply="raw reply"))
+    hermes.postprocess_outputs.append({"status": "ok", "final_reply": "humanized reply"})
+    cfg = _config(
+        reply_postprocess=ReplyPostprocessConfig(
+            enabled=True,
+            humanizer_zh=ReplyPostprocessHumanizerZhConfig(enabled=True, skill_path="humanizer.md"),
+        ),
+        chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)},
+    )
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    service.process_raw_message(
+        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        action = conn.execute("SELECT payload_json FROM actions WHERE kind = 'send_reply'").fetchone()
+    payload = json.loads(action["payload_json"])
+    assert payload["postprocess"]["enabled_guidance"] == ["humanizer_zh"]
+    assert payload["postprocess"]["humanizer_skill_path"] == "humanizer.md"
+    assert "humanizer.md" in hermes.postprocess_prompts[0]
+    assert "owner_style" not in hermes.postprocess_prompts[0]
+
+
+def test_reply_postprocess_missing_humanizer_creates_owner_review(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1", proposed_reply="raw reply"))
+    cfg = _config(
+        reply_postprocess=ReplyPostprocessConfig(
+            enabled=True,
+            humanizer_zh=ReplyPostprocessHumanizerZhConfig(enabled=True, skill_path="missing-humanizer.md"),
+        ),
+        chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)},
+    )
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    service.process_raw_message(
+        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert hermes.postprocess_prompts == []
+    with store.connect() as conn:
+        approval = conn.execute("SELECT preview, payload_json FROM approvals").fetchone()
+        send_count = conn.execute("SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'").fetchone()["c"]
+    payload = json.loads(approval["payload_json"])
+    assert approval["preview"] == "raw reply"
+    assert payload["postprocess"]["failure_reason"] == "humanizer_missing"
+    assert payload["postprocess"]["humanizer_skill_path"] == "missing-humanizer.md"
+    assert send_count == 0
+
+
 def test_reply_postprocess_success_updates_needs_owner_approval_preview(tmp_path: Path) -> None:
     (tmp_path / "owner_style.md").write_text("# style\n", encoding="utf-8")
     hermes = FakeHermes()
@@ -714,6 +775,11 @@ def test_rejecting_postprocess_failure_approval_keeps_task_and_other_pending_wor
         approval_id=other_approval_id,
     )
     assert other_action_id is not None
+    old_watch_until = "2000-01-01T00:00:00+08:00"
+    refreshed_watch_until = "2999-01-01T00:00:00+08:00"
+    with store.connect() as conn:
+        conn.execute("UPDATE approvals SET expires_at = ? WHERE id = ?", (old_watch_until, other_approval_id))
+        conn.execute("UPDATE tasks SET watch_until = ? WHERE id = ?", (old_watch_until, created.task.id))
     with store.connect() as conn:
         postprocess_approval = conn.execute(
             "SELECT short_id FROM approvals WHERE payload_json LIKE ?",
@@ -726,12 +792,13 @@ def test_rejecting_postprocess_failure_approval_keeps_task_and_other_pending_wor
         command=f"/reject {postprocess_approval['short_id']}",
         verb="reject",
         target_id=postprocess_approval["short_id"],
+        keep_watching_until=refreshed_watch_until,
     )
 
     assert rejected["status"] == "applied"
     assert rejected["result"]["kept_watching"] is True
     with store.connect() as conn:
-        task = conn.execute("SELECT status, closed_at FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
+        task = conn.execute("SELECT status, closed_at, watch_until FROM tasks WHERE id = ?", (created.task.id,)).fetchone()
         approvals = {
             row["short_id"]: row["status"]
             for row in conn.execute("SELECT short_id, status FROM approvals ORDER BY id").fetchall()
@@ -739,6 +806,7 @@ def test_rejecting_postprocess_failure_approval_keeps_task_and_other_pending_wor
         other_action = conn.execute("SELECT status FROM actions WHERE id = ?", (other_action_id,)).fetchone()
     assert task["status"] == "watching"
     assert task["closed_at"] is None
+    assert task["watch_until"] == refreshed_watch_until
     assert approvals[postprocess_approval["short_id"]] == "rejected"
     assert approvals[other_short_id] == "pending"
     assert other_action["status"] == "pending"

@@ -164,6 +164,7 @@ class ApprovalService:
                 command=command,
                 verb=verb,
                 target_id=target_id,
+                keep_watching_until=_plus_minutes(message.sent_at, self.config.lifecycle.watch_minutes),
             )
         if verb == "send" and target_id and final_reply is not None:
             return self.store.apply_approval_command(
@@ -172,6 +173,7 @@ class ApprovalService:
                 verb=verb,
                 target_id=target_id,
                 final_reply=final_reply,
+                keep_watching_until=_plus_minutes(message.sent_at, self.config.lifecycle.watch_minutes),
             )
         return self.store.apply_approval_command(
             message_id=message.message_id,

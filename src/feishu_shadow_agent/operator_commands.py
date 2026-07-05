@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from pydantic import ValidationError
 
@@ -72,8 +72,9 @@ class CommandResult:
 
 
 class ApprovalCommandService:
-    def __init__(self, store: SQLiteStore):
+    def __init__(self, store: SQLiteStore, *, keep_watching_until_factory: Callable[[], str] | None = None):
         self.store = store
+        self.keep_watching_until_factory = keep_watching_until_factory
 
     def approve(
         self,
@@ -130,6 +131,11 @@ class ApprovalCommandService:
             verb=verb,
             target_id=target_id,
             final_reply=final_reply,
+            keep_watching_until=(
+                self.keep_watching_until_factory()
+                if verb == "reject" and self.keep_watching_until_factory is not None
+                else None
+            ),
         )
         raw_status = str(raw.get("status", "failed"))
         result = _dict_result(raw.get("result"))
@@ -543,8 +549,14 @@ class PolicyCommandService:
 
 
 class OperatorCommandService:
-    def __init__(self, store: SQLiteStore, *, readback_marker: DispatchReadbackMarker | None = None):
-        self.approvals = ApprovalCommandService(store)
+    def __init__(
+        self,
+        store: SQLiteStore,
+        *,
+        readback_marker: DispatchReadbackMarker | None = None,
+        keep_watching_until_factory: Callable[[], str] | None = None,
+    ):
+        self.approvals = ApprovalCommandService(store, keep_watching_until_factory=keep_watching_until_factory)
         self.dispatch = DispatchCommandService(store, readback_marker=readback_marker)
         self.maintenance = MaintenanceCommandService(store)
         self.tasks = TaskCommandService(store)

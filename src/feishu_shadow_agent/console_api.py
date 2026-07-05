@@ -181,6 +181,7 @@ def create_console_app(
         return OperatorCommandService(
             store,
             readback_marker=marker,
+            keep_watching_until_factory=lambda: _watch_until_from_now(loaded_config.config.lifecycle.watch_minutes),
         )
 
     api = APIRouter(prefix="/api", dependencies=[Depends(require_token)])

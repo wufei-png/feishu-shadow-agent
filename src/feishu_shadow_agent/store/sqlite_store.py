@@ -2201,11 +2201,21 @@ class SQLiteStore:
         verb: str,
         target_id: str,
         final_reply: str | None = None,
+        keep_watching_until: str | None = None,
     ) -> dict[str, Any]:
         self.migrate()
         now = utc_now_iso()
         with self.connect() as conn:
-            self._expire_pending_approvals_locked(conn, now=now)
+            keep_watching_reject_task_id = self._keep_watching_reject_task_id_locked(
+                conn,
+                verb=verb,
+                target_id=target_id,
+            )
+            self._expire_pending_approvals_locked(
+                conn,
+                now=now,
+                exclude_task_id=keep_watching_reject_task_id,
+            )
             existing = conn.execute(
                 "SELECT status, result_json FROM approval_commands WHERE message_id = ?",
                 (message_id,),
@@ -2221,6 +2231,7 @@ class SQLiteStore:
                     target_id=target_id,
                     final_reply=final_reply,
                     now=now,
+                    keep_watching_until=keep_watching_until,
                 )
             except Exception as exc:
                 # State changes are rolled back, but the command itself is still
@@ -2248,18 +2259,26 @@ class SQLiteStore:
             )
         return {"status": status, "result": result}
 
-    def _expire_pending_approvals_locked(self, conn: sqlite3.Connection, *, now: str) -> int:
-        rows = conn.execute(
-            """
+    def _expire_pending_approvals_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        now: str,
+        exclude_task_id: int | None = None,
+    ) -> int:
+        query = """
             SELECT id
             FROM approvals
             WHERE status = 'pending'
               AND expires_at IS NOT NULL
               AND datetime(expires_at) < datetime(?)
-            ORDER BY expires_at, id
-            """,
-            (now,),
-        ).fetchall()
+        """
+        params: list[Any] = [now]
+        if exclude_task_id is not None:
+            query += " AND (task_id IS NULL OR task_id != ?)"
+            params.append(exclude_task_id)
+        query += " ORDER BY expires_at, id"
+        rows = conn.execute(query, params).fetchall()
         expired = 0
         for row in rows:
             cursor = conn.execute(
@@ -2284,6 +2303,7 @@ class SQLiteStore:
         target_id: str,
         final_reply: str | None,
         now: str,
+        keep_watching_until: str | None,
     ) -> dict[str, Any]:
         if verb in {"approve", "reject"}:
             if target_id.startswith("t_"):
@@ -2330,10 +2350,13 @@ class SQLiteStore:
                     conn.execute(
                         """
                         UPDATE tasks
-                        SET status = ?, updated_at = ?, closed_at = NULL
+                        SET status = ?,
+                            updated_at = ?,
+                            closed_at = NULL,
+                            watch_until = COALESCE(?, watch_until)
                         WHERE id = ?
                         """,
-                        (TaskStatus.WATCHING.value, now, int(approval["task_id"])),
+                        (TaskStatus.WATCHING.value, now, keep_watching_until, int(approval["task_id"])),
                     )
                     return {
                         "approval_id": approval["short_id"],
@@ -2463,6 +2486,38 @@ class SQLiteStore:
             return {"approval_id": approval_short_id, "task_id": task["id"], "action_id": action_id}
 
         raise ValueError(f"unsupported command: {verb}")
+
+    def _keep_watching_reject_task_id_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        verb: str,
+        target_id: str,
+    ) -> int | None:
+        if verb != "reject":
+            return None
+        if target_id.startswith("a_"):
+            approval = conn.execute(
+                """
+                SELECT * FROM approvals
+                WHERE short_id = ? AND status = 'pending'
+                """,
+                (target_id,),
+            ).fetchone()
+            if approval is None or approval["task_id"] is None:
+                return None
+            payload = _loads_json_object(approval["payload_json"])
+            return int(approval["task_id"]) if payload.get("keep_watching_on_reject") is True else None
+        if target_id.startswith("t_"):
+            task = conn.execute("SELECT * FROM tasks WHERE short_id = ?", (target_id,)).fetchone()
+            if task is None:
+                return None
+            pending = self._list_pending_approvals_locked(conn, task_id=int(task["id"]))
+            for approval in pending:
+                payload = _loads_json_object(approval["payload_json"])
+                if payload.get("keep_watching_on_reject") is True:
+                    return int(task["id"])
+        return None
 
     def _cancel_pending_actions_for_approvals_locked(
         self,
