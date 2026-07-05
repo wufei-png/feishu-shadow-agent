@@ -61,7 +61,7 @@ export function SettingsScreen({ token }: { token: string }) {
           badge={<Badge tone="info">{visibleEntries.length} visible</Badge>}
         >
           <p className="section-note">
-            Settings is a product field map. Product Policy edits live in Policy; config.yaml fields are readonly in v1.
+            Settings is a product field map. Product Policy edits live on the Policy page; config.yaml fields are readonly in v1.
           </p>
         </SectionHeader>
         <div className="policy-diff-grid">
@@ -185,7 +185,7 @@ function editableLabel(entry: SettingsCatalogEntry): string {
     return "command";
   }
   if (entry.editable_v1 === true) {
-    return entry.source === "product_policy_store" ? "edit in Policy" : "editable";
+    return entry.source === "product_policy_store" ? "Edit on Policy page" : "editable";
   }
   return "readonly";
 }
@@ -198,7 +198,7 @@ function readonlyNote(entry: SettingsCatalogEntry): string | null {
     return "Readonly in v1 because config.yaml writes need a future command facade and audit path.";
   }
   if (entry.source === "product_policy_store" && entry.editable_v1 === true) {
-    return "Editable through the Policy screen and OperatorCommandService.";
+    return "Editable through the Policy page and OperatorCommandService.";
   }
   if (entry.editable_v1 === false) {
     return "Readonly runtime or derived field.";
