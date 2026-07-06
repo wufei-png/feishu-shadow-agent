@@ -156,6 +156,26 @@ class Daemon:
                         data={"stage": result.name, "error": result.error},
                     )
                 else:
+                    if (
+                        result.name == "approval_inbox"
+                        and self.store.latest_health_check_status("approval_inbox")
+                        not in (None, "ok")
+                    ):
+                        self.store.record_health_results(
+                            run_id=run_id,
+                            results=[
+                                HealthCheckResult(
+                                    "approval_inbox",
+                                    "warning",
+                                    "ok",
+                                    "approval_inbox completed successfully",
+                                    {
+                                        "stage": result.name,
+                                        "processed": result.processed,
+                                    },
+                                )
+                            ],
+                        )
                     self.logger.emit(
                         "info",
                         "daemon_stage_completed",

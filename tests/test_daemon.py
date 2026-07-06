@@ -17,6 +17,7 @@ from feishu_shadow_agent.config import (
 from feishu_shadow_agent.daemon import Daemon
 from feishu_shadow_agent.health import REQUIRED_USER_SCOPES, HealthSuite
 from feishu_shadow_agent.jsonl import JSONLLogger
+from feishu_shadow_agent.operator_query import OperatorQueryService
 from feishu_shadow_agent.processing import TaskProcessingService
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import HealthCheckResult, LarkCliResult, MessagePage
@@ -855,6 +856,135 @@ logging:
     assert main(["status", "--config", str(config_path)]) == 0
     output = yaml.safe_load(capsys.readouterr().out)
     assert output["recent_health_warnings"][0]["check_name"] == "approval_inbox"
+
+
+def test_approval_inbox_success_clears_prior_health_issue(
+    tmp_path: Path,
+    capsys: Any,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+storage:
+  sqlite_path: agent.sqlite3
+logging:
+  jsonl_path: agent.jsonl
+""".lstrip(),
+        encoding="utf-8",
+    )
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    logger = JSONLLogger(tmp_path / "agent.jsonl")
+    suite = FakeHealthSuite(
+        [HealthCheckResult("config_schema", "critical", "ok", "ok")]
+    )
+    fake = FakeFeishu()
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    _seed_policy(store, config)
+    processor = TaskProcessingService(
+        store=store,
+        config=config,
+        agent_backend=FakeAgentBackend(),
+        logger=logger,
+        agent_retry_delays_seconds=(0.0, 0.0),
+    )
+    daemon = Daemon(
+        store=store,
+        logger=logger,
+        health_suite=suite,  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=False,
+        app_config=config,
+        feishu_client=fake,  # type: ignore[arg-type]
+        task_processor=processor,
+        runtime_health_interval_seconds=0,
+    )
+
+    fake.fail_approval_inbox = True
+    daemon.run_one_tick(run_id="run_failed")
+    fake.fail_approval_inbox = False
+    daemon.run_one_tick(run_id="run_recovered")
+
+    with store.connect() as conn:
+        latest = conn.execute(
+            """
+            SELECT status, message, details_json
+            FROM health_checks
+            WHERE check_name = 'approval_inbox'
+            ORDER BY datetime(checked_at) DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    assert latest["status"] == "ok"
+    assert latest["message"] == "approval_inbox completed successfully"
+    assert json.loads(latest["details_json"])["processed"] == 0
+
+    payload = OperatorQueryService(store).health_issues()
+    assert not any(
+        issue["title"] == "approval_inbox reported failed"
+        for issue in payload["issues"]
+    )
+    snapshot = store.status_snapshot()
+    assert not any(
+        warning["check_name"] == "approval_inbox"
+        for warning in snapshot["recent_health_warnings"]
+    )
+    dashboard = OperatorQueryService(store).dashboard_snapshot()
+    assert not any(
+        warning["check_name"] == "approval_inbox"
+        for warning in dashboard["recent_health_warnings"]
+    )
+    assert main(["status", "--config", str(config_path)]) == 0
+    output = yaml.safe_load(capsys.readouterr().out)
+    assert not any(
+        warning["check_name"] == "approval_inbox"
+        for warning in output["recent_health_warnings"]
+    )
+
+
+def test_approval_inbox_success_does_not_write_repeated_health_ok(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    logger = JSONLLogger(tmp_path / "agent.jsonl")
+    suite = FakeHealthSuite(
+        [HealthCheckResult("config_schema", "critical", "ok", "ok")]
+    )
+    fake = FakeFeishu()
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    _seed_policy(store, config)
+    processor = TaskProcessingService(
+        store=store,
+        config=config,
+        agent_backend=FakeAgentBackend(),
+        logger=logger,
+        agent_retry_delays_seconds=(0.0, 0.0),
+    )
+    daemon = Daemon(
+        store=store,
+        logger=logger,
+        health_suite=suite,  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=False,
+        app_config=config,
+        feishu_client=fake,  # type: ignore[arg-type]
+        task_processor=processor,
+        runtime_health_interval_seconds=0,
+    )
+
+    daemon.run_one_tick(run_id="run_first_ok")
+    daemon.run_one_tick(run_id="run_second_ok")
+
+    with store.connect() as conn:
+        count = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM health_checks
+            WHERE check_name = 'approval_inbox'
+            """
+        ).fetchone()["count"]
+    assert count == 0
 
 
 def test_fake_feishu_hermes_tick_runs_ordered_ingest_watch_and_dispatch(

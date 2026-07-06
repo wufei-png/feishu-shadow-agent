@@ -13,6 +13,7 @@ from .config import AppConfig, ChatPolicyConfig
 from .policy import PolicyResolver, ProductPolicyInvalidError, ProductPolicyMissingError
 from .settings_catalog import CONFIG_VALUE_PATHS
 from .store.sqlite_store import (
+    LATEST_NON_OK_HEALTH_CHECKS_SQL,
     PRODUCT_POLICY_KEY,
     RUN_HEARTBEAT_STALE_AFTER_SECONDS,
     SQLiteStore,
@@ -218,24 +219,8 @@ class OperatorQueryService:
                     (_coerce_limit(limit),),
                 ).fetchall()
                 health_rows = conn.execute(
-                    """
-                    SELECT hc.check_name, hc.severity, hc.status, hc.message, hc.checked_at
-                    FROM health_checks hc
-                    WHERE hc.status != 'ok'
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM health_checks newer
-                          WHERE newer.check_name = hc.check_name
-                            AND (
-                                datetime(newer.checked_at) > datetime(hc.checked_at)
-                                OR (
-                                    datetime(newer.checked_at) = datetime(hc.checked_at)
-                                    AND newer.id > hc.id
-                                )
-                            )
-                      )
-                    ORDER BY datetime(hc.checked_at) DESC, hc.id DESC
-                    """
+                    LATEST_NON_OK_HEALTH_CHECKS_SQL,
+                    (_coerce_limit(limit),),
                 ).fetchall()
                 failed_dispatch_rows = conn.execute(
                     """
@@ -872,13 +857,7 @@ class OperatorQueryService:
         try:
             with self._connect() as conn:
                 rows = conn.execute(
-                    """
-                    SELECT check_name, severity, status, message, checked_at
-                    FROM health_checks
-                    WHERE status != 'ok'
-                    ORDER BY checked_at DESC, id DESC
-                    LIMIT ?
-                    """,
+                    LATEST_NON_OK_HEALTH_CHECKS_SQL,
                     (_coerce_limit(limit),),
                 ).fetchall()
         except _ReadStoreUnavailable:

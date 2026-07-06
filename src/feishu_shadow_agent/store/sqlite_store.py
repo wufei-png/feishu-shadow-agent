@@ -35,6 +35,25 @@ from ..types import (
 SQLITE_BUSY_TIMEOUT_MS = 5000
 RUN_HEARTBEAT_STALE_AFTER_SECONDS = 300
 PRODUCT_POLICY_KEY = "reply_policy"
+LATEST_NON_OK_HEALTH_CHECKS_SQL = """
+SELECT hc.check_name, hc.severity, hc.status, hc.message, hc.checked_at
+FROM health_checks hc
+WHERE hc.status != 'ok'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM health_checks newer
+      WHERE newer.check_name = hc.check_name
+        AND (
+            datetime(newer.checked_at) > datetime(hc.checked_at)
+            OR (
+                datetime(newer.checked_at) = datetime(hc.checked_at)
+                AND newer.id > hc.id
+            )
+        )
+  )
+ORDER BY datetime(hc.checked_at) DESC, hc.id DESC
+LIMIT ?
+"""
 
 
 class SQLiteStore:
@@ -593,6 +612,21 @@ class SQLiteStore:
                     for result in results
                 ],
             )
+
+    def latest_health_check_status(self, check_name: str) -> str | None:
+        self.migrate()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT status
+                FROM health_checks
+                WHERE check_name = ?
+                ORDER BY datetime(checked_at) DESC, id DESC
+                LIMIT 1
+                """,
+                (check_name,),
+            ).fetchone()
+        return str(row["status"]) if row is not None else None
 
     def set_checkpoint(self, key: str, value: dict[str, Any]) -> None:
         self.migrate()
@@ -2009,13 +2043,8 @@ class SQLiteStore:
                 """
             ).fetchall()
             recent_health = conn.execute(
-                """
-                SELECT check_name, severity, status, message, checked_at
-                FROM health_checks
-                WHERE status != 'ok'
-                ORDER BY checked_at DESC, id DESC
-                LIMIT 20
-                """
+                LATEST_NON_OK_HEALTH_CHECKS_SQL,
+                (20,),
             ).fetchall()
             stale_sending = conn.execute(
                 """

@@ -224,7 +224,15 @@ def test_dashboard_snapshot_health_summary_matches_open_health_issues(
     snapshot = query.dashboard_snapshot()
     health = query.health_issues()
 
-    assert len(snapshot["recent_health_warnings"]) == 20
+    assert snapshot["recent_health_warnings"] == [
+        {
+            "check_name": "lark",
+            "severity": "warning",
+            "status": "failed",
+            "message": "Lark failed",
+            "checked_at": "2026-06-22T09:57:00+08:00",
+        }
+    ]
     assert snapshot["health_issue_summary"] == health["summary"]
     assert snapshot["health_issue_summary"]["open_issue_count"] == 1
 
