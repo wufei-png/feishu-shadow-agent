@@ -56,6 +56,10 @@ _Avoid_: Replay command, raw message dump, dispatch preview generation
 An explicit owner action that may mutate state, such as approving a reply, recovering a dispatch action, expiring approvals, or updating Product Policy.
 _Avoid_: Store helper, UI callback
 
+**Agent Input Contract**:
+The product boundary that defines what information an agent turn can see and which decision or output each field is allowed to influence.
+_Avoid_: Prompt dump, debug metadata, everything we know
+
 **Settings Catalog**:
 A stable product field map that defines which settings the Operator Console exposes, how they are grouped, whether they are editable, and which source owns them. It is not a dynamic schema engine and should not mirror every raw config field.
 _Avoid_: Raw config schema, dynamic form engine, every setting is editable

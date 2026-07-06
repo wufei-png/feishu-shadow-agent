@@ -465,7 +465,7 @@ def test_runtime_critical_health_failure_blocks_ingestion_and_all_sends(
     )
 
 
-def test_status_snapshot_flags_stale_running_daemon(tmp_path: Path) -> None:
+def test_dashboard_snapshot_flags_stale_running_daemon(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.migrate()
     with store.connect() as conn:
@@ -487,16 +487,18 @@ def test_status_snapshot_flags_stale_running_daemon(tmp_path: Path) -> None:
             ),
         )
 
-    snapshot = store.status_snapshot(
+    snapshot = OperatorQueryService(
+        store,
+        now=lambda: "2026-06-22T10:02:01+08:00",
+    ).dashboard_snapshot(
         daemon_stale_after_seconds=60,
-        now="2026-06-22T10:02:01+08:00",
     )
 
     assert snapshot["daemon_liveness"]["status"] == "stale"
     assert snapshot["daemon_liveness"]["heartbeat_age_seconds"] == 121
 
 
-def test_status_snapshot_daemon_liveness_ignores_newer_doctor_run(
+def test_dashboard_snapshot_daemon_liveness_ignores_newer_doctor_run(
     tmp_path: Path,
 ) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
@@ -535,9 +537,11 @@ def test_status_snapshot_daemon_liveness_ignores_newer_doctor_run(
             ),
         )
 
-    snapshot = store.status_snapshot(
+    snapshot = OperatorQueryService(
+        store,
+        now=lambda: "2026-06-22T10:02:01+08:00",
+    ).dashboard_snapshot(
         daemon_stale_after_seconds=60,
-        now="2026-06-22T10:02:01+08:00",
     )
 
     assert snapshot["last_run"]["run_id"] == "doctor_newer"
@@ -841,7 +845,7 @@ logging:
 
     daemon.run_one_tick(run_id="run_1")
 
-    snapshot = store.status_snapshot()
+    snapshot = OperatorQueryService(store).dashboard_snapshot()
     warnings = snapshot["recent_health_warnings"]
     assert warnings[0]["check_name"] == "approval_inbox"
     assert warnings[0]["severity"] == "warning"
@@ -924,11 +928,6 @@ logging:
     assert not any(
         issue["title"] == "approval_inbox reported failed"
         for issue in payload["issues"]
-    )
-    snapshot = store.status_snapshot()
-    assert not any(
-        warning["check_name"] == "approval_inbox"
-        for warning in snapshot["recent_health_warnings"]
     )
     dashboard = OperatorQueryService(store).dashboard_snapshot()
     assert not any(

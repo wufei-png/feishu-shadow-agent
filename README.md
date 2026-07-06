@@ -14,7 +14,7 @@ Feishu Shadow Agent 是一个本机运行的飞书个人办公影子助手。它
 - 飞书 bot 身份负责 owner 通知、审批入口、群聊自动回复和资源下载
 - Hermes CLI 负责任务路由和单任务会话处理
 
-更多设计背景见 [MVP 设计](docs/specs/feishu-shadow-agent-mvp-design.md) 和 [流程图](docs/specs/feishu-shadow-agent-flows.md)。
+当前扩展边界见 [当前架构边界](docs/architecture/current-boundaries.md)；更多设计背景见 [MVP 设计](docs/specs/feishu-shadow-agent-mvp-design.md) 和 [流程图](docs/specs/feishu-shadow-agent-flows.md)。
 
 ## 快速启动
 
