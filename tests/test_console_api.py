@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from feishu_shadow_agent.cli import main
 from feishu_shadow_agent.config import ConfigService
 from feishu_shadow_agent.console_api import console_static_ready, create_console_app
+from feishu_shadow_agent.operator_commands import CommandResult
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 
 
@@ -465,6 +466,11 @@ def test_message_detail_api_is_service_backed_and_read_only(tmp_path: Path) -> N
         ("POST", "/api/tasks/t_missing/close"),
         ("POST", "/api/tasks/t_missing/reopen"),
         ("POST", "/api/maintenance/expire-approvals"),
+        ("POST", "/api/maintenance/doctor"),
+        ("POST", "/api/maintenance/config-validate"),
+        ("POST", "/api/maintenance/retention-prune"),
+        ("POST", "/api/maintenance/reply-style-refresh"),
+        ("POST", "/api/messages/om_missing/replay"),
         ("POST", "/api/dispatch/actions/1/retry"),
         ("POST", "/api/dispatch/actions/1/cancel"),
         ("POST", "/api/dispatch/actions/1/mark-sent"),
@@ -695,6 +701,169 @@ def test_maintenance_and_dispatch_command_routes_return_command_results(
     assert expire.status_code == 200
     assert expire.json()["command"] == "maintenance.expire_approvals"
     assert expire.json()["actor"] == "local_console"
+
+
+def test_maintenance_routes_call_in_process_command_service(
+    tmp_path: Path, monkeypatch
+) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeMaintenanceCommandService:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def doctor(
+            self, *, send_test: bool, actor: str, reason: str | None
+        ) -> CommandResult:
+            calls.append(
+                (
+                    "doctor",
+                    {"send_test": send_test, "actor": actor, "reason": reason},
+                )
+            )
+            return _test_command_result(
+                "maintenance.doctor_send_test" if send_test else "maintenance.doctor",
+                actor=actor,
+                reason=reason,
+                changed=send_test,
+                result={"send_test": send_test},
+            )
+
+        def config_validate(self, *, actor: str, reason: str | None) -> CommandResult:
+            calls.append(("config_validate", {"actor": actor, "reason": reason}))
+            return _test_command_result(
+                "maintenance.config_validate", actor=actor, reason=reason
+            )
+
+        def retention_prune(
+            self, *, dry_run: bool, actor: str, reason: str | None
+        ) -> CommandResult:
+            calls.append(
+                (
+                    "retention_prune",
+                    {"dry_run": dry_run, "actor": actor, "reason": reason},
+                )
+            )
+            return _test_command_result(
+                "maintenance.retention_prune",
+                actor=actor,
+                reason=reason,
+                changed=not dry_run,
+                result={"dry_run": dry_run},
+            )
+
+        def reply_style_refresh(
+            self, *, dry_run: bool, actor: str, reason: str | None
+        ) -> CommandResult:
+            calls.append(
+                (
+                    "reply_style_refresh",
+                    {"dry_run": dry_run, "actor": actor, "reason": reason},
+                )
+            )
+            return _test_command_result(
+                "maintenance.reply_style_refresh",
+                actor=actor,
+                reason=reason,
+                changed=not dry_run,
+                result={"dry_run": dry_run},
+            )
+
+    monkeypatch.setattr(
+        "feishu_shadow_agent.console_api.MaintenanceCommandService",
+        FakeMaintenanceCommandService,
+    )
+    client = _client(tmp_path)
+
+    doctor = client.post(
+        "/api/maintenance/doctor",
+        headers=_auth(),
+        json={"send_test": True, "reason": "owner smoke test"},
+    )
+    config = client.post(
+        "/api/maintenance/config-validate",
+        headers=_auth(),
+        json={"reason": "preflight"},
+    )
+    retention = client.post(
+        "/api/maintenance/retention-prune",
+        headers=_auth(),
+        json={"dry_run": False, "reason": "cleanup"},
+    )
+    reply_style = client.post(
+        "/api/maintenance/reply-style-refresh",
+        headers=_auth(),
+        json={"dry_run": True, "reason": "preview"},
+    )
+
+    assert doctor.status_code == 200
+    assert doctor.json()["command"] == "maintenance.doctor_send_test"
+    assert doctor.json()["actor"] == "local_console"
+    assert doctor.json()["result"] == {"send_test": True}
+    assert config.status_code == 200
+    assert config.json()["command"] == "maintenance.config_validate"
+    assert retention.status_code == 200
+    assert retention.json()["changed"] is True
+    assert retention.json()["result"] == {"dry_run": False}
+    assert reply_style.status_code == 200
+    assert reply_style.json()["changed"] is False
+    assert calls == [
+        (
+            "doctor",
+            {
+                "send_test": True,
+                "actor": "local_console",
+                "reason": "owner smoke test",
+            },
+        ),
+        ("config_validate", {"actor": "local_console", "reason": "preflight"}),
+        (
+            "retention_prune",
+            {"dry_run": False, "actor": "local_console", "reason": "cleanup"},
+        ),
+        (
+            "reply_style_refresh",
+            {"dry_run": True, "actor": "local_console", "reason": "preview"},
+        ),
+    ]
+
+
+def test_message_replay_route_returns_dry_run_command_result(
+    tmp_path: Path, monkeypatch
+) -> None:
+    calls: list[str] = []
+
+    def fake_replay_message_dry_run(**kwargs: object) -> dict[str, object] | None:
+        message_id = kwargs["message_id"]
+        calls.append(str(message_id))
+        if message_id == "om_found":
+            return {
+                "message_id": message_id,
+                "state": {"message": {"message_id": message_id}},
+                "dispatch_preview": {"processed": 0, "actions": []},
+                "mutated_real_db": False,
+            }
+        return None
+
+    monkeypatch.setattr(
+        "feishu_shadow_agent.console_api.replay_message_dry_run",
+        fake_replay_message_dry_run,
+    )
+    client = _client(tmp_path)
+
+    found = client.post("/api/messages/om_found/replay", headers=_auth(), json={})
+    missing = client.post("/api/messages/om_missing/replay", headers=_auth(), json={})
+
+    assert found.status_code == 200
+    assert found.json()["status"] == "no_change"
+    assert found.json()["command"] == "message.replay_dry_run"
+    assert found.json()["changed"] is False
+    assert found.json()["result"]["message_id"] == "om_found"
+    assert found.json()["result"]["mutated_real_db"] is False
+    assert missing.status_code == 200
+    assert missing.json()["status"] == "not_found"
+    assert missing.json()["command"] == "message.replay_dry_run"
+    assert calls == ["om_found", "om_missing"]
 
 
 def test_dispatch_mark_sent_route_uses_readback_marker(tmp_path: Path) -> None:
@@ -957,6 +1126,25 @@ def test_dispatch_mark_sent_route_reports_marker_construction_failure(
     assert payload["changed"] is False
     assert "readback marker unavailable" in payload["result"]["error"]
     assert store.get_action(action_id).status == "failed_needs_review"  # type: ignore[union-attr]
+
+
+def _test_command_result(
+    command: str,
+    *,
+    actor: str,
+    reason: str | None,
+    changed: bool = False,
+    result: dict[str, object] | None = None,
+) -> CommandResult:
+    return CommandResult(
+        status="applied" if changed else "no_change",
+        command=command,
+        actor=actor,
+        reason=reason,
+        target={"type": "test"},
+        changed=changed,
+        result=result or {},
+    )
 
 
 def _seed_task_with_message(

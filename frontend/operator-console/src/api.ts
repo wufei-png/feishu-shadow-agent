@@ -54,6 +54,16 @@ export type PolicyDeleteBody = {
   reason?: string;
 };
 
+export type MaintenanceDoctorBody = {
+  reason?: string;
+  send_test?: boolean;
+};
+
+export type MaintenanceDryRunBody = {
+  reason?: string;
+  dry_run?: boolean;
+};
+
 type ListParams = {
   limit?: number;
   offset?: number;
@@ -158,6 +168,10 @@ export function getMessageDetail(token: string, messageId: string): Promise<Mess
   return fetchApi(`/api/messages/${encodeURIComponent(messageId)}/detail`, token);
 }
 
+export function replayMessage(token: string, messageId: string): Promise<CommandResult> {
+  return postCommand(`/api/messages/${encodeURIComponent(messageId)}/replay`, token, {});
+}
+
 export function getPolicyStatus(token: string): Promise<PolicyStatus> {
   return fetchApi("/api/policy/status", token);
 }
@@ -180,6 +194,22 @@ export function updateChatPolicy(token: string, chatId: string, body: ChatPolicy
 
 export function deleteChatPolicy(token: string, chatId: string, body: PolicyDeleteBody): Promise<CommandResult> {
   return deleteCommand(`/api/policy/chats/${encodeURIComponent(chatId)}`, token, body);
+}
+
+export function runDoctor(token: string, body: MaintenanceDoctorBody): Promise<CommandResult> {
+  return postCommand("/api/maintenance/doctor", token, body);
+}
+
+export function validateConfig(token: string, body: { reason?: string }): Promise<CommandResult> {
+  return postCommand("/api/maintenance/config-validate", token, body);
+}
+
+export function pruneRetention(token: string, body: MaintenanceDryRunBody): Promise<CommandResult> {
+  return postCommand("/api/maintenance/retention-prune", token, body);
+}
+
+export function refreshReplyStyle(token: string, body: MaintenanceDryRunBody): Promise<CommandResult> {
+  return postCommand("/api/maintenance/reply-style-refresh", token, body);
 }
 
 export function getSettingsCatalog(token: string): Promise<SettingsCatalog> {

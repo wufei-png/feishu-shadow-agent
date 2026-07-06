@@ -29,7 +29,10 @@ _CORE_TABLES = frozenset(
         "dispatch_attempts",
         "runs",
         "health_checks",
+        "resources",
         "routing_audits",
+        "agent_audits",
+        "message_processing",
         "chat_policies",
         "product_policies",
         "policy_audits",
@@ -70,10 +73,12 @@ class OperatorQueryService:
         store: SQLiteStore,
         *,
         policy_import_source: AppConfig | None = None,
+        base_dir: Path | None = None,
         now: Callable[[], str] | None = None,
     ):
         self.store = store
         self.policy_import_source = policy_import_source
+        self.base_dir = base_dir
         self._now = now or utc_now_iso
         self.policy_resolver = PolicyResolver(_ReadOnlyProductPolicyRepository(self))
 
@@ -517,6 +522,18 @@ class OperatorQueryService:
                     """,
                     (int(task["id"]), _coerce_limit(limit)),
                 ).fetchall()
+                agent_audit_rows = conn.execute(
+                    """
+                    SELECT id, backend_provider, request_type, task_id, agent_session_id,
+                           input_message_ids_json, input_resource_ids_json, response_json,
+                           error, latency_ms, prompt_json, tool_permissions_profile, created_at
+                    FROM agent_audits
+                    WHERE task_id = ?
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (int(task["id"]), _coerce_limit(limit)),
+                ).fetchall()
         except _ReadStoreUnavailable:
             return None
         task_summary = _task_summary_dto(task)
@@ -531,6 +548,7 @@ class OperatorQueryService:
             "recent_messages": [_message_dto(row) for row in reversed(messages)],
             "pending_approvals": pending_approvals,
             "actions": actions,
+            "agent_audits": [_agent_audit_dto(row) for row in agent_audit_rows],
             "effective_policy": self.effective_policy_summary(
                 task["chat_id"], task["chat_type"]
             ),
@@ -639,6 +657,43 @@ class OperatorQueryService:
                     """,
                     (message_id,),
                 ).fetchall()
+                processing_rows = conn.execute(
+                    """
+                    SELECT id, message_id, task_id, stage, status, attempt_count,
+                           last_error, terminal_reason, created_at, updated_at
+                    FROM message_processing
+                    WHERE message_id = ?
+                    ORDER BY updated_at DESC, id DESC
+                    """,
+                    (message_id,),
+                ).fetchall()
+                resource_rows = conn.execute(
+                    """
+                    SELECT id, message_id, file_key, resource_type, download_status, path,
+                           sha256, raw_json, created_at, updated_at
+                    FROM resources
+                    WHERE message_id = ?
+                    ORDER BY id
+                    """,
+                    (message_id,),
+                ).fetchall()
+                agent_audit_rows = conn.execute(
+                    """
+                    SELECT id, backend_provider, request_type, task_id, agent_session_id,
+                           input_message_ids_json, input_resource_ids_json, response_json,
+                           error, latency_ms, prompt_json, tool_permissions_profile, created_at
+                    FROM agent_audits
+                    WHERE input_message_ids_json LIKE ? ESCAPE '\\'
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (
+                        _sqlite_like_contains(
+                            json.dumps(message_id, ensure_ascii=False)
+                        ),
+                        _coerce_limit(50),
+                    ),
+                ).fetchall()
                 task_rows = conn.execute(
                     """
                     SELECT DISTINCT t.id, t.short_id, t.status, t.chat_id, t.chat_type, t.thread_id,
@@ -680,6 +735,15 @@ class OperatorQueryService:
             "task_ids": task_ids,
             "task_summaries": [_task_summary_dto(row) for row in task_rows],
             "routing_audits": [_routing_audit_dto(row) for row in routing_audits],
+            "processing": [_message_processing_dto(row) for row in processing_rows],
+            "resources": [
+                _resource_dto(row, base_dir=self.base_dir) for row in resource_rows
+            ],
+            "agent_audits": [
+                audit
+                for audit in (_agent_audit_dto(row) for row in agent_audit_rows)
+                if message_id in audit["input_message_ids"]
+            ],
             "approvals": approval_dtos,
             "actions": action_dtos,
             "recorded_dispatch_outcomes": recorded_dispatch_outcomes,
@@ -1176,6 +1240,102 @@ def _routing_audit_dto(row: sqlite3.Row) -> dict[str, Any]:
         "target_task_id": data["target_task_id"],
         "created_at": data["created_at"],
     }
+
+
+def _message_processing_dto(row: sqlite3.Row) -> dict[str, Any]:
+    data = _row_dict(row)
+    return {
+        "id": data["id"],
+        "message_id": data["message_id"],
+        "task_id": data["task_id"],
+        "stage": data["stage"],
+        "status": data["status"],
+        "attempt_count": int(data.get("attempt_count") or 0),
+        "last_error": data.get("last_error"),
+        "terminal_reason": data.get("terminal_reason"),
+        "created_at": data.get("created_at"),
+        "updated_at": data.get("updated_at"),
+    }
+
+
+def _resource_dto(row: sqlite3.Row, *, base_dir: Path | None) -> dict[str, Any]:
+    data = _row_dict(row)
+    stored_path = data.get("path")
+    path_exists = _resource_path_exists(stored_path, base_dir=base_dir)
+    raw = _loads_json_object(data.get("raw_json"))
+    sha256 = data.get("sha256")
+    return {
+        "id": data["id"],
+        "message_id": data["message_id"],
+        "file_key": data["file_key"],
+        "resource_type": data["resource_type"],
+        "download_status": data["download_status"],
+        "path": stored_path,
+        "path_exists": path_exists,
+        "sha256": sha256,
+        "sha256_short": None if not sha256 else str(sha256)[:12],
+        "created_at": data.get("created_at"),
+        "updated_at": data.get("updated_at"),
+        "raw_summary": _resource_raw_summary(raw),
+        "raw": raw,
+    }
+
+
+def _agent_audit_dto(row: sqlite3.Row) -> dict[str, Any]:
+    data = _row_dict(row)
+    response = _loads_json_object(data.get("response_json"))
+    prompt = _loads_json_object(data.get("prompt_json"))
+    return {
+        "id": data["id"],
+        "backend_provider": data["backend_provider"],
+        "request_type": data["request_type"],
+        "task_id": data["task_id"],
+        "agent_session_id": data["agent_session_id"],
+        "input_message_ids": _loads_json_list(data.get("input_message_ids_json")),
+        "input_resource_ids": _loads_json_list(data.get("input_resource_ids_json")),
+        "response_summary": _agent_response_summary(response),
+        "response": response,
+        "error": data.get("error"),
+        "latency_ms": data.get("latency_ms"),
+        "tool_permissions_profile": data.get("tool_permissions_profile"),
+        "prompt_debug": prompt,
+        "created_at": data["created_at"],
+    }
+
+
+def _resource_path_exists(value: Any, *, base_dir: Path | None) -> bool | None:
+    if base_dir is None or not isinstance(value, str) or not value:
+        return None
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        return None
+    return (base_dir / path).is_file()
+
+
+def _resource_raw_summary(raw: dict[str, Any]) -> dict[str, Any]:
+    allowed = (
+        "reason",
+        "error",
+        "policy_source",
+        "resource_dir_bytes",
+        "max_resource_bytes",
+        "max_resource_dir_bytes",
+    )
+    return {key: raw[key] for key in allowed if key in raw}
+
+
+def _agent_response_summary(response: dict[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for key, value in response.items():
+        if isinstance(value, str):
+            summary[key] = value if len(value) <= 120 else f"{value[:117]}..."
+        elif isinstance(value, (bool, int, float)) or value is None:
+            summary[key] = value
+        elif isinstance(value, list):
+            summary[key] = f"{len(value)} item(s)"
+        elif isinstance(value, dict):
+            summary[key] = f"{len(value)} field(s)"
+    return summary
 
 
 def _recorded_dispatch_outcome(
@@ -1973,6 +2133,11 @@ def _coerce_offset(offset: int) -> int:
     return max(0, int(offset))
 
 
+def _sqlite_like_contains(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 def _has_core_schema(conn: sqlite3.Connection) -> bool:
     rows = conn.execute(
         """
@@ -2012,6 +2177,11 @@ def _loads_json(value: Any) -> Any:
 def _loads_json_object(value: Any) -> dict[str, Any]:
     loaded = _loads_json(value)
     return loaded if isinstance(loaded, dict) else {}
+
+
+def _loads_json_list(value: Any) -> list[Any]:
+    loaded = _loads_json(value)
+    return loaded if isinstance(loaded, list) else []
 
 
 def _parse_datetime_or_none(value: Any) -> datetime | None:

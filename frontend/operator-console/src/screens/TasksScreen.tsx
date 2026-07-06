@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bell, ClipboardList, MessageSquare, RotateCcw, Send, XCircle } from "lucide-react";
+import { Bell, Bot, ClipboardList, MessageSquare, RotateCcw, Send, XCircle } from "lucide-react";
 import { closeTask, getTask, listTasks, reopenTask } from "../api";
 import {
   Badge,
@@ -21,6 +21,7 @@ import {
 } from "../components/Primitives";
 import { invalidateAfterTaskCommand, queryKeys } from "../queryKeys";
 import type { CommandResult, TaskStatus } from "../types";
+import { AgentAuditList } from "./AgentAuditList";
 import { MessageDetailPanel } from "./MessageDetailPanel";
 
 type TaskFilter = TaskStatus | "all";
@@ -242,6 +243,14 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
               ) : (
                 <p className="detail-note">No dispatch actions for this task.</p>
               )}
+            </div>
+
+            <div className="detail-panel">
+              <div className="subsection-title">
+                <Bot aria-hidden="true" size={16} />
+                <h2>Agent audits</h2>
+              </div>
+              <AgentAuditList audits={detail.data.agent_audits} />
             </div>
           </>
         ) : (

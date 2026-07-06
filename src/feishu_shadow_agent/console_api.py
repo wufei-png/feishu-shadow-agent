@@ -29,13 +29,19 @@ from .console_security import (
 from .dispatcher import Dispatcher
 from .feishu.lark_cli import LarkCliClient
 from .jsonl import JSONLLogger
-from .operator_commands import DispatchReadbackMarker, OperatorCommandService
+from .maintenance_commands import MaintenanceCommandService
+from .operator_commands import (
+    CommandResult,
+    DispatchReadbackMarker,
+    OperatorCommandService,
+)
 from .operator_query import (
     OperatorQueryReadError,
     OperatorQueryService,
     OperatorQueryUnavailable,
 )
 from .paths import resolve_relative_path
+from .replay import replay_message_dry_run
 from .settings_catalog import settings_catalog
 from .store.sqlite_store import SQLiteStore
 from .types import ActionStatus, ApprovalStatus, TaskStatus, utc_now_iso
@@ -114,6 +120,20 @@ class PolicyDeleteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reason: str | None = None
+
+
+class MaintenanceDoctorRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = None
+    send_test: bool = False
+
+
+class MaintenanceDryRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = None
+    dry_run: bool = True
 
 
 def default_console_static_dir() -> Path:
@@ -196,7 +216,11 @@ def create_console_app(
             _raise_api_error(401, "unauthorized", "A valid bearer token is required.")
 
     def query_service() -> OperatorQueryService:
-        return OperatorQueryService(store, policy_import_source=loaded_config.config)
+        return OperatorQueryService(
+            store,
+            policy_import_source=loaded_config.config,
+            base_dir=loaded_config.base_dir,
+        )
 
     def command_service(
         *, needs_readback_marker: bool = False
@@ -213,6 +237,13 @@ def create_console_app(
             keep_watching_until_factory=lambda: _watch_until_from_now(
                 loaded_config.config.lifecycle.watch_minutes
             ),
+        )
+
+    def maintenance_service() -> MaintenanceCommandService:
+        return MaintenanceCommandService(
+            loaded_config=loaded_config,
+            store=store,
+            logger=_build_jsonl_logger(loaded_config),
         )
 
     api = APIRouter(prefix="/api", dependencies=[Depends(require_token)])
@@ -327,6 +358,33 @@ def create_console_app(
             _raise_api_error(404, "not_found", f"Message not found: {message_id}")
         return detail
 
+    @api.post("/messages/{message_id}/replay")
+    def replay_message(message_id: str) -> dict[str, Any]:
+        result = replay_message_dry_run(
+            loaded_config=loaded_config,
+            store=store,
+            message_id=message_id,
+        )
+        if result is None:
+            return CommandResult(
+                status="not_found",
+                command="message.replay_dry_run",
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=None,
+                target={"type": "message", "message_id": message_id},
+                changed=False,
+                result={"error": f"message not found: {message_id}"},
+            ).as_dict()
+        return CommandResult(
+            status="no_change",
+            command="message.replay_dry_run",
+            actor=LOCAL_CONSOLE_ACTOR,
+            reason=None,
+            target={"type": "message", "message_id": message_id},
+            changed=False,
+            result=result,
+        ).as_dict()
+
     @api.post("/approvals/{approval_id}/approve")
     def approve_approval(
         approval_id: str,
@@ -423,6 +481,65 @@ def create_console_app(
         return (
             command_service()
             .expire_approvals(
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=payload.reason,
+            )
+            .as_dict()
+        )
+
+    @api.post("/maintenance/doctor")
+    def run_doctor(
+        body: Annotated[MaintenanceDoctorRequest | None, Body()] = None,
+    ) -> dict[str, Any]:
+        payload = body or MaintenanceDoctorRequest()
+        return (
+            maintenance_service()
+            .doctor(
+                send_test=payload.send_test,
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=payload.reason,
+            )
+            .as_dict()
+        )
+
+    @api.post("/maintenance/config-validate")
+    def validate_config(
+        body: Annotated[CommandRequest | None, Body()] = None,
+    ) -> dict[str, Any]:
+        payload = body or CommandRequest()
+        return (
+            maintenance_service()
+            .config_validate(
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=payload.reason,
+            )
+            .as_dict()
+        )
+
+    @api.post("/maintenance/retention-prune")
+    def retention_prune(
+        body: Annotated[MaintenanceDryRunRequest | None, Body()] = None,
+    ) -> dict[str, Any]:
+        payload = body or MaintenanceDryRunRequest()
+        return (
+            maintenance_service()
+            .retention_prune(
+                dry_run=payload.dry_run,
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=payload.reason,
+            )
+            .as_dict()
+        )
+
+    @api.post("/maintenance/reply-style-refresh")
+    def reply_style_refresh(
+        body: Annotated[MaintenanceDryRunRequest | None, Body()] = None,
+    ) -> dict[str, Any]:
+        payload = body or MaintenanceDryRunRequest()
+        return (
+            maintenance_service()
+            .reply_style_refresh(
+                dry_run=payload.dry_run,
                 actor=LOCAL_CONSOLE_ACTOR,
                 reason=payload.reason,
             )
@@ -568,14 +685,6 @@ def _build_dispatch_readback_marker(
     store: SQLiteStore,
 ) -> Dispatcher:
     config = loaded_config.config
-    jsonl_path = resolve_relative_path(
-        config.logging.jsonl_path, loaded_config.base_dir
-    )
-    text_path = (
-        None
-        if config.logging.text_path is None
-        else resolve_relative_path(config.logging.text_path, loaded_config.base_dir)
-    )
     client = LarkCliClient(
         path=config.lark_cli.path,
         timeout_seconds=config.lark_cli.timeout_seconds,
@@ -585,12 +694,25 @@ def _build_dispatch_readback_marker(
         store=store,
         feishu_client=client,
         config=config,
-        logger=JSONLLogger(
-            jsonl_path,
-            level=config.logging.level,
-            console=config.logging.console,
-            text_path=text_path,
-        ),
+        logger=_build_jsonl_logger(loaded_config),
+    )
+
+
+def _build_jsonl_logger(loaded_config: LoadedConfig) -> JSONLLogger:
+    config = loaded_config.config
+    jsonl_path = resolve_relative_path(
+        config.logging.jsonl_path, loaded_config.base_dir
+    )
+    text_path = (
+        None
+        if config.logging.text_path is None
+        else resolve_relative_path(config.logging.text_path, loaded_config.base_dir)
+    )
+    return JSONLLogger(
+        jsonl_path,
+        level=config.logging.level,
+        console=config.logging.console,
+        text_path=text_path,
     )
 
 

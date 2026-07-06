@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import subprocess
 import sys
-import tempfile
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -38,6 +36,7 @@ from .paths import (
     resolve_relative_path,
 )
 from .processing import TaskProcessingService
+from .replay import replay_message_dry_run
 from .reply_style import ReplyStyleRefresher
 from .retention import RetentionService
 from .store.sqlite_store import SQLiteStore
@@ -529,48 +528,15 @@ def _handle_local_approval_command(
 
 def _handle_replay(args: argparse.Namespace) -> int:
     loaded, store, _ = _load_runtime(args.config)
-    client = LarkCliClient(
-        path=loaded.config.lark_cli.path,
-        timeout_seconds=loaded.config.lark_cli.timeout_seconds,
-        cwd=loaded.base_dir,
+    output = replay_message_dry_run(
+        loaded_config=loaded,
+        store=store,
+        message_id=args.message_id,
+        lark_client_factory=LarkCliClient,
     )
-    previews = []
-    with tempfile.TemporaryDirectory(prefix="feishu-shadow-agent-replay-") as tmp:
-        temp_db = Path(tmp) / "agent.sqlite3"
-        if store.path.exists():
-            shutil.copy2(store.path, temp_db)
-        temp_store = SQLiteStore(temp_db)
-        temp_store.migrate()
-        summary = temp_store.replay_summary(args.message_id)
-        if summary is None:
-            print(f"message not found: {args.message_id}", file=sys.stderr)
-            return 2
-        related_pending_action_ids = [
-            action["id"]
-            for action in summary["actions"]
-            if action.get("status") == "pending"
-            and action.get("kind") in {"send_reply", "owner_notification"}
-        ]
-        dispatcher = Dispatcher(
-            store=temp_store,
-            feishu_client=client,
-            config=loaded.config,
-            logger=JSONLLogger(Path(tmp) / "replay.jsonl"),
-        )
-        run_id = new_run_id("replay")
-        for action_id in related_pending_action_ids:
-            preview = dispatcher.preview_action(action_id, run_id=run_id)
-            if preview is not None:
-                previews.append(preview)
-    output = {
-        "message_id": args.message_id,
-        "state": summary,
-        "dispatch_preview": {
-            "processed": len(previews),
-            "actions": previews,
-        },
-        "mutated_real_db": False,
-    }
+    if output is None:
+        print(f"message not found: {args.message_id}", file=sys.stderr)
+        return 2
     print(yaml.safe_dump(output, allow_unicode=True, sort_keys=False), end="")
     return 0
 

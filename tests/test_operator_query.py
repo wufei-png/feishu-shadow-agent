@@ -336,6 +336,29 @@ def test_task_detail_returns_related_read_models_and_effective_policy(
     task_id = _insert_task(store)
     _insert_message(store, task_id=task_id)
     _insert_approval(store, task_id=task_id, short_id="a_review")
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO agent_audits(
+              backend_provider, request_type, task_id, agent_session_id,
+              input_message_ids_json, input_resource_ids_json, response_json,
+              latency_ms, prompt_json, tool_permissions_profile, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "hermes",
+                "task_session",
+                task_id,
+                "session_1",
+                json.dumps(["om_root"]),
+                json.dumps([]),
+                json.dumps({"reply": "hello", "tool_calls": []}),
+                42,
+                json.dumps({"messages": ["debug prompt"]}),
+                "default",
+                "2026-06-22T08:01:00+08:00",
+            ),
+        )
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_root",
@@ -360,6 +383,12 @@ def test_task_detail_returns_related_read_models_and_effective_policy(
     assert [message["message_id"] for message in detail["recent_messages"]] == [
         "om_root"
     ]
+    assert detail["agent_audits"][0]["request_type"] == "task_session"
+    assert detail["agent_audits"][0]["input_message_ids"] == ["om_root"]
+    assert detail["agent_audits"][0]["response_summary"] == {
+        "reply": "hello",
+        "tool_calls": "0 item(s)",
+    }
     assert detail["pending_approvals"][0]["approval_id"] == "a_review"
     assert detail["actions"][0]["action_id"] == action_id
     assert detail["effective_policy"] == {
@@ -467,6 +496,9 @@ def test_message_detail_returns_processing_context_without_preview_side_effects(
     task_id = _insert_task(store)
     _insert_message(store, task_id=task_id)
     _insert_approval(store, task_id=task_id, short_id="a_msg_detail")
+    resource_path = tmp_path / "resources" / "om_root.txt"
+    resource_path.parent.mkdir()
+    resource_path.write_text("attachment", encoding="utf-8")
     with store.connect() as conn:
         conn.execute(
             """
@@ -475,6 +507,91 @@ def test_message_detail_returns_processing_context_without_preview_side_effects(
             """,
             ("om_root", task_id, "new_task", "new task", "2026-06-22T08:00:00+08:00"),
         )
+        conn.execute(
+            """
+            INSERT INTO message_processing(
+              message_id, task_id, stage, status, attempt_count, last_error,
+              terminal_reason, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "om_root",
+                task_id,
+                "resource_download",
+                "processed",
+                1,
+                None,
+                None,
+                "2026-06-22T08:00:00+08:00",
+                "2026-06-22T08:01:00+08:00",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO resources(
+              message_id, file_key, resource_type, download_status, path,
+              sha256, raw_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "om_root",
+                "file_1",
+                "image",
+                "downloaded",
+                "resources/om_root.txt",
+                "0123456789abcdef",
+                json.dumps({"reason": "ok", "private": "omitted"}),
+                "2026-06-22T08:00:00+08:00",
+                "2026-06-22T08:01:00+08:00",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO agent_audits(
+              backend_provider, request_type, task_id, agent_session_id,
+              input_message_ids_json, input_resource_ids_json, response_json,
+              error, latency_ms, prompt_json, tool_permissions_profile, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "hermes",
+                "router",
+                None,
+                None,
+                json.dumps(["om_root"]),
+                json.dumps([1]),
+                json.dumps({"route": "new_task", "candidates": [task_id]}),
+                None,
+                7,
+                json.dumps({"prompt": "router debug"}),
+                "read_only",
+                "2026-06-22T08:02:00+08:00",
+            ),
+        )
+        for index in range(51):
+            conn.execute(
+                """
+                INSERT INTO agent_audits(
+                  backend_provider, request_type, task_id, agent_session_id,
+                  input_message_ids_json, input_resource_ids_json, response_json,
+                  error, latency_ms, prompt_json, tool_permissions_profile, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "hermes",
+                    "router",
+                    None,
+                    None,
+                    json.dumps([f"om_root_shadow_{index}"]),
+                    json.dumps([]),
+                    json.dumps({"route": "ignore"}),
+                    None,
+                    5,
+                    json.dumps({}),
+                    "read_only",
+                    f"2026-06-22T08:03:{index:02d}+08:00",
+                ),
+            )
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_root",
@@ -486,7 +603,11 @@ def test_message_detail_returns_processing_context_without_preview_side_effects(
     )
     assert action_id is not None
     before = _message_detail_state(store, action_id)
-    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:00:00+08:00")
+    query = OperatorQueryService(
+        store,
+        base_dir=tmp_path,
+        now=lambda: "2026-06-22T10:00:00+08:00",
+    )
 
     detail = query.message_detail("om_root")
 
@@ -495,6 +616,18 @@ def test_message_detail_returns_processing_context_without_preview_side_effects(
     assert detail["task_ids"] == [task_id]
     assert detail["task_summaries"][0]["task_id"] == "t_1"
     assert detail["routing_audits"][0]["route"] == "new_task"
+    assert detail["processing"][0]["stage"] == "resource_download"
+    assert detail["processing"][0]["status"] == "processed"
+    assert detail["resources"][0]["file_key"] == "file_1"
+    assert detail["resources"][0]["path_exists"] is True
+    assert detail["resources"][0]["raw_summary"] == {"reason": "ok"}
+    assert [audit["request_type"] for audit in detail["agent_audits"]] == ["router"]
+    assert detail["agent_audits"][0]["task_id"] is None
+    assert detail["agent_audits"][0]["input_message_ids"] == ["om_root"]
+    assert detail["agent_audits"][0]["response_summary"] == {
+        "route": "new_task",
+        "candidates": "1 item(s)",
+    }
     assert detail["approvals"][0]["approval_id"] == "a_msg_detail"
     assert detail["actions"][0]["action_id"] == action_id
     assert "payload" not in detail["approvals"][0]

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Bell, ClipboardList, Database, FileText, HeartPulse, Home, Send, Settings, ShieldCheck } from "lucide-react";
+import { Activity, Bell, ClipboardList, Database, FileText, HeartPulse, Home, Send, Settings, ShieldCheck, Wrench } from "lucide-react";
 import { getDashboard } from "./api";
 import { Badge, EmptyState } from "./components/Primitives";
 import { queryKeys } from "./queryKeys";
@@ -8,6 +8,7 @@ import { ApprovalsScreen } from "./screens/ApprovalsScreen";
 import { DashboardScreen } from "./screens/DashboardScreen";
 import { DispatchScreen } from "./screens/DispatchScreen";
 import { HealthScreen } from "./screens/HealthScreen";
+import { MaintenanceScreen } from "./screens/MaintenanceScreen";
 import { PolicyScreen } from "./screens/PolicyScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { TasksScreen } from "./screens/TasksScreen";
@@ -22,7 +23,8 @@ const navItems: Array<{ key: RouteKey; label: string; icon: typeof Home }> = [
   { key: "dispatch", label: "Dispatch", icon: Send },
   { key: "policy", label: "Policy", icon: ShieldCheck },
   { key: "settings", label: "Settings", icon: Settings },
-  { key: "health", label: "Health", icon: HeartPulse }
+  { key: "health", label: "Health", icon: HeartPulse },
+  { key: "maintenance", label: "Maintenance", icon: Wrench }
 ];
 
 export function App() {
@@ -103,6 +105,8 @@ export function App() {
             <SettingsScreen token={token} />
           ) : location.route === "health" ? (
             <HealthScreen token={token} />
+          ) : location.route === "maintenance" ? (
+            <MaintenanceScreen token={token} />
           ) : (
             <FollowUpScreen route={location.route} />
           )}

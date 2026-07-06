@@ -1,4 +1,4 @@
-export type RouteKey = "dashboard" | "approvals" | "tasks" | "dispatch" | "policy" | "settings" | "health";
+export type RouteKey = "dashboard" | "approvals" | "tasks" | "dispatch" | "policy" | "settings" | "health" | "maintenance";
 
 export type Tone = "neutral" | "success" | "warning" | "danger" | "info" | "muted";
 
@@ -193,6 +193,7 @@ export type TaskDetail = TaskSummary & {
   recent_messages: TaskMessage[];
   pending_approvals: ApprovalSummary[];
   actions: DispatchActionSummary[];
+  agent_audits: AgentAudit[];
   effective_policy: EffectivePolicy;
   recommended_actions: string[];
 };
@@ -261,10 +262,59 @@ export type MessageDetail = {
   task_ids: number[];
   task_summaries: TaskSummary[];
   routing_audits: Array<Record<string, unknown>>;
+  processing: MessageProcessing[];
+  resources: MessageResource[];
+  agent_audits: AgentAudit[];
   approvals: ApprovalDetail[];
   actions: DispatchActionSummary[];
   recorded_dispatch_outcomes: Array<Record<string, unknown>>;
   recommended_actions: string[];
+};
+
+export type MessageProcessing = {
+  id: number;
+  message_id: string;
+  task_id: number | null;
+  stage: string;
+  status: string;
+  attempt_count: number;
+  last_error: string | null;
+  terminal_reason: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type MessageResource = {
+  id: number;
+  message_id: string;
+  file_key: string;
+  resource_type: string;
+  download_status: string;
+  path: string | null;
+  path_exists: boolean | null;
+  sha256: string | null;
+  sha256_short: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  raw_summary: Record<string, unknown>;
+  raw: Record<string, unknown>;
+};
+
+export type AgentAudit = {
+  id: number;
+  backend_provider: string;
+  request_type: string;
+  task_id: number | null;
+  agent_session_id: string | null;
+  input_message_ids: string[];
+  input_resource_ids: string[];
+  response_summary: Record<string, unknown>;
+  response: Record<string, unknown>;
+  error: string | null;
+  latency_ms: number | null;
+  tool_permissions_profile: string | null;
+  prompt_debug: Record<string, unknown>;
+  created_at: string | null;
 };
 
 export type SettingsCatalog = {
