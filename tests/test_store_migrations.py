@@ -217,6 +217,93 @@ def test_baseline_schema_includes_current_columns(tmp_path: Path) -> None:
     assert "idx_policy_audits_policy" in indexes
 
 
+def test_migration_relaxes_legacy_policy_audit_new_json_for_delete(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "agent.sqlite3"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE schema_migrations (
+              version TEXT PRIMARY KEY,
+              applied_at TEXT NOT NULL
+            );
+            INSERT INTO schema_migrations(version, applied_at)
+            VALUES
+              ('0001_foundation', 'now'),
+              ('0002_add_task_agent_working_dir', 'now');
+
+            CREATE TABLE chat_policies (
+              chat_id TEXT PRIMARY KEY,
+              name TEXT,
+              auto_reply INTEGER NOT NULL DEFAULT 0,
+              bot_joined INTEGER NOT NULL DEFAULT 0,
+              reply_identity TEXT NOT NULL DEFAULT 'bot_preferred',
+              allow_user_fallback INTEGER NOT NULL DEFAULT 1,
+              resource_download INTEGER NOT NULL DEFAULT 1,
+              updated_at TEXT NOT NULL
+            );
+            INSERT INTO chat_policies(
+              chat_id, name, auto_reply, bot_joined, reply_identity,
+              allow_user_fallback, resource_download, updated_at
+            )
+            VALUES ('oc_legacy', 'Legacy', 1, 0, 'bot_preferred', 1, 1, 'now');
+
+            CREATE TABLE policy_audits (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              scope TEXT NOT NULL CHECK (scope IN ('global', 'chat')),
+              policy_key TEXT NOT NULL,
+              actor TEXT NOT NULL,
+              old_json TEXT,
+              new_json TEXT NOT NULL,
+              reason TEXT,
+              created_at TEXT NOT NULL
+            );
+            INSERT INTO policy_audits(
+              scope, policy_key, actor, old_json, new_json, reason, created_at
+            )
+            VALUES ('chat', 'chat:oc_legacy', 'test', NULL, '{}', 'seed', 'now');
+            CREATE INDEX idx_policy_audits_policy
+            ON policy_audits(policy_key, created_at);
+            """
+        )
+
+    store = SQLiteStore(db_path)
+
+    result = store.delete_chat_product_policy(
+        "oc_legacy",
+        actor="test_operator",
+        reason="remove legacy override",
+    )
+
+    assert result["changed"] is True
+    with store.connect() as conn:
+        policy_audit_columns = {
+            row["name"]: row
+            for row in conn.execute("PRAGMA table_info(policy_audits)").fetchall()
+        }
+        audit = conn.execute(
+            """
+            SELECT new_json
+            FROM policy_audits
+            WHERE policy_key = 'chat:oc_legacy'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        migration = conn.execute(
+            """
+            SELECT 1
+            FROM schema_migrations
+            WHERE version = '0003_relax_policy_audit_delete_json'
+            """
+        ).fetchone()
+
+    assert policy_audit_columns["new_json"]["notnull"] == 0
+    assert audit["new_json"] is None
+    assert migration is not None
+
+
 def test_send_reply_guard_and_failed_retry_use_current_baseline(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.migrate()
