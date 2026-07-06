@@ -65,6 +65,7 @@ retention:
 
 lifecycle:
   watch_minutes: 120
+  burst_attach_seconds: 60
   closed_recall_days: 7
   approval_timeout_hours: 24
 

@@ -985,6 +985,7 @@ class SQLiteStore:
         watch_until: str,
         candidates_count: int,
         matched_by: str,
+        reason: str = "deterministic_shortcut",
     ) -> RouteDecision:
         self.migrate()
         now = utc_now_iso()
@@ -992,7 +993,7 @@ class SQLiteStore:
             "attach_task",
             target_task_id=task.id,
             target_task_short_id=task.short_id,
-            reason="deterministic_shortcut",
+            reason=reason,
             candidates_count=candidates_count,
             shortcut_hit=True,
             matched_by=matched_by,
@@ -1143,6 +1144,39 @@ class SQLiteStore:
                 (chat_id, key, now),
             ).fetchall()
         return [_task_from_row(row) for row in rows]
+
+    def get_latest_task_sender_message_sent_at(
+        self,
+        task_id: int,
+        sender_id: str,
+        *,
+        exclude_message_id: str | None = None,
+    ) -> str | None:
+        self.migrate()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT m.message_id, m.sent_at
+                FROM task_messages tm
+                JOIN messages m ON m.message_id = tm.message_id
+                WHERE tm.task_id = ?
+                  AND m.sender_id = ?
+                  AND m.sent_at IS NOT NULL
+                  AND (? IS NULL OR m.message_id != ?)
+                """,
+                (task_id, sender_id, exclude_message_id, exclude_message_id),
+            ).fetchall()
+        latest_value: str | None = None
+        latest_dt: datetime | None = None
+        for row in rows:
+            sent_at = row["sent_at"]
+            parsed = _parse_datetime_or_none(sent_at)
+            if parsed is None:
+                continue
+            if latest_dt is None or parsed > latest_dt:
+                latest_dt = parsed
+                latest_value = sent_at
+        return latest_value
 
     def get_recent_closed_tasks(
         self, chat_id: str, *, limit: int = 20

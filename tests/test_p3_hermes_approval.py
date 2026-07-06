@@ -187,6 +187,7 @@ def _message(
     sender_id: str = "ou_ext",
     sender_name: str = "Ext",
     text: str = "hello",
+    create_time: str = "2026-06-22T10:00:00+08:00",
     mentions: list[dict[str, str]] | None = None,
     image_key: str | None = None,
 ) -> dict[str, Any]:
@@ -202,7 +203,7 @@ def _message(
         "sender_id": sender_id,
         "sender_name": sender_name,
         "sender_type": "user",
-        "create_time": "2026-06-22T10:00:00+08:00",
+        "create_time": create_time,
         "content": content,
     }
 
@@ -410,7 +411,13 @@ def test_existing_task_followup_uses_stored_agent_working_dir_after_config_chang
     )
 
     service_after_change.process_raw_message(
-        _message("om_2", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        _message(
+            "om_2",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            create_time="2026-06-22T10:02:01+08:00",
+        ),
         source="p2p",
         default_chat_type="p2p",
         run_id="run_2",
@@ -468,7 +475,13 @@ def test_missing_stored_agent_working_dir_blocks_only_task_session(
     )
 
     routed = service_after_missing_cwd.process_raw_message(
-        _message("om_2", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        _message(
+            "om_2",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            create_time="2026-06-22T10:02:01+08:00",
+        ),
         source="p2p",
         default_chat_type="p2p",
         run_id="run_2",
@@ -1536,7 +1549,13 @@ def test_p2p_single_active_same_task_can_attach_through_task_router(
     )
 
     service.process_raw_message(
-        _message("om_2", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        _message(
+            "om_2",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            create_time="2026-06-22T10:02:01+08:00",
+        ),
         source="p2p",
         default_chat_type="p2p",
         run_id="run_1",
@@ -1580,7 +1599,13 @@ def test_p2p_single_active_unrelated_topic_can_create_new_task_through_task_rout
         run_id="run_1",
     )
     second = service.process_raw_message(
-        _message("om_2", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        _message(
+            "om_2",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            create_time="2026-06-22T10:02:01+08:00",
+        ),
         source="p2p",
         default_chat_type="p2p",
         run_id="run_1",

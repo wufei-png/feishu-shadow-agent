@@ -326,6 +326,13 @@
           "title": "Watch Minutes",
           "type": "integer"
         },
+        "burst_attach_seconds": {
+          "default": 60,
+          "description": "Seconds in which trigger messages from the same sender and chat can attach to the same active task without calling the task router; 0 disables this shortcut.",
+          "minimum": 0,
+          "title": "Burst Attach Seconds",
+          "type": "integer"
+        },
         "closed_recall_days": {
           "default": 7,
           "description": "Days to consider closed tasks for explicit recall.",

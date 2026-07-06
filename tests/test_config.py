@@ -27,6 +27,7 @@ def test_load_minimal_config() -> None:
     assert loaded.config.chats["oc_test"].auto_reply is True
     assert loaded.config.reply_policy.unknown_group_auto_reply is False
     assert loaded.config.lifecycle.watch_minutes == 120
+    assert loaded.config.lifecycle.burst_attach_seconds == 60
     assert loaded.config.lifecycle.closed_recall_days == 7
     assert loaded.config.lifecycle.approval_timeout_hours == 24
     assert loaded.config.agent_backend.provider == "hermes"

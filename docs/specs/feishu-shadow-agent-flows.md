@@ -118,7 +118,9 @@ flowchart TD
   Deterministic -->|thread_id 唯一命中| Attach
   Deterministic -->|reply_to msg 唯一命中| Attach
 
-  Deterministic -->|否| CandidateCount{"候选是否明确"}
+  Deterministic -->|否| Burst{"burst window 唯一命中<br/>同 chat + 同 sender + 窗口内"}
+  Burst -->|是| Attach
+  Burst -->|否| CandidateCount{"候选是否明确"}
   CandidateCount -->|无 active 或新触发| Historical["closed task recall 检索最近 7 天"]
   CandidateCount -->|多个或语义可能换题| TaskRouter["Hermes TaskRouter"]
   Historical --> TaskRouter

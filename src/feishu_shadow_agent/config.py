@@ -409,6 +409,11 @@ class LifecycleConfig(StrictModel):
     watch_minutes: int = Field(
         default=120, gt=0, description="Minutes to keep watching a task after activity."
     )
+    burst_attach_seconds: int = Field(
+        default=60,
+        ge=0,
+        description="Seconds in which trigger messages from the same sender and chat can attach to the same active task without calling the task router; 0 disables this shortcut.",
+    )
     closed_recall_days: int = Field(
         default=7,
         ge=1,

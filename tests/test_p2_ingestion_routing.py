@@ -343,7 +343,7 @@ def test_group_ingest_drains_pages_sorts_dedupes_and_advances_checkpoint(
             row["route"]
             for row in conn.execute("SELECT route FROM routing_audits ORDER BY id")
         ]
-    assert routes == ["new_task", "ignore", "ambiguous", "ambiguous"]
+    assert routes == ["new_task", "ignore", "attach_task", "attach_task"]
 
 
 def test_failed_pagination_does_not_advance_checkpoint(tmp_path: Path) -> None:
@@ -509,7 +509,7 @@ def test_resource_store_failure_is_retried_for_duplicate_message(
     assert resource["download_status"] == "downloaded"
 
 
-def test_p2p_single_active_sender_candidate_uses_router_placeholder(
+def test_p2p_burst_window_attaches_single_active_sender_candidate(
     tmp_path: Path,
 ) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
@@ -522,13 +522,88 @@ def test_p2p_single_active_sender_candidate_uses_router_placeholder(
     )
 
     first = service.process_raw_message(
-        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        _message(
+            "om_1",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            create_time="2026-06-22T10:00:00+08:00",
+        ),
         source="p2p",
         default_chat_type="p2p",
         run_id="run_1",
     )
     second = service.process_raw_message(
-        _message("om_2", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        _message(
+            "om_2",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            text="https://example.com",
+            create_time="2026-06-22T10:00:20+08:00",
+        ),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    third = service.process_raw_message(
+        _message(
+            "om_3",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            text="好滴好滴",
+            create_time="2026-06-22T10:00:40+08:00",
+        ),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    assert first is not None and first.decision.route == "new_task"
+    assert second is not None and second.decision.route == "attach_task"
+    assert second.decision.reason == "burst_window"
+    assert second.decision.matched_by == "burst_window"
+    assert third is not None and third.decision.route == "attach_task"
+    assert third.decision.reason == "burst_window"
+    assert third.decision.matched_by == "burst_window"
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 1
+        assert (
+            conn.execute("SELECT COUNT(*) AS c FROM task_messages").fetchone()["c"] == 3
+        )
+
+
+def test_p2p_burst_window_expired_uses_router_placeholder(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(lifecycle=LifecycleConfig(burst_attach_seconds=60)),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+
+    first = service.process_raw_message(
+        _message(
+            "om_1",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            create_time="2026-06-22T10:00:00+08:00",
+        ),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    second = service.process_raw_message(
+        _message(
+            "om_2",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            create_time="2026-06-22T10:02:01+08:00",
+        ),
         source="p2p",
         default_chat_type="p2p",
         run_id="run_1",
@@ -540,6 +615,230 @@ def test_p2p_single_active_sender_candidate_uses_router_placeholder(
     with store.connect() as conn:
         assert (
             conn.execute("SELECT COUNT(*) AS c FROM task_messages").fetchone()["c"] == 1
+        )
+
+
+def test_group_at_me_burst_window_attaches_same_sender_same_chat(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+
+    first = service.process_raw_message(
+        _message(
+            "om_1",
+            chat_id="oc_group",
+            chat_type="group",
+            sender_id="ou_a",
+            mentions=[{"open_id": "ou_owner"}],
+            create_time="2026-06-22T10:00:00+08:00",
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    second = service.process_raw_message(
+        _message(
+            "om_2",
+            chat_id="oc_group",
+            chat_type="group",
+            sender_id="ou_a",
+            mentions=[{"open_id": "ou_owner"}],
+            create_time="2026-06-22T10:00:30+08:00",
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert first is not None and first.decision.route == "new_task"
+    assert second is not None and second.decision.route == "attach_task"
+    assert second.decision.reason == "burst_window"
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 1
+        assert (
+            conn.execute("SELECT COUNT(*) AS c FROM task_messages").fetchone()["c"] == 2
+        )
+
+
+def test_active_watch_same_sender_within_burst_window_still_uses_router_placeholder(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+
+    first = service.process_raw_message(
+        _message(
+            "om_1",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            create_time="2026-06-22T10:00:00+08:00",
+        ),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    second = service.process_raw_message(
+        _message(
+            "om_2",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            create_time="2026-06-22T10:00:30+08:00",
+        ),
+        source="active_watch",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    assert first is not None and first.decision.route == "new_task"
+    assert second is not None and second.decision.route == "ambiguous"
+    assert second.decision.reason == "router_placeholder"
+    with store.connect() as conn:
+        assert (
+            conn.execute("SELECT COUNT(*) AS c FROM task_messages").fetchone()["c"] == 1
+        )
+
+
+def test_burst_window_attaches_when_only_one_of_multiple_candidates_is_eligible(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    task_ids: list[int] = []
+    for message_id, sent_at in (
+        ("om_old_root", "2026-06-22T09:58:00+08:00"),
+        ("om_recent_root", "2026-06-22T10:00:10+08:00"),
+    ):
+        message = service.normalizer.normalize(
+            _message(
+                message_id,
+                chat_id="ou_chat",
+                chat_type="p2p",
+                sender_id="ou_a",
+                create_time=sent_at,
+            ),
+            default_chat_type="p2p",
+        )
+        store.upsert_message(message)
+        task = store.create_task_for_message(
+            message,
+            watch_until="2026-06-22T12:10:00+08:00",
+        )
+        task_ids.append(task.id)
+
+    result = service.process_raw_message(
+        _message(
+            "om_3",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            create_time="2026-06-22T10:00:20+08:00",
+        ),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    assert result is not None and result.decision.route == "attach_task"
+    assert result.decision.reason == "burst_window"
+    assert result.decision.matched_by == "burst_window"
+    assert result.decision.candidates_count == 2
+    assert result.task is not None and result.task.id == task_ids[1]
+    with store.connect() as conn:
+        assert (
+            conn.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM task_messages
+                WHERE task_id = ? AND message_id = ?
+                """,
+                (task_ids[1], "om_3"),
+            ).fetchone()["c"]
+            == 1
+        )
+        assert (
+            conn.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM task_messages
+                WHERE task_id = ? AND message_id = ?
+                """,
+                (task_ids[0], "om_3"),
+            ).fetchone()["c"]
+            == 0
+        )
+
+
+def test_burst_window_multiple_same_sender_candidates_uses_router_placeholder(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    for message_id, sent_at in (
+        ("om_root_1", "2026-06-22T10:00:00+08:00"),
+        ("om_root_2", "2026-06-22T10:00:10+08:00"),
+    ):
+        message = service.normalizer.normalize(
+            _message(
+                message_id,
+                chat_id="ou_chat",
+                chat_type="p2p",
+                sender_id="ou_a",
+                create_time=sent_at,
+            ),
+            default_chat_type="p2p",
+        )
+        store.upsert_message(message)
+        store.create_task_for_message(
+            message,
+            watch_until="2026-06-22T12:10:00+08:00",
+        )
+
+    result = service.process_raw_message(
+        _message(
+            "om_3",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            create_time="2026-06-22T10:00:20+08:00",
+        ),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    assert result is not None and result.decision.route == "ambiguous"
+    assert result.decision.reason == "router_placeholder"
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 2
+        assert (
+            conn.execute("SELECT COUNT(*) AS c FROM task_messages").fetchone()["c"] == 2
         )
 
 

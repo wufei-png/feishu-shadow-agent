@@ -527,7 +527,9 @@ class IngestionService:
             config.agent_backend.working_dir, self.config_base_dir
         )
         self.router = router or MessageRouter(
-            store=store, closed_recall_days=config.lifecycle.closed_recall_days
+            store=store,
+            closed_recall_days=config.lifecycle.closed_recall_days,
+            burst_attach_seconds=config.lifecycle.burst_attach_seconds,
         )
         self.task_processor = task_processor
         self.approval_service = approval_service or (

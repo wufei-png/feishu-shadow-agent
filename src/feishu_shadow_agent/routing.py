@@ -70,10 +70,12 @@ class MessageRouter:
         store: SQLiteStore,
         collector: CandidateCollector | None = None,
         closed_recall_days: int = 7,
+        burst_attach_seconds: int = 60,
     ):
         self.store = store
         self.collector = collector or CandidateCollector(store)
         self.closed_recall_days = closed_recall_days
+        self.burst_attach_seconds = burst_attach_seconds
 
     def route(
         self,
@@ -162,6 +164,19 @@ class MessageRouter:
                 matched_by=deterministic.matched_by,
             )
             return RoutingResult(decision=decision, task=deterministic.task)
+
+        if source in TRIGGER_SOURCES:
+            burst_task = self._burst_attach_match(message, candidates)
+            if burst_task is not None:
+                decision = self.store.attach_message_to_task_and_audit(
+                    burst_task,
+                    message,
+                    watch_until=watch_until,
+                    candidates_count=len(candidates),
+                    reason="burst_window",
+                    matched_by="burst_window",
+                )
+                return RoutingResult(decision=decision, task=burst_task)
 
         if not candidates and source in TRIGGER_SOURCES and message.chat_id:
             historical = self.store.get_related_closed_tasks(
@@ -269,6 +284,46 @@ class MessageRouter:
             return thread_matches[0]
         return None
 
+    def _burst_attach_match(
+        self,
+        message: NormalizedMessage,
+        candidates: list[TaskCandidate],
+    ) -> TaskRecord | None:
+        if (
+            self.burst_attach_seconds <= 0
+            or not candidates
+            or not message.chat_id
+            or not message.sender_id
+            or not message.sent_at
+        ):
+            return None
+        message_sent_at = _parse_datetime_or_none(message.sent_at)
+        if message_sent_at is None:
+            return None
+
+        eligible: dict[int, TaskRecord] = {}
+        for candidate in candidates:
+            task = candidate.task
+            if task.chat_id != message.chat_id:
+                continue
+            latest_sent_at = self.store.get_latest_task_sender_message_sent_at(
+                task.id,
+                message.sender_id,
+                exclude_message_id=message.message_id,
+            )
+            if latest_sent_at is None:
+                continue
+            latest_dt = _parse_datetime_or_none(latest_sent_at)
+            if latest_dt is None:
+                continue
+            age_seconds = (message_sent_at - latest_dt).total_seconds()
+            if 0 <= age_seconds <= self.burst_attach_seconds:
+                eligible[task.id] = task
+
+        if len(eligible) == 1:
+            return next(iter(eligible.values()))
+        return None
+
     def _audit(
         self,
         message: NormalizedMessage,
@@ -301,3 +356,13 @@ def _minus_days(value: str, days: int) -> str:
     except ValueError:
         base = datetime.now().astimezone()
     return (base - timedelta(days=days)).astimezone().isoformat(timespec="seconds")
+
+
+def _parse_datetime_or_none(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed.astimezone()

@@ -703,17 +703,26 @@ target_task_id
 
 群聊 reply_to:
   reply_to 的 msg key 唯一命中 active task。
+
+burst window:
+  source 是 p2p 或 group_at_me。
+  同一 chat_id、同一 sender_id。
+  当前消息 sent_at 距该 task 中同 sender 最近消息 sent_at 不超过
+  lifecycle.burst_attach_seconds，默认 60 秒；0 表示关闭。
+  过滤后唯一 burst-eligible active task 命中时 attach_task，
+  matched_by=burst_window，不调用 TaskRouter。
 ```
 
-P2P single-active 只进入语义候选；普通 follow-up 必须经 TaskRouter 判断
-`attach_task` 或 `new_task`。
+P2P single-active 不能无条件 attach。只有满足 burst window 或 reply/thread
+结构性 shortcut 时才可跳过 TaskRouter；窗口外的普通 follow-up 仍必须经
+TaskRouter 判断 `attach_task` 或 `new_task`。
 
-其他情况走 TaskRouter，特别是：
+burst window 未命中、过期或过滤后仍不唯一时，其他情况走 TaskRouter，特别是：
 
-- P2P single-active 候选。
-- 群聊无 thread 普通消息，仅 sender 在 watch_keys。
-- 群聊再次 @ owner。
-- 多个 active candidates。
+- burst window 过期的 P2P single-active 候选。
+- burst window 过期的群聊无 thread 普通消息，仅 sender 在 watch_keys。
+- 未唯一命中 burst window 的群聊再次 @ owner。
+- 多个 burst-eligible active candidates。
 - closed recall candidates。
 - 新 sender 加入。
 - 候选任务存在但语义可能换题。
