@@ -48,6 +48,10 @@ _Avoid_: Metrics dashboard, raw status list, activity feed
 A read-only operator-facing view of current state. It may derive overdue or recommended-action fields, but it must not mutate state.
 _Avoid_: Status mutation, maintenance action
 
+**Operator Query Slice**:
+A focused read-only module that owns one operator-facing read model, such as Message Detail or Health Issues, while a thin compatibility facade exposes it to CLI and local API routes.
+_Avoid_: Raw SQL helper, screen component, store method
+
 **Message Detail**:
 A read-only operator view of one Feishu message's processing context, including related task links, routing decisions, approvals, dispatch actions, and recorded outcomes. It explains what happened around a message without generating new dispatch previews or mutating state.
 _Avoid_: Replay command, raw message dump, dispatch preview generation
