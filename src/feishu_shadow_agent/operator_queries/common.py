@@ -7,6 +7,39 @@ from typing import Any
 
 from ..types import ActionStatus, ApprovalStatus, TaskStatus
 
+_CORE_TABLES = frozenset(
+    {
+        "messages",
+        "tasks",
+        "task_messages",
+        "approvals",
+        "actions",
+        "dispatch_attempts",
+        "runs",
+        "health_checks",
+        "resources",
+        "routing_audits",
+        "agent_audits",
+        "message_processing",
+        "chat_policies",
+        "product_policies",
+        "policy_audits",
+        "approval_commands",
+    }
+)
+
+
+class OperatorQueryUnavailable(RuntimeError):
+    pass
+
+
+class OperatorQueryReadError(RuntimeError):
+    pass
+
+
+class _ReadStoreUnavailable(OperatorQueryUnavailable):
+    pass
+
 
 def _approval_dto(
     row: sqlite3.Row, *, now: str, include_payload: bool = False
@@ -332,3 +365,16 @@ def _parse_datetime_or_none(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.astimezone()
     return parsed.astimezone()
+
+
+def _has_core_schema(conn: sqlite3.Connection) -> bool:
+    rows = conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name IN ({})
+        """.format(",".join("?" for _ in _CORE_TABLES)),
+        tuple(sorted(_CORE_TABLES)),
+    ).fetchall()
+    return {row["name"] for row in rows} == _CORE_TABLES

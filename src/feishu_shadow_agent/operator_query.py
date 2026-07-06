@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import re
 import sqlite3
 from collections.abc import Callable, Iterable
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
-from .config import AppConfig, ChatPolicyConfig
+from .config import AppConfig
 from .operator_queries.common import (
+    OperatorQueryReadError,
+    OperatorQueryUnavailable,
     _action_dto,
     _agent_audit_dto,
     _approval_dto,
@@ -17,69 +16,33 @@ from .operator_queries.common import (
     _coerce_limit,
     _coerce_offset,
     _dispatch_recommended_actions,
-    _json_row_dict,
-    _loads_json_object,
+    _has_core_schema,
     _message_dto,
-    _parse_datetime_or_none,
     _readback_summary,
-    _row_dict,
+    _ReadStoreUnavailable,
     _task_summary_dto,
 )
+from .operator_queries.health import (
+    _RUN_RUNTIME_COLUMNS,
+    HealthQuery,
+    _daemon_liveness,
+    _recent_errors,
+    _run_runtime_summary,
+    _store_read_uri,
+)
 from .operator_queries.message_detail import MessageDetailQuery
-from .policy import PolicyResolver, ProductPolicyInvalidError, ProductPolicyMissingError
-from .settings_catalog import CONFIG_VALUE_PATHS
+from .operator_queries.policy import PolicyQuery
 from .store.sqlite_store import (
-    LATEST_NON_OK_HEALTH_CHECKS_SQL,
-    PRODUCT_POLICY_KEY,
     RUN_HEARTBEAT_STALE_AFTER_SECONDS,
     SQLiteStore,
 )
 from .types import ActionStatus, ApprovalStatus, TaskStatus, utc_now_iso
 
-_CORE_TABLES = frozenset(
-    {
-        "messages",
-        "tasks",
-        "task_messages",
-        "approvals",
-        "actions",
-        "dispatch_attempts",
-        "runs",
-        "health_checks",
-        "resources",
-        "routing_audits",
-        "agent_audits",
-        "message_processing",
-        "chat_policies",
-        "product_policies",
-        "policy_audits",
-        "approval_commands",
-    }
-)
-
-_ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![\w:])/(?:[^\s'\"`]+)")
-_SEVERITY_ORDER = {
-    "info": 0,
-    "warning": 1,
-    "error": 2,
-    "critical": 3,
-}
-_RUN_RUNTIME_COLUMNS = """
-run_id, started_at, finished_at, status, dry_run, last_heartbeat_at,
-last_tick_started_at, last_tick_finished_at, last_tick_status
-"""
-
-
-class OperatorQueryUnavailable(RuntimeError):
-    pass
-
-
-class OperatorQueryReadError(RuntimeError):
-    pass
-
-
-class _ReadStoreUnavailable(OperatorQueryUnavailable):
-    pass
+__all__ = [
+    "OperatorQueryReadError",
+    "OperatorQueryService",
+    "OperatorQueryUnavailable",
+]
 
 
 class OperatorQueryService:
@@ -97,7 +60,18 @@ class OperatorQueryService:
         self.policy_import_source = policy_import_source
         self.base_dir = base_dir
         self._now = now or utc_now_iso
-        self.policy_resolver = PolicyResolver(_ReadOnlyProductPolicyRepository(self))
+        self._policy_query = PolicyQuery(
+            connect=self._connect,
+            policy_import_source=policy_import_source,
+        )
+        self._health_query = HealthQuery(
+            store=store,
+            connect=self._connect,
+            now=self._now,
+            policy_status=self._policy_query.policy_status,
+            validate_policy_store=self._policy_query.validate_policy_store,
+        )
+        self.policy_resolver = self._policy_query.policy_resolver
 
     def dashboard_snapshot(
         self,
@@ -178,193 +152,10 @@ class OperatorQueryService:
         stale_after_seconds: int = 900,
         daemon_stale_after_seconds: int = RUN_HEARTBEAT_STALE_AFTER_SECONDS,
     ) -> dict[str, Any]:
-        now = self._now()
-        store_status = self._store_status()
-        issues: list[dict[str, Any]] = []
-        runtime: dict[str, Any] = {
-            "store": store_status,
-            "daemon_liveness": {},
-            "last_run": None,
-        }
-        recent_failed_commands: list[dict[str, Any]] = []
-        recent_failed_dispatch_actions: list[dict[str, Any]] = []
-
-        if store_status["status"] != "available":
-            issues.append(
-                _health_issue(
-                    issue_id=f"store-{store_status['status']}",
-                    severity="critical",
-                    category="store",
-                    title=_store_issue_title(store_status["status"]),
-                    detail=_store_issue_detail(store_status["status"]),
-                    detected_at=now,
-                    links=[{"type": "settings", "id": "storage"}],
-                    recommended_actions=["inspect_settings", "run_doctor"],
-                )
-            )
-            return _health_response(
-                generated_at=now,
-                runtime=runtime,
-                issues=issues,
-                recent_failed_commands=recent_failed_commands,
-                recent_failed_dispatch_actions=recent_failed_dispatch_actions,
-            )
-
-        try:
-            with self._connect() as conn:
-                last_run = conn.execute(
-                    f"SELECT {_RUN_RUNTIME_COLUMNS} FROM runs ORDER BY started_at DESC LIMIT 1"
-                ).fetchone()
-                daemon_run = conn.execute(
-                    f"""
-                    SELECT {_RUN_RUNTIME_COLUMNS}
-                    FROM runs
-                    WHERE last_tick_started_at IS NOT NULL
-                    ORDER BY last_tick_started_at DESC, started_at DESC
-                    LIMIT 1
-                    """
-                ).fetchone()
-                failed_commands = conn.execute(
-                    """
-                    SELECT message_id, command, status, result_json, updated_at
-                    FROM approval_commands
-                    WHERE status != 'applied' AND status != 'duplicate'
-                    ORDER BY updated_at DESC, id DESC
-                    LIMIT ?
-                    """,
-                    (_coerce_limit(limit),),
-                ).fetchall()
-                health_rows = conn.execute(
-                    LATEST_NON_OK_HEALTH_CHECKS_SQL,
-                    (_coerce_limit(limit),),
-                ).fetchall()
-                failed_dispatch_rows = conn.execute(
-                    """
-                    SELECT a.*, t.short_id AS task_short_id
-                    FROM actions a
-                    LEFT JOIN tasks t ON t.id = a.task_id
-                    WHERE a.status IN ('failed', 'failed_needs_review')
-                    ORDER BY a.updated_at DESC, a.id DESC
-                    """
-                ).fetchall()
-                stale_rows = conn.execute(
-                    """
-                    SELECT a.*, t.short_id AS task_short_id
-                    FROM actions a
-                    LEFT JOIN tasks t ON t.id = a.task_id
-                    WHERE a.status = 'sending'
-                      AND datetime(a.updated_at) <= datetime(?)
-                    ORDER BY a.updated_at, a.id
-                    """,
-                    (_minus_seconds(now, stale_after_seconds),),
-                ).fetchall()
-        except sqlite3.DatabaseError as exc:
-            issues.append(
-                _health_issue(
-                    issue_id="store-read-error",
-                    severity="critical",
-                    category="store",
-                    title="Store read failed",
-                    detail=_safe_detail(
-                        str(exc), fallback="The operator store could not be read."
-                    ),
-                    detected_at=now,
-                    links=[{"type": "settings", "id": "storage"}],
-                    recommended_actions=["inspect_settings", "run_doctor"],
-                )
-            )
-            return _health_response(
-                generated_at=now,
-                runtime=runtime,
-                issues=issues,
-                recent_failed_commands=recent_failed_commands,
-                recent_failed_dispatch_actions=recent_failed_dispatch_actions,
-            )
-
-        try:
-            last_run_dto = _run_runtime_summary(last_run) if last_run else None
-            daemon_run_dto = _run_runtime_summary(daemon_run) if daemon_run else None
-            daemon_liveness = _daemon_liveness(
-                daemon_run_dto,
-                now=now,
-                stale_after_seconds=daemon_stale_after_seconds,
-            )
-            policy_status = self.policy_status()
-            failed_dispatch_actions = [
-                _action_dto(row, include_payload=False) for row in failed_dispatch_rows
-            ]
-            stale_sending_actions = [
-                _action_dto(row, include_payload=False) for row in stale_rows
-            ]
-            recent_failed_commands = [
-                _approval_command_summary(row) for row in failed_commands
-            ]
-            recent_failed_dispatch_actions = failed_dispatch_actions[
-                : _coerce_limit(limit)
-            ]
-
-            runtime |= {
-                "daemon_liveness": daemon_liveness,
-                "last_run": last_run_dto,
-                "policy_status": policy_status,
-            }
-
-            daemon_issue = _daemon_health_issue(daemon_liveness, detected_at=now)
-            if daemon_issue is not None:
-                issues.append(daemon_issue)
-            policy_issue = self._policy_health_issue(policy_status, detected_at=now)
-            if policy_issue is not None:
-                issues.append(policy_issue)
-        except sqlite3.DatabaseError:
-            runtime["store"] = {
-                "status": "schema_incompatible",
-                "available": False,
-                "schema_initialized": False,
-            }
-            issues.append(
-                _health_issue(
-                    issue_id="store-schema_incompatible",
-                    severity="critical",
-                    category="store",
-                    title=_store_issue_title("schema_incompatible"),
-                    detail=_store_issue_detail("schema_incompatible"),
-                    detected_at=now,
-                    links=[{"type": "settings", "id": "storage"}],
-                    recommended_actions=["inspect_settings", "run_doctor"],
-                )
-            )
-            return _health_response(
-                generated_at=now,
-                runtime=runtime,
-                issues=issues,
-                recent_failed_commands=recent_failed_commands,
-                recent_failed_dispatch_actions=recent_failed_dispatch_actions,
-            )
-
-        for row in health_rows:
-            issue = _health_check_issue(row)
-            if issue is not None:
-                issues.append(issue)
-        for action in failed_dispatch_actions:
-            issues.append(_dispatch_action_issue(action, detected_at=now))
-        for action in stale_sending_actions:
-            issues.append(_stale_sending_issue(action, detected_at=now))
-
-        issues.sort(
-            key=lambda issue: (
-                _SEVERITY_ORDER.get(issue["severity"], 0),
-                str(issue["detected_at"]),
-            ),
-            reverse=True,
-        )
-        open_issue_count = len(issues)
-        return _health_response(
-            generated_at=now,
-            runtime=runtime,
-            issues=issues[: _coerce_limit(limit)],
-            open_issue_count=open_issue_count,
-            recent_failed_commands=recent_failed_commands,
-            recent_failed_dispatch_actions=recent_failed_dispatch_actions,
+        return self._health_query.health_issues(
+            limit=limit,
+            stale_after_seconds=stale_after_seconds,
+            daemon_stale_after_seconds=daemon_stale_after_seconds,
         )
 
     def list_approvals(
@@ -643,65 +434,15 @@ class OperatorQueryService:
             raise OperatorQueryReadError(str(exc)) from exc
 
     def policy_status(self) -> dict[str, Any]:
-        try:
-            with self._connect() as conn:
-                global_policy = conn.execute(
-                    "SELECT policy_json, updated_at FROM product_policies WHERE key = ?",
-                    (PRODUCT_POLICY_KEY,),
-                ).fetchone()
-                chat_count = conn.execute(
-                    "SELECT COUNT(*) AS count FROM chat_policies"
-                ).fetchone()
-                diff = self._policy_import_diff(conn)
-        except _ReadStoreUnavailable:
-            return {
-                "initialized": False,
-                "global_policy_updated_at": None,
-                "chat_policy_count": 0,
-                "policy_import_diff": self._missing_store_policy_import_diff(),
-            }
-        return {
-            "initialized": global_policy is not None,
-            "global_policy_updated_at": None
-            if global_policy is None
-            else global_policy["updated_at"],
-            "chat_policy_count": 0 if chat_count is None else int(chat_count["count"]),
-            "policy_import_diff": diff,
-        }
+        return self._policy_query.policy_status()
 
     def settings_runtime(self, config: AppConfig) -> dict[str, Any]:
-        policy_status = self.policy_status()
-        global_policy = self._get_product_policy()
-        chat_policies = self._list_chat_product_policies()
-        return {
-            "values": _settings_values(
-                config, policy_status=policy_status, global_policy=global_policy
-            ),
-            "global_policy": global_policy,
-            "chat_policies": chat_policies,
-            "policy_status": policy_status,
-            "policy_audit_history": self.policy_audit_history(limit=20),
-        }
+        return self._policy_query.settings_runtime(config)
 
     def effective_policy_summary(
         self, chat_id: str | None, chat_type: str | None
     ) -> dict[str, Any]:
-        if not chat_id:
-            return _empty_effective_policy("unknown_chat")
-        try:
-            policy = self.policy_resolver.resolve_chat_policy(chat_id, chat_type)
-        except ProductPolicyMissingError as exc:
-            return _empty_effective_policy("uninitialized", error=str(exc))
-        except ProductPolicyInvalidError as exc:
-            return _empty_effective_policy("invalid", error=str(exc))
-        return {
-            "policy_source": policy.policy_source,
-            "auto_reply": policy.auto_reply,
-            "bot_joined": policy.bot_joined,
-            "reply_identity": policy.reply_identity,
-            "allow_user_fallback": policy.allow_user_fallback,
-            "resource_download": policy.resource_download,
-        }
+        return self._policy_query.effective_policy_summary(chat_id, chat_type)
 
     def policy_audit_history(
         self,
@@ -712,248 +453,50 @@ class OperatorQueryService:
         policy_key: str | None = None,
         since: str | None = None,
     ) -> list[dict[str, Any]]:
-        where = []
-        params: list[Any] = []
-        if scope is not None:
-            where.append("scope = ?")
-            params.append(scope)
-        if policy_key is not None:
-            where.append("policy_key = ?")
-            params.append(policy_key)
-        if since is not None:
-            where.append("created_at >= ?")
-            params.append(since)
-        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
-        params.extend([_coerce_limit(limit), _coerce_offset(offset)])
-        try:
-            with self._connect() as conn:
-                rows = conn.execute(
-                    f"""
-                    SELECT id, scope, policy_key, actor, reason, created_at, old_json, new_json
-                    FROM policy_audits
-                    {where_sql}
-                    ORDER BY id DESC
-                    LIMIT ? OFFSET ?
-                    """,
-                    params,
-                ).fetchall()
-        except _ReadStoreUnavailable:
-            return []
-        return [_policy_audit_dto(row) for row in rows]
+        return self._policy_query.policy_audit_history(
+            limit=limit,
+            offset=offset,
+            scope=scope,
+            policy_key=policy_key,
+            since=since,
+        )
 
     def _failed_approval_commands(self, *, limit: int) -> list[dict[str, Any]]:
-        try:
-            with self._connect() as conn:
-                rows = conn.execute(
-                    """
-                    SELECT message_id, command, status, result_json, updated_at
-                    FROM approval_commands
-                    WHERE status != 'applied' AND status != 'duplicate'
-                    ORDER BY updated_at DESC, id DESC
-                    LIMIT ?
-                    """,
-                    (_coerce_limit(limit),),
-                ).fetchall()
-        except _ReadStoreUnavailable:
-            return []
-        return [_approval_command_summary(row) for row in rows]
+        return self._health_query._failed_approval_commands(limit=limit)
 
     def _recent_health_warnings(self, *, limit: int) -> list[dict[str, Any]]:
-        try:
-            with self._connect() as conn:
-                rows = conn.execute(
-                    LATEST_NON_OK_HEALTH_CHECKS_SQL,
-                    (_coerce_limit(limit),),
-                ).fetchall()
-        except _ReadStoreUnavailable:
-            return []
-        return [_health_warning_dto(row) for row in rows]
+        return self._health_query._recent_health_warnings(limit=limit)
 
     def _stale_sending_actions(
         self, *, stale_after_seconds: int, limit: int
     ) -> list[dict[str, Any]]:
-        cutoff = _minus_seconds(self._now(), stale_after_seconds)
-        try:
-            with self._connect() as conn:
-                rows = conn.execute(
-                    """
-                    SELECT a.*, t.short_id AS task_short_id
-                    FROM actions a
-                    LEFT JOIN tasks t ON t.id = a.task_id
-                    WHERE a.status = 'sending'
-                      AND datetime(a.updated_at) <= datetime(?)
-                    ORDER BY a.updated_at, a.id
-                    LIMIT ?
-                    """,
-                    (cutoff, _coerce_limit(limit)),
-                ).fetchall()
-        except _ReadStoreUnavailable:
-            return []
-        return [_action_dto(row, include_payload=False) for row in rows]
+        return self._health_query._stale_sending_actions(
+            stale_after_seconds=stale_after_seconds,
+            limit=limit,
+        )
 
     def _get_product_policy(self) -> dict[str, Any] | None:
-        try:
-            with self._connect() as conn:
-                row = conn.execute(
-                    "SELECT policy_json FROM product_policies WHERE key = ?",
-                    (PRODUCT_POLICY_KEY,),
-                ).fetchone()
-        except _ReadStoreUnavailable:
-            return None
-        return None if row is None else _loads_json_object(row["policy_json"])
+        return self._policy_query._get_product_policy()
 
     def _get_chat_product_policy(self, chat_id: str) -> dict[str, Any] | None:
-        try:
-            with self._connect() as conn:
-                row = conn.execute(
-                    """
-                    SELECT chat_id, name, auto_reply, bot_joined, reply_identity,
-                           allow_user_fallback, resource_download
-                    FROM chat_policies
-                    WHERE chat_id = ?
-                    """,
-                    (chat_id,),
-                ).fetchone()
-        except _ReadStoreUnavailable:
-            return None
-        return None if row is None else _chat_policy_from_row(row)
+        return self._policy_query._get_chat_product_policy(chat_id)
 
     def _list_chat_product_policies(self, *, limit: int = 100) -> list[dict[str, Any]]:
-        try:
-            with self._connect() as conn:
-                rows = conn.execute(
-                    """
-                    SELECT chat_id, name, auto_reply, bot_joined, reply_identity,
-                           allow_user_fallback, resource_download, updated_at
-                    FROM chat_policies
-                    ORDER BY chat_id
-                    LIMIT ?
-                    """,
-                    (_coerce_limit(limit),),
-                ).fetchall()
-        except _ReadStoreUnavailable:
-            return []
-        return [_chat_policy_runtime_dto(row) for row in rows]
+        return self._policy_query._list_chat_product_policies(limit=limit)
 
     def _policy_import_diff(self, conn: sqlite3.Connection) -> dict[str, Any]:
-        if self.policy_import_source is None:
-            return {
-                "status": "unknown",
-                "message": "No Policy Import Source was provided for comparison.",
-            }
-        source_global = _global_policy_from_import_source(self.policy_import_source)
-        global_row = conn.execute(
-            "SELECT policy_json FROM product_policies WHERE key = ?",
-            (PRODUCT_POLICY_KEY,),
-        ).fetchone()
-        missing_global = global_row is None
-        changed_global = False
-        if global_row is not None:
-            changed_global = (
-                _loads_json_object(global_row["policy_json"]) != source_global
-            )
-
-        missing_chats: list[str] = []
-        changed_chats: list[str] = []
-        for chat_id, chat_config in sorted(self.policy_import_source.chats.items()):
-            source_chat = _chat_policy_from_import_source(chat_id, chat_config)
-            row = conn.execute(
-                """
-                SELECT chat_id, name, auto_reply, bot_joined, reply_identity,
-                       allow_user_fallback, resource_download
-                FROM chat_policies
-                WHERE chat_id = ?
-                """,
-                (chat_id,),
-            ).fetchone()
-            if row is None:
-                missing_chats.append(chat_id)
-            elif _chat_policy_from_row(row) != source_chat:
-                changed_chats.append(chat_id)
-
-        if (
-            not missing_global
-            and not changed_global
-            and not missing_chats
-            and not changed_chats
-        ):
-            return {
-                "status": "matches",
-                "message": "Policy Import Source matches Product Policy Store for global policy and config-listed chats.",
-                "missing_global": False,
-                "changed_global": False,
-                "missing_chats": [],
-                "changed_chats": [],
-            }
-        return {
-            "status": "differs",
-            "message": (
-                "Policy Import Source differs from Product Policy Store; import-config would insert missing "
-                "rows and import-config --replace would update changed rows."
-            ),
-            "missing_global": missing_global,
-            "changed_global": changed_global,
-            "missing_chats": missing_chats,
-            "changed_chats": changed_chats,
-        }
+        return self._policy_query._policy_import_diff(conn)
 
     def _missing_store_policy_import_diff(self) -> dict[str, Any]:
-        if self.policy_import_source is None:
-            return {
-                "status": "unknown",
-                "message": "No Policy Import Source was provided for comparison.",
-            }
-        return {
-            "status": "differs",
-            "message": (
-                "Policy Import Source differs from Product Policy Store because no initialized store "
-                "is available to compare."
-            ),
-            "missing_global": True,
-            "changed_global": False,
-            "missing_chats": sorted(self.policy_import_source.chats),
-            "changed_chats": [],
-        }
+        return self._policy_query._missing_store_policy_import_diff()
 
     def _policy_health_issue(
         self, policy_status: dict[str, Any], *, detected_at: str
     ) -> dict[str, Any] | None:
-        if policy_status.get("initialized") is not True:
-            return _health_issue(
-                issue_id="policy-uninitialized",
-                severity="critical",
-                category="policy",
-                title="Product Policy Store is not initialized",
-                detail="Daemon runtime will fail closed until global Product Policy is imported.",
-                detected_at=detected_at,
-                links=[{"type": "policy", "id": "global"}],
-                recommended_actions=["import_config"],
-            )
-        try:
-            self.policy_resolver.resolve_chat_policy(None, None)
-        except ProductPolicyMissingError:
-            return _health_issue(
-                issue_id="policy-uninitialized",
-                severity="critical",
-                category="policy",
-                title="Product Policy Store is not initialized",
-                detail="Daemon runtime will fail closed until global Product Policy is imported.",
-                detected_at=detected_at,
-                links=[{"type": "policy", "id": "global"}],
-                recommended_actions=["import_config"],
-            )
-        except ProductPolicyInvalidError as exc:
-            return _health_issue(
-                issue_id="policy-invalid",
-                severity="critical",
-                category="policy",
-                title="Product Policy Store is invalid",
-                detail=str(exc),
-                detected_at=detected_at,
-                links=[{"type": "policy", "id": "global"}],
-                recommended_actions=["inspect_policy", "import_config"],
-            )
-        return None
+        return self._health_query.policy_health_issue(
+            policy_status,
+            detected_at=detected_at,
+        )
 
     def _connect(self) -> sqlite3.Connection:
         if not self.store.path.exists():
@@ -971,85 +514,7 @@ class OperatorQueryService:
         return conn
 
     def _store_status(self) -> dict[str, Any]:
-        if not self.store.path.exists():
-            return {
-                "status": "missing",
-                "available": False,
-                "schema_initialized": False,
-            }
-        try:
-            conn = sqlite3.connect(_store_read_uri(self.store.path), uri=True)
-        except sqlite3.OperationalError:
-            return {
-                "status": "unreadable",
-                "available": False,
-                "schema_initialized": False,
-            }
-        try:
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA query_only = ON")
-            schema_initialized = _has_core_schema(conn)
-        except sqlite3.DatabaseError:
-            conn.close()
-            return {
-                "status": "schema_incompatible",
-                "available": False,
-                "schema_initialized": False,
-            }
-        conn.close()
-        if not schema_initialized:
-            return {
-                "status": "schema_uninitialized",
-                "available": False,
-                "schema_initialized": False,
-            }
-        return {
-            "status": "available",
-            "available": True,
-            "schema_initialized": True,
-        }
-
-
-class _ReadOnlyProductPolicyRepository:
-    def __init__(self, service: OperatorQueryService):
-        self.service = service
-
-    def get_product_policy(self) -> dict[str, Any] | None:
-        return self.service._get_product_policy()
-
-    def get_chat_product_policy(self, chat_id: str) -> dict[str, Any] | None:
-        return self.service._get_chat_product_policy(chat_id)
-
-
-def _policy_audit_dto(row: sqlite3.Row) -> dict[str, Any]:
-    data = _row_dict(row)
-    return {
-        "id": data["id"],
-        "scope": data["scope"],
-        "policy_key": data["policy_key"],
-        "actor": data["actor"],
-        "reason": data["reason"],
-        "created_at": data["created_at"],
-        "old_summary": _policy_summary(_loads_json_object(data["old_json"])),
-        "new_summary": _policy_summary(_loads_json_object(data["new_json"])),
-    }
-
-
-def _policy_summary(policy: dict[str, Any]) -> dict[str, Any]:
-    if not policy:
-        return {}
-    allowed = (
-        "chat_id",
-        "name",
-        "auto_reply",
-        "bot_joined",
-        "reply_identity",
-        "allow_user_fallback",
-        "resource_download",
-        "reply_policy",
-        "default_chat_policy",
-    )
-    return {key: policy[key] for key in allowed if key in policy}
+        return self._health_query._store_status()
 
 
 def _task_recommended_actions(
@@ -1082,458 +547,6 @@ def _task_recommended_actions(
     return recommendations
 
 
-def _empty_effective_policy(
-    policy_source: str, *, error: str | None = None
-) -> dict[str, Any]:
-    dto: dict[str, Any] = {
-        "policy_source": policy_source,
-        "auto_reply": None,
-        "bot_joined": None,
-        "reply_identity": None,
-        "allow_user_fallback": None,
-        "resource_download": None,
-    }
-    if error is not None:
-        dto["error"] = error
-    return dto
-
-
-def _recent_errors(
-    failed_commands: list[dict[str, Any]],
-    failed_actions: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    errors: list[dict[str, Any]] = []
-    for command in failed_commands:
-        summary = _approval_command_summary(command)
-        errors.append(
-            {
-                "type": "approval_command",
-                "status": summary["status"],
-                "message": summary["label"],
-                "updated_at": summary["updated_at"],
-            }
-        )
-    for action in failed_actions:
-        errors.append(
-            {
-                "type": "dispatch_action",
-                "status": action["status"],
-                "message": f"{action['kind']} action {action['action_id']}",
-                "updated_at": action["updated_at"],
-            }
-        )
-    return sorted(errors, key=lambda item: str(item["updated_at"]), reverse=True)
-
-
-def _health_response(
-    *,
-    generated_at: str,
-    runtime: dict[str, Any],
-    issues: list[dict[str, Any]],
-    open_issue_count: int | None = None,
-    recent_failed_commands: list[dict[str, Any]],
-    recent_failed_dispatch_actions: list[dict[str, Any]],
-) -> dict[str, Any]:
-    highest = "info"
-    if issues:
-        highest = max(
-            issues, key=lambda issue: _SEVERITY_ORDER.get(issue["severity"], 0)
-        )["severity"]
-    return {
-        "generated_at": generated_at,
-        "summary": {
-            "highest_severity": highest,
-            "open_issue_count": len(issues)
-            if open_issue_count is None
-            else open_issue_count,
-        },
-        "runtime": runtime,
-        "issues": issues,
-        "recent_failed_commands": recent_failed_commands,
-        "recent_failed_dispatch_actions": recent_failed_dispatch_actions,
-    }
-
-
-def _health_issue(
-    *,
-    issue_id: str,
-    severity: str,
-    category: str,
-    title: str,
-    detail: str,
-    detected_at: str | None,
-    links: list[dict[str, str]] | None = None,
-    recommended_actions: list[str] | None = None,
-) -> dict[str, Any]:
-    return {
-        "id": issue_id,
-        "severity": severity,
-        "category": category,
-        "title": title,
-        "detail": _safe_detail(detail, fallback=title),
-        "detected_at": detected_at,
-        "links": links or [],
-        "recommended_actions": recommended_actions or [],
-    }
-
-
-def _daemon_health_issue(
-    liveness: dict[str, Any], *, detected_at: str
-) -> dict[str, Any] | None:
-    status = str(liveness.get("status") or "unknown")
-    if status == "live":
-        return None
-    if status == "not_started":
-        return _health_issue(
-            issue_id="daemon-not-started",
-            severity="warning",
-            category="daemon",
-            title="Daemon has not started",
-            detail="No daemon tick has been recorded in the operator store.",
-            detected_at=detected_at,
-            recommended_actions=["run_doctor", "start_daemon"],
-        )
-    if status == "stale":
-        return _health_issue(
-            issue_id="daemon-stale",
-            severity="error",
-            category="daemon",
-            title="Daemon heartbeat is stale",
-            detail="The last running daemon heartbeat is older than the configured liveness threshold.",
-            detected_at=detected_at,
-            recommended_actions=["inspect_runtime", "restart_daemon"],
-        )
-    if status == "stopped":
-        return _health_issue(
-            issue_id="daemon-stopped",
-            severity="warning",
-            category="daemon",
-            title="Daemon is not running",
-            detail="The latest daemon run is not currently marked running.",
-            detected_at=detected_at,
-            recommended_actions=["inspect_runtime", "start_daemon"],
-        )
-    return _health_issue(
-        issue_id="daemon-unknown",
-        severity="warning",
-        category="daemon",
-        title="Daemon liveness is unknown",
-        detail="The operator store does not contain enough daemon heartbeat data.",
-        detected_at=detected_at,
-        recommended_actions=["inspect_runtime"],
-    )
-
-
-def _health_check_issue(row: sqlite3.Row) -> dict[str, Any] | None:
-    data = _row_dict(row)
-    check_name = str(data.get("check_name") or "runtime")
-    status = str(data.get("status") or "warning")
-    severity = _health_check_severity(str(data.get("severity") or "warning"), status)
-    detected_at = data.get("checked_at")
-    return _health_issue(
-        issue_id=f"health-{_slug(check_name)}-{_slug(str(detected_at or 'unknown'))}",
-        severity=severity,
-        category="runtime",
-        title=f"{check_name} reported {status}",
-        detail=str(
-            data.get("message") or "Runtime health check reported a non-ok status."
-        ),
-        detected_at=detected_at,
-        recommended_actions=["inspect_runtime"],
-    )
-
-
-def _health_warning_dto(row: sqlite3.Row) -> dict[str, Any]:
-    data = _row_dict(row)
-    data["message"] = _safe_detail(
-        str(data.get("message") or ""),
-        fallback="Runtime health check reported a non-ok status.",
-    )
-    return data
-
-
-def _approval_command_summary(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    if isinstance(row, sqlite3.Row):
-        data = _json_row_dict(row, "result_json")
-    else:
-        data = dict(row)
-    if "label" in data and "result_summary" in data:
-        return data
-    verb, target_id = _parse_approval_command(str(data.get("command") or ""))
-    result = (
-        data.get("result_json") if isinstance(data.get("result_json"), dict) else {}
-    )
-    summary: dict[str, Any] = {
-        "message_id": data.get("message_id"),
-        "verb": verb,
-        "target_id": target_id,
-        "status": data.get("status"),
-        "updated_at": data.get("updated_at"),
-        "label": _approval_command_label(verb, target_id),
-        "result_summary": _approval_command_result_summary(result),
-    }
-    summary["command"] = summary["label"]
-    return summary
-
-
-def _parse_approval_command(command_text: str) -> tuple[str | None, str | None]:
-    parts = command_text.split(maxsplit=2)
-    if not parts:
-        return None, None
-    verb = parts[0].lstrip("/") or None
-    target_id = parts[1] if len(parts) >= 2 else None
-    return verb, target_id
-
-
-def _approval_command_label(verb: str | None, target_id: str | None) -> str:
-    if verb and target_id:
-        return f"/{verb} {target_id}"
-    if verb:
-        return f"/{verb}"
-    return "approval command"
-
-
-def _approval_command_result_summary(result: dict[str, Any]) -> dict[str, Any]:
-    summary: dict[str, Any] = {}
-    error = result.get("error")
-    if error is not None:
-        summary["error"] = _safe_detail(str(error), fallback="Approval command failed.")
-    for key in ("action_id", "notification_action_id"):
-        if key in result:
-            summary[key] = result[key]
-    pending_ids = result.get("pending_approval_ids")
-    if isinstance(pending_ids, list):
-        summary["pending_approval_count"] = len(pending_ids)
-    return summary
-
-
-def _dispatch_action_issue(
-    action: dict[str, Any], *, detected_at: str
-) -> dict[str, Any]:
-    status = str(action.get("status") or "")
-    action_id = str(action.get("action_id"))
-    is_needs_review = status == ActionStatus.FAILED_NEEDS_REVIEW.value
-    title = (
-        "Dispatch action needs review" if is_needs_review else "Dispatch action failed"
-    )
-    detail = (
-        f"Action {action_id} failed after the actual-send boundary."
-        if is_needs_review
-        else f"Action {action_id} failed before it could be marked sent."
-    )
-    return _health_issue(
-        issue_id=f"dispatch-action-{action_id}",
-        severity="error",
-        category="dispatch",
-        title=title,
-        detail=detail,
-        detected_at=action.get("updated_at") or detected_at,
-        links=[{"type": "dispatch_action", "id": action_id}],
-        recommended_actions=_dispatch_action_names(status),
-    )
-
-
-def _stale_sending_issue(action: dict[str, Any], *, detected_at: str) -> dict[str, Any]:
-    action_id = str(action.get("action_id"))
-    return _health_issue(
-        issue_id=f"dispatch-action-{action_id}-stale-sending",
-        severity="warning",
-        category="dispatch",
-        title="Dispatch action is stale while sending",
-        detail=f"Action {action_id} is still marked sending after the recovery threshold.",
-        detected_at=action.get("updated_at") or detected_at,
-        links=[{"type": "dispatch_action", "id": action_id}],
-        recommended_actions=["inspect", "mark_sent", "cancel"],
-    )
-
-
-def _dispatch_action_names(status: str) -> list[str]:
-    if status == ActionStatus.FAILED_NEEDS_REVIEW.value:
-        return ["inspect", "mark_sent", "retry", "cancel"]
-    if status == ActionStatus.FAILED.value:
-        return ["inspect", "retry", "cancel"]
-    return ["inspect"]
-
-
-def _health_check_severity(severity: str, status: str) -> str:
-    if severity == "critical":
-        return "critical"
-    if status == "failed":
-        return "error"
-    return "warning"
-
-
-def _store_issue_title(status: str) -> str:
-    return {
-        "missing": "SQLite store is missing",
-        "unreadable": "SQLite store is unreadable",
-        "schema_uninitialized": "SQLite store schema is not initialized",
-        "schema_incompatible": "SQLite store schema is incompatible",
-    }.get(status, "SQLite store is unavailable")
-
-
-def _store_issue_detail(status: str) -> str:
-    return {
-        "missing": "The operator store file does not exist yet, so console read models are unavailable.",
-        "unreadable": "The operator store exists but cannot be opened by the local console.",
-        "schema_uninitialized": "The operator store exists but required tables are missing.",
-        "schema_incompatible": "The operator store could not be inspected with the expected schema contract.",
-    }.get(status, "The operator store is unavailable.")
-
-
-def _safe_detail(value: str, *, fallback: str) -> str:
-    text = value.strip() or fallback
-    return _ABSOLUTE_PATH_PATTERN.sub("[path]", text)
-
-
-def _slug(value: str) -> str:
-    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-")
-    return slug or "unknown"
-
-
-def _store_read_uri(path: Path) -> str:
-    return f"file:{quote(str(path.resolve()), safe='/')}?mode=ro"
-
-
-def _run_runtime_summary(row: sqlite3.Row) -> dict[str, Any]:
-    return {
-        "run_id": row["run_id"],
-        "started_at": row["started_at"],
-        "finished_at": row["finished_at"],
-        "status": row["status"],
-        "dry_run": bool(row["dry_run"]),
-        "last_heartbeat_at": row["last_heartbeat_at"],
-        "last_tick_started_at": row["last_tick_started_at"],
-        "last_tick_finished_at": row["last_tick_finished_at"],
-        "last_tick_status": row["last_tick_status"],
-    }
-
-
-def _daemon_liveness(
-    last_run: dict[str, Any] | None,
-    *,
-    now: str,
-    stale_after_seconds: int,
-) -> dict[str, Any]:
-    base: dict[str, Any] = {"stale_after_seconds": stale_after_seconds}
-    if last_run is None:
-        return base | {"status": "not_started", "stale": False}
-    run_status = last_run.get("status")
-    heartbeat = last_run.get("last_heartbeat_at")
-    base |= {
-        "run_id": last_run.get("run_id"),
-        "run_status": run_status,
-        "last_heartbeat_at": heartbeat,
-    }
-    if run_status != "running":
-        return base | {"status": "stopped", "stale": False}
-    heartbeat_dt = _parse_datetime_or_none(heartbeat)
-    now_dt = _parse_datetime_or_none(now)
-    if heartbeat_dt is None or now_dt is None:
-        return base | {
-            "status": "stale",
-            "stale": True,
-            "reason": "missing_or_invalid_heartbeat",
-        }
-    age_seconds = max(0, int((now_dt - heartbeat_dt).total_seconds()))
-    stale = age_seconds > stale_after_seconds
-    return base | {
-        "status": "stale" if stale else "live",
-        "stale": stale,
-        "heartbeat_age_seconds": age_seconds,
-    }
-
-
-def _global_policy_from_import_source(config: AppConfig) -> dict[str, Any]:
-    default_chat_policy = ChatPolicyConfig().model_dump(mode="json")
-    return {
-        "reply_policy": config.reply_policy.model_dump(mode="json"),
-        "default_chat_policy": {
-            key: default_chat_policy[key]
-            for key in (
-                "bot_joined",
-                "reply_identity",
-                "allow_user_fallback",
-                "resource_download",
-            )
-        },
-    }
-
-
-def _chat_policy_from_import_source(
-    chat_id: str, config: ChatPolicyConfig
-) -> dict[str, Any]:
-    data = config.model_dump(mode="json")
-    return {"chat_id": chat_id, **data}
-
-
-def _chat_policy_from_row(row: sqlite3.Row) -> dict[str, Any]:
-    return {
-        "chat_id": row["chat_id"],
-        "name": row["name"] or "",
-        "auto_reply": bool(row["auto_reply"]),
-        "bot_joined": bool(row["bot_joined"]),
-        "reply_identity": row["reply_identity"],
-        "allow_user_fallback": bool(row["allow_user_fallback"]),
-        "resource_download": bool(row["resource_download"]),
-    }
-
-
-def _chat_policy_runtime_dto(row: sqlite3.Row) -> dict[str, Any]:
-    return _chat_policy_from_row(row) | {"updated_at": row["updated_at"]}
-
-
-def _settings_values(
-    config: AppConfig,
-    *,
-    policy_status: dict[str, Any],
-    global_policy: dict[str, Any] | None,
-) -> dict[str, Any]:
-    values = {
-        key: _config_path_value(config, path)
-        for key, path in CONFIG_VALUE_PATHS.items()
-    }
-    values["policy.status.initialized"] = policy_status["initialized"]
-    values["policy.status.import_diff"] = policy_status["policy_import_diff"]
-    values["policy.audit.history"] = None
-    values["policy.import_config"] = {"available": True}
-
-    reply_policy = _nested_dict(global_policy, "reply_policy")
-    default_chat_policy = _nested_dict(global_policy, "default_chat_policy")
-    values["policy.global.p2p_auto_reply"] = reply_policy.get("p2p_auto_reply")
-    values["policy.global.unknown_group_auto_reply"] = reply_policy.get(
-        "unknown_group_auto_reply"
-    )
-    values["policy.global.default_bot_joined"] = default_chat_policy.get("bot_joined")
-    values["policy.global.default_reply_identity"] = default_chat_policy.get(
-        "reply_identity"
-    )
-    values["policy.global.default_allow_user_fallback"] = default_chat_policy.get(
-        "allow_user_fallback"
-    )
-    values["policy.global.default_resource_download"] = default_chat_policy.get(
-        "resource_download"
-    )
-    return values
-
-
-def _config_path_value(config: AppConfig, path: str) -> Any:
-    current: Any = config
-    for part in path.split("."):
-        if isinstance(current, dict):
-            current = current.get(part)
-        else:
-            current = getattr(current, part)
-    return current
-
-
-def _nested_dict(value: dict[str, Any] | None, key: str) -> dict[str, Any]:
-    if value is None:
-        return {}
-    nested = value.get(key)
-    return nested if isinstance(nested, dict) else {}
-
-
 def _id_lookup(alias: str, value: int | str) -> tuple[str, list[Any]]:
     if isinstance(value, int):
         return f"{alias}.id = ?", [value]
@@ -1541,26 +554,3 @@ def _id_lookup(alias: str, value: int | str) -> tuple[str, list[Any]]:
     if text.isdigit():
         return f"{alias}.id = ?", [int(text)]
     return f"{alias}.short_id = ?", [text]
-
-
-def _has_core_schema(conn: sqlite3.Connection) -> bool:
-    rows = conn.execute(
-        """
-        SELECT name
-        FROM sqlite_master
-        WHERE type = 'table'
-          AND name IN ({})
-        """.format(",".join("?" for _ in _CORE_TABLES)),
-        tuple(sorted(_CORE_TABLES)),
-    ).fetchall()
-    return {row["name"] for row in rows} == _CORE_TABLES
-
-
-def _minus_seconds(value: str, seconds: int) -> str:
-    try:
-        base = datetime.fromisoformat(value)
-    except ValueError:
-        base = datetime.now().astimezone()
-    return (
-        (base - timedelta(seconds=seconds)).astimezone().isoformat(timespec="seconds")
-    )
