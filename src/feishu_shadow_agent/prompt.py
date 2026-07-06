@@ -97,16 +97,47 @@ class BaseTaskSessionOutput(StrictModel):
         )
     )
     proposed_reply: str = Field(
-        default="", description="Plain reply text without Feishu @ mentions."
+        default="",
+        description=(
+            "Plain reply text without Feishu @ mentions. Required and non-empty for "
+            "auto_reply and needs_owner; must be empty for no_reply."
+        ),
     )
     reply_target_message_id: str | None = Field(
         default=None,
-        description="Message id to reply to; must be one of metadata.reply_target_message_ids.",
+        description=(
+            "Message id to reply to. Required for auto_reply and needs_owner; must be null "
+            "for no_reply. When present, it must be one of metadata.reply_target_message_ids."
+        ),
     )
     watch_action: Literal["keep_watching", "close"] = Field(
         default="keep_watching",
         description="Whether to keep watching this task or close it.",
     )
+
+    @model_validator(mode="after")
+    def validate_reply_fields_for_answerability(self) -> BaseTaskSessionOutput:
+        proposed_reply = self.proposed_reply.strip()
+        reply_target = (
+            None
+            if self.reply_target_message_id is None
+            else self.reply_target_message_id.strip()
+        )
+        if self.answerability == "no_reply":
+            if proposed_reply:
+                raise ValueError("no_reply requires proposed_reply to be empty")
+            if self.reply_target_message_id is not None:
+                raise ValueError("no_reply requires reply_target_message_id to be null")
+            return self
+        if not proposed_reply:
+            raise ValueError(
+                f"{self.answerability} requires a non-empty proposed_reply"
+            )
+        if not reply_target:
+            raise ValueError(
+                f"{self.answerability} requires a non-empty reply_target_message_id"
+            )
+        return self
 
 
 class InitialTaskSessionOutput(BaseTaskSessionOutput):

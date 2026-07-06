@@ -292,6 +292,110 @@ def test_followup_task_session_prompt_omits_task_label_and_rejects_extra_label()
         )
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "answerability": "auto_reply",
+            "proposed_reply": "reply",
+            "reply_target_message_id": "om_1",
+            "watch_action": "keep_watching",
+        },
+        {
+            "answerability": "needs_owner",
+            "proposed_reply": "draft for owner review",
+            "reply_target_message_id": "om_1",
+            "watch_action": "keep_watching",
+        },
+        {
+            "answerability": "no_reply",
+            "proposed_reply": "",
+            "reply_target_message_id": None,
+            "watch_action": "close",
+        },
+        {
+            "answerability": "no_reply",
+            "proposed_reply": "   ",
+            "reply_target_message_id": None,
+            "watch_action": "keep_watching",
+        },
+    ],
+)
+def test_task_session_output_accepts_consumed_field_combinations(
+    payload: dict[str, object],
+) -> None:
+    output = InitialTaskSessionOutput.model_validate(payload | {"task_label": "label"})
+
+    assert output.answerability == payload["answerability"]
+
+
+@pytest.mark.parametrize(
+    ("payload", "error_match"),
+    [
+        (
+            {
+                "answerability": "no_reply",
+                "proposed_reply": "reply should not be consumed",
+                "reply_target_message_id": None,
+                "watch_action": "keep_watching",
+            },
+            "no_reply requires proposed_reply to be empty",
+        ),
+        (
+            {
+                "answerability": "no_reply",
+                "proposed_reply": "",
+                "reply_target_message_id": "om_1",
+                "watch_action": "keep_watching",
+            },
+            "no_reply requires reply_target_message_id to be null",
+        ),
+        (
+            {
+                "answerability": "auto_reply",
+                "proposed_reply": "",
+                "reply_target_message_id": "om_1",
+                "watch_action": "keep_watching",
+            },
+            "auto_reply requires a non-empty proposed_reply",
+        ),
+        (
+            {
+                "answerability": "auto_reply",
+                "proposed_reply": "reply",
+                "reply_target_message_id": None,
+                "watch_action": "keep_watching",
+            },
+            "auto_reply requires a non-empty reply_target_message_id",
+        ),
+        (
+            {
+                "answerability": "needs_owner",
+                "proposed_reply": "   ",
+                "reply_target_message_id": "om_1",
+                "watch_action": "keep_watching",
+            },
+            "needs_owner requires a non-empty proposed_reply",
+        ),
+        (
+            {
+                "answerability": "needs_owner",
+                "proposed_reply": "draft for owner review",
+                "reply_target_message_id": "   ",
+                "watch_action": "keep_watching",
+            },
+            "needs_owner requires a non-empty reply_target_message_id",
+        ),
+    ],
+)
+def test_task_session_output_rejects_unconsumed_field_combinations(
+    payload: dict[str, object],
+    error_match: str,
+) -> None:
+    with pytest.raises(ValidationError, match=error_match):
+        InitialTaskSessionOutput.model_validate(payload | {"task_label": "label"})
+
+
 def test_reply_postprocess_prompt_omits_metadata_only_guidance_summary() -> None:
     prompt = json.loads(
         build_reply_postprocess_prompt(

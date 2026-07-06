@@ -777,7 +777,7 @@ def test_no_reply_does_not_run_reply_postprocess(tmp_path: Path) -> None:
         assert conn.execute("SELECT COUNT(*) AS c FROM actions").fetchone()["c"] == 0
 
 
-def test_reply_postprocess_skips_empty_auto_reply_candidate(tmp_path: Path) -> None:
+def test_empty_auto_reply_candidate_is_schema_failure(tmp_path: Path) -> None:
     (tmp_path / "owner_style.md").write_text("# style\n", encoding="utf-8")
     hermes = FakeHermes()
     hermes.session_outputs.append(
@@ -795,19 +795,36 @@ def test_reply_postprocess_skips_empty_auto_reply_candidate(tmp_path: Path) -> N
 
     assert hermes.postprocess_prompts == []
     with store.connect() as conn:
-        approval = conn.execute("SELECT payload_json FROM approvals").fetchone()
+        approval_count = conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()[
+            "c"
+        ]
         send_count = conn.execute(
             "SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'"
         ).fetchone()["c"]
-    payload = json.loads(approval["payload_json"])
-    assert payload["reason"] == "empty_proposed_reply"
-    assert payload["approvable"] is False
-    assert payload["text"] == ""
-    assert "postprocess" not in payload
+        processing = conn.execute(
+            """
+            SELECT status, terminal_reason, last_error
+            FROM message_processing
+            WHERE message_id = ? AND stage = 'task_session'
+            """,
+            ("om_1",),
+        ).fetchone()
+        notification = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'owner_notification'",
+        ).fetchone()
+    assert approval_count == 0
     assert send_count == 0
+    assert processing["status"] == "processing_failed_terminal"
+    assert processing["terminal_reason"] == "agent_schema_failed"
+    assert "auto_reply requires a non-empty proposed_reply" in processing["last_error"]
+    payload = json.loads(notification["payload_json"])
+    assert payload["type"] == "processing_failed"
+    _assert_owner_notification_context(
+        payload, message_id="om_1", text="hello", sender_name="Ext", chat_id="ou_chat"
+    )
 
 
-def test_reply_postprocess_skips_empty_needs_owner_candidate(tmp_path: Path) -> None:
+def test_empty_needs_owner_candidate_is_schema_failure(tmp_path: Path) -> None:
     (tmp_path / "owner_style.md").write_text("# style\n", encoding="utf-8")
     hermes = FakeHermes()
     hermes.session_outputs.append(
@@ -829,17 +846,29 @@ def test_reply_postprocess_skips_empty_needs_owner_candidate(tmp_path: Path) -> 
 
     assert hermes.postprocess_prompts == []
     with store.connect() as conn:
-        approval = conn.execute("SELECT payload_json FROM approvals").fetchone()
+        approval_count = conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()[
+            "c"
+        ]
         notification = conn.execute(
             "SELECT payload_json FROM actions WHERE kind = 'owner_notification'"
         ).fetchone()
-    payload = json.loads(approval["payload_json"])
-    notify_payload = json.loads(notification["payload_json"])
-    assert payload["reason"] == "needs_owner"
-    assert payload["approvable"] is False
-    assert payload["text"] == ""
-    assert notify_payload["suggested_reply"] == ""
-    assert "postprocess" not in payload
+        processing = conn.execute(
+            """
+            SELECT status, terminal_reason, last_error
+            FROM message_processing
+            WHERE message_id = ? AND stage = 'task_session'
+            """,
+            ("om_1",),
+        ).fetchone()
+    assert approval_count == 0
+    assert processing["status"] == "processing_failed_terminal"
+    assert processing["terminal_reason"] == "agent_schema_failed"
+    assert "needs_owner requires a non-empty proposed_reply" in processing["last_error"]
+    payload = json.loads(notification["payload_json"])
+    assert payload["type"] == "processing_failed"
+    _assert_owner_notification_context(
+        payload, message_id="om_1", text="hello", sender_name="Ext", chat_id="ou_chat"
+    )
 
 
 def test_reply_postprocess_missing_profile_creates_keep_watching_approval_with_original_candidate(
@@ -1006,7 +1035,7 @@ def test_reply_postprocess_length_guard_routes_to_owner_review(tmp_path: Path) -
     assert audit["error"] == "postprocess_length_growth"
 
 
-def test_needs_owner_notification_includes_context_without_suggested_reply(
+def test_empty_needs_owner_reply_is_schema_failure_notification_includes_context(
     tmp_path: Path,
 ) -> None:
     hermes = FakeHermes()
@@ -1032,30 +1061,33 @@ def test_needs_owner_notification_includes_context_without_suggested_reply(
     )
 
     with store.connect() as conn:
-        approval = conn.execute(
-            "SELECT short_id, payload_json FROM approvals"
-        ).fetchone()
+        approval_count = conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()[
+            "c"
+        ]
         notification = conn.execute(
             "SELECT payload_json FROM actions WHERE kind = 'owner_notification'"
         ).fetchone()
-    approval_payload = json.loads(approval["payload_json"])
+        processing = conn.execute(
+            """
+            SELECT status, terminal_reason, last_error
+            FROM message_processing
+            WHERE message_id = ? AND stage = 'task_session'
+            """,
+            ("om_1",),
+        ).fetchone()
     notify_payload = json.loads(notification["payload_json"])
-    assert approval_payload["reason"] == "needs_owner"
-    assert approval_payload["approvable"] is False
-    assert approval_payload["text"] == ""
-    assert notify_payload["reason"] == "needs_owner"
+    assert approval_count == 0
+    assert processing["status"] == "processing_failed_terminal"
+    assert processing["terminal_reason"] == "agent_schema_failed"
+    assert "needs_owner requires a non-empty proposed_reply" in processing["last_error"]
+    assert notify_payload["type"] == "processing_failed"
+    assert notify_payload["reason"].startswith("agent_schema_failed:")
     assert notify_payload["incoming_message"] == {
         "message_id": "om_1",
         "text": "classification service failed to start",
     }
     assert notify_payload["source"]["chat_id"] == "oc_1"
     assert notify_payload["source"]["sender_name"] == "Ext"
-    assert notify_payload["suggested_reply"] == ""
-    assert notify_payload["approvable"] is False
-    assert notify_payload["commands"] == [
-        f"/send {notify_payload['task_id']} <final reply>",
-        f"/reject {approval['short_id']}",
-    ]
 
 
 def test_forbidden_hermes_mentions_downgrade_to_approval(tmp_path: Path) -> None:
@@ -2527,7 +2559,7 @@ def test_duplicate_with_routing_audit_but_no_processing_reruns_task_session(
     assert processing["attempt_count"] == 1
 
 
-def test_empty_auto_reply_downgrades_to_approval(tmp_path: Path) -> None:
+def test_empty_auto_reply_is_schema_failure(tmp_path: Path) -> None:
     hermes = FakeHermes()
     hermes.session_outputs.append(
         _session_output(reply_target_message_id="om_1", proposed_reply="   ")
@@ -2542,16 +2574,33 @@ def test_empty_auto_reply_downgrades_to_approval(tmp_path: Path) -> None:
     )
 
     with store.connect() as conn:
-        approval = conn.execute("SELECT status, payload_json FROM approvals").fetchone()
+        approval_count = conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()[
+            "c"
+        ]
         send_count = conn.execute(
             "SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'"
         ).fetchone()["c"]
-    payload = json.loads(approval["payload_json"])
-    assert approval["status"] == "pending"
-    assert payload["reason"] == "empty_proposed_reply"
-    assert payload["approvable"] is False
-    assert payload["text"] == ""
+        processing = conn.execute(
+            """
+            SELECT status, terminal_reason, last_error
+            FROM message_processing
+            WHERE message_id = ? AND stage = 'task_session'
+            """,
+            ("om_1",),
+        ).fetchone()
+        notification = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'owner_notification'",
+        ).fetchone()
+    assert approval_count == 0
     assert send_count == 0
+    assert processing["status"] == "processing_failed_terminal"
+    assert processing["terminal_reason"] == "agent_schema_failed"
+    assert "auto_reply requires a non-empty proposed_reply" in processing["last_error"]
+    payload = json.loads(notification["payload_json"])
+    assert payload["type"] == "processing_failed"
+    _assert_owner_notification_context(
+        payload, message_id="om_1", text="hello", sender_name="Ext", chat_id="ou_chat"
+    )
 
 
 def test_send_composer_mentions_reply_target_sender_once() -> None:
