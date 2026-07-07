@@ -19,6 +19,8 @@ export const queryKeys = {
   policyStatus: () => ["policy-status"] as const,
   policyAudits: (filters: { limit?: number; offset?: number; scope?: string; policy_key?: string; since?: string }) =>
     ["policy-audits", filters] as const,
+  policyImpactPreview: (scope: string, target: string, changes: Record<string, unknown>) =>
+    ["policy-impact-preview", scope, target, changes] as const,
   settingsCatalog: () => ["settings-catalog"] as const,
   settingsRuntime: () => ["settings-runtime"] as const
 };
@@ -80,6 +82,7 @@ export function invalidateAfterPolicyCommand(queryClient: QueryClient): Promise<
     queryClient.invalidateQueries({ queryKey: ["health-issues"] }),
     queryClient.invalidateQueries({ queryKey: ["policy-status"] }),
     queryClient.invalidateQueries({ queryKey: ["policy-audits"] }),
+    queryClient.invalidateQueries({ queryKey: ["policy-impact-preview"] }),
     queryClient.invalidateQueries({ queryKey: ["settings-runtime"] }),
     queryClient.invalidateQueries({ queryKey: ["settings-catalog"] }),
     queryClient.invalidateQueries({ queryKey: ["tasks"] }),

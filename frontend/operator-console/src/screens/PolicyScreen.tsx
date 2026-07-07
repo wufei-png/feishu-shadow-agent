@@ -8,6 +8,9 @@ import {
   getSettingsRuntime,
   importPolicyConfig,
   listPolicyAudits,
+  previewChatPolicy,
+  previewDeleteChatPolicy,
+  previewGlobalPolicy,
   updateChatPolicy,
   updateGlobalPolicy
 } from "../api";
@@ -31,6 +34,7 @@ import { invalidateAfterPolicyCommand, queryKeys } from "../queryKeys";
 import type {
   ChatPolicy,
   CommandResult,
+  PolicyImpactPreview,
   ProductPolicy,
   ReplyIdentity,
   SettingsCatalogEntry,
@@ -123,6 +127,23 @@ export function PolicyScreen({ token, selectedId }: { token: string; selectedId:
   const chatChanges = scope === "new-chat" ? { ...chatForm } : diffObject(chatBaseline, chatForm);
   const policyInitialized = runtime.data?.policy_status.initialized === true;
   const activeChatId = scope === "new-chat" ? chatIdDraft.trim() : selectedChat?.chat_id ?? "";
+  const hasGlobalChanges = Object.keys(globalChanges).length > 0;
+  const hasChatChanges = Object.keys(chatChanges).length > 0;
+  const globalPreview = useQuery({
+    queryKey: queryKeys.policyImpactPreview("global", "reply_policy", globalChanges as Record<string, unknown>),
+    queryFn: () => previewGlobalPolicy(token, globalChanges),
+    enabled: Boolean(token && policyInitialized && scope === "global" && hasGlobalChanges)
+  });
+  const chatPreview = useQuery({
+    queryKey: queryKeys.policyImpactPreview("chat", activeChatId, chatChanges as Record<string, unknown>),
+    queryFn: () => previewChatPolicy(token, activeChatId, chatChanges),
+    enabled: Boolean(token && policyInitialized && scope !== "global" && activeChatId && hasChatChanges)
+  });
+  const deletePreview = useQuery({
+    queryKey: queryKeys.policyImpactPreview("chat-delete", activeChatId, {}),
+    queryFn: () => previewDeleteChatPolicy(token, activeChatId),
+    enabled: Boolean(token && scope.startsWith("chat:") && activeChatId)
+  });
 
   useEffect(() => {
     setScope(selectedId ? `chat:${selectedId}` : "global");
@@ -249,11 +270,17 @@ export function PolicyScreen({ token, selectedId }: { token: string; selectedId:
               setGlobalForm(next);
             }}
             onSave={() => saveGlobal.mutate()}
+            preview={globalPreview.data ?? null}
+            previewError={globalPreview.error}
+            previewLoading={globalPreview.isFetching}
           />
         ) : (
           <ChatPolicyEditor
             changes={chatChanges}
             deleteDisabled={!activeChatId || deleteChat.isPending}
+            deletePreview={deletePreview.data ?? null}
+            deletePreviewError={deletePreview.error}
+            deletePreviewLoading={deletePreview.isFetching}
             entries={entries}
             form={chatForm}
             isNew={scope === "new-chat"}
@@ -269,6 +296,9 @@ export function PolicyScreen({ token, selectedId }: { token: string; selectedId:
             onSave={() => saveChat.mutate()}
             saveDisabled={!policyInitialized || !activeChatId || saveChat.isPending}
             selectedChatId={activeChatId}
+            updatePreview={chatPreview.data ?? null}
+            updatePreviewError={chatPreview.error}
+            updatePreviewLoading={chatPreview.isFetching}
           />
         )}
 
@@ -386,7 +416,10 @@ function GlobalPolicyEditor({
   entries,
   form,
   onChange,
-  onSave
+  onSave,
+  preview,
+  previewError,
+  previewLoading
 }: {
   changes: Record<string, unknown>;
   disabled: boolean;
@@ -394,6 +427,9 @@ function GlobalPolicyEditor({
   form: GlobalPolicyForm;
   onChange: (form: GlobalPolicyForm) => void;
   onSave: () => void;
+  preview: PolicyImpactPreview | null;
+  previewError: unknown;
+  previewLoading: boolean;
 }) {
   return (
     <div className="detail-panel">
@@ -414,6 +450,12 @@ function GlobalPolicyEditor({
         ))}
       </div>
       <ChangePreview changes={changes} entries={entries} fieldDefs={globalFields} />
+      <PolicyImpactPreviewPanel
+        error={previewError}
+        isLoading={previewLoading}
+        preview={preview}
+        title="Runtime impact preview"
+      />
       <Button disabled={disabled || Object.keys(changes).length === 0} onClick={onSave} tone="success">
         <Save aria-hidden="true" size={15} />
         Save global policy
@@ -426,6 +468,9 @@ function GlobalPolicyEditor({
 function ChatPolicyEditor({
   changes,
   deleteDisabled,
+  deletePreview,
+  deletePreviewError,
+  deletePreviewLoading,
   entries,
   form,
   isNew,
@@ -434,10 +479,16 @@ function ChatPolicyEditor({
   onDelete,
   onSave,
   saveDisabled,
-  selectedChatId
+  selectedChatId,
+  updatePreview,
+  updatePreviewError,
+  updatePreviewLoading
 }: {
   changes: Record<string, unknown>;
   deleteDisabled: boolean;
+  deletePreview: PolicyImpactPreview | null;
+  deletePreviewError: unknown;
+  deletePreviewLoading: boolean;
   entries: SettingsCatalogEntry[];
   form: ChatPolicyForm;
   isNew: boolean;
@@ -447,6 +498,9 @@ function ChatPolicyEditor({
   onSave: () => void;
   saveDisabled: boolean;
   selectedChatId: string;
+  updatePreview: PolicyImpactPreview | null;
+  updatePreviewError: unknown;
+  updatePreviewLoading: boolean;
 }) {
   return (
     <div className="detail-panel">
@@ -473,6 +527,20 @@ function ChatPolicyEditor({
         ))}
       </div>
       <ChangePreview changes={changes} entries={entries} fieldDefs={chatFields} />
+      <PolicyImpactPreviewPanel
+        error={updatePreviewError}
+        isLoading={updatePreviewLoading}
+        preview={updatePreview}
+        title="Save impact preview"
+      />
+      {!isNew ? (
+        <PolicyImpactPreviewPanel
+          error={deletePreviewError}
+          isLoading={deletePreviewLoading}
+          preview={deletePreview}
+          title="Delete fallback preview"
+        />
+      ) : null}
       <div className="command-buttons">
         <Button disabled={saveDisabled || Object.keys(changes).length === 0} onClick={onSave} tone="success">
           <Save aria-hidden="true" size={15} />
@@ -574,6 +642,93 @@ function ChangePreview({
   );
 }
 
+function PolicyImpactPreviewPanel({
+  title,
+  preview,
+  isLoading,
+  error
+}: {
+  title: string;
+  preview: PolicyImpactPreview | null;
+  isLoading: boolean;
+  error: unknown;
+}) {
+  if (!preview && !isLoading && !error) {
+    return null;
+  }
+  return (
+    <div className="policy-impact-preview">
+      <div className="subsection-title">
+        <FileDiff aria-hidden="true" size={16} />
+        <h2>{title}</h2>
+      </div>
+      {isLoading ? <p className="detail-note">Loading deterministic policy impact...</p> : null}
+      {error ? <p className="detail-note">Preview unavailable: {errorMessage(error)}</p> : null}
+      {preview ? (
+        <>
+          <ImpactChangeList title="Field changes" changes={preview.field_changes} />
+          <ImpactChangeList title="Behavior changes" changes={preview.behavior_changes} />
+          <ImpactSummary summary={preview.affected_summary} />
+          {preview.warnings.length ? (
+            <ul className="warning-list">
+              {preview.warnings.map((warning) => (
+                <li key={warning}>{warning}</li>
+              ))}
+            </ul>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function ImpactChangeList({
+  title,
+  changes
+}: {
+  title: string;
+  changes: PolicyImpactPreview["behavior_changes"];
+}) {
+  return (
+    <div className="impact-section">
+      <h3>{title}</h3>
+      {changes.length ? (
+        <ul className="change-list">
+          {changes.map((change) => (
+            <li key={`${change.subject ?? "field"}:${change.field}`}>
+              <span>{impactLabel(change)}</span>
+              <strong>
+                {formatSettingValue(change.before)}
+                {" -> "}
+                {formatSettingValue(change.after)}
+              </strong>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="detail-note">No deterministic behavior change detected.</p>
+      )}
+    </div>
+  );
+}
+
+function ImpactSummary({ summary }: { summary: Record<string, unknown> }) {
+  const rows = Object.entries(summary);
+  if (!rows.length) {
+    return null;
+  }
+  return (
+    <div className="impact-section">
+      <h3>Affected summary</h3>
+      <FieldList>
+        {rows.map(([key, value]) => (
+          <FactRow key={key} label={key} value={formatSettingValue(value)} />
+        ))}
+      </FieldList>
+    </div>
+  );
+}
+
 function ImportDiffDetails({ diff }: { diff: SettingsRuntime["policy_status"]["policy_import_diff"] }) {
   return (
     <div className="policy-import-detail">
@@ -589,6 +744,10 @@ function ImportDiffDetails({ diff }: { diff: SettingsRuntime["policy_status"]["p
       </FieldList>
     </div>
   );
+}
+
+function impactLabel(change: PolicyImpactPreview["behavior_changes"][number]): string {
+  return change.subject ? `${change.subject}.${change.field}` : change.field;
 }
 
 function PolicyAuditHistory({
@@ -749,6 +908,10 @@ function formatSettingValue(value: unknown): string {
     return JSON.stringify(value);
   }
   return String(value);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Request failed.";
 }
 
 function errorResult(command: string, error: unknown): CommandResult {

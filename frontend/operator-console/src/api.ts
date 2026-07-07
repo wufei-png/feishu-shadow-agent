@@ -10,6 +10,7 @@ import type {
   HealthIssuesResponse,
   MessageDetail,
   PolicyAudit,
+  PolicyImpactPreview,
   PolicyStatus,
   SettingsCatalog,
   SettingsRuntime,
@@ -188,12 +189,24 @@ export function updateGlobalPolicy(token: string, body: GlobalPolicyUpdateBody):
   return patchCommand("/api/policy/global", token, body);
 }
 
+export function previewGlobalPolicy(token: string, body: GlobalPolicyUpdateBody): Promise<PolicyImpactPreview> {
+  return postPreview("/api/policy/global/preview", token, body);
+}
+
 export function updateChatPolicy(token: string, chatId: string, body: ChatPolicyUpdateBody): Promise<CommandResult> {
   return patchCommand(`/api/policy/chats/${encodeURIComponent(chatId)}`, token, body);
 }
 
+export function previewChatPolicy(token: string, chatId: string, body: ChatPolicyUpdateBody): Promise<PolicyImpactPreview> {
+  return postPreview(`/api/policy/chats/${encodeURIComponent(chatId)}/preview`, token, body);
+}
+
 export function deleteChatPolicy(token: string, chatId: string, body: PolicyDeleteBody): Promise<CommandResult> {
   return deleteCommand(`/api/policy/chats/${encodeURIComponent(chatId)}`, token, body);
+}
+
+export function previewDeleteChatPolicy(token: string, chatId: string): Promise<PolicyImpactPreview> {
+  return postPreview(`/api/policy/chats/${encodeURIComponent(chatId)}/delete-preview`, token, {});
 }
 
 export function runDoctor(token: string, body: MaintenanceDoctorBody): Promise<CommandResult> {
@@ -237,6 +250,13 @@ async function patchCommand(path: string, token: string, body: Record<string, un
 async function deleteCommand(path: string, token: string, body: Record<string, unknown>): Promise<CommandResult> {
   return fetchApi(path, token, {
     method: "DELETE",
+    body: JSON.stringify(body)
+  });
+}
+
+async function postPreview(path: string, token: string, body: Record<string, unknown>): Promise<PolicyImpactPreview> {
+  return fetchApi(path, token, {
+    method: "POST",
     body: JSON.stringify(body)
   });
 }

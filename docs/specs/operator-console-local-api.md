@@ -277,7 +277,15 @@ Maintenance commands:
 
 ```text
 POST /api/maintenance/expire-approvals
+POST /api/maintenance/doctor
+POST /api/maintenance/config-validate
+POST /api/maintenance/retention-prune
+POST /api/maintenance/reply-style-refresh
 ```
+
+`expire-approvals` is shown from Dashboard/Approvals workflow context even
+though the route namespace is maintenance. The other maintenance routes belong
+to the Maintenance screen.
 
 Policy commands:
 
@@ -285,10 +293,23 @@ Policy commands:
 POST /api/policy/import-config
 PATCH /api/policy/global
 PATCH /api/policy/chats/{chat_id}
+DELETE /api/policy/chats/{chat_id}
 ```
 
-All command responses use the command result shape. The renderer shows command
-feedback from the result, then invalidates and refreshes affected query groups.
+Policy preview routes are read-only deterministic impact previews, not command
+mutations:
+
+```text
+POST /api/policy/global/preview
+POST /api/policy/chats/{chat_id}/preview
+POST /api/policy/chats/{chat_id}/delete-preview
+```
+
+All command responses use the command result shape. Preview routes return
+structured field changes, effective before/after policy, behavior changes, and
+affected summaries; they must not write audits, assign risk levels, or create
+confirmation-required workflows. The renderer shows command feedback from the
+result, then invalidates and refreshes affected query groups.
 
 ## Settings And Policy Mutation
 

@@ -638,12 +638,27 @@ dd {
 }
 
 .policy-import-detail,
-.policy-change-preview {
+.policy-change-preview,
+.policy-impact-preview {
   margin: 14px 0;
   padding: 14px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-small);
   background: var(--surface-inset);
+}
+
+.impact-section {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.impact-section h3 {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
 }
 
 .policy-form-grid,

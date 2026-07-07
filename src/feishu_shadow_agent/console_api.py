@@ -41,6 +41,12 @@ from .operator_query import (
     OperatorQueryUnavailable,
 )
 from .paths import resolve_relative_path
+from .policy import ProductPolicyInvalidError, ProductPolicyMissingError
+from .policy_preview import (
+    PolicyPreviewNotFoundError,
+    PolicyPreviewService,
+    PolicyPreviewValidationError,
+)
 from .replay import replay_message_dry_run
 from .settings_catalog import settings_catalog
 from .store.sqlite_store import SQLiteStore
@@ -245,6 +251,9 @@ def create_console_app(
             store=store,
             logger=_build_jsonl_logger(loaded_config),
         )
+
+    def policy_preview_service() -> PolicyPreviewService:
+        return PolicyPreviewService(store)
 
     api = APIRouter(prefix="/api", dependencies=[Depends(require_token)])
 
@@ -633,6 +642,18 @@ def create_console_app(
             .as_dict()
         )
 
+    @api.post("/policy/global/preview")
+    def preview_global_policy(body: GlobalPolicyUpdateRequest) -> dict[str, Any]:
+        try:
+            return policy_preview_service().preview_global_policy(body.changes())
+        except (
+            PolicyPreviewValidationError,
+            ProductPolicyInvalidError,
+        ) as exc:
+            _raise_api_error(400, "validation_failed", str(exc))
+        except ProductPolicyMissingError as exc:
+            _raise_api_error(404, "not_found", str(exc))
+
     @api.patch("/policy/chats/{chat_id}")
     def update_chat_policy(
         chat_id: str, body: ChatPolicyUpdateRequest
@@ -647,6 +668,31 @@ def create_console_app(
             )
             .as_dict()
         )
+
+    @api.post("/policy/chats/{chat_id}/preview")
+    def preview_chat_policy(
+        chat_id: str, body: ChatPolicyUpdateRequest
+    ) -> dict[str, Any]:
+        try:
+            return policy_preview_service().preview_chat_policy(chat_id, body.changes())
+        except (
+            PolicyPreviewValidationError,
+            ProductPolicyInvalidError,
+        ) as exc:
+            _raise_api_error(400, "validation_failed", str(exc))
+        except ProductPolicyMissingError as exc:
+            _raise_api_error(404, "not_found", str(exc))
+
+    @api.post("/policy/chats/{chat_id}/delete-preview")
+    def preview_delete_chat_policy(chat_id: str) -> dict[str, Any]:
+        try:
+            return policy_preview_service().preview_delete_chat_policy(chat_id)
+        except PolicyPreviewValidationError as exc:
+            _raise_api_error(400, "validation_failed", str(exc))
+        except PolicyPreviewNotFoundError as exc:
+            _raise_api_error(404, "not_found", str(exc))
+        except ProductPolicyInvalidError as exc:
+            _raise_api_error(400, "validation_failed", str(exc))
 
     @api.delete("/policy/chats/{chat_id}")
     def delete_chat_policy(

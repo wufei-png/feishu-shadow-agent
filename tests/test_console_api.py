@@ -478,7 +478,10 @@ def test_message_detail_api_is_service_backed_and_read_only(tmp_path: Path) -> N
         ("GET", "/api/policy/audits"),
         ("POST", "/api/policy/import-config"),
         ("PATCH", "/api/policy/global"),
+        ("POST", "/api/policy/global/preview"),
         ("PATCH", "/api/policy/chats/oc_policy"),
+        ("POST", "/api/policy/chats/oc_policy/preview"),
+        ("POST", "/api/policy/chats/oc_policy/delete-preview"),
         ("DELETE", "/api/policy/chats/oc_policy"),
         ("GET", "/api/health/issues"),
     ],
@@ -1006,6 +1009,81 @@ def test_policy_routes_use_command_facade_and_settings_runtime_read_model(
     assert runtime_payload["chat_policies"][0]["chat_id"] == "oc_console"
     assert runtime_payload["policy_audit_history"][0]["scope"] == "chat"
     assert store.get_chat_product_policy("oc_console")["auto_reply"] is True
+
+
+def test_policy_preview_routes_return_deterministic_impact_without_audit(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    store = _store(tmp_path)
+    imported = client.post("/api/policy/import-config", headers=_auth(), json={})
+    created = client.patch(
+        "/api/policy/chats/oc_console",
+        headers=_auth(),
+        json={
+            "name": "Console group",
+            "auto_reply": True,
+            "bot_joined": True,
+            "resource_download": True,
+        },
+    )
+    audit_count = len(store.list_policy_audits(limit=10))
+
+    global_preview = client.post(
+        "/api/policy/global/preview",
+        headers=_auth(),
+        json={"unknown_group_auto_reply": True, "bot_joined": True},
+    )
+    chat_preview = client.post(
+        "/api/policy/chats/oc_console/preview",
+        headers=_auth(),
+        json={"resource_download": False, "reply_identity": "bot"},
+    )
+    delete_preview = client.post(
+        "/api/policy/chats/oc_console/delete-preview",
+        headers=_auth(),
+        json={},
+    )
+
+    assert imported.status_code == 200
+    assert created.status_code == 200
+    assert global_preview.status_code == 200
+    global_payload = global_preview.json()
+    assert global_payload["scope"] == "global"
+    assert global_payload["operation"] == "update"
+    assert {
+        change["field"]: change["after"] for change in global_payload["field_changes"]
+    } == {"unknown_group_auto_reply": True, "bot_joined": True}
+    assert global_payload["effective_before"]["unknown_group"]["auto_reply"] is False
+    assert global_payload["effective_after"]["unknown_group"]["auto_reply"] is True
+    assert global_payload["affected_summary"]["explicit_chat_policy_count"] == 1
+    assert global_payload["affected_summary"]["explicit_chat_policies_changed"] is False
+    assert "risk_level" not in global_payload
+    assert "confirmation_required" not in global_payload
+
+    assert chat_preview.status_code == 200
+    chat_payload = chat_preview.json()
+    assert chat_payload["target"] == {
+        "type": "chat_policy",
+        "chat_id": "oc_console",
+    }
+    assert chat_payload["effective_before"]["policy_source"] == "explicit_chat"
+    assert chat_payload["effective_after"]["resource_download"] is False
+    assert {
+        change["field"]: change["after"] for change in chat_payload["field_changes"]
+    } == {"reply_identity": "bot", "resource_download": False}
+    assert "risk_level" not in chat_payload
+    assert "confirmation_required" not in chat_payload
+
+    assert delete_preview.status_code == 200
+    delete_payload = delete_preview.json()
+    assert delete_payload["operation"] == "delete"
+    assert delete_payload["effective_before"]["policy_source"] == "explicit_chat"
+    assert delete_payload["effective_after"]["policy_source"] == "unknown_group"
+    assert (
+        delete_payload["affected_summary"]["fallback_policy_source"] == "unknown_group"
+    )
+    assert len(store.list_policy_audits(limit=10)) == audit_count
 
 
 def test_console_policy_delete_chat_removes_override_and_updates_runtime(

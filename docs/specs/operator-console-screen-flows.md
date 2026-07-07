@@ -59,6 +59,7 @@ Dispatch
 Policy
 Settings
 Health
+Maintenance
 ```
 
 The shell layout remains:
@@ -69,6 +70,12 @@ Left navigation + top runtime strip + main work surface + persistent detail pane
 
 The detail panel should be persistent for queue workflows so the operator can
 move through items without losing list context.
+
+Maintenance is a first-level local operations screen for explicit low-frequency
+commands such as doctor, config validation, retention pruning, and reply style
+refresh. It must not become a miscellaneous command drawer. Commands whose
+operator context is a queue or task workflow, such as expiring approvals, remain
+on the workflow screen even if their backend API namespace is maintenance.
 
 ## Shared Screen States
 
@@ -377,12 +384,19 @@ Commands:
 import config
 update global policy
 update chat policy
+delete chat policy
+preview global policy impact
+preview chat policy impact
+preview chat policy deletion fallback
 ```
 
 Rules:
 
 - Valid policy changes apply directly and write audit records.
 - Do not use risk levels or confirmation-required policy flows.
+- Preview routes are read-only deterministic impact views. They show field
+  changes, effective before/after behavior, behavior changes, and affected
+  summaries, but they do not write audit records.
 - Field help explains meaning; it does not tell the operator what decision to
   make.
 - `config.yaml.reply_policy` and `config.yaml.chats` remain Policy Import Source,
@@ -397,6 +411,10 @@ GET /api/settings/catalog
 POST /api/policy/import-config
 PATCH /api/policy/global
 PATCH /api/policy/chats/{chat_id}
+DELETE /api/policy/chats/{chat_id}
+POST /api/policy/global/preview
+POST /api/policy/chats/{chat_id}/preview
+POST /api/policy/chats/{chat_id}/delete-preview
 ```
 
 ## Settings

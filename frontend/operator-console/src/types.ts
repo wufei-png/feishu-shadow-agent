@@ -123,6 +123,25 @@ export type PolicyAudit = {
   new_summary: Record<string, unknown>;
 };
 
+export type PolicyFieldChange = {
+  field: string;
+  before: unknown;
+  after: unknown;
+  subject?: string;
+};
+
+export type PolicyImpactPreview = {
+  scope: string;
+  operation: string;
+  target: Record<string, unknown>;
+  field_changes: PolicyFieldChange[];
+  effective_before: Record<string, unknown>;
+  effective_after: Record<string, unknown>;
+  behavior_changes: PolicyFieldChange[];
+  affected_summary: Record<string, unknown>;
+  warnings: string[];
+};
+
 export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired";
 
 export type ApprovalSummary = {
