@@ -204,6 +204,9 @@ runtime availability.
 | `agent_backend.hermes.path` | Hermes executable | `config_yaml` | `diagnostic` | no | yes | none | none |
 | `agent_backend.hermes.health_url` | Hermes health URL | `config_yaml` | `diagnostic` | no | yes | none | none |
 | `agent_backend.hermes.api_key_env` | Hermes API key env | `config_yaml` | `diagnostic` | no | yes | none | none |
+| `agent_backend.codex.model` | Codex model | `config_yaml` | `advanced` | no | yes | future config audit | future `ConfigCommandService` |
+| `agent_backend.codex.timeout_seconds` | Codex timeout | `config_yaml` | `advanced` | no | yes | future config audit | future `ConfigCommandService` |
+| `agent_backend.codex.path` | Codex executable | `config_yaml` | `diagnostic` | no | yes | none | none |
 | `tool_permissions` | Tool permissions | `config_yaml` | `advanced` | no | yes | future config audit | future `ConfigCommandService` |
 
 ## Feishu And Owner Settings

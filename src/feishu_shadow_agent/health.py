@@ -10,6 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .agent_backend import AgentRunResult
+from .codex import codex_execution_policy
 from .config import LoadedConfig
 from .feishu.client import FeishuClient
 from .hermes import hermes_execution_policy
@@ -36,6 +37,7 @@ BackendReadinessChecker = Callable[
     [LoadedConfig], HealthCheckResult | list[HealthCheckResult]
 ]
 HermesChecker = BackendReadinessChecker
+CodexChecker = BackendReadinessChecker
 
 
 class HermesHttpChecker:
@@ -145,14 +147,75 @@ class HermesHealthChecker:
         return [*cli_results, *_health_result_list(self.http_checker(loaded))]
 
 
+class CodexCliChecker:
+    def __call__(self, loaded: LoadedConfig) -> list[HealthCheckResult]:
+        codex = loaded.config.agent_backend.codex
+        path = codex.path or "codex"
+        cwd = resolve_agent_working_dir(
+            loaded.config.agent_backend.working_dir, loaded.base_dir
+        )
+        version = _run_codex_command(
+            [path, "--version"], timeout_seconds=codex.timeout_seconds, cwd=cwd
+        )
+        version_result = _agent_command_result(
+            "codex_cli_version",
+            version,
+            "Codex CLI version detected",
+            "Codex CLI version check failed",
+            severity="critical",
+        )
+        if version_result.is_critical_failure:
+            return [version_result]
+        login_status = _run_codex_command(
+            [path, "login", "status"], timeout_seconds=codex.timeout_seconds, cwd=cwd
+        )
+        login_result = _agent_command_result(
+            "codex_login_status",
+            login_status,
+            "Codex login status command succeeded",
+            "Codex login status command failed",
+            severity="critical",
+        )
+        exec_help = _run_codex_command(
+            [path, *codex_execution_policy("read_only").root_args, "exec", "--help"],
+            timeout_seconds=codex.timeout_seconds,
+            cwd=cwd,
+        )
+        resume_help = _run_codex_command(
+            [
+                path,
+                *codex_execution_policy("read_only").root_args,
+                "exec",
+                "--sandbox",
+                "read-only",
+                "resume",
+                "--help",
+            ],
+            timeout_seconds=codex.timeout_seconds,
+            cwd=cwd,
+        )
+        permissions_result = _codex_capabilities_result(
+            loaded, exec_help=exec_help, resume_help=resume_help
+        )
+        return [version_result, login_result, permissions_result]
+
+
 class SelectedBackendReadinessChecker:
-    def __init__(self, *, hermes_checker: HermesChecker | None = None):
+    def __init__(
+        self,
+        *,
+        hermes_checker: HermesChecker | None = None,
+        codex_checker: CodexChecker | None = None,
+    ):
         self.hermes_checker = hermes_checker or HermesHealthChecker()
+        self.codex_checker = codex_checker or CodexCliChecker()
 
     def __call__(self, loaded: LoadedConfig) -> list[HealthCheckResult]:
         provider = loaded.config.agent_backend.provider
         if provider == "hermes":
             return _health_result_list(self.hermes_checker(loaded))
+        if provider == "codex":
+            return _health_result_list(self.codex_checker(loaded))
         return [
             HealthCheckResult(
                 "agent_backend_ready",
@@ -628,6 +691,89 @@ def _run_hermes_command(
     )
 
 
+def _run_codex_command(
+    argv: list[str], *, timeout_seconds: int, cwd: Path | None = None
+) -> AgentRunResult:
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            argv,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return AgentRunResult(
+            argv=argv,
+            exit_code=None,
+            stdout=exc.stdout or "",
+            stderr=exc.stderr or "",
+            error=f"command timed out after {timeout_seconds}s",
+            timed_out=True,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            backend_provider="codex",
+        )
+    except OSError as exc:
+        return AgentRunResult(
+            argv=argv,
+            exit_code=None,
+            error=str(exc),
+            latency_ms=int((time.monotonic() - started) * 1000),
+            backend_provider="codex",
+        )
+    return AgentRunResult(
+        argv=argv,
+        exit_code=completed.returncode,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        error=None
+        if completed.returncode == 0
+        else (completed.stderr.strip() or completed.stdout.strip()),
+        latency_ms=int((time.monotonic() - started) * 1000),
+        backend_provider="codex",
+    )
+
+
+def _agent_command_result(
+    name: str,
+    result: AgentRunResult,
+    ok_message: str,
+    failed_message: str,
+    *,
+    severity: str,
+) -> HealthCheckResult:
+    if not result.ok:
+        return HealthCheckResult(
+            name,
+            severity,  # type: ignore[arg-type]
+            "failed",
+            failed_message,
+            {
+                "argv": result.argv,
+                "exit_code": result.exit_code,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "error": result.error,
+                "timed_out": result.timed_out,
+                "latency_ms": result.latency_ms,
+            },
+        )
+    return HealthCheckResult(
+        name,
+        severity,  # type: ignore[arg-type]
+        "ok",
+        ok_message,
+        {
+            "argv": result.argv,
+            "stdout": result.stdout.strip(),
+            "stderr": result.stderr.strip(),
+            "latency_ms": result.latency_ms,
+        },
+    )
+
+
 def _hermes_command_result(
     name: str,
     result: AgentRunResult,
@@ -664,6 +810,90 @@ def _hermes_command_result(
             "latency_ms": result.latency_ms,
         },
     )
+
+
+def _codex_capabilities_result(
+    loaded: LoadedConfig, *, exec_help: AgentRunResult, resume_help: AgentRunResult
+) -> HealthCheckResult:
+    profile = loaded.config.tool_permissions
+    policy = codex_execution_policy(profile)
+    backend = loaded.config.agent_backend
+    details = {
+        "tool_permissions_profile": profile,
+        "effective_root_args": policy.root_args,
+        "effective_exec_args": policy.exec_args,
+        "config_scope": backend.config_scope,
+        "auto_context": backend.auto_context,
+        "explicit_skills_count": len(backend.explicit_context.skills),
+        "exec_help_argv": exec_help.argv,
+        "resume_help_argv": resume_help.argv,
+        "exec_help_exit_code": exec_help.exit_code,
+        "resume_help_exit_code": resume_help.exit_code,
+        "exec_help_error": exec_help.error,
+        "resume_help_error": resume_help.error,
+        "exec_help_timed_out": exec_help.timed_out,
+        "resume_help_timed_out": resume_help.timed_out,
+    }
+    if not exec_help.ok:
+        return HealthCheckResult(
+            "codex_exec_capabilities",
+            "critical",
+            "failed",
+            "Codex exec help command failed",
+            details,
+        )
+    if not resume_help.ok:
+        return HealthCheckResult(
+            "codex_exec_capabilities",
+            "critical",
+            "failed",
+            "Codex exec resume help command failed",
+            details,
+        )
+    exec_text = f"{exec_help.stdout}\n{exec_help.stderr}"
+    resume_text = f"{resume_help.stdout}\n{resume_help.stderr}"
+    missing = [
+        flag for flag in _required_codex_exec_flags(loaded) if flag not in exec_text
+    ]
+    missing.extend(
+        flag
+        for flag in ["resume", "--output-schema", "--output-last-message", "--json"]
+        if flag not in resume_text
+    )
+    if missing:
+        return HealthCheckResult(
+            "codex_exec_capabilities",
+            "critical",
+            "failed",
+            "Codex CLI does not expose required backend flags",
+            details | {"missing_flags": list(dict.fromkeys(missing))},
+        )
+    return HealthCheckResult(
+        "codex_exec_capabilities",
+        "critical",
+        "ok",
+        "Codex CLI supports configured backend flags",
+        details,
+    )
+
+
+def _required_codex_exec_flags(loaded: LoadedConfig) -> list[str]:
+    required = [
+        "--sandbox",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--output-schema",
+        "--output-last-message",
+        "--json",
+        "--skip-git-repo-check",
+    ]
+    if loaded.config.agent_backend.working_dir is not None:
+        required.append("--cd")
+    if loaded.config.agent_backend.codex.model:
+        required.append("--model")
+    if loaded.config.tool_permissions == "full_access":
+        required.append("--dangerously-bypass-approvals-and-sandbox")
+    return required
 
 
 def _hermes_tool_permissions_result(

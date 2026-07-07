@@ -35,6 +35,8 @@ def test_load_minimal_config() -> None:
     assert loaded.config.agent_backend.config_scope == "isolated"
     assert loaded.config.agent_backend.auto_context == "disabled"
     assert loaded.config.agent_backend.hermes.mode == "cli"
+    assert loaded.config.agent_backend.codex.path is None
+    assert loaded.config.agent_backend.codex.model is None
     assert loaded.config.reply_postprocess.enabled is False
     assert loaded.config.reply_postprocess.max_turns == 4
     assert loaded.config.reply_postprocess.owner_style.enabled is False
@@ -47,13 +49,12 @@ def test_tracked_config_schema_matches_generated_schema() -> None:
     assert tracked_schema == ConfigService().json_schema_dict()
 
 
-def test_agent_backend_provider_schema_accepts_only_hermes() -> None:
+def test_agent_backend_provider_schema_accepts_hermes_and_codex() -> None:
     schema = ConfigService().json_schema_dict()
     provider_schema = schema["$defs"]["AgentBackendConfig"]["properties"]["provider"]
 
-    assert provider_schema.get("const") == "hermes"
-    assert "enum" not in provider_schema
-    assert "codex" not in json.dumps(provider_schema)
+    assert provider_schema.get("enum") == ["hermes", "codex"]
+    assert "const" not in provider_schema
     assert "claude_code" not in json.dumps(provider_schema)
 
 
@@ -409,7 +410,7 @@ agent_backend:
         ConfigService().load(config_path)
 
 
-def test_unsupported_agent_backend_provider_is_rejected(tmp_path: Path) -> None:
+def test_codex_agent_backend_provider_is_accepted(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
@@ -417,6 +418,28 @@ owner:
   open_id: ou_owner
 agent_backend:
   provider: codex
+  codex:
+    path: /bin/codex
+    model: gpt-5
+""",
+        encoding="utf-8",
+    )
+
+    loaded = ConfigService().load(config_path)
+
+    assert loaded.config.agent_backend.provider == "codex"
+    assert loaded.config.agent_backend.codex.path == "/bin/codex"
+    assert loaded.config.agent_backend.codex.model == "gpt-5"
+
+
+def test_unsupported_agent_backend_provider_is_rejected(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+agent_backend:
+  provider: claude_code
 """,
         encoding="utf-8",
     )
@@ -428,3 +451,4 @@ agent_backend:
     assert "agent_backend" in error
     assert "provider" in error
     assert "hermes" in error
+    assert "codex" in error

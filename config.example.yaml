@@ -48,6 +48,10 @@ agent_backend:
     # HTTP mode compatibility. Used only when mode: http.
     health_url: null
     api_key_env: HERMES_API_KEY
+  codex:
+    path: null
+    model: null
+    timeout_seconds: 60
 
 reply_policy:
   p2p_auto_reply: true

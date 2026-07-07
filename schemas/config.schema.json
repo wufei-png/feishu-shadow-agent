@@ -4,9 +4,12 @@
       "additionalProperties": false,
       "properties": {
         "provider": {
-          "const": "hermes",
           "default": "hermes",
-          "description": "Agent backend provider. Config currently accepts only hermes.",
+          "description": "Agent backend provider. Config accepts hermes or codex.",
+          "enum": [
+            "hermes",
+            "codex"
+          ],
           "title": "Provider",
           "type": "string"
         },
@@ -50,6 +53,10 @@
         "hermes": {
           "$ref": "#/$defs/HermesConfig",
           "description": "Hermes backend settings."
+        },
+        "codex": {
+          "$ref": "#/$defs/CodexConfig",
+          "description": "Codex backend settings."
         }
       },
       "title": "AgentBackendConfig",
@@ -101,6 +108,46 @@
         }
       },
       "title": "ChatPolicyConfig",
+      "type": "object"
+    },
+    "CodexConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional Codex executable path; null uses the current PATH.",
+          "title": "Path"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional Codex model override; null uses the Codex default.",
+          "title": "Model"
+        },
+        "timeout_seconds": {
+          "default": 60,
+          "description": "Timeout in seconds for Codex subprocess calls.",
+          "exclusiveMinimum": 0,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "CodexConfig",
       "type": "object"
     },
     "DaemonConfig": {

@@ -192,10 +192,26 @@ class HermesConfig(StrictModel):
         return self
 
 
+class CodexConfig(StrictModel):
+    path: str | None = Field(
+        default=None,
+        description="Optional Codex executable path; null uses the current PATH.",
+    )
+    model: str | None = Field(
+        default=None,
+        description="Optional Codex model override; null uses the Codex default.",
+    )
+    timeout_seconds: int = Field(
+        default=60,
+        gt=0,
+        description="Timeout in seconds for Codex subprocess calls.",
+    )
+
+
 ToolPermissionsProfile = Literal["read_only", "full_access"]
 ConfigScopeMode = Literal["isolated", "native"]
 AutoContextMode = Literal["disabled", "enabled"]
-ConfigAgentBackendProvider = Literal["hermes"]
+ConfigAgentBackendProvider = Literal["hermes", "codex"]
 
 
 class ExplicitAgentContextConfig(StrictModel):
@@ -218,7 +234,7 @@ class ExplicitAgentContextConfig(StrictModel):
 class AgentBackendConfig(StrictModel):
     provider: ConfigAgentBackendProvider = Field(
         default="hermes",
-        description="Agent backend provider. Config currently accepts only hermes.",
+        description="Agent backend provider. Config accepts hermes or codex.",
     )
     working_dir: str | None = Field(
         default=None,
@@ -238,6 +254,9 @@ class AgentBackendConfig(StrictModel):
     )
     hermes: HermesConfig = Field(
         default_factory=HermesConfig, description="Hermes backend settings."
+    )
+    codex: CodexConfig = Field(
+        default_factory=CodexConfig, description="Codex backend settings."
     )
 
     @field_validator("working_dir")
