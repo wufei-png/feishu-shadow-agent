@@ -10,6 +10,7 @@ from pathlib import Path
 
 import yaml
 
+from .agent_backend_factory import create_agent_backend
 from .agent_invocation import AgentInvoker
 from .config import ConfigError, ConfigService, LoadedConfig
 from .console_api import (
@@ -26,15 +27,10 @@ from .daemon import Daemon
 from .dispatcher import Dispatcher
 from .feishu.lark_cli import LarkCliClient
 from .health import HealthSuite, has_critical_failure, summarize_results
-from .hermes import HermesCliClient
 from .jsonl import JSONLLogger
 from .operator_commands import CommandResult, OperatorCommandService, command_exit_code
 from .operator_query import OperatorQueryService
-from .paths import (
-    resolve_agent_skill_path,
-    resolve_agent_working_dir,
-    resolve_relative_path,
-)
+from .paths import resolve_agent_working_dir, resolve_relative_path
 from .processing import TaskProcessingService
 from .replay import replay_message_dry_run
 from .reply_style import ReplyStyleRefresher
@@ -342,18 +338,7 @@ def _handle_daemon(args: argparse.Namespace) -> int:
     agent_working_dir = resolve_agent_working_dir(
         backend_config.working_dir, loaded.base_dir
     )
-    session_skills = [
-        resolve_agent_skill_path(skill, loaded.base_dir)
-        for skill in backend_config.explicit_context.skills
-    ]
-    agent_backend = HermesCliClient(
-        config=backend_config.hermes,
-        tool_permissions=loaded.config.tool_permissions,
-        config_scope=backend_config.config_scope,
-        auto_context=backend_config.auto_context,
-        reply_postprocess=loaded.config.reply_postprocess,
-        session_skills=session_skills,
-    )
+    agent_backend = create_agent_backend(loaded.config, base_dir=loaded.base_dir)
     task_processor = TaskProcessingService(
         store=store,
         config=loaded.config,
@@ -557,19 +542,12 @@ def _handle_retention_prune(args: argparse.Namespace) -> int:
 
 def _handle_reply_style_refresh(args: argparse.Namespace) -> int:
     loaded, _, logger = _load_runtime(args.config)
-    backend_config = loaded.config.agent_backend
     client = LarkCliClient(
         path=loaded.config.lark_cli.path,
         timeout_seconds=loaded.config.lark_cli.timeout_seconds,
         cwd=loaded.base_dir,
     )
-    backend = HermesCliClient(
-        config=backend_config.hermes,
-        tool_permissions=loaded.config.tool_permissions,
-        config_scope=backend_config.config_scope,
-        auto_context=backend_config.auto_context,
-        reply_postprocess=loaded.config.reply_postprocess,
-    )
+    backend = create_agent_backend(loaded.config, base_dir=loaded.base_dir)
     refresher = ReplyStyleRefresher(
         config=loaded.config,
         base_dir=loaded.base_dir,

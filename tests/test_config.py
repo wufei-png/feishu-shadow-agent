@@ -23,7 +23,7 @@ def test_load_minimal_config() -> None:
     assert loaded.config.logging.level == "info"
     assert loaded.config.logging.console is False
     assert loaded.config.logging.text_path == "logs/test.log"
-    assert loaded.config.tool_permissions == "guarded_write"
+    assert loaded.config.tool_permissions == "read_only"
     assert loaded.config.chats["oc_test"].auto_reply is True
     assert loaded.config.reply_policy.unknown_group_auto_reply is False
     assert loaded.config.lifecycle.watch_minutes == 120
@@ -59,7 +59,7 @@ def test_agent_backend_provider_schema_accepts_only_hermes() -> None:
 
 def test_missing_owner_fails(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("tool_permissions: guarded_write\n", encoding="utf-8")
+    config_path.write_text("tool_permissions: read_only\n", encoding="utf-8")
 
     with pytest.raises(ConfigError, match="owner"):
         ConfigService().load(config_path)
@@ -87,7 +87,22 @@ def test_nested_tool_permissions_config_is_rejected(tmp_path: Path) -> None:
 owner:
   open_id: ou_owner
 tool_permissions:
-  profile: guarded_write
+  profile: read_only
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="tool_permissions"):
+        ConfigService().load(config_path)
+
+
+def test_guarded_write_tool_permission_is_rejected(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+tool_permissions: guarded_write
 """,
         encoding="utf-8",
     )

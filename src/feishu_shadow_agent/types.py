@@ -252,6 +252,7 @@ class TaskRecord:
     task_label: str | None
     watch_until: str | None
     agent_session_id: str | None = None
+    agent_session_provider: str | None = None
     agent_working_dir: str | None = None
 
 

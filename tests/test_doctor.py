@@ -9,6 +9,7 @@ from feishu_shadow_agent.health import (
     HealthSuite,
     HermesCliChecker,
     HermesHealthChecker,
+    SelectedBackendReadinessChecker,
 )
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import HealthCheckResult, LarkCliResult
@@ -111,6 +112,20 @@ agent_backend:
     assert "hermes_cli_version" in {
         result.name for result in results if result.is_critical_failure
     }
+
+
+def test_selected_backend_readiness_checker_delegates_to_configured_provider() -> None:
+    loaded = ConfigService().load(FIXTURE)
+    calls: list[str] = []
+
+    def hermes_checker(loaded: LoadedConfig) -> HealthCheckResult:
+        calls.append(loaded.config.agent_backend.provider)
+        return HealthCheckResult("hermes_cli_version", "critical", "ok", "ok")
+
+    results = SelectedBackendReadinessChecker(hermes_checker=hermes_checker)(loaded)
+
+    assert calls == ["hermes"]
+    assert [result.name for result in results] == ["hermes_cli_version"]
 
 
 def test_doctor_all_green_and_default_owner_notification_is_dry_run(

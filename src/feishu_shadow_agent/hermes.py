@@ -37,8 +37,6 @@ class HermesExecutionPolicy:
 def hermes_execution_policy(profile: ToolPermissionsProfile) -> HermesExecutionPolicy:
     if profile == "read_only":
         return HermesExecutionPolicy(toolsets="safe")
-    if profile == "guarded_write":
-        return HermesExecutionPolicy(toolsets="hermes-cli")
     if profile == "full_access":
         return HermesExecutionPolicy(toolsets="hermes-cli", yolo=True)
     raise ValueError(f"unknown tool permissions profile: {profile}")
@@ -51,7 +49,7 @@ class HermesCliClient:
         self,
         *,
         config: HermesConfig,
-        tool_permissions: ToolPermissionsProfile = "guarded_write",
+        tool_permissions: ToolPermissionsProfile = "read_only",
         config_scope: ConfigScopeMode = "isolated",
         auto_context: AutoContextMode = "disabled",
         reply_postprocess: ReplyPostprocessConfig | None = None,

@@ -32,7 +32,10 @@ REQUIRED_USER_SCOPES = {
     "im:message",
 }
 
-HermesChecker = Callable[[LoadedConfig], HealthCheckResult | list[HealthCheckResult]]
+BackendReadinessChecker = Callable[
+    [LoadedConfig], HealthCheckResult | list[HealthCheckResult]
+]
+HermesChecker = BackendReadinessChecker
 
 
 class HermesHttpChecker:
@@ -142,6 +145,25 @@ class HermesHealthChecker:
         return [*cli_results, *_health_result_list(self.http_checker(loaded))]
 
 
+class SelectedBackendReadinessChecker:
+    def __init__(self, *, hermes_checker: HermesChecker | None = None):
+        self.hermes_checker = hermes_checker or HermesHealthChecker()
+
+    def __call__(self, loaded: LoadedConfig) -> list[HealthCheckResult]:
+        provider = loaded.config.agent_backend.provider
+        if provider == "hermes":
+            return _health_result_list(self.hermes_checker(loaded))
+        return [
+            HealthCheckResult(
+                "agent_backend_ready",
+                "critical",
+                "failed",
+                f"unsupported agent backend provider: {provider}",
+                {"provider": provider},
+            )
+        ]
+
+
 class HealthSuite:
     def __init__(
         self,
@@ -149,13 +171,18 @@ class HealthSuite:
         loaded_config: LoadedConfig,
         store: SQLiteStore,
         feishu_client: FeishuClient,
+        agent_backend_checker: BackendReadinessChecker | None = None,
         hermes_checker: HermesChecker | None = None,
         run_id: str | None = None,
     ):
+        if agent_backend_checker is not None and hermes_checker is not None:
+            raise ValueError("configure either agent_backend_checker or hermes_checker")
         self.loaded_config = loaded_config
         self.store = store
         self.feishu_client = feishu_client
-        self.hermes_checker = hermes_checker or HermesHealthChecker()
+        self.agent_backend_checker = agent_backend_checker or (
+            SelectedBackendReadinessChecker(hermes_checker=hermes_checker)
+        )
         self.run_id = run_id
 
     def run(self, *, send_test: bool = False) -> list[HealthCheckResult]:
@@ -175,11 +202,11 @@ class HealthSuite:
         results.append(self._check_bot_available(auth_json))
         results.append(self._check_owner_config())
         results.append(self._check_owner_notification(send_test=send_test))
-        hermes_results = self.hermes_checker(self.loaded_config)
-        if isinstance(hermes_results, list):
-            results.extend(hermes_results)
+        backend_results = self.agent_backend_checker(self.loaded_config)
+        if isinstance(backend_results, list):
+            results.extend(backend_results)
         else:
-            results.append(hermes_results)
+            results.append(backend_results)
         results.append(self._check_agent_explicit_skills())
         results.extend(self._check_reply_postprocess_guidance())
         self.store.record_health_results(run_id=self.run_id, results=results)
@@ -201,11 +228,11 @@ class HealthSuite:
         results.append(self._check_user_scopes(auth_json))
         results.append(self._check_bot_available(auth_json))
         results.append(self._check_owner_config())
-        hermes_results = self.hermes_checker(self.loaded_config)
-        if isinstance(hermes_results, list):
-            results.extend(hermes_results)
+        backend_results = self.agent_backend_checker(self.loaded_config)
+        if isinstance(backend_results, list):
+            results.extend(backend_results)
         else:
-            results.append(hermes_results)
+            results.append(backend_results)
         self.store.record_health_results(run_id=self.run_id, results=results)
         return results
 

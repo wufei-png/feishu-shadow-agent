@@ -192,7 +192,7 @@ class HermesConfig(StrictModel):
         return self
 
 
-ToolPermissionsProfile = Literal["read_only", "guarded_write", "full_access"]
+ToolPermissionsProfile = Literal["read_only", "full_access"]
 ConfigScopeMode = Literal["isolated", "native"]
 AutoContextMode = Literal["disabled", "enabled"]
 ConfigAgentBackendProvider = Literal["hermes"]
@@ -473,8 +473,8 @@ class AppConfig(StrictModel):
         description="Per-chat policy overrides keyed by Feishu chat_id, such as oc_xxx.",
     )
     tool_permissions: ToolPermissionsProfile = Field(
-        default="guarded_write",
-        description="Agent backend tool permission profile: read_only, guarded_write, or full_access.",
+        default="read_only",
+        description="Agent backend tool permission profile: read_only or full_access.",
     )
     retention: RetentionConfig = Field(
         default_factory=RetentionConfig, description="Local data retention settings."

@@ -35,7 +35,7 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `reply_policy` | object | 见下表 | Policy Import Source 中的全局自动回复策略。 |
 | `reply_postprocess` | object | 见下表 | 可选的一次性回复表达改写；默认关闭，不改变现有回复路径。 |
 | `chats` | map | `{}` | Policy Import Source 中按 Feishu `chat_id` 声明的群级策略，例如 `oc_xxx`。 |
-| `tool_permissions` | enum | `guarded_write` | Agent backend 工具权限档位：`read_only`、`guarded_write`、`full_access`。当前仅 Hermes backend 实现映射。 |
+| `tool_permissions` | enum | `read_only` | Agent backend 工具权限档位：`read_only` 或 `full_access`。当前仅 Hermes backend 实现映射。 |
 | `retention` | object | 见下表 | 本地数据保留时间。 |
 | `lifecycle` | object | 见下表 | 全局任务生命周期和审批过期设置。 |
 | `debug` | object | 见下表 | 调试用持久化开关。 |
@@ -158,8 +158,9 @@ Console 覆盖 Dashboard、Approvals、Tasks、Dispatch、Policy、Settings 和 
 | `tool_permissions` | Hermes CLI 参数 | 实际边界 |
 | --- | --- | --- |
 | `read_only` | `--toolsets safe` | Hermes `safe` 工具集：允许 web 搜索/抓取、vision、`image_generate` 等；**禁用** terminal、file、`execute_code` 等本地写操作类工具。不是“零副作用”——例如 `image_generate` 可能写入图片文件。 |
-| `guarded_write` | `--toolsets hermes-cli` | 启用 Hermes 完整 CLI 工具集（file、terminal、browser、skills、memory 等），**不**传 `--yolo`。 |
 | `full_access` | `--toolsets hermes-cli --yolo` | 同上，并显式跳过 Hermes 危险命令审批提示（`--yolo`）。仍受 Hermes hardline block（如 `rm -rf /`）约束。 |
+
+`context_access` 不跟随写权限开放。只要本地 DB 存在，read-only profile 也会收到一个受 `query_scope` 限制的 bounded snapshot 和 read-only SQLite URI。Hermes `safe` 没有本地 file/SQLite 工具，因此应使用 snapshot；只有具备只读 SQLite client 的 backend 才能直接查询 `read_only_uri`。
 
 ### 非交互子进程下的重要语义
 
@@ -167,9 +168,9 @@ daemon 通过 `subprocess` 以无 TTY 方式调用 `hermes chat -q -Q`。在此�
 
 因此：
 
-- `guarded_write` **不能**理解为“Hermes 会在写操作前拦住并等人点确认”。它与 `full_access` 的主要差异是工具集范围（`safe` vs `hermes-cli`）以及是否显式 `--yolo`，而不是“有无交互审批”。
+- `full_access` 是显式危险模式，会启用 Hermes 完整 CLI 工具集（file、terminal、browser、skills、memory 等）并传 `--yolo`。
 - 飞书侧真正的写保护来自：结构化 JSON schema、`answerability`/置信度等级/风险 gate、owner 审批、`dry-run`、幂等和 dispatch 策略。
-- 若需要更严格的本地副作用控制，应使用 `read_only`（`safe`），而不是指望 `guarded_write` 触发 Hermes TTY 审批。
+- 若需要更严格的本地副作用控制，应使用 `read_only`（`safe`）。
 
 ## Hermes 集成说明
 

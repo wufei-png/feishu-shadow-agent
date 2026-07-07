@@ -64,6 +64,18 @@ _Avoid_: Store helper, UI callback
 The product boundary that defines what information an agent turn can see and which decision or output each field is allowed to influence.
 _Avoid_: Prompt dump, debug metadata, everything we know
 
+**Agent Backend**:
+The selected coding-agent runtime that interprets Feishu task context and returns schema-bound decisions or reply candidates for the assistant.
+_Avoid_: LLM, model, Hermes-only path
+
+**Backend Capability Set**:
+The complete set of agent-owned work a runtime must perform to be product-grade for this assistant: task ownership routing, task handling, reply expression rewriting, and owner style summarization.
+_Avoid_: CLI feature list, partial integration
+
+**Supported Agent Backend**:
+An Agent Backend that is allowed in runtime configuration because it satisfies the Backend Capability Set under the assistant's policy, approval, dispatch, and audit boundaries.
+_Avoid_: Experimental provider, best-effort backend, partially supported backend
+
 **Settings Catalog**:
 A stable product field map that defines which settings the Operator Console exposes, how they are grouped, whether they are editable, and which source owns them. It is not a dynamic schema engine and should not mirror every raw config field.
 _Avoid_: Raw config schema, dynamic form engine, every setting is editable

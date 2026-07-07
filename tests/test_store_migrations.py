@@ -171,6 +171,7 @@ def test_baseline_schema_includes_current_columns(tmp_path: Path) -> None:
         "last_user_message",
         "last_agent_reply",
         "agent_session_id",
+        "agent_session_provider",
         "agent_working_dir",
     } <= task_columns
     assert "hermes_session_id" not in task_columns
@@ -232,6 +233,16 @@ def test_migration_relaxes_legacy_policy_audit_new_json_for_delete(
             VALUES
               ('0001_foundation', 'now'),
               ('0002_add_task_agent_working_dir', 'now');
+
+            CREATE TABLE tasks (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              short_id TEXT NOT NULL UNIQUE,
+              status TEXT NOT NULL,
+              agent_session_id TEXT,
+              agent_working_dir TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
 
             CREATE TABLE chat_policies (
               chat_id TEXT PRIMARY KEY,
@@ -304,6 +315,57 @@ def test_migration_relaxes_legacy_policy_audit_new_json_for_delete(
     assert migration is not None
 
 
+def test_migration_backfills_existing_task_session_provider(tmp_path: Path) -> None:
+    db_path = tmp_path / "agent.sqlite3"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE schema_migrations (
+              version TEXT PRIMARY KEY,
+              applied_at TEXT NOT NULL
+            );
+            INSERT INTO schema_migrations(version, applied_at)
+            VALUES
+              ('0001_foundation', 'now'),
+              ('0002_add_task_agent_working_dir', 'now'),
+              ('0003_relax_policy_audit_delete_json', 'now');
+
+            CREATE TABLE tasks (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              short_id TEXT NOT NULL UNIQUE,
+              status TEXT NOT NULL,
+              agent_session_id TEXT,
+              agent_working_dir TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            INSERT INTO tasks(
+              short_id, status, agent_session_id, created_at, updated_at
+            )
+            VALUES
+              ('t_with_session', 'watching', 'sid_1', 'now', 'now'),
+              ('t_without_session', 'watching', NULL, 'now', 'now');
+            """
+        )
+
+    store = SQLiteStore(db_path)
+    store.migrate()
+
+    with store.connect() as conn:
+        rows = {
+            row["short_id"]: row["agent_session_provider"]
+            for row in conn.execute(
+                """
+                SELECT short_id, agent_session_provider
+                FROM tasks
+                ORDER BY short_id
+                """
+            ).fetchall()
+        }
+
+    assert rows == {"t_with_session": "hermes", "t_without_session": None}
+
+
 def test_send_reply_guard_and_failed_retry_use_current_baseline(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.migrate()
@@ -330,7 +392,15 @@ def test_send_reply_guard_and_failed_retry_use_current_baseline(tmp_path: Path) 
         ).fetchone()["id"]
     store.migrate()
 
-    assert store.get_initialized_agent_session_id(task_id) == "sid_current"
+    store.set_task_agent_session_id(task_id, "sid_current", backend_provider="hermes")
+    assert (
+        store.get_initialized_agent_session_id(task_id, backend_provider="hermes")
+        == "sid_current"
+    )
+    assert (
+        store.get_initialized_agent_session_id(task_id, backend_provider="codex")
+        is None
+    )
     first = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_1",

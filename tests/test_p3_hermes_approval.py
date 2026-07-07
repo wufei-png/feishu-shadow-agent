@@ -2232,7 +2232,7 @@ def test_task_session_followup_uses_stored_hermes_session(tmp_path: Path) -> Non
         ).fetchone()
     assert json.loads(audit["input_message_ids_json"]) == ["om_2"]
     assert json.loads(audit["input_resource_ids_json"]) == []
-    assert audit["tool_permissions_profile"] == "guarded_write"
+    assert audit["tool_permissions_profile"] == "read_only"
 
 
 def test_task_session_followup_approval_notification_uses_current_message_context(
@@ -2312,7 +2312,7 @@ def test_task_session_followup_approval_notification_uses_current_message_contex
     )
 
 
-def test_context_access_omitted_for_read_only_tool_profile(tmp_path: Path) -> None:
+def test_context_access_available_for_read_only_tool_profile(tmp_path: Path) -> None:
     hermes = FakeHermes()
     hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
     cfg = _config(tool_permissions="read_only")
@@ -2326,7 +2326,8 @@ def test_context_access_omitted_for_read_only_tool_profile(tmp_path: Path) -> No
     )
 
     prompt = json.loads(hermes.session_prompts[0])
-    assert "context_access" not in prompt
+    assert prompt["context_access"]["backend"] == "sqlite"
+    assert prompt["context_access"]["mode"] == "live_read_only"
 
 
 def test_context_access_omitted_when_database_file_is_missing(tmp_path: Path) -> None:

@@ -1100,7 +1100,11 @@ class TaskProcessingService:
                 "task session runner returned no output after successful validation"
             )
         if result.session_id and result.session_id != session_plan.session_id:
-            self.store.set_task_agent_session_id(task.id, result.session_id)
+            self.store.set_task_agent_session_id(
+                task.id,
+                result.session_id,
+                backend_provider=str(self.agent_backend.provider),
+            )
             self.logger.debug(
                 "task_session_id_updated",
                 run_id=run_id,

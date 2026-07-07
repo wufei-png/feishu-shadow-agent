@@ -376,10 +376,10 @@ P2P MVP 使用默认策略，不做 per-user 配置，但预留 `UserPolicyStore
 工具权限和飞书对外回复权限分开。`tool_permissions` 只控制 Hermes CLI 运行时的工具权限，Python daemon 不解析、不执行 `tool_plan`。
 
 ```yaml
-tool_permissions: guarded_write   # read_only | guarded_write | full_access
+tool_permissions: read_only   # read_only | full_access
 ```
 
-三档：
+两档：
 
 ```text
 read_only:
@@ -387,15 +387,9 @@ read_only:
   safe 禁用 terminal/file/execute_code 等本地写操作类工具，但保留 web、vision、image_generate。
   不是严格意义的“零副作用只读”——image_generate 等仍可能产生文件。
 
-guarded_write:
-  Hermes 使用 --toolsets hermes-cli（不传 --yolo）。
-  启用完整 CLI 工具集。daemon 以无 TTY 子进程调用 Hermes，不会触发交互式危险命令审批；
-  非 gateway 场景下 Hermes 对 terminal 等路径通常自动放行。
-  写风险主要靠 toolset 边界 + 本项目 JSON schema / reply gate / owner 审批，而非 Hermes TTY 确认。
-
 full_access:
   Hermes 使用 --toolsets hermes-cli --yolo。
-  显式跳过 Hermes 危险命令审批提示。
+  启用完整 CLI 工具集并显式跳过 Hermes 危险命令审批提示。
   仍受 Hermes hardline block、进程边界、系统权限和工具自身限制约束。
 ```
 
@@ -463,7 +457,7 @@ metadata block:
   minimal JSON，只放 id、状态、策略和资源引用
 
 context_access block:
-  可选顶层 card，只在权限和本地 DB 条件允许时提供 read-only SQLite context
+  可选顶层 card，在本地 DB 存在时提供受 query_scope 限制的 bounded snapshot 和 read-only SQLite URI
 
 conversation block:
   简洁自然语言消息上下文，必须带 sender 信息
@@ -836,7 +830,7 @@ candidate card 只包含摘要级短文本，不包含历史原文。
 - `message_count` 是轻量计数，不包含历史原文，也不是 closed recall 的文本匹配依据。
 - Router candidate card 不暴露 `last_user_message` / `last_agent_reply`；需要更多只读上下文时，通过顶层 `context_access` 在 `query_scope` 内查询。
 - active candidate 可带 `matched_by`，表示命中来源；完整 watch keys 和消息关联保留在 SQLite。
-- `context_access` 如存在，是与 candidate card 并列的顶层 card，不嵌入候选项。
+- `context_access` 如存在，是与 candidate card 并列的顶层 card，不嵌入候选项。Hermes `safe` 使用其中的 bounded snapshot；只有具备只读 SQLite client 的 backend 才直接查询 `read_only_uri`。
 
 ## 19. ApprovalRequest
 

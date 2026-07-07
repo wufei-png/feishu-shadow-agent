@@ -5,7 +5,7 @@ from feishu_shadow_agent.config import HermesConfig, ReplyPostprocessConfig
 from feishu_shadow_agent.hermes import HermesCliClient
 
 
-def test_hermes_cli_builds_guarded_write_chat_command_with_model_provider_and_resume() -> (
+def test_hermes_cli_builds_default_read_only_chat_command_with_model_provider_and_resume() -> (
     None
 ):
     config = HermesConfig(
@@ -30,7 +30,7 @@ def test_hermes_cli_builds_guarded_write_chat_command_with_model_provider_and_re
         "--source",
         "feishu-shadow-agent",
         "--toolsets",
-        "hermes-cli",
+        "safe",
         "--max-turns",
         "7",
         "--ignore-user-config",
@@ -185,7 +185,7 @@ def test_owner_style_refresh_uses_safe_toolset_and_postprocess_overrides() -> No
         config=HermesConfig(
             path="/bin/hermes", model="main-model", provider="main-provider"
         ),
-        tool_permissions="guarded_write",
+        tool_permissions="full_access",
         reply_postprocess=ReplyPostprocessConfig(
             max_turns=6, model="style-model", provider="style-provider"
         ),

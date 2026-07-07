@@ -81,7 +81,7 @@ chats:
     allow_user_fallback: true
     resource_download: true
 
-tool_permissions: guarded_write
+tool_permissions: read_only
 
 retention:
   raw_message_days: 30

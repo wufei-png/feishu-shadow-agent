@@ -2090,6 +2090,53 @@ class SQLiteStore:
         counts = {int(row["task_id"]): int(row["message_count"]) for row in rows}
         return {task_id: counts.get(task_id, 0) for task_id in ids}
 
+    def list_recent_task_context(
+        self, task_ids: Iterable[int], *, messages_per_task: int = 5
+    ) -> dict[int, dict[str, Any]]:
+        ids = list(dict.fromkeys(int(task_id) for task_id in task_ids))
+        if not ids:
+            return {}
+        limit = max(0, int(messages_per_task))
+        self.migrate()
+        contexts: dict[int, dict[str, Any]] = {}
+        with self.connect() as conn:
+            for task_id in ids:
+                count_row = conn.execute(
+                    "SELECT COUNT(*) AS message_count FROM task_messages WHERE task_id = ?",
+                    (task_id,),
+                ).fetchone()
+                message_count = (
+                    0 if count_row is None else int(count_row["message_count"])
+                )
+                rows = conn.execute(
+                    """
+                    SELECT tm.message_id, tm.role, tm.created_at AS task_message_created_at,
+                           m.chat_id, m.chat_type, m.sender_id,
+                           m.sender_name, m.sender_role, m.sent_at, m.thread_id,
+                           m.reply_to_message_id, m.text
+                    FROM task_messages tm
+                    LEFT JOIN messages m ON m.message_id = tm.message_id
+                    WHERE tm.task_id = ?
+                    ORDER BY tm.created_at DESC, tm.message_id DESC
+                    LIMIT ?
+                    """,
+                    (task_id, limit),
+                ).fetchall()
+                contexts[task_id] = {
+                    "message_count": message_count,
+                    "truncated": message_count > len(rows),
+                    "recent_messages": [
+                        _task_context_message(row) for row in reversed(rows)
+                    ],
+                }
+        return {
+            task_id: contexts.get(
+                task_id,
+                {"message_count": 0, "truncated": False, "recent_messages": []},
+            )
+            for task_id in ids
+        }
+
     def list_resources_for_messages(
         self, message_ids: Iterable[str]
     ) -> list[sqlite3.Row]:
@@ -2109,11 +2156,13 @@ class SQLiteStore:
                 ids,
             ).fetchall()
 
-    def get_initialized_agent_session_id(self, task_id: int) -> str | None:
+    def get_initialized_agent_session_id(
+        self, task_id: int, *, backend_provider: str
+    ) -> str | None:
         self.migrate()
         with self.connect() as conn:
             row = conn.execute(
-                "SELECT agent_session_id FROM tasks WHERE id = ?",
+                "SELECT agent_session_id, agent_session_provider FROM tasks WHERE id = ?",
                 (task_id,),
             ).fetchone()
         if row is None:
@@ -2121,18 +2170,22 @@ class SQLiteStore:
         session_id = row["agent_session_id"]
         if not session_id:
             return None
+        if row["agent_session_provider"] != backend_provider:
+            return None
         return str(session_id)
 
-    def set_task_agent_session_id(self, task_id: int, session_id: str) -> None:
+    def set_task_agent_session_id(
+        self, task_id: int, session_id: str, *, backend_provider: str
+    ) -> None:
         self.migrate()
         with self.connect() as conn:
             conn.execute(
                 """
                 UPDATE tasks
-                SET agent_session_id = ?, updated_at = ?
+                SET agent_session_id = ?, agent_session_provider = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (session_id, utc_now_iso(), task_id),
+                (session_id, backend_provider, utc_now_iso(), task_id),
             )
 
     def update_task_after_agent(
@@ -3243,8 +3296,9 @@ class SQLiteStore:
             """
             INSERT INTO tasks(
               short_id, status, chat_id, root_message_id, task_label, agent_session_id,
-              agent_working_dir, created_at, updated_at, chat_type, thread_id, watch_until, last_user_message
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              agent_session_provider, agent_working_dir, created_at, updated_at, chat_type,
+              thread_id, watch_until, last_user_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 short_id,
@@ -3252,6 +3306,7 @@ class SQLiteStore:
                 message.chat_id,
                 message.message_id,
                 label,
+                None,
                 None,
                 agent_working_dir,
                 now,
@@ -3602,6 +3657,7 @@ def _task_from_row(row: sqlite3.Row) -> TaskRecord:
         task_label=row["task_label"],
         watch_until=row["watch_until"],
         agent_session_id=row["agent_session_id"],
+        agent_session_provider=row["agent_session_provider"],
         agent_working_dir=row["agent_working_dir"],
     )
 
@@ -3615,6 +3671,7 @@ def _task_command_summary(task: TaskRecord) -> dict[str, Any]:
         "chat_id": task.chat_id,
         "chat_type": task.chat_type,
         "watch_until": task.watch_until,
+        "agent_session_provider": task.agent_session_provider,
         "agent_working_dir": task.agent_working_dir,
     }
 
@@ -3773,6 +3830,22 @@ def _json_row_dict(row: sqlite3.Row | dict[str, Any], *columns: str) -> dict[str
         if column in data:
             data[column] = _loads_json(data[column])
     return data
+
+
+def _task_context_message(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "message_id": row["message_id"],
+        "role": row["role"],
+        "chat_id": row["chat_id"],
+        "chat_type": row["chat_type"],
+        "sender_id": row["sender_id"],
+        "sender_name": row["sender_name"],
+        "sender_role": row["sender_role"],
+        "sent_at": row["sent_at"],
+        "thread_id": row["thread_id"],
+        "reply_to_message_id": row["reply_to_message_id"],
+        "text": row["text"],
+    }
 
 
 def _approval_read_model(

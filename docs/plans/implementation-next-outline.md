@@ -6,7 +6,7 @@
 
 ## 1. Fixed Decisions
 
-- 本轮不修改 `tool_permissions` 默认值；默认仍保持当前 `guarded_write`。未来如需收紧默认权限，应单独开安全专项。
+- P0 backend-slices 后，`tool_permissions` 默认值为 `read_only`；只保留 `read_only` / `full_access` 两个正式档位。
 - 当前项目未正式投入使用，不要求兼容旧 SQLite 数据。
 - 实现这些计划时允许重写 `src/feishu_shadow_agent/store/migrations/` 为新的 schema baseline。
 - 开发者应删除旧 `data/agent.sqlite3` 后重新初始化；测试只需覆盖新库初始化，不覆盖旧 schema upgrade。
@@ -58,7 +58,7 @@
 - 不做 Web UI / TUI。
 - 不做 LaunchAgent / systemd / cron 安装。
 - 不做多 owner 或 per-chat owner。
-- 不做 provider factory 或第二 agent backend。
+- 不实现第二 agent backend。
 - 不做旧 DB migration 兼容。
 - 不做自动 dispatch 重发。
 

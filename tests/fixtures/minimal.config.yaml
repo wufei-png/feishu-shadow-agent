@@ -57,7 +57,7 @@ chats:
     auto_reply: true
     bot_joined: true
 
-tool_permissions: guarded_write
+tool_permissions: read_only
 
 retention:
   raw_message_days: 30

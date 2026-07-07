@@ -23,19 +23,25 @@ def _config() -> AppConfig:
     return AppConfig(owner=OwnerConfig(open_id="ou_owner", name="Owner"))
 
 
-def _message(*, resources: list[ResourceRef] | None = None) -> NormalizedMessage:
+def _message(
+    *,
+    message_id: str = "om_1",
+    text: str = "hello",
+    sent_at: str = "2026-06-22T10:00:00+08:00",
+    resources: list[ResourceRef] | None = None,
+) -> NormalizedMessage:
     return NormalizedMessage(
-        message_id="om_1",
+        message_id=message_id,
         chat_id="oc_1",
         chat_type="group",
         sender_id="ou_ext",
         sender_name="Ext",
         sender_type="user",
         sender_role="external_user_message",
-        sent_at="2026-06-22T10:00:00+08:00",
+        sent_at=sent_at,
         thread_id=None,
         reply_to_message_id=None,
-        text="hello",
+        text=text,
         direct_mention=True,
         at_all=False,
         resources=resources or [],
@@ -131,6 +137,66 @@ def test_context_access_builder_preserves_router_and_task_scope_cards(
         "current_message_id": "om_1",
         "task": {"id": 1, "short_id": "t_active"},
     }
+    assert task_session["snapshot"] == {
+        "type": "bounded_recent_task_messages",
+        "message_limit_per_task": 5,
+        "tasks": [
+            {
+                "id": 1,
+                "short_id": "t_active",
+                "message_count": 0,
+                "truncated": False,
+                "recent_messages": [],
+            }
+        ],
+    }
+
+
+def test_context_access_snapshot_includes_bounded_recent_task_messages(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    root = _message(
+        message_id="om_01",
+        text="root issue",
+        sent_at="2026-06-22T10:01:00+08:00",
+    )
+    store.upsert_message(root)
+    task = store.create_task_for_message(
+        root,
+        watch_until="2026-06-22T12:00:00+08:00",
+        task_label="Existing task",
+    )
+    for index in range(2, 7):
+        message = _message(
+            message_id=f"om_{index:02d}",
+            text=f"follow up {index}",
+            sent_at=f"2026-06-22T10:{index:02d}:00+08:00",
+        )
+        store.upsert_message(message)
+        store.attach_message_to_task(
+            task.id,
+            message,
+            watch_until="2026-06-22T12:00:00+08:00",
+        )
+
+    builder = ContextAccessBuilder(store=store, config=_config())
+    context = builder.task_session_context_access(
+        message=_message(message_id="om_06"), task=store.get_task_by_id(task.id)
+    )
+
+    assert context is not None
+    snapshot_task = context["snapshot"]["tasks"][0]
+    assert snapshot_task["message_count"] == 6
+    assert snapshot_task["truncated"] is True
+    assert [row["message_id"] for row in snapshot_task["recent_messages"]] == [
+        "om_02",
+        "om_03",
+        "om_04",
+        "om_05",
+        "om_06",
+    ]
+    assert snapshot_task["recent_messages"][-1]["text"] == "follow up 6"
 
 
 @pytest.mark.parametrize(

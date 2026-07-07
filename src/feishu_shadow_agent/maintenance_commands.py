@@ -3,11 +3,12 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any
 
+from .agent_backend import AgentBackend
+from .agent_backend_factory import create_agent_backend
 from .agent_invocation import AgentInvoker
 from .config import ConfigError, ConfigService, LoadedConfig
 from .feishu.lark_cli import LarkCliClient
 from .health import HealthSuite, has_critical_failure, summarize_results
-from .hermes import HermesCliClient
 from .jsonl import JSONLLogger
 from .operator_commands import CommandResult
 from .reply_style import ReplyStyleRefresher
@@ -172,14 +173,9 @@ class MaintenanceCommandService:
             cwd=self.loaded_config.base_dir,
         )
 
-    def _agent_backend(self) -> HermesCliClient:
-        backend_config = self.loaded_config.config.agent_backend
-        return HermesCliClient(
-            config=backend_config.hermes,
-            tool_permissions=self.loaded_config.config.tool_permissions,
-            config_scope=backend_config.config_scope,
-            auto_context=backend_config.auto_context,
-            reply_postprocess=self.loaded_config.config.reply_postprocess,
+    def _agent_backend(self) -> AgentBackend:
+        return create_agent_backend(
+            self.loaded_config.config, base_dir=self.loaded_config.base_dir
         )
 
 

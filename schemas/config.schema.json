@@ -669,11 +669,10 @@
       "type": "object"
     },
     "tool_permissions": {
-      "default": "guarded_write",
-      "description": "Agent backend tool permission profile: read_only, guarded_write, or full_access.",
+      "default": "read_only",
+      "description": "Agent backend tool permission profile: read_only or full_access.",
       "enum": [
         "read_only",
-        "guarded_write",
         "full_access"
       ],
       "title": "Tool Permissions",

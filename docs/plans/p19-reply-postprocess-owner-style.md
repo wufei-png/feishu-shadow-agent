@@ -350,8 +350,7 @@ def owner_style_refresh(prompt: str, *, cwd: str | Path | None = None) -> AgentR
 Implementation requirements:
 
 - `reply_postprocess` and `owner_style_refresh` must use safe/read-only Hermes
-  toolsets even when the global daemon `tool_permissions` is `guarded_write` or
-  `full_access`.
+  toolsets even when the global daemon `tool_permissions` is `full_access`.
 - These methods must not pass `--resume`.
 - These methods must not inject task-session skills.
 - `task_session` remains the only method that resumes task sessions and includes
@@ -476,9 +475,9 @@ Runtime:
 Hermes backend:
 
 - `reply_postprocess` uses `--toolsets safe` even when the client was created
-  with global `guarded_write` or `full_access`.
+  with global `full_access`.
 - `owner_style_refresh` uses `--toolsets safe` even when the client was created
-  with global `guarded_write` or `full_access`.
+  with global `full_access`.
 - Neither method emits `--resume`.
 - Neither method emits `--skills`.
 - `task_session` still emits `--resume` when a session id exists and still

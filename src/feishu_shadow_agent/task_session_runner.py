@@ -55,7 +55,9 @@ class TaskSessionRunner:
     def build_plan(
         self, *, task: TaskRecord, message: NormalizedMessage
     ) -> TaskSessionPromptPlan:
-        session_id = self.store.get_initialized_agent_session_id(task.id)
+        session_id = self.store.get_initialized_agent_session_id(
+            task.id, backend_provider=str(self.agent_backend.provider)
+        )
         task_message_ids = self.store.list_task_message_ids(task.id)
         prompt_message_ids = self.prompt_message_ids(
             task=task,

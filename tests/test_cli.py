@@ -248,7 +248,6 @@ def test_config_schema_outputs_json_schema(capsys) -> None:
     assert schema["additionalProperties"] is False
     assert schema["properties"]["tool_permissions"]["enum"] == [
         "read_only",
-        "guarded_write",
         "full_access",
     ]
     assert "description" in schema["properties"]["reply_policy"]
@@ -270,7 +269,7 @@ def test_config_validate_returns_zero_for_valid_config(tmp_path: Path, capsys) -
 
 def test_config_validate_returns_two_for_invalid_config(tmp_path: Path, capsys) -> None:
     config = tmp_path / "config.yaml"
-    config.write_text("tool_permissions: guarded_write\n", encoding="utf-8")
+    config.write_text("tool_permissions: read_only\n", encoding="utf-8")
 
     assert main(["config", "validate", "--config", str(config)]) == 2
 
