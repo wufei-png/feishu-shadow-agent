@@ -10,6 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .agent_backend import AgentRunResult
+from .claude_code import claude_code_execution_policy
 from .codex import codex_execution_policy
 from .config import LoadedConfig
 from .feishu.client import FeishuClient
@@ -38,6 +39,7 @@ BackendReadinessChecker = Callable[
 ]
 HermesChecker = BackendReadinessChecker
 CodexChecker = BackendReadinessChecker
+ClaudeCodeChecker = BackendReadinessChecker
 
 
 class HermesHttpChecker:
@@ -200,15 +202,61 @@ class CodexCliChecker:
         return [version_result, login_result, permissions_result]
 
 
+class ClaudeCodeCliChecker:
+    def __call__(self, loaded: LoadedConfig) -> list[HealthCheckResult]:
+        claude_code = loaded.config.agent_backend.claude_code
+        path = claude_code.path or "claude"
+        cwd = resolve_agent_working_dir(
+            loaded.config.agent_backend.working_dir, loaded.base_dir
+        )
+        version = _run_claude_code_command(
+            [path, "--version"],
+            timeout_seconds=claude_code.timeout_seconds,
+            cwd=cwd,
+        )
+        version_result = _agent_command_result(
+            "claude_code_cli_version",
+            version,
+            "Claude Code CLI version detected",
+            "Claude Code CLI version check failed",
+            severity="critical",
+        )
+        if version_result.is_critical_failure:
+            return [version_result]
+        auth_status = _run_claude_code_command(
+            [path, "auth", "status"],
+            timeout_seconds=claude_code.timeout_seconds,
+            cwd=cwd,
+        )
+        auth_result = _agent_command_result(
+            "claude_code_auth_status",
+            auth_status,
+            "Claude Code auth status command succeeded",
+            "Claude Code auth status command failed",
+            severity="critical",
+        )
+        print_help = _run_claude_code_command(
+            [path, "-p", "--help"],
+            timeout_seconds=claude_code.timeout_seconds,
+            cwd=cwd,
+        )
+        capabilities_result = _claude_code_capabilities_result(
+            loaded, print_help=print_help
+        )
+        return [version_result, auth_result, capabilities_result]
+
+
 class SelectedBackendReadinessChecker:
     def __init__(
         self,
         *,
         hermes_checker: HermesChecker | None = None,
         codex_checker: CodexChecker | None = None,
+        claude_code_checker: ClaudeCodeChecker | None = None,
     ):
         self.hermes_checker = hermes_checker or HermesHealthChecker()
         self.codex_checker = codex_checker or CodexCliChecker()
+        self.claude_code_checker = claude_code_checker or ClaudeCodeCliChecker()
 
     def __call__(self, loaded: LoadedConfig) -> list[HealthCheckResult]:
         provider = loaded.config.agent_backend.provider
@@ -216,6 +264,8 @@ class SelectedBackendReadinessChecker:
             return _health_result_list(self.hermes_checker(loaded))
         if provider == "codex":
             return _health_result_list(self.codex_checker(loaded))
+        if provider == "claude_code":
+            return _health_result_list(self.claude_code_checker(loaded))
         return [
             HealthCheckResult(
                 "agent_backend_ready",
@@ -736,6 +786,51 @@ def _run_codex_command(
     )
 
 
+def _run_claude_code_command(
+    argv: list[str], *, timeout_seconds: int, cwd: Path | None = None
+) -> AgentRunResult:
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            argv,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return AgentRunResult(
+            argv=argv,
+            exit_code=None,
+            stdout=exc.stdout or "",
+            stderr=exc.stderr or "",
+            error=f"command timed out after {timeout_seconds}s",
+            timed_out=True,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            backend_provider="claude_code",
+        )
+    except OSError as exc:
+        return AgentRunResult(
+            argv=argv,
+            exit_code=None,
+            error=str(exc),
+            latency_ms=int((time.monotonic() - started) * 1000),
+            backend_provider="claude_code",
+        )
+    return AgentRunResult(
+        argv=argv,
+        exit_code=completed.returncode,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        error=None
+        if completed.returncode == 0
+        else (completed.stderr.strip() or completed.stdout.strip()),
+        latency_ms=int((time.monotonic() - started) * 1000),
+        backend_provider="claude_code",
+    )
+
+
 def _agent_command_result(
     name: str,
     result: AgentRunResult,
@@ -877,6 +972,54 @@ def _codex_capabilities_result(
     )
 
 
+def _claude_code_capabilities_result(
+    loaded: LoadedConfig, *, print_help: AgentRunResult
+) -> HealthCheckResult:
+    profile = loaded.config.tool_permissions
+    policy = claude_code_execution_policy(profile)
+    backend = loaded.config.agent_backend
+    details = {
+        "tool_permissions_profile": profile,
+        "effective_args": policy.args,
+        "config_scope": backend.config_scope,
+        "auto_context": backend.auto_context,
+        "explicit_skills_count": len(backend.explicit_context.skills),
+        "print_help_argv": print_help.argv,
+        "print_help_exit_code": print_help.exit_code,
+        "print_help_error": print_help.error,
+        "print_help_timed_out": print_help.timed_out,
+    }
+    if not print_help.ok:
+        return HealthCheckResult(
+            "claude_code_print_capabilities",
+            "critical",
+            "failed",
+            "Claude Code print help command failed",
+            details,
+        )
+    help_text = f"{print_help.stdout}\n{print_help.stderr}"
+    missing = [
+        flag
+        for flag in _required_claude_code_print_flags(loaded)
+        if flag not in help_text
+    ]
+    if missing:
+        return HealthCheckResult(
+            "claude_code_print_capabilities",
+            "critical",
+            "failed",
+            "Claude Code CLI does not expose required backend flags",
+            details | {"missing_flags": list(dict.fromkeys(missing))},
+        )
+    return HealthCheckResult(
+        "claude_code_print_capabilities",
+        "critical",
+        "ok",
+        "Claude Code CLI supports configured backend flags",
+        details,
+    )
+
+
 def _required_codex_exec_flags(loaded: LoadedConfig) -> list[str]:
     required = [
         "--sandbox",
@@ -893,6 +1036,31 @@ def _required_codex_exec_flags(loaded: LoadedConfig) -> list[str]:
         required.append("--model")
     if loaded.config.tool_permissions == "full_access":
         required.append("--dangerously-bypass-approvals-and-sandbox")
+    return required
+
+
+def _required_claude_code_print_flags(loaded: LoadedConfig) -> list[str]:
+    required = [
+        "-p",
+        "--output-format",
+        "--json-schema",
+        "--resume",
+        "--permission-mode",
+        "--tools",
+        "--allowedTools",
+        "--mcp-config",
+        "--strict-mcp-config",
+    ]
+    if loaded.config.agent_backend.config_scope == "isolated":
+        required.append("--setting-sources")
+    if loaded.config.agent_backend.auto_context == "disabled":
+        required.append("--safe-mode")
+    if loaded.config.agent_backend.claude_code.model:
+        required.append("--model")
+    if loaded.config.tool_permissions == "read_only":
+        required.append("dontAsk")
+    if loaded.config.tool_permissions == "full_access":
+        required.extend(["bypassPermissions", "--dangerously-skip-permissions"])
     return required
 
 

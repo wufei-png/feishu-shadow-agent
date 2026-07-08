@@ -208,10 +208,26 @@ class CodexConfig(StrictModel):
     )
 
 
+class ClaudeCodeConfig(StrictModel):
+    path: str | None = Field(
+        default=None,
+        description="Optional Claude Code executable path; null uses the current PATH.",
+    )
+    model: str | None = Field(
+        default=None,
+        description="Optional Claude Code model override; null uses the Claude Code default.",
+    )
+    timeout_seconds: int = Field(
+        default=60,
+        gt=0,
+        description="Timeout in seconds for Claude Code subprocess calls.",
+    )
+
+
 ToolPermissionsProfile = Literal["read_only", "full_access"]
 ConfigScopeMode = Literal["isolated", "native"]
 AutoContextMode = Literal["disabled", "enabled"]
-ConfigAgentBackendProvider = Literal["hermes", "codex"]
+ConfigAgentBackendProvider = Literal["hermes", "codex", "claude_code"]
 
 
 class ExplicitAgentContextConfig(StrictModel):
@@ -234,7 +250,7 @@ class ExplicitAgentContextConfig(StrictModel):
 class AgentBackendConfig(StrictModel):
     provider: ConfigAgentBackendProvider = Field(
         default="hermes",
-        description="Agent backend provider. Config accepts hermes or codex.",
+        description="Agent backend provider. Config accepts hermes, codex, or claude_code.",
     )
     working_dir: str | None = Field(
         default=None,
@@ -257,6 +273,10 @@ class AgentBackendConfig(StrictModel):
     )
     codex: CodexConfig = Field(
         default_factory=CodexConfig, description="Codex backend settings."
+    )
+    claude_code: ClaudeCodeConfig = Field(
+        default_factory=ClaudeCodeConfig,
+        description="Claude Code backend settings.",
     )
 
     @field_validator("working_dir")

@@ -5,10 +5,11 @@
       "properties": {
         "provider": {
           "default": "hermes",
-          "description": "Agent backend provider. Config accepts hermes or codex.",
+          "description": "Agent backend provider. Config accepts hermes, codex, or claude_code.",
           "enum": [
             "hermes",
-            "codex"
+            "codex",
+            "claude_code"
           ],
           "title": "Provider",
           "type": "string"
@@ -57,6 +58,10 @@
         "codex": {
           "$ref": "#/$defs/CodexConfig",
           "description": "Codex backend settings."
+        },
+        "claude_code": {
+          "$ref": "#/$defs/ClaudeCodeConfig",
+          "description": "Claude Code backend settings."
         }
       },
       "title": "AgentBackendConfig",
@@ -108,6 +113,46 @@
         }
       },
       "title": "ChatPolicyConfig",
+      "type": "object"
+    },
+    "ClaudeCodeConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional Claude Code executable path; null uses the current PATH.",
+          "title": "Path"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional Claude Code model override; null uses the Claude Code default.",
+          "title": "Model"
+        },
+        "timeout_seconds": {
+          "default": 60,
+          "description": "Timeout in seconds for Claude Code subprocess calls.",
+          "exclusiveMinimum": 0,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "ClaudeCodeConfig",
       "type": "object"
     },
     "CodexConfig": {

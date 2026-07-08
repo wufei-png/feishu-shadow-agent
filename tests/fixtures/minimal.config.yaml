@@ -46,6 +46,14 @@ agent_backend:
     timeout_seconds: 1
     health_url: null
     api_key_env: HERMES_API_KEY
+  codex:
+    path: null
+    model: null
+    timeout_seconds: 1
+  claude_code:
+    path: null
+    model: null
+    timeout_seconds: 1
 
 reply_policy:
   p2p_auto_reply: true

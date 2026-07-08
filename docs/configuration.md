@@ -63,11 +63,11 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `logging.text_path` | string/null | `null` | 可选普通文本日志文件路径；相对路径基于配置文件目录解析。 |
 | `lark_cli.path` | string/null | `null` | 指定 `lark-cli` 路径；`null` 使用当前 `PATH`。 |
 | `lark_cli.timeout_seconds` | int `> 0` | `30` | `lark-cli` 子进程调用超时。 |
-| `agent_backend.provider` | `hermes`/`codex` | `hermes` | Agent backend provider。被选中的 provider 必须覆盖 task router、task session、reply postprocess 和 owner style refresh。 |
+| `agent_backend.provider` | `hermes`/`codex`/`claude_code` | `hermes` | Agent backend provider。被选中的 provider 必须覆盖 task router、task session、reply postprocess 和 owner style refresh。 |
 | `agent_backend.working_dir` | string/null | `null` | Agent 子进程运行目录；`null` 表示 `config.yaml` 所在目录。相对路径基于配置文件目录解析。新 task 创建时会把解析后的绝对路径固化到 `tasks.agent_working_dir`；后续 follow-up/reopen 继续使用 task 内记录的目录，不随配置漂移。无 task 的 router 使用当前配置解析结果。 |
-| `agent_backend.config_scope` | `isolated`/`native` | `isolated` | 是否加载普通用户级配置；不等同于清除 credentials、managed policy 或 auth state。Hermes 和 Codex 的 `isolated` 都会传 `--ignore-user-config`。 |
-| `agent_backend.auto_context` | `disabled`/`enabled` | `disabled` | 是否加载 CLI 自带规则、memory、默认 skill 等隐式上下文。Hermes 和 Codex 的 `disabled` 都会传 `--ignore-rules`，但不同 CLI 的实际含义不同，见“Agent Backend 上下文语义”。 |
-| `agent_backend.explicit_context.skills` | list[string] | `[]` | 显式注入 task session 的 skill 目录或 `SKILL.md` 文件路径。相对路径基于配置文件目录解析；`SKILL.md` 文件路径会规范化为其父目录。当前只传给 Hermes task session；Codex v1 不暴露 skill 注入 argv。 |
+| `agent_backend.config_scope` | `isolated`/`native` | `isolated` | 是否加载普通用户级配置；不等同于清除 credentials、managed policy 或 auth state。各 provider 映射见“Agent Backend 上下文语义”。 |
+| `agent_backend.auto_context` | `disabled`/`enabled` | `disabled` | 是否加载 CLI 自带规则、memory、默认 skill 等隐式上下文。不同 CLI 的实际含义不同，见“Agent Backend 上下文语义”。 |
+| `agent_backend.explicit_context.skills` | list[string] | `[]` | 显式注入 task session 的 skill 目录或 `SKILL.md` 文件路径。相对路径基于配置文件目录解析；`SKILL.md` 文件路径会规范化为其父目录。当前只传给 Hermes task session；Codex/Claude Code v1 不暴露 skill 注入 argv。 |
 | `agent_backend.hermes.mode` | `cli`/`http` | `cli` | 只影响 `doctor`/运行时 health 探测方式；**无论取何值，任务处理和 runtime backend readiness 都会检查并使用本机 `hermes chat` CLI**。`http` 会额外探测 Hermes gateway/API server 是否可达。 |
 | `agent_backend.hermes.path` | string/null | `null` | `cli` 模式下指定 Hermes 路径；`null` 使用当前 `PATH`。 |
 | `agent_backend.hermes.source` | string | `feishu-shadow-agent` | 传给 Hermes 会话和审计数据的来源标记；不能为空。官方建议第三方集成可用 `tool` 以从用户 session 列表中过滤；本项目保留自定义标签便于审计区分。 |
@@ -81,12 +81,15 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `agent_backend.codex.path` | string/null | `null` | 指定 Codex CLI 路径；`null` 使用当前 `PATH`。 |
 | `agent_backend.codex.model` | string/null | `null` | 可选 Codex model 覆盖；`null` 时由 Codex CLI 决定。 |
 | `agent_backend.codex.timeout_seconds` | int `> 0` | `60` | Codex 子进程调用和 Codex readiness 探测超时。 |
+| `agent_backend.claude_code.path` | string/null | `null` | 指定 Claude Code CLI 路径；`null` 使用当前 `PATH`。 |
+| `agent_backend.claude_code.model` | string/null | `null` | 可选 Claude Code model 覆盖；`null` 时由 Claude Code CLI 决定。 |
+| `agent_backend.claude_code.timeout_seconds` | int `> 0` | `60` | Claude Code 子进程调用和 Claude Code readiness 探测超时。 |
 | `reply_policy.p2p_auto_reply` | bool | `true` | 导入 Product Policy Store 后，P2P 私聊在回复 gate 通过时是否允许自动回复。 |
 | `reply_policy.unknown_group_auto_reply` | bool | `false` | 导入 Product Policy Store 后，未显式配置的群是否允许自动回复；不影响资源下载、bot 是否入群或 user fallback。 |
 | `reply_postprocess.enabled` | bool | `false` | 是否对 agent 生成的候选回复做一次性表达改写。关闭时不检查 profile/skill 路径，也不调用 backend postprocess。开启时至少需要启用 `owner_style` 或 `humanizer_zh` 之一。 |
-| `reply_postprocess.max_turns` | int `> 0` | `4` | 一次性 reply postprocess 和 owner style refresh 的 Hermes `--max-turns`；Codex 没有对应 max-turns flag。 |
-| `reply_postprocess.model` | string/null | `null` | postprocess/refresh 的模型覆盖；Hermes 继承 `agent_backend.hermes.model`，Codex 继承 `agent_backend.codex.model`。 |
-| `reply_postprocess.provider` | string/null | `null` | Hermes postprocess/refresh 的 provider 覆盖；Codex backend 不使用此字段。 |
+| `reply_postprocess.max_turns` | int `> 0` | `4` | 一次性 reply postprocess 和 owner style refresh 的 Hermes `--max-turns`；Codex 和 Claude Code 没有对应 max-turns flag。 |
+| `reply_postprocess.model` | string/null | `null` | postprocess/refresh 的模型覆盖；Hermes 继承 `agent_backend.hermes.model`，Codex 继承 `agent_backend.codex.model`，Claude Code 继承 `agent_backend.claude_code.model`。 |
+| `reply_postprocess.provider` | string/null | `null` | Hermes postprocess/refresh 的 provider 覆盖；Codex/Claude Code backend 不使用此字段。 |
 | `reply_postprocess.owner_style.enabled` | bool | `false` | 是否让 postprocess 读取 owner style profile 并贴近 owner 的自然回复习惯。 |
 | `reply_postprocess.owner_style.profile_path` | string | `data/owner_style.zh.md` | owner style Markdown profile 路径；相对路径基于配置文件目录解析。缺失或不可读时不自动发送，候选回复转 owner review。 |
 | `reply_postprocess.owner_style.refresh.lookback_days` | int `>= 1` | `30` | `reply-style refresh` 拉取 owner 回复样本的时间窗口。 |
@@ -144,13 +147,13 @@ Console 覆盖 Dashboard、Approvals、Tasks、Dispatch、Policy、Settings 和 
 
 ## Agent Backend 上下文语义
 
-`config_scope`、`auto_context` 和 `explicit_context` 是 provider-neutral 语义，不应简单套用同名 CLI flag。未来新增 provider 时按下表落地：
+`config_scope`、`auto_context` 和 `explicit_context` 是 provider-neutral 语义，不应简单套用同名 CLI flag。当前 provider 按下表落地：
 
 | Provider | `config_scope: isolated` | `auto_context: disabled` | `explicit_context` |
 | --- | --- | --- | --- |
 | Hermes | 传 `--ignore-user-config`。 | 传 `--ignore-rules`，跳过 Hermes 自动规则、memory 和预加载 skill。 | 当前只在 task session 传 `--skills <path>`，task router 不注入。 |
 | Codex | 传 `codex exec --ignore-user-config`，但它只是不加载 `$CODEX_HOME/config.toml`；auth 仍使用 `CODEX_HOME`。 | 传 `--ignore-rules`，但该 flag 只跳过 user/project execpolicy `.rules`；禁用 `AGENTS.md`、memory、skills、MCP 等需要更强 wrapper 层隔离。 | Codex v1 不传 skill 注入 argv；需要通过受控工作目录、prompt 和后续 wrapper 层实现更强显式上下文。 |
-| Claude Code | CLI 可用 `--setting-sources` 限制 user/project/local settings；`--bare` 是更强的最小模式，会连带改变 auth 和启动行为。SDK 用 `settingSources`。 | CLI 可用 `--safe-mode` 禁大多数自定义上下文；需要更强隔离时才用 `--bare`。SDK 用 `settingSources`，并显式控制 plugins、MCP、memory 等非 settings 输入。 | CLI/SDK 都可显式提供 settings、system prompt、plugins、MCP、agents、skills；MCP 隔离需配合 `--strict-mcp-config`。 |
+| Claude Code | 传 `--setting-sources local`，避免加载 user/project settings；auth 和 managed policy 仍由 Claude Code 自身处理。 | 传 `--safe-mode`，禁用 CLAUDE.md、skills、plugins、hooks、MCP servers、custom commands/agents 等自定义上下文；不使用 `--bare` 作为默认 baseline。 | Claude Code v1 不传 skill 注入 argv；每次调用都传 `--strict-mcp-config` 和空 MCP config，避免加载全局 MCP。 |
 
 最重要的边界：Codex `--ignore-rules` 不是“禁项目规则、memory、skills”的总开关；它只处理 execpolicy `.rules`。如果 `agent_backend.provider: codex` 指向含项目规则的工作目录，这些规则仍可能影响 Codex 行为。
 
@@ -158,10 +161,10 @@ Console 覆盖 Dashboard、Approvals、Tasks、Dispatch、Policy、Settings 和 
 
 `tool_permissions` 控制传给 agent backend 的工具权限。Backend CLI 权限之外，本项目仍会叠加 reply policy、审批队列和 dispatch gate。它与飞书对外发送权限是两套机制。
 
-| `tool_permissions` | Hermes CLI 参数 | Codex CLI 参数 | 实际边界 |
-| --- | --- | --- | --- |
-| `read_only` | `--toolsets safe` | top-level `--search --ask-for-approval never` + `exec --sandbox read-only` | Hermes `safe` 禁用本地写操作类工具；Codex 在只读 sandbox 下运行并禁止交互审批，仍允许 live search。两者都不是“零副作用”。 |
-| `full_access` | `--toolsets hermes-cli --yolo` | top-level `--search` + `exec --dangerously-bypass-approvals-and-sandbox` | 显式危险模式。Backend 可执行本地写工具；飞书侧写入仍必须经过本项目的 policy、approval、dry-run、幂等和 dispatch gate。 |
+| `tool_permissions` | Hermes CLI 参数 | Codex CLI 参数 | Claude Code CLI 参数 | 实际边界 |
+| --- | --- | --- | --- | --- |
+| `read_only` | `--toolsets safe` | top-level `--search --ask-for-approval never` + `exec --sandbox read-only` | `--permission-mode dontAsk --tools Read,Grep,Glob,LS,WebFetch,WebSearch --allowedTools Read,Grep,Glob,LS,WebFetch,WebSearch` | Hermes `safe` 禁用本地写操作类工具；Codex 在只读 sandbox 下运行并禁止交互审批，仍允许 live search；Claude Code 只暴露 read/search 类工具且不允许 Bash。它们都不是“零副作用”。 |
+| `full_access` | `--toolsets hermes-cli --yolo` | top-level `--search` + `exec --dangerously-bypass-approvals-and-sandbox` | `--permission-mode bypassPermissions --dangerously-skip-permissions --tools default` | 显式危险模式。Backend 可执行本地写工具；飞书侧写入仍必须经过本项目的 policy、approval、dry-run、幂等和 dispatch gate。 |
 
 `context_access` 不跟随写权限开放。只要本地 DB 存在，read-only profile 也会收到一个受 `query_scope` 限制的 bounded snapshot 和 read-only SQLite URI。Hermes `safe` 没有本地 file/SQLite 工具，因此应使用 snapshot；只有具备只读 SQLite client 的 backend 才能直接查询 `read_only_uri`。
 
@@ -171,7 +174,7 @@ daemon 通过 `subprocess` 以无 TTY 方式调用 `hermes chat -q -Q`。在此�
 
 因此：
 
-- `full_access` 是显式危险模式，会启用 Hermes 完整 CLI 工具集（file、terminal、browser、skills、memory 等）并传 `--yolo`；Codex 会传 `--dangerously-bypass-approvals-and-sandbox`。
+- `full_access` 是显式危险模式，会启用 Hermes 完整 CLI 工具集（file、terminal、browser、skills、memory 等）并传 `--yolo`；Codex 会传 `--dangerously-bypass-approvals-and-sandbox`；Claude Code 会传 `--permission-mode bypassPermissions --dangerously-skip-permissions --tools default`。
 - 飞书侧真正的写保护来自：结构化 JSON schema、`answerability`/置信度等级/风险 gate、owner 审批、`dry-run`、幂等和 dispatch 策略。
 - 若需要更严格的本地副作用控制，应使用 `read_only`。
 
@@ -222,6 +225,25 @@ codex --search --ask-for-approval never exec --sandbox read-only --json --output
 - `--output-last-message` 是最终 JSON 输出来源；stdout JSONL 中的 `thread.started.thread_id` 会作为 agent session id 持久化。
 - task session follow-up 使用 `codex exec resume <session_id> -`。如果配置切换 provider，已有非 Codex session id 不会被 Codex 复用。
 - `doctor` 的 selected-backend readiness 对 Codex 检查 `--version`、`login status`、`exec --help` 和 `exec resume --help`，不运行完整 `codex doctor`，避免把安装更新、terminal 状态或历史线程扫描等无关项变成 daemon 阻塞条件。
+
+## Claude Code 集成说明
+
+### 调用方式
+
+Claude Code backend 使用 provider-native structured output：
+
+```text
+claude -p --output-format json --json-schema <schema-json> --permission-mode dontAsk --tools Read,Grep,Glob,LS,WebFetch,WebSearch --allowedTools Read,Grep,Glob,LS,WebFetch,WebSearch --mcp-config '{"mcpServers":{}}' --strict-mcp-config [--setting-sources local] [--safe-mode] [--add-dir <cwd>] [--model ...]
+claude -p --output-format json --json-schema <schema-json> ... --resume <session_id>
+```
+
+`full_access` 会把 read-only 工具 allowlist 替换为 `--permission-mode bypassPermissions --dangerously-skip-permissions --tools default`。Reply postprocess 和 owner style refresh 固定使用 read-only policy，即使主 task session 配置为 `full_access`。
+
+- prompt 通过 stdin 传入，不放进 argv。
+- `--json-schema` 使用当前 Pydantic 输出模型生成的内联 JSON Schema。
+- `--output-format json` 的 `structured_output` 是优先解析来源；`session_id` 会作为 agent session id 持久化。
+- task session follow-up 使用 `claude -p ... --resume <session_id>`。如果配置切换 provider，已有非 Claude Code session id 不会被 Claude Code 复用。
+- `doctor` 的 selected-backend readiness 对 Claude Code 检查 `--version`、`auth status` 和 `-p --help`，不运行完整模型调用或 `claude doctor`，避免把升级器、workspace trust、MCP 启动或模型费用变成 daemon 阻塞条件。
 
 ## Schema
 

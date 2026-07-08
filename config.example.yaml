@@ -52,6 +52,10 @@ agent_backend:
     path: null
     model: null
     timeout_seconds: 60
+  claude_code:
+    path: null
+    model: null
+    timeout_seconds: 60
 
 reply_policy:
   p2p_auto_reply: true

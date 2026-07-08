@@ -37,6 +37,8 @@ def test_load_minimal_config() -> None:
     assert loaded.config.agent_backend.hermes.mode == "cli"
     assert loaded.config.agent_backend.codex.path is None
     assert loaded.config.agent_backend.codex.model is None
+    assert loaded.config.agent_backend.claude_code.path is None
+    assert loaded.config.agent_backend.claude_code.model is None
     assert loaded.config.reply_postprocess.enabled is False
     assert loaded.config.reply_postprocess.max_turns == 4
     assert loaded.config.reply_postprocess.owner_style.enabled is False
@@ -49,13 +51,12 @@ def test_tracked_config_schema_matches_generated_schema() -> None:
     assert tracked_schema == ConfigService().json_schema_dict()
 
 
-def test_agent_backend_provider_schema_accepts_hermes_and_codex() -> None:
+def test_agent_backend_provider_schema_accepts_supported_backends() -> None:
     schema = ConfigService().json_schema_dict()
     provider_schema = schema["$defs"]["AgentBackendConfig"]["properties"]["provider"]
 
-    assert provider_schema.get("enum") == ["hermes", "codex"]
+    assert provider_schema.get("enum") == ["hermes", "codex", "claude_code"]
     assert "const" not in provider_schema
-    assert "claude_code" not in json.dumps(provider_schema)
 
 
 def test_missing_owner_fails(tmp_path: Path) -> None:
@@ -432,7 +433,7 @@ agent_backend:
     assert loaded.config.agent_backend.codex.model == "gpt-5"
 
 
-def test_unsupported_agent_backend_provider_is_rejected(tmp_path: Path) -> None:
+def test_claude_code_agent_backend_provider_is_accepted(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
@@ -440,6 +441,28 @@ owner:
   open_id: ou_owner
 agent_backend:
   provider: claude_code
+  claude_code:
+    path: /bin/claude
+    model: sonnet
+""",
+        encoding="utf-8",
+    )
+
+    loaded = ConfigService().load(config_path)
+
+    assert loaded.config.agent_backend.provider == "claude_code"
+    assert loaded.config.agent_backend.claude_code.path == "/bin/claude"
+    assert loaded.config.agent_backend.claude_code.model == "sonnet"
+
+
+def test_unsupported_agent_backend_provider_is_rejected(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+agent_backend:
+  provider: openhands
 """,
         encoding="utf-8",
     )
@@ -452,3 +475,4 @@ agent_backend:
     assert "provider" in error
     assert "hermes" in error
     assert "codex" in error
+    assert "claude_code" in error

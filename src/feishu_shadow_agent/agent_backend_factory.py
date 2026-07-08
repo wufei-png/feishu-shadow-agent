@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .agent_backend import AgentBackend
+from .claude_code import ClaudeCodeCliClient
 from .codex import CodexCliClient
 from .config import AppConfig
 from .hermes import HermesCliClient
@@ -27,6 +28,14 @@ def create_agent_backend(config: AppConfig, *, base_dir: str | Path) -> AgentBac
     if backend.provider == "codex":
         return CodexCliClient(
             config=backend.codex,
+            tool_permissions=config.tool_permissions,
+            config_scope=backend.config_scope,
+            auto_context=backend.auto_context,
+            reply_postprocess=config.reply_postprocess,
+        )
+    if backend.provider == "claude_code":
+        return ClaudeCodeCliClient(
+            config=backend.claude_code,
             tool_permissions=config.tool_permissions,
             config_scope=backend.config_scope,
             auto_context=backend.auto_context,

@@ -6,6 +6,7 @@ from pathlib import Path
 from feishu_shadow_agent.config import ConfigService, LoadedConfig
 from feishu_shadow_agent.health import (
     REQUIRED_USER_SCOPES,
+    ClaudeCodeCliChecker,
     CodexCliChecker,
     HealthSuite,
     HermesCliChecker,
@@ -153,6 +154,34 @@ agent_backend:
 
     assert calls == ["codex"]
     assert [result.name for result in results] == ["codex_cli_version"]
+
+
+def test_selected_backend_readiness_checker_delegates_to_claude_code_provider(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+agent_backend:
+  provider: claude_code
+""",
+        encoding="utf-8",
+    )
+    loaded = ConfigService().load(config_path)
+    calls: list[str] = []
+
+    def claude_code_checker(loaded: LoadedConfig) -> HealthCheckResult:
+        calls.append(loaded.config.agent_backend.provider)
+        return HealthCheckResult("claude_code_cli_version", "critical", "ok", "ok")
+
+    results = SelectedBackendReadinessChecker(claude_code_checker=claude_code_checker)(
+        loaded
+    )
+
+    assert calls == ["claude_code"]
+    assert [result.name for result in results] == ["claude_code_cli_version"]
 
 
 def test_doctor_all_green_and_default_owner_notification_is_dry_run(
@@ -699,6 +728,111 @@ tool_permissions: full_access
     assert capabilities.details["missing_flags"] == [
         "--dangerously-bypass-approvals-and-sandbox"
     ]
+
+
+def test_claude_code_cli_checker_checks_auth_and_print_capabilities(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+agent_backend:
+  provider: claude_code
+  claude_code:
+    path: /bin/claude
+    model: sonnet
+tool_permissions: read_only
+""",
+        encoding="utf-8",
+    )
+    loaded = ConfigService().load(config_path)
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        if argv[1] == "--version":
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="2.1.201 (Claude Code)\n", stderr=""
+            )
+        if argv[1:3] == ["auth", "status"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout='{"loggedIn":true,"authMethod":"oauth_token"}\n',
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout="Usage: claude [options] [prompt]\n-p --output-format --json-schema --resume --permission-mode dontAsk --tools --allowedTools --mcp-config --strict-mcp-config --setting-sources --safe-mode --model\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    results = ClaudeCodeCliChecker()(loaded)
+
+    assert [result.name for result in results] == [
+        "claude_code_cli_version",
+        "claude_code_auth_status",
+        "claude_code_print_capabilities",
+    ]
+    assert [result.status for result in results] == ["ok", "ok", "ok"]
+    assert calls == [
+        ["/bin/claude", "--version"],
+        ["/bin/claude", "auth", "status"],
+        ["/bin/claude", "-p", "--help"],
+    ]
+
+
+def test_claude_code_cli_checker_requires_full_access_bypass_flag(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+agent_backend:
+  provider: claude_code
+tool_permissions: full_access
+""",
+        encoding="utf-8",
+    )
+    loaded = ConfigService().load(config_path)
+
+    def fake_run(argv, **kwargs):
+        if argv[1] == "--version":
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="2.1.201 (Claude Code)\n", stderr=""
+            )
+        if argv[1:3] == ["auth", "status"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout='{"loggedIn":true,"authMethod":"oauth_token"}\n',
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout="Usage: claude [options] [prompt]\n-p --output-format --json-schema --resume --permission-mode bypassPermissions --tools --allowedTools --mcp-config --strict-mcp-config --setting-sources --safe-mode\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    results = ClaudeCodeCliChecker()(loaded)
+
+    capabilities = next(
+        result for result in results if result.name == "claude_code_print_capabilities"
+    )
+    assert capabilities.is_critical_failure
+    assert capabilities.details["missing_flags"] == ["--dangerously-skip-permissions"]
 
 
 def test_doctor_warns_when_explicit_agent_skill_is_missing(tmp_path: Path) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from feishu_shadow_agent.agent_backend_factory import create_agent_backend
+from feishu_shadow_agent.claude_code import ClaudeCodeCliClient
 from feishu_shadow_agent.codex import CodexCliClient
 from feishu_shadow_agent.config import AppConfig, OwnerConfig
 from feishu_shadow_agent.hermes import HermesCliClient
@@ -48,3 +49,22 @@ def test_backend_factory_builds_selected_codex_backend() -> None:
     assert backend.provider == "codex"
     assert argv[0] == "/bin/codex"
     assert argv[argv.index("--sandbox") + 1] == "read-only"
+
+
+def test_backend_factory_builds_selected_claude_code_backend() -> None:
+    config = AppConfig(
+        owner=OwnerConfig(open_id="ou_owner"),
+        agent_backend={
+            "provider": "claude_code",
+            "claude_code": {"path": "/bin/claude"},
+        },
+    )
+
+    backend = create_agent_backend(config, base_dir=Path("/tmp"))
+
+    assert isinstance(backend, ClaudeCodeCliClient)
+    argv = backend.build_print_command(output_schema={"type": "object"})
+
+    assert backend.provider == "claude_code"
+    assert argv[0] == "/bin/claude"
+    assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
