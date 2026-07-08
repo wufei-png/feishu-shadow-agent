@@ -1023,16 +1023,19 @@ def _claude_code_capabilities_result(
 def _required_codex_exec_flags(loaded: LoadedConfig) -> list[str]:
     required = [
         "--sandbox",
-        "--ignore-user-config",
-        "--ignore-rules",
         "--output-schema",
         "--output-last-message",
         "--json",
         "--skip-git-repo-check",
     ]
-    if loaded.config.agent_backend.working_dir is not None:
+    backend = loaded.config.agent_backend
+    if backend.config_scope == "isolated":
+        required.append("--ignore-user-config")
+    if backend.auto_context == "disabled":
+        required.append("--ignore-rules")
+    if backend.working_dir is not None:
         required.append("--cd")
-    if loaded.config.agent_backend.codex.model:
+    if backend.codex.model:
         required.append("--model")
     if loaded.config.tool_permissions == "full_access":
         required.append("--dangerously-bypass-approvals-and-sandbox")

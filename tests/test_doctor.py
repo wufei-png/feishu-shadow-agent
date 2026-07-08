@@ -677,6 +677,66 @@ tool_permissions: read_only
     ]
 
 
+def test_codex_cli_checker_matches_context_mode_specific_exec_flags(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    def make_fake_run(exec_help: str):
+        def fake_run(argv, **kwargs):
+            if argv[1] == "--version":
+                return subprocess.CompletedProcess(
+                    argv, 0, stdout="codex-cli 0.142.5\n", stderr=""
+                )
+            if argv[1:3] == ["login", "status"]:
+                return subprocess.CompletedProcess(
+                    argv, 0, stdout="Logged in using ChatGPT\n", stderr=""
+                )
+            if "resume" in argv:
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    stdout="Usage: codex exec resume [--output-schema <FILE>] [--output-last-message <FILE>] [--json]\n",
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(argv, 0, stdout=exec_help, stderr="")
+
+        return fake_run
+
+    cases = [
+        (
+            "native",
+            "  config_scope: native\n",
+            "Usage: codex exec [--sandbox <MODE>] [--ignore-rules] [--output-schema <FILE>] [--output-last-message <FILE>] [--json] [--skip-git-repo-check] resume\n",
+        ),
+        (
+            "auto-context-enabled",
+            "  auto_context: enabled\n",
+            "Usage: codex exec [--sandbox <MODE>] [--ignore-user-config] [--output-schema <FILE>] [--output-last-message <FILE>] [--json] [--skip-git-repo-check] resume\n",
+        ),
+    ]
+    for name, backend_context, exec_help in cases:
+        config_path = tmp_path / f"{name}.yaml"
+        config_path.write_text(
+            f"""
+owner:
+  open_id: ou_owner
+agent_backend:
+  provider: codex
+{backend_context}  codex:
+    path: /bin/codex
+tool_permissions: read_only
+""",
+            encoding="utf-8",
+        )
+        loaded = ConfigService().load(config_path)
+
+        monkeypatch.setattr(subprocess, "run", make_fake_run(exec_help))
+
+        results = CodexCliChecker()(loaded)
+
+        assert [result.status for result in results] == ["ok", "ok", "ok"]
+
+
 def test_codex_cli_checker_requires_full_access_bypass_flag(
     monkeypatch,
     tmp_path: Path,

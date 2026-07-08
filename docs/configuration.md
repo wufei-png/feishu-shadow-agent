@@ -35,7 +35,7 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `reply_policy` | object | 见下表 | Policy Import Source 中的全局自动回复策略。 |
 | `reply_postprocess` | object | 见下表 | 可选的一次性回复表达改写；默认关闭，不改变现有回复路径。 |
 | `chats` | map | `{}` | Policy Import Source 中按 Feishu `chat_id` 声明的群级策略，例如 `oc_xxx`。 |
-| `tool_permissions` | enum | `read_only` | Agent backend 工具权限档位：`read_only` 或 `full_access`。Hermes 和 Codex backend 都会映射到各自 CLI 的权限边界。 |
+| `tool_permissions` | enum | `read_only` | Agent backend 工具权限档位：`read_only` 或 `full_access`。Hermes、Codex 和 Claude Code backend 都会映射到各自 CLI 的权限边界。 |
 | `retention` | object | 见下表 | 本地数据保留时间。 |
 | `lifecycle` | object | 见下表 | 全局任务生命周期和审批过期设置。 |
 | `debug` | object | 见下表 | 调试用持久化开关。 |
