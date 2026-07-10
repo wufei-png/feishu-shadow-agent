@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
 from .agent_backend import AgentRunResult
 from .config import (
     AutoContextMode,
@@ -126,6 +128,25 @@ class HermesCliClient:
         session_id: str | None = None,
         cwd: str | Path | None = None,
     ) -> AgentRunResult:
+        return self._run(
+            self.build_chat_command(
+                prompt=prompt,
+                max_turns=self.config.session_max_turns,
+                session_id=session_id,
+                include_session_skills=True,
+            ),
+            cwd=cwd,
+        )
+
+    def structured_output(
+        self,
+        prompt: str,
+        *,
+        output_model: type[BaseModel],
+        session_id: str | None = None,
+        cwd: str | Path | None = None,
+    ) -> AgentRunResult:
+        del output_model
         return self._run(
             self.build_chat_command(
                 prompt=prompt,

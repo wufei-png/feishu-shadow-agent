@@ -147,6 +147,18 @@ class ClaudeCodeCliClient:
             prompt, output_model=output_model, session_id=session_id, cwd=cwd
         )
 
+    def structured_output(
+        self,
+        prompt: str,
+        *,
+        output_model: type[BaseModel],
+        session_id: str | None = None,
+        cwd: str | Path | None = None,
+    ) -> AgentRunResult:
+        return self._run(
+            prompt, output_model=output_model, session_id=session_id, cwd=cwd
+        )
+
     def reply_postprocess(
         self, prompt: str, *, cwd: str | Path | None = None
     ) -> AgentRunResult:

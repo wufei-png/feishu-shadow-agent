@@ -387,6 +387,7 @@ class LarkCliClient:
         end: str | None,
         page_token: str | None = None,
         page_size: int = 50,
+        order: str = "asc",
     ) -> MessagePage:
         result = self.run_json(
             self.build_chat_messages_list(
@@ -394,7 +395,7 @@ class LarkCliClient:
                 chat_id=chat_id,
                 start=start,
                 end=end,
-                order="asc",
+                order=order,
                 page_token=page_token,
                 page_size=page_size,
             )

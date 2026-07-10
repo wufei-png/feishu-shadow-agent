@@ -10,9 +10,16 @@ CONTEXT_SNAPSHOT_MESSAGES_PER_TASK = 5
 
 
 class ContextAccessBuilder:
-    def __init__(self, *, store: SQLiteStore, config: AppConfig):
+    def __init__(
+        self,
+        *,
+        store: SQLiteStore,
+        config: AppConfig,
+        preserve_store_path: bool = False,
+    ):
         self.store = store
         self.config = config
+        self.preserve_store_path = preserve_store_path
 
     def router_context_access(
         self,
@@ -70,10 +77,11 @@ class ContextAccessBuilder:
         path = self.store.path.expanduser()
         if not path.exists():
             return None
+        uri_path = path.absolute() if self.preserve_store_path else path.resolve()
         return {
             "backend": "sqlite",
             "mode": "live_read_only",
-            "read_only_uri": f"{path.resolve().as_uri()}?mode=ro",
+            "read_only_uri": f"{uri_path.as_uri()}?mode=ro",
             "allowed_tables": [
                 "tasks",
                 "task_messages",

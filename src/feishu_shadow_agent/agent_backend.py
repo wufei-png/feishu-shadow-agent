@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from pydantic import BaseModel
+
 AgentBackendProvider = Literal["hermes", "codex", "claude_code"]
 
 
@@ -36,6 +38,15 @@ class AgentBackend(Protocol):
         self,
         prompt: str,
         *,
+        session_id: str | None = None,
+        cwd: str | Path | None = None,
+    ) -> AgentRunResult: ...
+
+    def structured_output(
+        self,
+        prompt: str,
+        *,
+        output_model: type[BaseModel],
         session_id: str | None = None,
         cwd: str | Path | None = None,
     ) -> AgentRunResult: ...

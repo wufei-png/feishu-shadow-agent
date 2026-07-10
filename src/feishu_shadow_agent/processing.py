@@ -247,6 +247,7 @@ class TaskProcessingService:
         agent_retry_delays_seconds: tuple[float, ...] = (1.0, 3.0),
         agent_working_dir: str | Path | None = None,
         config_base_dir: str | Path | None = None,
+        preserve_context_store_path: bool = False,
         sleep_func: Callable[[float], None] = time.sleep,
     ):
         self.store = store
@@ -269,7 +270,11 @@ class TaskProcessingService:
             retry_delays_seconds=agent_retry_delays_seconds,
             sleep_func=sleep_func,
         )
-        self.context_access = ContextAccessBuilder(store=store, config=config)
+        self.context_access = ContextAccessBuilder(
+            store=store,
+            config=config,
+            preserve_store_path=preserve_context_store_path,
+        )
         self.resource_preflight = ResourcePreflight(
             store=store,
             logger=logger,
@@ -875,6 +880,26 @@ class TaskProcessingService:
                 decision=decision, task=self.store.get_task_by_id(target.id)
             )
         return None
+
+    def run_task_router(
+        self,
+        *,
+        message: NormalizedMessage,
+        source: str,
+        reason: str,
+        now: str,
+        watch_until: str,
+        run_id: str,
+    ) -> RoutingResult | ProcessingResult | None:
+        """Run the production model-router stage for an existing placeholder."""
+        return self._run_task_router(
+            message=message,
+            source=source,
+            reason=reason,
+            now=now,
+            watch_until=watch_until,
+            run_id=run_id,
+        )
 
     def _run_task_session(
         self,

@@ -12,6 +12,7 @@ from typing import Any
 from .config import AppConfig
 from .feishu.client import FeishuClient
 from .jsonl import JSONLLogger
+from .message_eligibility import MessageEligibilityPolicy
 from .paths import resolve_agent_working_dir
 from .policy import PolicyResolver
 from .processing import ApprovalService, TaskProcessingService
@@ -22,6 +23,7 @@ from .types import (
     NormalizedMessage,
     ResourceRef,
     ResourceStatus,
+    RouteDecision,
     utc_now_iso,
 )
 
@@ -167,6 +169,9 @@ class ResourceProcessor:
         config: AppConfig,
         logger: JSONLLogger,
         config_base_dir: str | Path | None = None,
+        resource_base_dir: str | Path | None = None,
+        store_absolute_paths: bool = False,
+        preserve_resource_base_path: bool = False,
     ):
         self.store = store
         self.feishu_client = feishu_client
@@ -175,8 +180,15 @@ class ResourceProcessor:
         self.config_base_dir = (
             Path(config_base_dir or Path.cwd()).expanduser().resolve()
         )
+        resource_base = Path(resource_base_dir or self.config_base_dir).expanduser()
+        self.resource_base_dir = (
+            resource_base.absolute()
+            if preserve_resource_base_path
+            else resource_base.resolve()
+        )
+        self.store_absolute_paths = store_absolute_paths
         self.policy = PolicyResolver(store)
-        self.quota = ResourceQuotaGuard(config=config, base_dir=self.config_base_dir)
+        self.quota = ResourceQuotaGuard(config=config, base_dir=self.resource_base_dir)
         self._quota_downloads_blocked = False
 
     def process(self, message: NormalizedMessage, *, run_id: str | None = None) -> None:
@@ -247,7 +259,8 @@ class ResourceProcessor:
                 )
                 continue
             output = _resource_output(resource, self.config.storage.resource_dir)
-            local_output = self.config_base_dir / output
+            local_output = self.resource_base_dir / output
+            stored_path = str(local_output) if self.store_absolute_paths else output
             quota_preflight = self.quota.before_download()
             if not quota_preflight.allow:
                 self._record_quota_blocked(
@@ -277,7 +290,7 @@ class ResourceProcessor:
                 self.store.upsert_resource(
                     resource,
                     download_status="failed",
-                    path=output,
+                    path=stored_path,
                     raw={"error": str(exc)},
                 )
                 self.logger.warning(
@@ -295,7 +308,7 @@ class ResourceProcessor:
                     self.store.upsert_resource(
                         resource,
                         download_status="missing_file",
-                        path=output,
+                        path=stored_path,
                         raw={
                             "result": result.json_data,
                             "error": "download output file missing",
@@ -327,7 +340,7 @@ class ResourceProcessor:
                     self.store.upsert_resource(
                         resource,
                         download_status="missing_file",
-                        path=output,
+                        path=stored_path,
                         raw={
                             "result": result.json_data,
                             "error": "download output file missing",
@@ -346,7 +359,7 @@ class ResourceProcessor:
                 self.store.upsert_resource(
                     resource,
                     download_status="downloaded",
-                    path=output,
+                    path=stored_path,
                     sha256_hex=sha256_hex,
                     raw={"result": result.json_data},
                 )
@@ -366,7 +379,7 @@ class ResourceProcessor:
                 self.store.upsert_resource(
                     resource,
                     download_status=status,
-                    path=output,
+                    path=stored_path,
                     raw={
                         "error": result.error,
                         "stderr": result.stderr,
@@ -514,12 +527,16 @@ class IngestionService:
         approval_service: ApprovalService | None = None,
         clock: Callable[[], str] = utc_now_iso,
         config_base_dir: str | Path | None = None,
+        resource_base_dir: str | Path | None = None,
+        store_absolute_resource_paths: bool = False,
+        preserve_resource_base_path: bool = False,
     ):
         self.store = store
         self.feishu_client = feishu_client
         self.config = config
         self.logger = logger
         self.normalizer = MessageNormalizer(owner_open_id=config.owner.open_id)
+        self.eligibility = MessageEligibilityPolicy()
         self.config_base_dir = (
             Path(config_base_dir or Path.cwd()).expanduser().resolve()
         )
@@ -541,6 +558,9 @@ class IngestionService:
             config=config,
             logger=logger,
             config_base_dir=config_base_dir,
+            resource_base_dir=resource_base_dir,
+            store_absolute_paths=store_absolute_resource_paths,
+            preserve_resource_base_path=preserve_resource_base_path,
         )
         if self.task_processor is not None:
             self.task_processor.set_resource_retry_func(
@@ -770,6 +790,40 @@ class IngestionService:
         default_chat_type: str | None,
         run_id: str,
     ) -> RoutingResult | None:
+        return self._process_raw_message(
+            raw,
+            source=source,
+            default_chat_type=default_chat_type,
+            run_id=run_id,
+            enforce_eligibility=True,
+        )
+
+    def process_eligible_raw_message(
+        self,
+        raw: dict[str, Any],
+        *,
+        source: str,
+        default_chat_type: str | None,
+        run_id: str,
+    ) -> RoutingResult | None:
+        """Process a message after Message Eligibility has already passed."""
+        return self._process_raw_message(
+            raw,
+            source=source,
+            default_chat_type=default_chat_type,
+            run_id=run_id,
+            enforce_eligibility=False,
+        )
+
+    def _process_raw_message(
+        self,
+        raw: dict[str, Any],
+        *,
+        source: str,
+        default_chat_type: str | None,
+        run_id: str,
+        enforce_eligibility: bool,
+    ) -> RoutingResult | None:
         try:
             message = self.normalizer.normalize(
                 raw, default_chat_type=default_chat_type
@@ -814,6 +868,44 @@ class IngestionService:
             return None
         now = self.clock()
         watch_until = _plus_minutes(now, self.config.lifecycle.watch_minutes)
+        if message.is_self_message:
+            sent_action_task = self.store.find_task_for_sent_action_message(
+                message.message_id
+            )
+            if sent_action_task is not None:
+                result = self.router.route(
+                    message,
+                    source=source,
+                    inserted=inserted,
+                    now=now,
+                    watch_until=watch_until,
+                    retry_incomplete_processing=False,
+                    agent_working_dir=str(self.agent_working_dir),
+                )
+                self._log_routing_result(
+                    message=message,
+                    source=source,
+                    inserted=inserted,
+                    result=result,
+                    run_id=run_id,
+                )
+                return result
+        if enforce_eligibility:
+            eligibility = self.eligibility.decide(message, sources=[source])
+            if not eligibility.eligible:
+                decision = RouteDecision("ignore", reason=eligibility.reason_code)
+                self.store.record_routing_audit(
+                    message_id=message.message_id, decision=decision
+                )
+                result = RoutingResult(decision=decision, task=None)
+                self._log_routing_result(
+                    message=message,
+                    source=source,
+                    inserted=inserted,
+                    result=result,
+                    run_id=run_id,
+                )
+                return result
         result = self.router.route(
             message,
             source=source,
@@ -823,18 +915,12 @@ class IngestionService:
             retry_incomplete_processing=self.task_processor is not None,
             agent_working_dir=str(self.agent_working_dir),
         )
-        self.logger.info(
-            "message_routed",
+        self._log_routing_result(
+            message=message,
+            source=source,
+            inserted=inserted,
+            result=result,
             run_id=run_id,
-            task_id=None if result.task is None else str(result.task.id),
-            data={
-                "message_id": message.message_id,
-                "source": source,
-                "route": result.decision.route,
-                "reason": result.decision.reason,
-                "inserted": inserted,
-                "task_short_id": None if result.task is None else result.task.short_id,
-            },
         )
         if _should_process_resources(
             store=self.store,
@@ -886,6 +972,29 @@ class IngestionService:
                     },
                 )
         return result
+
+    def _log_routing_result(
+        self,
+        *,
+        message: NormalizedMessage,
+        source: str,
+        inserted: bool,
+        result: RoutingResult,
+        run_id: str,
+    ) -> None:
+        self.logger.info(
+            "message_routed",
+            run_id=run_id,
+            task_id=None if result.task is None else str(result.task.id),
+            data={
+                "message_id": message.message_id,
+                "source": source,
+                "route": result.decision.route,
+                "reason": result.decision.reason,
+                "inserted": inserted,
+                "task_short_id": None if result.task is None else result.task.short_id,
+            },
+        )
 
     def _window(self, checkpoint_key: str) -> tuple[str, str]:
         end = self.clock()

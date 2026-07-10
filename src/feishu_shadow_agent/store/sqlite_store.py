@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta
 from hashlib import sha256
 from importlib import resources
@@ -57,8 +57,9 @@ LIMIT ?
 
 
 class SQLiteStore:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, clock: Callable[[], str] = utc_now_iso):
         self.path = Path(path)
+        self.clock = clock
 
     def connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -83,7 +84,7 @@ class SQLiteStore:
                 conn.executescript(migration.read_text(encoding="utf-8"))
                 conn.execute(
                     "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                    (version, utc_now_iso()),
+                    (version, self.clock()),
                 )
 
     def _migration_applied(self, conn: sqlite3.Connection, version: str) -> bool:
@@ -164,7 +165,7 @@ class SQLiteStore:
         reason: str | None = None,
     ) -> dict[str, Any]:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         audit_reason = reason or (
             "policy import-config --replace" if replace else "policy import-config"
         )
@@ -281,7 +282,7 @@ class SQLiteStore:
         reason: str | None = None,
     ) -> dict[str, Any]:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         new_policy = _normalize_global_product_policy(policy)
         with self.connect() as conn:
             existing = conn.execute(
@@ -344,7 +345,7 @@ class SQLiteStore:
         reason: str | None = None,
     ) -> dict[str, Any]:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         new_policy = _normalize_chat_product_policy(policy)
         chat_id = str(new_policy["chat_id"])
         with self.connect() as conn:
@@ -398,7 +399,7 @@ class SQLiteStore:
         reason: str | None = None,
     ) -> dict[str, Any]:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         normalized_chat_id = chat_id.strip()
         with self.connect() as conn:
             existing = conn.execute(
@@ -452,7 +453,7 @@ class SQLiteStore:
         git_dirty: bool | None = None,
     ) -> None:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         with self.connect() as conn:
             conn.execute(
                 """
@@ -488,7 +489,7 @@ class SQLiteStore:
                 WHERE run_id = ?
                 """,
                 (
-                    utc_now_iso(),
+                    self.clock(),
                     status,
                     json.dumps(health_summary or {}, ensure_ascii=False, default=str),
                     run_id,
@@ -497,7 +498,7 @@ class SQLiteStore:
 
     def record_run_tick_started(self, *, run_id: str, dry_run: bool) -> None:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         with self.connect() as conn:
             conn.execute(
                 """
@@ -543,7 +544,7 @@ class SQLiteStore:
                 WHERE run_id = ?
                 """,
                 (
-                    utc_now_iso(),
+                    self.clock(),
                     json.dumps(summary, ensure_ascii=False, default=str),
                     run_id,
                 ),
@@ -557,7 +558,7 @@ class SQLiteStore:
         summary: dict[str, Any],
     ) -> None:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         with self.connect() as conn:
             conn.execute(
                 """
@@ -591,7 +592,7 @@ class SQLiteStore:
                     INSERT OR IGNORE INTO runs(run_id, started_at, status, dry_run)
                     VALUES (?, ?, ?, ?)
                     """,
-                    (run_id, utc_now_iso(), "running", 1),
+                    (run_id, self.clock(), "running", 1),
                 )
             conn.executemany(
                 """
@@ -607,7 +608,7 @@ class SQLiteStore:
                         result.status,
                         result.message,
                         json.dumps(result.details, ensure_ascii=False, default=str),
-                        utc_now_iso(),
+                        self.clock(),
                     )
                     for result in results
                 ],
@@ -642,7 +643,7 @@ class SQLiteStore:
                 (
                     key,
                     json.dumps(value, ensure_ascii=False, default=str),
-                    utc_now_iso(),
+                    self.clock(),
                 ),
             )
 
@@ -659,7 +660,7 @@ class SQLiteStore:
 
     def upsert_message(self, message: NormalizedMessage) -> bool:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         with self.connect() as conn:
             return self._upsert_message_locked(conn, message, now=now)
 
@@ -761,7 +762,7 @@ class SQLiteStore:
         terminal_reason: str | None = None,
     ) -> None:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         with self.connect() as conn:
             conn.execute(
                 """
@@ -800,7 +801,7 @@ class SQLiteStore:
         raw: dict[str, Any] | None = None,
     ) -> None:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         payload = resource.raw | (raw or {})
         with self.connect() as conn:
             conn.execute(
@@ -904,7 +905,7 @@ class SQLiteStore:
                     updated_at = ?
                 WHERE id IN ({placeholders})
                 """,
-                [utc_now_iso(), *ids],
+                [self.clock(), *ids],
             )
         return int(cursor.rowcount)
 
@@ -917,7 +918,7 @@ class SQLiteStore:
         agent_working_dir: str | None = None,
     ) -> TaskRecord:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         with self.connect() as conn:
             task_id = self._create_task_for_message(
                 conn,
@@ -941,7 +942,7 @@ class SQLiteStore:
         agent_working_dir: str | None = None,
     ) -> tuple[TaskRecord, RouteDecision]:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         with self.connect() as conn:
             task_id = self._create_task_for_message(
                 conn,
@@ -971,7 +972,7 @@ class SQLiteStore:
         self, task_id: int, message: NormalizedMessage, *, watch_until: str
     ) -> None:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         with self.connect() as conn:
             self._attach_message_to_task(
                 conn, task_id, message, watch_until=watch_until, now=now
@@ -988,7 +989,7 @@ class SQLiteStore:
         reason: str = "deterministic_shortcut",
     ) -> RouteDecision:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         decision = RouteDecision(
             "attach_task",
             target_task_id=task.id,
@@ -1009,13 +1010,13 @@ class SQLiteStore:
 
     def close_task_for_owner_takeover(self, task_id: int) -> None:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         with self.connect() as conn:
             self._close_task_for_owner_takeover(conn, task_id, now=now)
 
     def close_task_by_operator(self, task_id: int | str) -> dict[str, Any]:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         with self.connect() as conn:
             task = self._get_task_by_lookup(conn, task_id)
             if task is None:
@@ -1044,7 +1045,7 @@ class SQLiteStore:
         self, task_id: int | str, *, watch_until: str
     ) -> dict[str, Any]:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         with self.connect() as conn:
             task = self._get_task_by_lookup(conn, task_id)
             if task is None:
@@ -1076,7 +1077,7 @@ class SQLiteStore:
         message: NormalizedMessage,
     ) -> RouteDecision:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         decision = RouteDecision(
             "human_taken_over",
             target_task_id=task.id,
@@ -1319,7 +1320,7 @@ class SQLiteStore:
         watch_until: str,
     ) -> None:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         with self.connect() as conn:
             self._record_agent_message_for_task(
                 conn, task_id, message, watch_until=watch_until, now=now
@@ -1333,7 +1334,7 @@ class SQLiteStore:
         watch_until: str,
     ) -> RouteDecision:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         decision = RouteDecision(
             "ignore",
             target_task_id=task.id,
@@ -1409,7 +1410,7 @@ class SQLiteStore:
         if not unique_keys:
             return
         with self.connect() as conn:
-            self._add_watch_keys(conn, task_id, unique_keys, utc_now_iso())
+            self._add_watch_keys(conn, task_id, unique_keys, self.clock())
 
     def has_resource_eligible_routing_audit(self, message_id: str) -> bool:
         self.migrate()
@@ -1495,7 +1496,7 @@ class SQLiteStore:
         self, action_id: int, *, run_id: str | None = None
     ) -> DispatchClaim | None:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         claim_token = new_run_id("claim")
         with self.connect() as conn:
             cursor = conn.execute(
@@ -1584,7 +1585,7 @@ class SQLiteStore:
             DispatchAttemptStatus.UNCERTAIN.value,
         }:
             assignments.append("finished_at = ?")
-            params.append(utc_now_iso())
+            params.append(self.clock())
         params.append(attempt_id)
         with self.connect() as conn:
             conn.execute(
@@ -1627,7 +1628,7 @@ class SQLiteStore:
         self, *, stale_after_seconds: int = 900, now: str | None = None
     ) -> list[ActionRecord]:
         self.migrate()
-        cutoff = _minus_seconds(now or utc_now_iso(), stale_after_seconds)
+        cutoff = _minus_seconds(now or self.clock(), stale_after_seconds)
         with self.connect() as conn:
             rows = conn.execute(
                 """
@@ -1648,7 +1649,7 @@ class SQLiteStore:
         now: str | None = None,
     ) -> list[dict[str, Any]]:
         self.migrate()
-        effective_now = now or utc_now_iso()
+        effective_now = now or self.clock()
         cutoff = _minus_seconds(effective_now, stale_after_seconds)
         recovered: list[dict[str, Any]] = []
         with self.connect() as conn:
@@ -1744,7 +1745,7 @@ class SQLiteStore:
 
     def retry_dispatch_action(self, action_id: int) -> ActionRecord:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT * FROM actions WHERE id = ?", (action_id,)
@@ -1789,7 +1790,7 @@ class SQLiteStore:
 
     def cancel_dispatch_action(self, action_id: int) -> ActionRecord:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT * FROM actions WHERE id = ?", (action_id,)
@@ -1830,7 +1831,7 @@ class SQLiteStore:
         readback = result.get("readback")
         if not isinstance(readback, dict) or readback.get("ok") is not True:
             raise ValueError("readback evidence is required before marking sent")
-        now = utc_now_iso()
+        now = self.clock()
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT * FROM actions WHERE id = ?", (action_id,)
@@ -1927,7 +1928,7 @@ class SQLiteStore:
                 """,
                 (
                     json.dumps(result, ensure_ascii=False, default=str),
-                    utc_now_iso(),
+                    self.clock(),
                     action_id,
                 ),
             )
@@ -1950,7 +1951,7 @@ class SQLiteStore:
                 (
                     status,
                     json.dumps(result, ensure_ascii=False, default=str),
-                    utc_now_iso(),
+                    self.clock(),
                     action_id,
                 ),
             )
@@ -1977,7 +1978,7 @@ class SQLiteStore:
                 (
                     status,
                     json.dumps(result, ensure_ascii=False, default=str),
-                    utc_now_iso(),
+                    self.clock(),
                     action_id,
                 ),
             )
@@ -1990,7 +1991,7 @@ class SQLiteStore:
 
     def expire_pending_approvals(self, *, now: str | None = None) -> int:
         self.migrate()
-        effective_now = now or utc_now_iso()
+        effective_now = now or self.clock()
         with self.connect() as conn:
             return self._expire_pending_approvals_locked(conn, now=effective_now)
 
@@ -1998,7 +1999,7 @@ class SQLiteStore:
         self, message_id: str, *, now: str | None = None
     ) -> dict[str, Any] | None:
         self.migrate()
-        effective_now = now or utc_now_iso()
+        effective_now = now or self.clock()
         with self.connect() as conn:
             message = conn.execute(
                 """
@@ -2185,7 +2186,7 @@ class SQLiteStore:
                 SET agent_session_id = ?, agent_session_provider = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (session_id, backend_provider, utc_now_iso(), task_id),
+                (session_id, backend_provider, self.clock(), task_id),
             )
 
     def update_task_after_agent(
@@ -2198,7 +2199,7 @@ class SQLiteStore:
     ) -> None:
         self.migrate()
         assignments = ["updated_at = ?"]
-        params: list[Any] = [utc_now_iso()]
+        params: list[Any] = [self.clock()]
         if task_label is not None:
             assignments.append("task_label = ?")
             params.append(_truncate(task_label, limit=100))
@@ -2209,7 +2210,7 @@ class SQLiteStore:
                 assignments.append("closed_at = NULL")
             else:
                 assignments.append("closed_at = ?")
-                params.append(utc_now_iso())
+                params.append(self.clock())
         if watch_until is not None:
             assignments.append("watch_until = ?")
             params.append(watch_until)
@@ -2265,7 +2266,7 @@ class SQLiteStore:
                     if prompt is None
                     else json.dumps(prompt, ensure_ascii=False, default=str),
                     tool_permissions_profile,
-                    utc_now_iso(),
+                    self.clock(),
                 ),
             )
 
@@ -2278,7 +2279,7 @@ class SQLiteStore:
         approval_id: int | None = None,
     ) -> int | None:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         with self.connect() as conn:
             return self._create_send_reply_action_locked(
                 conn,
@@ -2296,7 +2297,7 @@ class SQLiteStore:
         payload: dict[str, Any],
     ) -> int:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         with self.connect() as conn:
             return self._create_owner_notification_action_locked(
                 conn,
@@ -2315,7 +2316,7 @@ class SQLiteStore:
         approval_timeout_hours: int | None = 24,
     ) -> int:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         expires_at = (
             None
             if approval_timeout_hours is None
@@ -2367,7 +2368,7 @@ class SQLiteStore:
         keep_watching_until: str | None = None,
     ) -> dict[str, Any]:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         with self.connect() as conn:
             keep_watching_reject_task_id = self._keep_watching_reject_task_id_locked(
                 conn,
@@ -3129,7 +3130,7 @@ class SQLiteStore:
         result: dict[str, Any] | None = None,
     ) -> None:
         self.migrate()
-        now = utc_now_iso()
+        now = self.clock()
         with self.connect() as conn:
             conn.execute(
                 """
@@ -3165,7 +3166,7 @@ class SQLiteStore:
                 INSERT INTO approvals(short_id, task_id, kind, status, created_at, expires_at)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (short_id, task_id, kind, status, utc_now_iso(), None),
+                (short_id, task_id, kind, status, self.clock(), None),
             )
 
     def _insert_chat_policy_locked(
@@ -3580,7 +3581,7 @@ class SQLiteStore:
                 int(decision.router_called),
                 decision.matched_by,
                 decision.target_task_id,
-                utc_now_iso(),
+                self.clock(),
             ),
         )
 

@@ -64,6 +64,7 @@ class FeishuClient(Protocol):
         end: str | None,
         page_token: str | None = None,
         page_size: int = 50,
+        order: str = "asc",
     ) -> MessagePage: ...
 
     def list_p2p_messages(
