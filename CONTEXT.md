@@ -64,6 +64,54 @@ _Avoid_: Store helper, UI callback
 The product boundary that defines what information an agent turn can see and which decision or output each field is allowed to influence.
 _Avoid_: Prompt dump, debug metadata, everything we know
 
+**Message Acquisition**:
+The retrieval of raw Feishu messages through source-specific Lark searches and chat or thread windows, including active-watch task and watch-key matching. It determines which raw messages and acquisition sources are available for local evaluation, not whether they belong to a task.
+_Avoid_: Message Eligibility, routing, ingest decision
+
+**Message Eligibility**:
+A source-aware deterministic decision made after normalization and before task routing that determines whether an acquired message may enter task ownership and handling. It receives acquisition sources but never reads task/store state, and it must preserve meaningful owner interventions without choosing a target task.
+_Avoid_: Message Acquisition, router outcome, handed to process_raw_message
+
+**Temporary Eval Store**:
+An isolated file-backed SQLite store rebuilt for one evaluation case from explicit scenario inputs. It carries the production state model during a run but is never copied from or written back to the production runtime store.
+_Avoid_: Production snapshot, copied runtime store, in-memory fixture, eval truth source
+
+**Evaluation Scenario**:
+The explicit messages, ingestion sources, task fixtures, mode, and target that define how one evaluation case is executed. It contains inputs only; expected routes, answerability, and reference answers belong to labels.
+_Avoid_: Golden label, captured context window, production snapshot
+
+**Evaluation Clock**:
+The deterministic business time of an evaluation turn, derived from the current scenario message's `sent_at`. Wall-clock run timestamps describe execution only and must not change model input, lifecycle state, or scoring.
+_Avoid_: Run creation time, replay time, explicit evaluation_at override
+
+**Evaluation Task Alias**:
+A case-local stable name such as `task_1` used to compare task identity without depending on production or temporary database IDs. Router scenarios declare aliases on task fixtures; full-chain runs assign them to setup-created tasks in creation order.
+_Avoid_: Production task ID, temporary row ID, task title
+
+**Evaluation Trial**:
+One isolated execution of an evaluation case. Repeated model evaluations rebuild the Temporary Eval Store and provider session for every trial so one result cannot affect another.
+_Avoid_: Retry, resumed run, repeated judge call
+
+**Trial Evidence Bundle**:
+The retained report, event log, and optional full prompts for one Evaluation Trial. Rebuildable SQLite state and resource copies are deleted after evidence has been materialized.
+_Avoid_: Temporary Eval Store, production snapshot, full runtime backup
+
+**Evaluation Resource Fixture**:
+A successfully captured Feishu file or image referenced by an Evaluation Scenario. Its bytes and checksum are copied into each trial so production resource preflight and prompt construction can run without Feishu network access.
+_Avoid_: Live download fallback, production resource cache, resource failure label
+
+**Evaluation Task Fixture**:
+The minimal explicit task state used to rebuild Router candidates in a Temporary Eval Store: a stable alias, production task status, task label, and ordered message membership. Derived chat, watch-key, count, and lifecycle timestamps are not duplicated in the fixture.
+_Avoid_: Production task row, copied task ID, full database snapshot
+
+**Case Baseline Config**:
+The immutable `config.yaml` copied into a captured or golden case to identify and reproduce the configuration under which that artifact was authored. It is not silently merged into later runs.
+_Avoid_: Active run config, config defaults, golden policy
+
+**Evaluation Run Config**:
+The `config.yaml` explicitly selected by `--config` for one evaluation run. It is the only configuration used for backend, model, tool permissions, prompt, lifecycle, and policy behavior, and a copy is stored with that run.
+_Avoid_: Case Baseline Config, merged config, implicit override
+
 **Agent Backend**:
 The selected coding-agent runtime that interprets Feishu task context and returns schema-bound decisions or reply candidates for the assistant.
 _Avoid_: LLM, model, Hermes-only path
