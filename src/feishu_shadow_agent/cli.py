@@ -25,6 +25,9 @@ from .console_security import (
 )
 from .daemon import Daemon
 from .dispatcher import Dispatcher
+from .evals import EvalError
+from .evals.config import load_evaluation_config
+from .evals.service import EvalService
 from .feishu.lark_cli import LarkCliClient
 from .health import HealthSuite, has_critical_failure, summarize_results
 from .jsonl import JSONLLogger
@@ -49,6 +52,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return args.handler(args)
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
+        return 2
+    except EvalError as exc:
+        print(f"eval error: {exc}", file=sys.stderr)
         return 2
 
 
@@ -114,6 +120,85 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--message-id", required=True)
     replay.add_argument("--dry-run", action="store_true", required=True)
     replay.set_defaults(handler=_handle_replay)
+
+    eval_parser = subparsers.add_parser("eval", help="evaluation helpers")
+    eval_subparsers = eval_parser.add_subparsers(dest="eval_command")
+    eval_capture = eval_subparsers.add_parser("capture", help="capture eval cases")
+    _add_config_arg(eval_capture)
+    eval_capture.add_argument("--lookback-days", type=int, default=2)
+    eval_capture.add_argument("--limit", type=int, default=20)
+    eval_capture.add_argument("--message-id")
+    eval_capture.add_argument("--context-before", type=int, default=20)
+    eval_capture.add_argument("--context-after", type=int, default=0)
+    eval_capture.add_argument("--label")
+    eval_capture.add_argument("--allow-sensitive-config", action="store_true")
+    eval_capture.set_defaults(handler=_handle_eval_capture)
+
+    eval_ingress = eval_subparsers.add_parser(
+        "run-ingress", help="evaluate group ingress filtering"
+    )
+    _add_config_arg(eval_ingress)
+    eval_ingress.add_argument("--chat-id")
+    eval_ingress.add_argument("--snapshot", type=Path)
+    eval_ingress.add_argument("--start")
+    eval_ingress.add_argument("--end")
+    eval_ingress.add_argument("--lookback-days", type=int)
+    eval_ingress.add_argument("--golden", type=Path)
+    eval_ingress.add_argument("--label")
+    eval_ingress.add_argument("--dry-run-backend", action="store_true")
+    eval_ingress.add_argument("--allow-sensitive-config", action="store_true")
+    eval_ingress.set_defaults(handler=_handle_eval_run_ingress)
+
+    eval_router = eval_subparsers.add_parser("run-router", help="run router eval")
+    _add_config_arg(eval_router)
+    eval_router.add_argument("--case", type=Path)
+    eval_router.add_argument("--cases", type=Path)
+    eval_router.add_argument("--label")
+    eval_router.add_argument("--repeat", type=int, default=1)
+    eval_router.add_argument("--dry-run-backend", action="store_true")
+    eval_router.add_argument("--allow-sensitive-config", action="store_true")
+    eval_router.set_defaults(handler=_handle_eval_run_router)
+
+    eval_task_session = eval_subparsers.add_parser(
+        "run-task-session", help="run task session eval"
+    )
+    _add_config_arg(eval_task_session)
+    eval_task_session.add_argument("--case", type=Path)
+    eval_task_session.add_argument("--cases", type=Path)
+    eval_task_session.add_argument("--label")
+    eval_task_session.add_argument("--repeat", type=int, default=1)
+    eval_task_session.add_argument("--dry-run-backend", action="store_true")
+    eval_task_session.add_argument("--allow-sensitive-config", action="store_true")
+    eval_task_session.set_defaults(handler=_handle_eval_run_task_session)
+
+    eval_full_chain = eval_subparsers.add_parser(
+        "run-full-chain", help="run full chain eval"
+    )
+    _add_config_arg(eval_full_chain)
+    eval_full_chain.add_argument("--case", type=Path)
+    eval_full_chain.add_argument("--cases", type=Path)
+    eval_full_chain.add_argument("--label")
+    eval_full_chain.add_argument("--repeat", type=int, default=1)
+    eval_full_chain.add_argument("--dry-run-backend", action="store_true")
+    eval_full_chain.add_argument("--allow-sensitive-config", action="store_true")
+    eval_full_chain.set_defaults(handler=_handle_eval_run_full_chain)
+
+    eval_promote = eval_subparsers.add_parser(
+        "promote", help="promote reviewed eval labels to golden"
+    )
+    _add_config_arg(eval_promote)
+    eval_promote.add_argument(
+        "--type",
+        dest="eval_type",
+        required=True,
+        choices=["ingress", "router", "task-session", "full-chain"],
+    )
+    eval_promote.add_argument("--run", type=Path)
+    eval_promote.add_argument("--case", type=Path)
+    eval_promote.add_argument("--review", type=Path, required=True)
+    eval_promote.add_argument("--name", required=True)
+    eval_promote.add_argument("--allow-sensitive-config", action="store_true")
+    eval_promote.set_defaults(handler=_handle_eval_promote)
 
     retention = subparsers.add_parser("retention", help="retention helpers")
     retention_subparsers = retention.add_subparsers(dest="retention_command")
@@ -524,6 +609,203 @@ def _handle_replay(args: argparse.Namespace) -> int:
         return 2
     print(yaml.safe_dump(output, allow_unicode=True, sort_keys=False), end="")
     return 0
+
+
+def _handle_eval_capture(args: argparse.Namespace) -> int:
+    loaded = load_evaluation_config(args.config)
+    service = EvalService(loaded=loaded)
+    if not args.message_id:
+        rows = service.capture_candidates(
+            lookback_days=args.lookback_days,
+            limit=args.limit,
+        )
+        print(
+            yaml.safe_dump({"candidates": rows}, allow_unicode=True, sort_keys=False),
+            end="",
+        )
+        return 0
+    case_dir = service.capture_case(
+        message_id=args.message_id,
+        context_before=args.context_before,
+        context_after=args.context_after,
+        lookback_days=args.lookback_days,
+        label=args.label,
+        allow_sensitive_config=args.allow_sensitive_config,
+    )
+    print(
+        yaml.safe_dump(
+            {"captured_case": str(case_dir)}, allow_unicode=True, sort_keys=False
+        ),
+        end="",
+    )
+    return 0
+
+
+def _handle_eval_run_ingress(args: argparse.Namespace) -> int:
+    loaded = load_evaluation_config(args.config)
+    service = EvalService(loaded=loaded)
+    if args.golden is not None:
+        if any(
+            value is not None
+            for value in (
+                args.chat_id,
+                args.snapshot,
+                args.start,
+                args.end,
+                args.lookback_days,
+            )
+        ):
+            raise EvalError("--golden cannot be combined with live/snapshot options")
+        run_dir, exit_code = service.run_ingress_golden(
+            case_dir=args.golden,
+            label=args.label,
+            allow_sensitive_config=args.allow_sensitive_config,
+        )
+        print(
+            yaml.safe_dump(
+                {"run_dir": str(run_dir), "report": str(run_dir / "report.yaml")},
+                allow_unicode=True,
+                sort_keys=False,
+            ),
+            end="",
+        )
+        return exit_code
+    run_dir = service.run_ingress(
+        chat_id=args.chat_id,
+        snapshot=args.snapshot,
+        start=args.start,
+        end=args.end,
+        lookback_days=args.lookback_days,
+        label=args.label,
+        dry_run_backend=args.dry_run_backend,
+        allow_sensitive_config=args.allow_sensitive_config,
+    )
+    print(
+        yaml.safe_dump(
+            {
+                "run_dir": str(run_dir),
+                "review": str(run_dir / "REVIEW.md"),
+                "labels": str(run_dir / "labels.review.yaml"),
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        end="",
+    )
+    return 0
+
+
+def _handle_eval_run_router(args: argparse.Namespace) -> int:
+    loaded = load_evaluation_config(args.config)
+    _validate_case_args(args.case, args.cases)
+    _warn_eval_full_access_repeat(loaded, args.repeat)
+    service = EvalService(loaded=loaded)
+    if args.cases is not None:
+        run_dir, exit_code = service.run_router_cases(
+            cases_dir=args.cases,
+            label=args.label,
+            dry_run_backend=args.dry_run_backend,
+            repeat=args.repeat,
+            allow_sensitive_config=args.allow_sensitive_config,
+        )
+        payload = {"run_dir": str(run_dir), "summary": str(run_dir / "summary.yaml")}
+    else:
+        run_dir, exit_code = service.run_router(
+            case_dir=args.case,
+            label=args.label,
+            dry_run_backend=args.dry_run_backend,
+            repeat=args.repeat,
+            allow_sensitive_config=args.allow_sensitive_config,
+        )
+        payload = {"run_dir": str(run_dir), "report": str(run_dir / "report.yaml")}
+    print(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), end="")
+    return exit_code
+
+
+def _handle_eval_run_task_session(args: argparse.Namespace) -> int:
+    loaded = load_evaluation_config(args.config)
+    _validate_case_args(args.case, args.cases)
+    _warn_eval_full_access_repeat(loaded, args.repeat)
+    service = EvalService(loaded=loaded)
+    if args.cases is not None:
+        run_dir, exit_code = service.run_task_session_cases(
+            cases_dir=args.cases,
+            label=args.label,
+            dry_run_backend=args.dry_run_backend,
+            repeat=args.repeat,
+            allow_sensitive_config=args.allow_sensitive_config,
+        )
+        payload = {"run_dir": str(run_dir), "summary": str(run_dir / "summary.yaml")}
+    else:
+        run_dir, exit_code = service.run_task_session(
+            case_dir=args.case,
+            label=args.label,
+            dry_run_backend=args.dry_run_backend,
+            repeat=args.repeat,
+            allow_sensitive_config=args.allow_sensitive_config,
+        )
+        payload = {"run_dir": str(run_dir), "report": str(run_dir / "report.yaml")}
+    print(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), end="")
+    return exit_code
+
+
+def _handle_eval_run_full_chain(args: argparse.Namespace) -> int:
+    loaded = load_evaluation_config(args.config)
+    _validate_case_args(args.case, args.cases)
+    _warn_eval_full_access_repeat(loaded, args.repeat)
+    service = EvalService(loaded=loaded)
+    if args.cases is not None:
+        run_dir, exit_code = service.run_full_chain_cases(
+            cases_dir=args.cases,
+            label=args.label,
+            dry_run_backend=args.dry_run_backend,
+            repeat=args.repeat,
+            allow_sensitive_config=args.allow_sensitive_config,
+        )
+        payload = {"run_dir": str(run_dir), "summary": str(run_dir / "summary.yaml")}
+    else:
+        run_dir, exit_code = service.run_full_chain(
+            case_dir=args.case,
+            label=args.label,
+            dry_run_backend=args.dry_run_backend,
+            repeat=args.repeat,
+            allow_sensitive_config=args.allow_sensitive_config,
+        )
+        payload = {"run_dir": str(run_dir), "report": str(run_dir / "report.yaml")}
+    print(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), end="")
+    return exit_code
+
+
+def _handle_eval_promote(args: argparse.Namespace) -> int:
+    loaded = load_evaluation_config(args.config)
+    target_dir = EvalService(loaded=loaded).promote(
+        eval_type=args.eval_type,
+        run_dir=args.run,
+        case_dir=args.case,
+        review_path=args.review,
+        name=args.name,
+        allow_sensitive_config=args.allow_sensitive_config,
+    )
+    print(
+        yaml.safe_dump(
+            {"golden_case": str(target_dir)}, allow_unicode=True, sort_keys=False
+        ),
+        end="",
+    )
+    return 0
+
+
+def _validate_case_args(case: Path | None, cases: Path | None) -> None:
+    if (case is None) == (cases is None):
+        raise EvalError("provide exactly one of --case or --cases")
+
+
+def _warn_eval_full_access_repeat(loaded: LoadedConfig, repeat: int) -> None:
+    if loaded.config.tool_permissions == "full_access" and repeat > 1:
+        print(
+            "warning: full_access agent tools may repeat external side effects across eval trials",
+            file=sys.stderr,
+        )
 
 
 def _handle_retention_prune(args: argparse.Namespace) -> int:
