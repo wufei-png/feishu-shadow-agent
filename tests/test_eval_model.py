@@ -334,6 +334,46 @@ def test_resume_runs_real_setup_then_target_only_prompt(tmp_path: Path) -> None:
     assert trial["target"]["plan"]["prompt_message_ids"] == ["om_2"]
 
 
+def test_resume_setup_preserves_same_minute_message_position_order(
+    tmp_path: Path,
+) -> None:
+    loaded = _loaded(tmp_path)
+    first = _message("om_z", minute=1)
+    first["message_position"] = "9"
+    second = _message("om_a", minute=1)
+    second["message_position"] = "10"
+    target = _message("om_target", minute=2)
+    target["message_position"] = "11"
+    case = _golden_case(
+        tmp_path,
+        loaded.path,
+        "task-session-resume-position",
+        [first, second, target],
+        {
+            "schema_version": "eval_case_v1",
+            "case_type": "task-session",
+            "mode": "resume",
+            "setup_message_ids": ["om_z", "om_a"],
+            "target_message_id": "om_target",
+            "resources": [],
+        },
+        {
+            "schema_version": "task_session_labels_v1",
+            "answerability": "no_reply",
+            "watch_action": "keep_watching",
+        },
+    )
+    backend = StatefulNoReplyBackend()
+
+    run_dir, exit_code = EvalService(
+        loaded=loaded, backend_factory=lambda _: backend
+    ).run_task_session(case_dir=case, label=None, dry_run_backend=False)
+
+    assert exit_code == 0
+    trial = read_yaml(run_dir / "trials/001/report.yaml")
+    assert trial["setup"]["plan"]["prompt_message_ids"] == ["om_z", "om_a"]
+
+
 def test_router_rejects_target_already_seeded_in_task(tmp_path: Path) -> None:
     loaded = _loaded(tmp_path)
     case = _golden_case(

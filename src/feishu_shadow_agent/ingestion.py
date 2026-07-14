@@ -54,6 +54,18 @@ class ResourceQuotaDecision:
     raw: dict[str, Any] | None = None
 
 
+def normalize_message_sent_at(value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    if parsed.utcoffset() is None:
+        return parsed.astimezone().isoformat(timespec="seconds")
+    return value
+
+
 class MessageNormalizer:
     def __init__(self, *, owner_open_id: str):
         self.owner_open_id = owner_open_id
@@ -96,8 +108,8 @@ class MessageNormalizer:
         chat_type = _first_string(raw, "chat_type", "chatType") or default_chat_type
         if chat_type not in {"group", "p2p"}:
             chat_type = None
-        sent_at = _first_string(
-            raw, "create_time", "created_at", "sent_at", "timestamp"
+        sent_at = normalize_message_sent_at(
+            _first_string(raw, "create_time", "created_at", "sent_at", "timestamp")
         )
         thread_id = _thread_id(raw)
         reply_to_value = raw.get("reply_to") or raw.get("replyTo")
@@ -1167,6 +1179,13 @@ def _append_unique(values: list[str], value: str) -> None:
 def _resources(
     message_id: str, raw: dict[str, Any], content: dict[str, Any]
 ) -> list[ResourceRef]:
+    message_type = _first_string(
+        raw, "msg_type", "msgType", "message_type", "messageType"
+    )
+    if message_type == "merge_forward":
+        # Feishu renders forwarded child resources as text placeholders, but the
+        # message resource API cannot reliably download them from the container.
+        return []
     resources: dict[tuple[str, str], ResourceRef] = {}
     for node in _walk([raw, content]):
         if isinstance(node, dict):

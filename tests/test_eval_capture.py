@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -156,6 +157,117 @@ def test_capture_candidates_fetches_all_pages_before_global_limit(
     )
 
     assert [row["message_id"] for row in rows] == ["om_new", "om_old_2"]
+
+
+def test_capture_candidates_use_second_precision_search_window(
+    tmp_path: Path,
+) -> None:
+    loaded = _loaded_config(tmp_path)
+    windows: list[tuple[str, str]] = []
+
+    class RecordingClient(FakeLarkClient):
+        def search_messages(self, *, start: str, end: str, **kwargs):
+            windows.append((start, end))
+            return MessagePage([])
+
+    EvalService(loaded=loaded, lark_client=RecordingClient([])).capture_candidates(
+        lookback_days=7, limit=20
+    )
+
+    assert len(windows) == 2
+    assert all(
+        datetime.fromisoformat(value).microsecond == 0
+        for pair in windows
+        for value in pair
+    )
+
+
+def test_capture_accepts_lark_cli_local_timestamp(tmp_path: Path) -> None:
+    loaded = _loaded_config(tmp_path)
+    message = _message("om_local", minute=1, direct=True)
+    message["create_time"] = "2026-07-10 10:01"
+    service = EvalService(loaded=loaded, lark_client=FakeLarkClient([message]))
+
+    case = service.capture_case(
+        message_id="om_local",
+        context_before=0,
+        context_after=0,
+        lookback_days=2,
+        label="local-time",
+        allow_sensitive_config=False,
+    )
+    run_dir, exit_code = service.run_task_session(
+        case_dir=case,
+        label=None,
+        repeat=1,
+        dry_run_backend=True,
+    )
+
+    assert exit_code == 0
+    assert (run_dir / "report.yaml").is_file()
+    assert read_jsonl(case / "messages.jsonl")[0]["create_time"] == "2026-07-10 10:01"
+
+
+def test_capture_uses_relative_resource_output(tmp_path: Path) -> None:
+    loaded = _loaded_config(tmp_path)
+    message = _message("om_image", minute=1, direct=True)
+    message["text"] += " ![Image](img_fixture)"
+    outputs: list[str] = []
+
+    class ResourceClient(FakeLarkClient):
+        def download_resource(self, *, output: str, **kwargs):
+            outputs.append(output)
+            destination = loaded.base_dir / output
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(b"image fixture")
+            return LarkCliResult(argv=[], exit_code=0)
+
+    service = EvalService(loaded=loaded, lark_client=ResourceClient([message]))
+    case = service.capture_case(
+        message_id="om_image",
+        context_before=0,
+        context_after=0,
+        lookback_days=2,
+        label="relative-resource",
+        allow_sensitive_config=False,
+    )
+
+    assert len(outputs) == 1
+    assert not Path(outputs[0]).is_absolute()
+    assert not read_yaml(case / "metadata.yaml").get("resource_capture_errors")
+    assert (
+        len(read_yaml(case / "task_session.review.yaml")["scenario"]["resources"]) == 1
+    )
+
+
+def test_capture_resolves_p2p_source_when_mget_omits_chat_type(
+    tmp_path: Path,
+) -> None:
+    loaded = _loaded_config(tmp_path)
+    seed = _message("om_p2p", minute=1, direct=False)
+    seed.pop("chat_type")
+    searched = seed | {"chat_type": "p2p"}
+
+    class SourceClient(FakeLarkClient):
+        def search_messages(self, *, chat_id=None, chat_type=None, **kwargs):
+            assert chat_id == "oc_test"
+            assert chat_type is None
+            return MessagePage([searched])
+
+    service = EvalService(loaded=loaded, lark_client=SourceClient([seed]))
+    case = service.capture_case(
+        message_id="om_p2p",
+        context_before=0,
+        context_after=0,
+        lookback_days=2,
+        label="p2p-source",
+        allow_sensitive_config=False,
+    )
+
+    router = read_yaml(case / "router.review.yaml")
+    full_chain = read_yaml(case / "full_chain.review.yaml")
+    assert router["scenario"]["target"]["source"] == "p2p"
+    assert full_chain["scenario"]["target"]["source"] == "p2p"
 
 
 def test_capture_reads_minimal_task_fixture_from_production_store(

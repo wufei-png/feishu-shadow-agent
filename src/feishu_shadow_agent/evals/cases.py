@@ -8,7 +8,7 @@ from typing import Any, Literal
 from pydantic import ValidationError
 
 from ..config import LoadedConfig
-from ..ingestion import MessageNormalizer
+from ..ingestion import MessageNormalizer, normalize_message_sent_at
 from .artifacts import (
     EvalError,
     file_sha256,
@@ -180,8 +180,10 @@ def message_sent_at(raw: dict[str, Any]) -> str:
     for key in ("create_time", "created_at", "sent_at", "timestamp"):
         value = raw.get(key)
         if isinstance(value, str) and value:
-            _parse_aware_datetime(value)
-            return value
+            normalized = normalize_message_sent_at(value)
+            assert normalized is not None
+            _parse_aware_datetime(normalized)
+            return normalized
     raise EvalError(f"message {message_id_from_raw(raw)} is missing sent_at")
 
 
@@ -242,11 +244,13 @@ def _validate_scenario_time_order(
             ]
             _require_strictly_increasing(values, "task-session message_ids")
         else:
-            setup = [
-                _message_datetime(raw_messages[item])
-                for item in scenario.setup_message_ids or []
+            setup_raws = [
+                raw_messages[item] for item in scenario.setup_message_ids or []
             ]
-            _require_strictly_increasing(setup, "task-session setup_message_ids")
+            _require_increasing_message_order(
+                setup_raws, "task-session setup_message_ids"
+            )
+            setup = [_message_datetime(raw) for raw in setup_raws]
             target = _message_datetime(raw_messages[str(scenario.target_message_id)])
             if setup[-1] >= target:
                 raise EvalError("task-session target must be later than setup messages")
@@ -334,6 +338,23 @@ def _require_strictly_increasing(values: list[datetime], field: str) -> None:
         for current, following in zip(values, values[1:], strict=False)
     ):
         raise EvalError(f"{field} must be strictly increasing by sent_at")
+
+
+def _require_increasing_message_order(raws: list[dict[str, Any]], field: str) -> None:
+    keys = [(_message_datetime(raw), _message_position(raw)) for raw in raws]
+    if any(
+        current >= following for current, following in zip(keys, keys[1:], strict=False)
+    ):
+        raise EvalError(f"{field} must follow sent_at and message_position order")
+
+
+def _message_position(raw: dict[str, Any]) -> int:
+    value = raw.get("message_position")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return 0
 
 
 def _safe_path_part(value: str) -> str:

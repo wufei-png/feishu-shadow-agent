@@ -264,6 +264,21 @@ def test_normalizer_marks_mentions_sender_roles_and_resources() -> None:
         ),
         default_chat_type="group",
     )
+    merge_forward = normalizer.normalize(
+        {
+            **_message(
+                "om_7",
+                text=(
+                    "<forwarded_messages>\n"
+                    "[Image: img_v3_0212t_forwarded-123]\n"
+                    "RuntimeError: engine failed\n"
+                    "</forwarded_messages>"
+                ),
+            ),
+            "msg_type": "merge_forward",
+        },
+        default_chat_type="p2p",
+    )
 
     assert direct.direct_mention is True
     assert direct.resources[0].file_key == "img_1"
@@ -285,6 +300,8 @@ def test_normalizer_marks_mentions_sender_roles_and_resources() -> None:
         ("image", "img_v3_0212t_abc-123"),
         ("file", "file_v2_xyz-456"),
     }
+    assert "RuntimeError: engine failed" in merge_forward.text
+    assert merge_forward.resources == []
 
 
 def test_group_ingest_drains_pages_sorts_dedupes_and_advances_checkpoint(

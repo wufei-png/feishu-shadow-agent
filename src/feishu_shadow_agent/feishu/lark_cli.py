@@ -339,16 +339,18 @@ class LarkCliClient:
     def search_messages(
         self,
         *,
-        chat_type: str,
+        chat_type: str | None,
         is_at_me: bool,
         start: str | None,
         end: str | None,
+        chat_id: str | None = None,
         page_token: str | None = None,
         query: str = "",
         page_size: int = 50,
     ) -> MessagePage:
         result = self.run_json(
             self.build_messages_search(
+                chat_id=chat_id,
                 chat_type=chat_type,
                 is_at_me=is_at_me,
                 start=start,

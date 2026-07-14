@@ -346,8 +346,9 @@ def _seed_task_messages(
 ) -> TaskRecord:
     if not messages:
         raise EvalError("cannot seed a task without messages")
+    storage_times = _task_message_storage_times(messages)
     first = messages[0]
-    runtime.clock.set(_message_time(first))
+    runtime.clock.set(storage_times[0])
     runtime.store.upsert_message(first)
     task = runtime.store.create_task_for_message(
         first,
@@ -361,8 +362,8 @@ def _seed_task_messages(
             )
         ),
     )
-    for message in messages[1:]:
-        runtime.clock.set(_message_time(message))
+    for message, storage_time in zip(messages[1:], storage_times[1:], strict=True):
+        runtime.clock.set(storage_time)
         runtime.store.upsert_message(message)
         runtime.store.attach_message_to_task(
             task.id,
@@ -372,6 +373,18 @@ def _seed_task_messages(
             ),
         )
     return runtime.store.get_task_by_id(task.id)
+
+
+def _task_message_storage_times(messages: list[NormalizedMessage]) -> list[str]:
+    values: list[str] = []
+    previous: datetime | None = None
+    for message in messages:
+        current = _parse_datetime(_message_time(message))
+        if previous is not None and current <= previous:
+            current = previous + timedelta(microseconds=1)
+        values.append(current.isoformat())
+        previous = current
+    return values
 
 
 def _seed_resource_rows(

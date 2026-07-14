@@ -8,7 +8,7 @@ from typing import Any
 
 from ..config import LoadedConfig
 from ..feishu.lark_cli import LarkCliClient
-from ..ingestion import MessageNormalizer
+from ..ingestion import MessageNormalizer, normalize_message_sent_at
 from ..paths import resolve_relative_path
 from ..types import NormalizedMessage
 from .artifacts import (
@@ -123,7 +123,7 @@ class CaptureService:
             metadata = read_yaml(case_dir / "metadata.yaml")
             metadata["resource_capture_errors"] = resource_errors
             write_yaml(case_dir / "metadata.yaml", metadata)
-        source = _infer_source(self.normalizer.normalize(seed))
+        source = self._resolve_source(seed)
         target_resources = [
             fixture.model_dump(mode="json")
             for fixture in resource_fixtures
@@ -180,6 +180,29 @@ class CaptureService:
         )
         _write_review_markdown(case_dir, resource_errors=resource_errors)
         return case_dir
+
+    def _resolve_source(self, seed: dict[str, Any]) -> str:
+        message = self.normalizer.normalize(seed)
+        if message.chat_type is not None:
+            return _infer_source(message)
+        sent_at = _parse_datetime(_raw_sent_at(seed))
+        if not message.chat_id or sent_at is None:
+            return _infer_source(message)
+        page = self.lark_client.search_messages(
+            chat_id=message.chat_id,
+            chat_type=None,
+            is_at_me=False,
+            start=(sent_at - timedelta(minutes=1)).isoformat(),
+            end=(sent_at + timedelta(minutes=1)).isoformat(),
+        )
+        for raw in page.items:
+            if message_id_from_raw(raw) != message.message_id:
+                continue
+            chat_type = raw.get("chat_type") or raw.get("chatType")
+            return _infer_source(
+                self.normalizer.normalize(seed, default_chat_type=chat_type)
+            )
+        return _infer_source(message)
 
     def _capture_context(
         self,
@@ -366,12 +389,13 @@ class CaptureService:
                 )
                 destination = resource_fixture_path(case_dir, provisional)
                 destination.parent.mkdir(parents=True, exist_ok=True)
+                relative_destination = destination.relative_to(self.loaded.base_dir)
                 try:
                     result = self.lark_client.download_resource(
                         message_id=resource.message_id,
                         file_key=resource.file_key,
                         resource_type=resource.resource_type,
-                        output=str(destination),
+                        output=relative_destination.as_posix(),
                     )
                 except Exception as exc:  # noqa: BLE001
                     errors.append(
@@ -519,7 +543,7 @@ def _infer_source(message: Any) -> str:
 
 
 def _lookback_window(days: int) -> tuple[str, str]:
-    end = datetime.now().astimezone()
+    end = datetime.now().astimezone().replace(microsecond=0)
     return (end - timedelta(days=days)).isoformat(), end.isoformat()
 
 
@@ -547,7 +571,7 @@ def _raw_sent_at(raw: dict[str, Any]) -> str | None:
     for key in ("create_time", "created_at", "sent_at", "timestamp"):
         value = raw.get(key)
         if isinstance(value, str) and value:
-            return value
+            return normalize_message_sent_at(value)
     return None
 
 
