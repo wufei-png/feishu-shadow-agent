@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MessageSource = Literal["group_at_me", "active_watch", "p2p"]
 TaskStatus = Literal["watching", "closed", "closed_by_owner", "human_taken_over"]
@@ -163,6 +163,12 @@ class DraftTaskSessionLabels(EvalModel):
     reference_answer: str | None = None
     answerability: Answerability | None = None
     watch_action: WatchAction | None = None
+    expected_skills: list[str] = Field(default_factory=list)
+
+    @field_validator("expected_skills")
+    @classmethod
+    def validate_expected_skills(cls, value: list[str]) -> list[str]:
+        return _validate_skill_names(value)
 
 
 class TaskSessionLabels(EvalModel):
@@ -170,6 +176,12 @@ class TaskSessionLabels(EvalModel):
     reference_answer: str | None = None
     answerability: Answerability
     watch_action: WatchAction
+    expected_skills: list[str] = Field(default_factory=list)
+
+    @field_validator("expected_skills")
+    @classmethod
+    def validate_expected_skills(cls, value: list[str]) -> list[str]:
+        return _validate_skill_names(value)
 
     @model_validator(mode="after")
     def validate_reference_answer(self) -> TaskSessionLabels:
@@ -383,3 +395,11 @@ def _validate_reference(
 def _require_unique(values: list[str], field: str) -> None:
     if len(values) != len(set(values)):
         raise ValueError(f"{field} must not contain duplicates")
+
+
+def _validate_skill_names(values: list[str]) -> list[str]:
+    normalized = [value.strip() for value in values]
+    if any(not value for value in normalized):
+        raise ValueError("expected_skills must not contain empty names")
+    _require_unique(normalized, "expected_skills")
+    return normalized

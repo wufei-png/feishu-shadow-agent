@@ -40,6 +40,10 @@ _Avoid_: waiting approval status, task status
 A bot private message to the owner that carries the minimum context and commands needed to resolve an Approval Blocker without opening the Operator Surface.
 _Avoid_: alert stub, raw dispatch action, Console-only pointer
 
+**Owner Escalation**:
+The system ending automated ownership of a task and notifying the owner that manual handling is required. It requests a handoff; unlike Human Takeover, it does not claim that the owner has already acted.
+_Avoid_: Human Takeover, blocked task, failed task
+
 **Action Queue**:
 The prioritized operator-facing set of items that need attention, such as pending approvals, overdue approvals, failed dispatch actions, stale sending actions, and blocking health or policy initialization issues.
 _Avoid_: Metrics dashboard, raw status list, activity feed
@@ -63,6 +67,14 @@ _Avoid_: Store helper, UI callback
 **Agent Input Contract**:
 The product boundary that defines what information an agent turn can see and which decision or output each field is allowed to influence.
 _Avoid_: Prompt dump, debug metadata, everything we know
+
+**Reply Context**:
+The minimal Task Session input that identifies the current and root messages, allowed reply targets, and optional chat type without carrying operational counts or conversation text.
+_Avoid_: Metadata block, task snapshot, audit context
+
+**Output Contract**:
+The compact model-visible description of the final Task Session fields and their cross-field rules; provider-native schemas and Python validation remain the enforcement boundary.
+_Avoid_: Full prompt schema, draft response, intermediate status
 
 **Message Acquisition**:
 The retrieval of raw Feishu messages through source-specific Lark searches and chat or thread windows, including active-watch task and watch-key matching. It determines which raw messages and acquisition sources are available for local evaluation, not whether they belong to a task.
@@ -95,6 +107,26 @@ _Avoid_: Retry, resumed run, repeated judge call
 **Trial Evidence Bundle**:
 The retained report, event log, and optional full prompts for one Evaluation Trial. Rebuildable SQLite state and resource copies are deleted after evidence has been materialized.
 _Avoid_: Temporary Eval Store, production snapshot, full runtime backup
+
+**Expected Skill Set**:
+The human-reviewed Task Session label listing which skills an Agent Backend should load for an Evaluation Scenario. It is evaluation truth and never part of the Agent Input Contract.
+_Avoid_: Explicit skill injection, production skill config, prompt hint
+
+**Discoverable Skill**:
+A skill whose identity and description are available to an Agent Backend for optional selection. Discoverability does not guarantee that the skill is activated for a Task Session.
+_Avoid_: Preloaded skill, active skill, Expected Skill Set
+
+**Native Skill Request**:
+The provider-specific configuration that requests a skill for a Task Session. Hermes uses configured paths with its native CLI; Codex uses a preinstalled skill name. A request is not evidence that the runtime loaded the skill.
+_Avoid_: Explicit Skill Activation, loaded skill, Expected Skill Set
+
+**Explicit Context Path**:
+An absolute path shown in the initial Task Session prompt for a non-native skill that the Agent may read when needed. It is explicitly marked as not loaded and is not a Native Skill Request.
+_Avoid_: Native skill, loaded skill, installed skill
+
+**Evaluation Skill Trace**:
+The sanitized Trial Evidence that separates requested skills from skills proven loaded by runtime-native session evidence, and records which catalog repositories were read. It is diagnostic evidence and never part of production prompts, replies, or audit responses.
+_Avoid_: Context trace, model self-report, production audit trace
 
 **Evaluation Resource Fixture**:
 A successfully captured Feishu file or image referenced by an Evaluation Scenario. Its bytes and checksum are copied into each trial so production resource preflight and prompt construction can run without Feishu network access.

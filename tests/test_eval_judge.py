@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from feishu_shadow_agent.agent_backend import AgentRunResult
 from feishu_shadow_agent.evals.artifacts import EvalError
-from feishu_shadow_agent.evals.judge import run_semantic_judge
+from feishu_shadow_agent.evals.judge import (
+    build_semantic_judge_prompt,
+    run_semantic_judge,
+)
 
 
 class JudgeBackend:
@@ -63,3 +67,15 @@ def test_semantic_judge_invalid_contract_is_runtime_error() -> None:
             visible_context={},
             cwd=None,
         )
+
+
+def test_semantic_judge_prompt_contains_only_scoring_evidence() -> None:
+    prompt = build_semantic_judge_prompt(
+        reference_answer="事实 A",
+        candidate_answer="事实 A",
+        visible_context={},
+    )
+
+    payload = json.loads(prompt)
+    assert "expected_decision" not in payload
+    assert "candidate_decision" not in payload

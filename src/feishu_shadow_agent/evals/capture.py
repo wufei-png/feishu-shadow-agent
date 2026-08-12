@@ -158,6 +158,7 @@ class CaptureService:
                     "reference_answer": None,
                     "answerability": None,
                     "watch_action": None,
+                    "expected_skills": [],
                 },
             },
         )

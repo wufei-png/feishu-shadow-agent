@@ -26,6 +26,7 @@ from .dry_run import DryRunBackend
 from .full_chain_eval import run_full_chain_trial
 from .router_eval import run_router_trial
 from .runtime import TrialRuntime
+from .skill_trace import build_skill_trace
 from .task_session_eval import run_task_session_trial
 
 BackendFactory = Callable[[LoadedConfig], AgentBackend]
@@ -251,6 +252,46 @@ class ModelEvalService:
                     trial["prompt_hashes"] = traced_backend.prompt_hashes()
                     if self.loaded.config.debug.save_full_agent_io:
                         traced_backend.write_prompts(evidence_dir / "prompts")
+                if eval_type == "task-session":
+                    expected_skills = list(
+                        getattr(case.labels, "expected_skills", []) or []
+                    )
+                    requested_skills = (
+                        []
+                        if dry_run_backend or traced_backend is None
+                        else traced_backend.requested_skill_names()
+                    )
+                    try:
+                        trial["skill_trace"] = build_skill_trace(
+                            backend_provider=str(
+                                self.loaded.config.agent_backend.provider
+                                if traced_backend is None
+                                else traced_backend.provider
+                            ),
+                            session_ids=[]
+                            if traced_backend is None
+                            else traced_backend.task_session_ids(),
+                            expected_skills=expected_skills,
+                            hermes_path=self.loaded.config.agent_backend.hermes.path,
+                            timeout_seconds=self.loaded.config.health.timeout_seconds,
+                            dry_run_backend=dry_run_backend,
+                            requested_skills=requested_skills,
+                        )
+                    except Exception:  # noqa: BLE001
+                        trial["skill_trace"] = {
+                            "status": "export_error",
+                            "error_code": "internal_error",
+                            "expected_skills": expected_skills,
+                            "requested_skills": requested_skills,
+                            "runtime_loaded_skills": [],
+                            "requested_not_loaded_skills": requested_skills,
+                            "missing_skills": expected_skills,
+                            "unexpected_skills": [],
+                            "skill_view_calls": 0,
+                            "repository_reads": [],
+                            "session_models": [],
+                            "session_providers": [],
+                        }
                 if runtime is not None:
                     try:
                         runtime.close()
@@ -359,7 +400,7 @@ def _aggregate_trials(
         case_passed = None
     else:
         case_passed = passed == len(trials)
-    return {
+    report = {
         "passed_trials": passed,
         "failed_trials": failed,
         "error_trials": errors,
@@ -367,6 +408,41 @@ def _aggregate_trials(
         "pass_rate": None if not trials else round(passed / len(trials), 4),
         "semantic_difference_counts": differences,
         "passed": case_passed,
+    }
+    skill_trace_summary = _aggregate_skill_traces(trials)
+    if skill_trace_summary is not None:
+        report["skill_trace_summary"] = skill_trace_summary
+    return report
+
+
+def _aggregate_skill_traces(trials: list[dict[str, Any]]) -> dict[str, Any] | None:
+    traces = [row.get("skill_trace") for row in trials]
+    traces = [row for row in traces if isinstance(row, dict)]
+    if not traces:
+        return None
+    status_counts: dict[str, int] = {}
+    expected = loaded = matched = missing = unexpected = 0
+    for trace in traces:
+        status = str(trace.get("status") or "unavailable")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        if status != "available":
+            continue
+        expected_skills = set(trace.get("expected_skills") or [])
+        runtime_loaded_skills = set(trace.get("runtime_loaded_skills") or [])
+        expected += len(expected_skills)
+        loaded += len(runtime_loaded_skills)
+        matched += len(expected_skills & runtime_loaded_skills)
+        missing += len(expected_skills - runtime_loaded_skills)
+        unexpected += len(runtime_loaded_skills - expected_skills)
+    return {
+        "status_counts": status_counts,
+        "expected_skill_occurrences": expected,
+        "loaded_skill_occurrences": loaded,
+        "matched_skill_occurrences": matched,
+        "missing_skill_occurrences": missing,
+        "unexpected_skill_occurrences": unexpected,
+        "precision": None if loaded == 0 else round(matched / loaded, 4),
+        "recall": None if expected == 0 else round(matched / expected, 4),
     }
 
 

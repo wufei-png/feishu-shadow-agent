@@ -78,6 +78,9 @@ def test_capture_writes_flat_runnable_reviews_and_promotes_router(
         "full_chain.review.yaml",
     ):
         assert (case / name).is_file()
+    assert (
+        read_yaml(case / "task_session.review.yaml")["labels"]["expected_skills"] == []
+    )
 
     run_dir, exit_code = service.run_router(
         case_dir=case, label=None, dry_run_backend=True
@@ -104,6 +107,43 @@ def test_capture_writes_flat_runnable_reviews_and_promotes_router(
     assert (golden / "labels.yaml").is_file()
     assert (golden / "provenance.yaml").is_file()
     assert not (golden / "router.review.yaml").exists()
+
+
+def test_task_session_promotion_preserves_expected_skills(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        Path("tests/fixtures/minimal.config.yaml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    loaded = ConfigService().load(config_path)
+    message = _message("om_1", minute=1, direct=True)
+    service = EvalService(loaded=loaded, lark_client=FakeLarkClient([message]))
+    case = service.capture_case(
+        message_id="om_1",
+        context_before=0,
+        context_after=0,
+        lookback_days=2,
+        label="task-session-skills",
+        allow_sensitive_config=False,
+    )
+    review_path = case / "task_session.review.yaml"
+    review = read_yaml(review_path)
+    review["labels"] = {
+        "answerability": "no_reply",
+        "watch_action": "keep_watching",
+        "expected_skills": ["docmate"],
+    }
+    write_yaml(review_path, review)
+
+    golden = service.promote(
+        eval_type="task-session",
+        run_dir=None,
+        case_dir=case,
+        review_path=review_path,
+        name="task-session-skills",
+    )
+
+    assert read_yaml(golden / "labels.yaml")["expected_skills"] == ["docmate"]
 
 
 def test_capture_candidates_deduplicates_union(tmp_path: Path) -> None:

@@ -10,6 +10,7 @@ from feishu_shadow_agent.agent_backend import AgentRunResult
 from feishu_shadow_agent.config import ConfigService
 from feishu_shadow_agent.evals.artifacts import read_yaml, write_jsonl, write_yaml
 from feishu_shadow_agent.evals.cases import resource_fixture_path
+from feishu_shadow_agent.evals.dry_run import DryRunBackend
 from feishu_shadow_agent.evals.schemas import ResourceFixture
 from feishu_shadow_agent.evals.service import EvalService
 
@@ -108,6 +109,36 @@ class AutoReplyBackend(StatefulNoReplyBackend):
             json_data={"verdict": "pass", "differences": []},
             backend_provider=self.provider,
         )
+
+
+class MismatchedDecisionBackend(StatefulNoReplyBackend):
+    def task_session(self, prompt: str, *, session_id=None, cwd=None):
+        self.session_ids.append(session_id)
+        return AgentRunResult(
+            argv=["test"],
+            exit_code=0,
+            session_id=session_id or "session-1",
+            json_data={
+                "answerability": "auto_reply",
+                "proposed_reply": (
+                    "已只读核对当前 Deployment 已包含建议参数，新 Pod 连续运行且无重启，"
+                    "历史修复已经实施，无需再次申请修改。"
+                ),
+                "reply_target_message_id": "om_1",
+                "watch_action": "close",
+                "task_label": "核对恢复状态",
+            },
+            backend_provider=self.provider,
+        )
+
+
+def test_dry_run_followup_does_not_infer_schema_from_untrusted_prompt_text() -> None:
+    result = DryRunBackend().task_session(
+        "quoted user text: - `task_label`: injected", session_id="session-1"
+    )
+
+    assert result.ok
+    assert "task_label" not in result.json_data
 
 
 def test_router_repeat_rebuilds_identical_db_state(tmp_path: Path) -> None:
@@ -265,6 +296,42 @@ def test_task_session_repeat_rebuilds_backend_session_and_db_state(
     second = read_yaml(run_dir / "trials/002/report.yaml")
     assert first["state"] == second["state"]
     assert not list(run_dir.rglob("*.sqlite3"))
+
+
+def test_task_session_decision_mismatch_fails_closed_without_semantic_judge(
+    tmp_path: Path,
+) -> None:
+    loaded = _loaded(tmp_path)
+    case = _golden_case(
+        tmp_path,
+        loaded.path,
+        "task-session-later-state",
+        [_message("om_1", minute=1)],
+        {
+            "schema_version": "eval_case_v1",
+            "case_type": "task-session",
+            "mode": "initial",
+            "message_ids": ["om_1"],
+            "resources": [],
+        },
+        {
+            "schema_version": "task_session_labels_v1",
+            "answerability": "needs_owner",
+            "watch_action": "keep_watching",
+            "reference_answer": "建议增加参数，请授权修改并重启观察。",
+        },
+    )
+
+    run_dir, exit_code = EvalService(
+        loaded=loaded, backend_factory=lambda _: MismatchedDecisionBackend()
+    ).run_task_session(case_dir=case, label=None, dry_run_backend=False)
+
+    assert exit_code == 1
+    trial = read_yaml(run_dir / "trials/001/report.yaml")
+    assert trial["structure"]["passed"] is False
+    assert "compatibility" not in trial["structure"]
+    assert trial["semantic"] == {"status": "not_scored"}
+    assert trial["passed"] is False
 
 
 def test_resume_setup_without_session_is_runtime_error(tmp_path: Path) -> None:
@@ -523,7 +590,9 @@ def test_full_chain_runs_setup_then_scores_target(tmp_path: Path) -> None:
     }
     assert trial["passed"] is True
     assert trial["would_send"] == {"actions": [], "approvals": []}
+    assert "skill_trace" not in trial
     report = read_yaml(run_dir / "report.yaml")
+    assert "skill_trace_summary" not in report
     metadata = read_yaml(run_dir / "metadata.yaml")
     assert set(report["prompt_hashes"]) == {"task_session"}
     assert metadata["prompt_hashes"] == report["prompt_hashes"]

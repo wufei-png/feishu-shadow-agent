@@ -194,9 +194,14 @@ schema_version: task_session_labels_v1
 answerability: auto_reply | needs_owner | no_reply
 watch_action: keep_watching | close
 reference_answer: "标准答案"
+expected_skills: [docmate]
 ```
 
-`auto_reply` / `needs_owner` 必须有非空 `reference_answer`；`no_reply` 必须省略。程序先检查 answerability、watch action、reply target、空回复、initial task label 和禁止 mention。结构合法后，semantic judge 只判断事实差异：omission、unsupported addition、contradiction、overcommitment。只有 `verdict: pass` 通过。
+`auto_reply` / `needs_owner` 必须有非空 `reference_answer`；`no_reply` 必须省略。程序先检查 answerability、watch action、reply target、空回复、initial task label 和禁止 mention。只有结构合法后才运行 semantic judge；answerability 或 watch action 不匹配时直接失败，不能仅根据候选回答中自述的后续核验覆盖结构标签。semantic judge 只输出 omission、unsupported addition、contradiction、overcommitment；只有 `verdict: pass` 通过。
+
+新 case 应尽量冻结不依赖运行日期的证据和期望，避免把“某个 Pod 当前是否仍存在、当前运行多久、线上参数是否后来改变”设计成唯一正确答案。无法避免外部状态漂移时，应重新 capture 或人工更新标签；在引入可独立验证的证据链之前，评分保持 fail closed。
+
+`expected_skills` 是仅用于 Task Session 评测的人工标签，默认 `[]`。名称必须非空且不能重复。它不会进入生产 Task Session prompt、输出 schema、飞书回复或生产 `agent_audits.response_json`，也不会发送给被评测 Agent。旧 draft/golden 未包含该字段时按空列表读取。
 
 ## 6. Full Chain
 
@@ -247,7 +252,32 @@ trials/<n>/events.jsonl
 trials/<n>/prompts/   # 仅 debug.save_full_agent_io: true
 ```
 
+真实 Hermes Task Session trial 还会从本轮 `AgentRunResult.session_id` 去重导出 `--redact` session，并只在 `trials/<n>/report.yaml` 保留净化后的 Evaluation Skill Trace：
+
+```yaml
+skill_trace:
+  status: available | unavailable | unsupported_backend | export_error
+  expected_skills: [docmate]
+  requested_skills: [docmate]
+  runtime_loaded_skills: [docmate]
+  requested_not_loaded_skills: []
+  missing_skills: []
+  unexpected_skills: []
+  skill_view_calls: 1
+  repository_reads:
+    - repository: viper-devops-docs
+      paths: [docs/troubleshooting.md]
+  session_models: [gpt-5.6-terra]
+  session_providers: [openai-codex]
+```
+
+`requested_skills` 记录本次 Task Session 配置或请求的 provider-native skill；它不构成加载证据。`runtime_loaded_skills` 只记录运行时证据：Hermes redacted session export 中的 `skill_view`，或 Codex 本地 session JSONL 中由原生 `$skill` 解析产生的 `<skill>` 输入。`requested_not_loaded_skills` 是 requested 与 runtime evidence 的差集；`missing_skills`、`unexpected_skills` 以及汇总 precision/recall 只使用 expected 与 `runtime_loaded_skills`，不会因为配置了 skill 而提高指标。
+
+报告不保存 session id、完整导出、完整 Codex session、shell 命令、绝对用户目录、认证信息或工具结果。`session_models` / `session_providers` 只记录 session 中的实际运行值，配置中的 model/provider 仍可保持 `null`。Dry-run backend 记为 `unsupported_backend`；没有可导出或可定位的 session 记为 `unavailable`；Hermes export 命令失败、超时或 session JSONL 非法时记为 `export_error`，不会伪造空轨迹。Codex trace 只读取本机对应 session id 的 JSONL 并提取安全的 skill/model/provider 名称，不复制 prompt、tool input/output 或路径到 eval report。
+
 证据写入后，无论成功或失败都会删除访问别名、临时 DB 和 trial-local resource；`.trial-slots` 中只保留不含业务数据的锁文件。报告聚合 `passed_trials`、`failed_trials`、`error_trials`、`pass_rate` 和 semantic difference counts；golden 只有全部 trials 通过才通过。
+
+Task Session case report 另行聚合 `skill_trace_summary` 的状态计数、missing/unexpected skill occurrences，以及可用轨迹上的 precision/recall。技能轨迹只用于诊断；最终 `passed` 仍只由现有结构评分与 semantic judge 决定。
 
 该边界保证 eval-owned DB 隔离和可重建，不保证模型输出逐字一致，也不保证 `full_access` Agent 工具外部副作用幂等。`full_access + --repeat > 1` 会输出非阻断警告。
 

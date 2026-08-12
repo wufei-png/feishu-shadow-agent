@@ -15,6 +15,7 @@ class TracedAgentBackend:
         self.backend = backend
         self.provider = backend.provider
         self._prompts: dict[str, list[str]] = {}
+        self._task_session_ids: list[str] = []
 
     def task_router(
         self, prompt: str, *, cwd: str | Path | None = None
@@ -30,7 +31,10 @@ class TracedAgentBackend:
         cwd: str | Path | None = None,
     ) -> AgentRunResult:
         self._record("task_session", prompt)
-        return self.backend.task_session(prompt, session_id=session_id, cwd=cwd)
+        result = self.backend.task_session(prompt, session_id=session_id, cwd=cwd)
+        if result.session_id and result.session_id not in self._task_session_ids:
+            self._task_session_ids.append(result.session_id)
+        return result
 
     def structured_output(
         self,
@@ -71,6 +75,15 @@ class TracedAgentBackend:
             prompt_type: _ordered_prompt_hash(prompts)
             for prompt_type, prompts in self._prompts.items()
         }
+
+    def task_session_ids(self) -> list[str]:
+        return list(self._task_session_ids)
+
+    def requested_skill_names(self) -> list[str]:
+        getter = getattr(self.backend, "requested_skill_names", None)
+        if not callable(getter):
+            return []
+        return list(getter())
 
     def write_prompts(self, directory: Path) -> None:
         if not self._prompts:

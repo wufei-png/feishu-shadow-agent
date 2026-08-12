@@ -70,7 +70,7 @@ def build_semantic_judge_prompt(
     candidate_answer: str,
     visible_context: dict[str, Any],
 ) -> str:
-    payload = {
+    payload: dict[str, Any] = {
         "instruction": (
             "Compare the candidate answer with the reference answer using only factual "
             "consistency and task completion. Ignore tone and wording differences. Report "

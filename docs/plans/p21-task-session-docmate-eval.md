@@ -102,7 +102,9 @@ labels:
    skill_trace:
      status: available | unavailable | unsupported_backend | export_error
      expected_skills: [docmate]
-     loaded_skills: [docmate]
+     requested_skills: [docmate]
+     runtime_loaded_skills: [docmate]
+     requested_not_loaded_skills: []
      missing_skills: []
      unexpected_skills: []
      skill_view_calls: 1
