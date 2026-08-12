@@ -60,18 +60,16 @@ class ContextAccessBuilder:
     def task_session_context_access(
         self,
         *,
-        message: NormalizedMessage,
         task: TaskRecord,
     ) -> dict[str, Any] | None:
         context = self.base_context_access()
         if context is None:
             return None
-        context["query_scope"] = {
-            "current_message_id": message.message_id,
-            "task": context_task_card(task),
+        return {
+            "read_only_uri": context["read_only_uri"],
+            "allowed_tables": context["allowed_tables"],
+            "query_scope": {"task": {"id": task.id}},
         }
-        context["snapshot"] = self.task_context_snapshot([task])
-        return context
 
     def base_context_access(self) -> dict[str, Any] | None:
         path = self.store.path.expanduser()

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -8,16 +7,6 @@ from pydantic import BaseModel
 
 from ..agent_backend import AgentRunResult
 from .schemas import IngressJudgeOutput, SemanticJudgeOutput
-
-
-def _prompt_requests_task_label(prompt: str) -> bool:
-    try:
-        payload = json.loads(prompt)
-    except json.JSONDecodeError:
-        return False
-    return "task_label" in json.dumps(
-        payload.get("output_schema", {}), ensure_ascii=False
-    )
 
 
 class DryRunBackend:
@@ -48,7 +37,7 @@ class DryRunBackend:
             "reply_target_message_id": None,
             "watch_action": "keep_watching",
         }
-        if _prompt_requests_task_label(prompt):
+        if session_id is None:
             data["task_label"] = "dry-run"
         return self._result(
             "task_session", data, session_id=session_id or "dry-run-session"

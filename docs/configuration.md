@@ -86,7 +86,7 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `agent_backend.codex.skills` | list[string] | `[]` | 已由部署环境安装到 Codex 原生发现范围的 skill 名称。名称只能使用小写字母、数字和内部连字符，最长 64 字符；新建 Task Session prompt 最后一行追加 `$name`。配置表示 requested/configured，不代表 runtime loaded。 |
 | `agent_backend.claude_code.path` | string/null | `null` | 指定 Claude Code CLI 路径；`null` 使用当前 `PATH`。 |
 | `agent_backend.claude_code.model` | string/null | `null` | 可选 Claude Code model 覆盖；`null` 时由 Claude Code CLI 决定。 |
-| `agent_backend.claude_code.timeout_seconds` | int `> 0` | `60` | Claude Code 子进程调用和 Claude Code readiness 探测超时。 |
+| `agent_backend.claude_code.timeout_seconds` | int `> 0`/null | `null` | Claude Code Agent 子进程超时；`null` 不设置 wall-clock 截止时间。readiness 探测使用 `health.timeout_seconds`。 |
 | `reply_policy.p2p_auto_reply` | bool | `true` | 导入 Product Policy Store 后，P2P 私聊在回复 gate 通过时是否允许自动回复。 |
 | `reply_policy.unknown_group_auto_reply` | bool | `false` | 导入 Product Policy Store 后，未显式配置的群是否允许自动回复；不影响资源下载、bot 是否入群或 user fallback。 |
 | `reply_postprocess.enabled` | bool | `false` | 是否对 agent 生成的候选回复做一次性表达改写。关闭时不检查 profile/skill 路径，也不调用 backend postprocess。开启时至少需要启用 `owner_style` 或 `humanizer_zh` 之一。 |
@@ -148,6 +148,8 @@ Console 覆盖 Dashboard、Approvals、Tasks、Dispatch、Policy、Settings 和 
 
 资源下载先通过 chat policy，再受本地限额保护。单文件超过 `storage.max_resource_bytes` 时，刚下载的文件会被删除，`resources.download_status` 置为 `too_large`，`path` 置空，并把尝试路径和大小写入 `raw_json`。`resource_dir` 用量超过 `storage.max_resource_dir_bytes` 时，刚下载文件会被删除，当前和后续资源标记为 `quota_exceeded` 且 `path` 置空。`too_large` / `quota_exceeded` 会阻塞 task session agent，并创建 owner notification；第一版不让 agent 在缺少资源的情况下语义降级回答。
 
+Agent backend 的默认 `timeout_seconds: null` 允许模型完成配置的 turns 和工具探索，不会在固定 60 秒截断。daemon 当前按消息串行执行 Agent；一次无限时调用未返回前，本 tick 的后续消息和 dispatch 会暂停。需要故障隔离上限的部署可显式配置正整数。startup/runtime health 与 doctor 不继承该值，仍由 `health.timeout_seconds` 限时。
+
 ## Agent Backend 上下文语义
 
 `config_scope`、`auto_context` 和 `explicit_context` 是 provider-neutral 语义，不应简单套用同名 CLI flag。当前 provider 按下表落地：
@@ -169,7 +171,7 @@ Console 覆盖 Dashboard、Approvals、Tasks、Dispatch、Policy、Settings 和 
 | `read_only` | `--toolsets safe` | top-level `--search --ask-for-approval never` + `exec --sandbox read-only` | `--permission-mode dontAsk --tools Read,Grep,Glob,LS,WebFetch,WebSearch --allowedTools Read,Grep,Glob,LS,WebFetch,WebSearch` | Hermes `safe` 禁用本地写操作类工具；Codex 在只读 sandbox 下运行并禁止交互审批，仍允许 live search；Claude Code 只暴露 read/search 类工具且不允许 Bash。它们都不是“零副作用”。 |
 | `full_access` | `--toolsets hermes-cli --yolo` | top-level `--search` + `exec --dangerously-bypass-approvals-and-sandbox` | `--permission-mode bypassPermissions --dangerously-skip-permissions --tools default` | 显式危险模式。Backend 可执行本地写工具；飞书侧写入仍必须经过本项目的 policy、approval、dry-run、幂等和 dispatch gate。 |
 
-`context_access` 不跟随写权限开放。只要本地 DB 存在，read-only profile 也会收到一个受 `query_scope` 限制的 bounded snapshot 和 read-only SQLite URI。Hermes `safe` 没有本地 file/SQLite 工具，因此应使用 snapshot；只有具备只读 SQLite client 的 backend 才能直接查询 `read_only_uri`。
+`context_access` 不跟随写权限开放。只要本地 DB 存在，Router 会收到受 `query_scope` 限制的 bounded snapshot 和 read-only SQLite URI；Task Session 已由 Messages 提供会话正文，只收到 read-only URI、allowed tables 与当前 task scope，不再复制 snapshot。Hermes `safe` 没有本地 file/SQLite 工具：Router 使用 snapshot，Task Session 使用 Messages；具备只读 SQLite client 的 backend 才能直接查询 `read_only_uri`。
 
 ### 非交互子进程下的重要语义
 

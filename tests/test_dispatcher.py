@@ -628,6 +628,7 @@ def test_owner_notification_can_be_sent_independently(tmp_path: Path) -> None:
             "incoming_message": {
                 "message_id": "om_target",
                 "text": "classification service failed to start",
+                "message_app_link": "https://applink.feishu.cn/client/chat/open?openChatId=oc_1&position=1",
             },
             "stage": "task_session",
             "reply_target_message_id": "om_root",
@@ -695,6 +696,7 @@ def test_owner_notification_can_be_sent_independently(tmp_path: Path) -> None:
     assert "source: group oc_1 / Ext / classification service" in sent_text
     assert "message_id: om_target" in sent_text
     assert "incoming: classification service failed to start" in sent_text
+    assert "message_link: https://applink.feishu.cn/client/chat/open?" in sent_text
     assert "suggested_reply: <none>" in sent_text
     assert "approvable: no" in sent_text
     assert "stage: task_session" in sent_text

@@ -15,8 +15,14 @@ from .prompt import (
     InitialTaskSessionOutput,
     build_task_session_prompt,
 )
+from .resource_preflight import (
+    P2P_UNAVAILABLE_RESOURCE_STATUSES,
+    has_substantive_resource_text,
+)
 from .store.sqlite_store import SQLiteStore
 from .types import NormalizedMessage, TaskRecord
+
+P2P_ADJACENT_RESOURCE_CONTEXT_LIMIT = 32
 
 
 @dataclass(frozen=True)
@@ -65,6 +71,12 @@ class TaskSessionRunner:
             session_id=session_id,
             task_message_ids=task_message_ids,
         )
+        if session_id is not None and (task.chat_type or message.chat_type) == "p2p":
+            prompt_message_ids = self._include_adjacent_unavailable_resource_context(
+                current_message_id=message.message_id,
+                task_message_ids=task_message_ids,
+                prompt_message_ids=prompt_message_ids,
+            )
         return TaskSessionPromptPlan(
             session_id=session_id,
             task_message_ids=task_message_ids,
@@ -76,6 +88,53 @@ class TaskSessionRunner:
                 task=task, current_message_id=message.message_id
             ),
         )
+
+    def _include_adjacent_unavailable_resource_context(
+        self,
+        *,
+        current_message_id: str,
+        task_message_ids: list[str],
+        prompt_message_ids: list[str],
+    ) -> list[str]:
+        try:
+            current_index = task_message_ids.index(current_message_id)
+        except ValueError:
+            return prompt_message_ids
+        previous_ids = task_message_ids[
+            max(0, current_index - P2P_ADJACENT_RESOURCE_CONTEXT_LIMIT) : current_index
+        ]
+        if not previous_ids:
+            return prompt_message_ids
+        resources_by_message: dict[str, list[Any]] = {}
+        for resource in self.store.list_resources_for_messages(previous_ids):
+            resources_by_message.setdefault(str(resource["message_id"]), []).append(
+                resource
+            )
+        messages_by_id = {
+            str(row["message_id"]): row
+            for row in self.store.get_messages_by_ids(previous_ids)
+        }
+        adjacent_ids: list[str] = []
+        for message_id in reversed(previous_ids):
+            message_resources = resources_by_message.get(message_id, [])
+            statuses = {
+                str(resource["download_status"]) for resource in message_resources
+            }
+            message_row = messages_by_id.get(message_id)
+            if (
+                not message_resources
+                or not statuses & P2P_UNAVAILABLE_RESOURCE_STATUSES
+                or message_row is None
+                or has_substantive_resource_text(
+                    str(message_row["text"] or ""),
+                    file_keys=[
+                        str(resource["file_key"]) for resource in message_resources
+                    ],
+                )
+            ):
+                break
+            adjacent_ids.append(message_id)
+        return list(reversed(adjacent_ids)) + prompt_message_ids
 
     def prompt_message_ids(
         self,
@@ -113,15 +172,8 @@ class TaskSessionRunner:
             messages=self.store.get_messages_by_ids(plan.prompt_message_ids),
             resources=resources,
             output_model=plan.output_model,
-            context_metadata=task_session_context_metadata(
-                session_id=plan.session_id,
-                included_message_count=len(plan.prompt_message_ids),
-                task_message_count=len(plan.task_message_ids)
-                or len(plan.prompt_message_ids),
-            ),
-            context_access=self.context_access.task_session_context_access(
-                message=message, task=task
-            ),
+            context_access=self.context_access.task_session_context_access(task=task),
+            chat_type=task.chat_type or message.chat_type,
         )
         outcome = self.agent_invoker.call_with_retries(
             lambda: self.agent_backend.task_session(
@@ -166,20 +218,3 @@ def reply_target_message_ids(*, task: TaskRecord, current_message_id: str) -> li
     if task.root_message_id:
         ids.append(task.root_message_id)
     return list(dict.fromkeys(ids))
-
-
-def task_session_context_metadata(
-    *,
-    session_id: str | None,
-    included_message_count: int,
-    task_message_count: int,
-) -> dict[str, Any]:
-    history_carried = session_id is not None
-    return {
-        "message_context_mode": "incremental_current_message"
-        if history_carried
-        else "full_task_messages",
-        "included_message_count": included_message_count,
-        "task_message_count": task_message_count,
-        "history_carried_by_agent_session": history_carried,
-    }

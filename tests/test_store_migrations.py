@@ -433,6 +433,160 @@ def test_send_reply_guard_and_failed_retry_use_current_baseline(tmp_path: Path) 
     assert retried_action.result == {}
 
 
+def test_owner_escalation_closes_task_and_replaces_pending_automation(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.migrate()
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO tasks(
+              short_id, status, chat_id, root_message_id, watch_until, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "t_escalate",
+                "watching",
+                "oc_1",
+                "om_1",
+                "2026-06-22T12:00:00+08:00",
+                "now",
+                "now",
+            ),
+        )
+        task_id = int(
+            conn.execute(
+                "SELECT id FROM tasks WHERE short_id = ?", ("t_escalate",)
+            ).fetchone()["id"]
+        )
+    send_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_1",
+        payload={"text": "pending reply", "source": "auto_reply"},
+    )
+    approval_id = store.create_send_reply_approval(
+        task_id=task_id,
+        preview="needs review",
+        payload={"reply_target_message_id": "om_1", "text": "needs review"},
+        notify_payload={"reason": "needs_owner"},
+    )
+
+    escalation_id = store.close_task_for_owner_escalation(
+        task_id=task_id,
+        task_label="manual pod diagnosis",
+        payload={
+            "type": "owner_escalation",
+            "reason": "p2p_resource_unavailable",
+            "dedupe_key": "owner-escalation:om_1",
+        },
+    )
+
+    assert send_id is not None
+    assert escalation_id is not None
+    with store.connect() as conn:
+        task = conn.execute(
+            "SELECT status, task_label, watch_until, closed_at FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        approval = conn.execute(
+            "SELECT status FROM approvals WHERE id = ?", (approval_id,)
+        ).fetchone()
+        actions = conn.execute(
+            "SELECT id, kind, status FROM actions WHERE task_id = ? ORDER BY id",
+            (task_id,),
+        ).fetchall()
+    assert task["status"] == "closed"
+    assert task["task_label"] == "manual pod diagnosis"
+    assert task["watch_until"] is None
+    assert task["closed_at"] is not None
+    assert approval["status"] == "expired"
+    assert len(actions) == 3
+    assert (actions[0]["id"], actions[0]["kind"], actions[0]["status"]) == (
+        send_id,
+        "send_reply",
+        "cancelled",
+    )
+    assert (actions[1]["kind"], actions[1]["status"]) == (
+        "owner_notification",
+        "cancelled",
+    )
+    assert (actions[2]["id"], actions[2]["kind"], actions[2]["status"]) == (
+        escalation_id,
+        "owner_notification",
+        "pending",
+    )
+
+
+def test_owner_escalation_rolls_back_when_notification_creation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.migrate()
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO tasks(short_id, status, chat_id, root_message_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("t_rollback", "watching", "oc_1", "om_1", "now", "now"),
+        )
+        task_id = int(
+            conn.execute(
+                "SELECT id FROM tasks WHERE short_id = ?", ("t_rollback",)
+            ).fetchone()["id"]
+        )
+    send_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_1",
+        payload={"text": "pending reply", "source": "auto_reply"},
+    )
+    approval_id = store.create_send_reply_approval(
+        task_id=task_id,
+        preview="needs review",
+        payload={"reply_target_message_id": "om_1", "text": "needs review"},
+        notify_payload={"reason": "needs_owner"},
+    )
+
+    def fail_notification(*args: object, **kwargs: object) -> int:
+        raise RuntimeError("notification insert failed")
+
+    monkeypatch.setattr(
+        store, "_create_owner_notification_action_locked", fail_notification
+    )
+
+    with pytest.raises(RuntimeError, match="notification insert failed"):
+        store.close_task_for_owner_escalation(
+            task_id=task_id,
+            payload={"type": "owner_escalation", "reason": "test"},
+        )
+
+    with store.connect() as conn:
+        task = conn.execute(
+            "SELECT status, closed_at FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        approval = conn.execute(
+            "SELECT status FROM approvals WHERE id = ?", (approval_id,)
+        ).fetchone()
+        actions = conn.execute(
+            "SELECT id, kind, status FROM actions WHERE task_id = ? ORDER BY id",
+            (task_id,),
+        ).fetchall()
+    assert task["status"] == "watching"
+    assert task["closed_at"] is None
+    assert approval["status"] == "pending"
+    assert len(actions) == 2
+    assert (actions[0]["id"], actions[0]["kind"], actions[0]["status"]) == (
+        send_id,
+        "send_reply",
+        "pending",
+    )
+    assert (actions[1]["kind"], actions[1]["status"]) == (
+        "owner_notification",
+        "pending",
+    )
+
+
 def test_claim_creates_dispatch_attempt_and_retry_preserves_idempotency_key(
     tmp_path: Path,
 ) -> None:

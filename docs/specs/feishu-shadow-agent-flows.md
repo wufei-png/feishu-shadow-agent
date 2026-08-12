@@ -149,7 +149,12 @@ flowchart TD
   HasResource -->|否| Continue["继续任务处理"]
   HasResource -->|是| Extract["user 身份读消息并提取 file_key"]
   Extract --> BotKnown{"chat policy 标记 bot_joined"}
-  BotKnown -->|否| NotifyJoin["创建 resource_needs_bot owner notification"]
+  BotKnown -->|否，群聊| NotifyJoin["创建 resource_needs_bot owner notification"]
+  BotKnown -->|否，P2P 纯资源消息| WaitContext["保持 watching，等待同任务文字上下文"]
+  BotKnown -->|否，P2P 已有明确诉求| TaskWithoutResource["Task Session 使用文字、资源状态与外部证据"]
+  TaskWithoutResource --> P2PAnswerable{"Agent 能安全完成"}
+  P2PAnswerable -->|是| Continue
+  P2PAnswerable -->|needs_owner| OwnerEscalation["关闭自动处理并创建 Owner Escalation"]
 
   BotKnown -->|是| Download["bot 身份 messages-resources-download"]
   Download --> DownloadOK{"下载成功"}

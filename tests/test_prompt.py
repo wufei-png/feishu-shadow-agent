@@ -13,6 +13,7 @@ from feishu_shadow_agent.prompt import (
     build_reply_postprocess_prompt,
     build_router_prompt,
     build_task_session_prompt,
+    task_session_prompt_json_section,
 )
 from feishu_shadow_agent.types import NormalizedMessage, TaskCandidate, TaskRecord
 
@@ -154,7 +155,7 @@ def test_task_router_output_rejects_malformed_route_target_pairs(
         TaskRouterOutput.model_validate(payload)
 
 
-def test_initial_task_session_prompt_embeds_pydantic_output_schema() -> None:
+def test_initial_task_session_prompt_is_compact_and_message_authoritative() -> None:
     task = TaskRecord(
         id=1,
         short_id="t_abc",
@@ -163,7 +164,7 @@ def test_initial_task_session_prompt_embeds_pydantic_output_schema() -> None:
         chat_type="group",
         thread_id="omt_1",
         root_message_id="om_root",
-        task_label="Existing task",
+        task_label="Existing task with ```json fence",
         watch_until="2026-06-22T12:00:00+08:00",
     )
     rows = [
@@ -191,8 +192,6 @@ def test_initial_task_session_prompt_embeds_pydantic_output_schema() -> None:
     ]
 
     context_access = {
-        "backend": "sqlite",
-        "mode": "live_read_only",
         "read_only_uri": "file:///tmp/agent.sqlite3?mode=ro",
         "allowed_tables": [
             "tasks",
@@ -201,47 +200,48 @@ def test_initial_task_session_prompt_embeds_pydantic_output_schema() -> None:
             "resources",
             "routing_audits",
         ],
-        "query_scope": {
-            "current_message_id": "om_1",
-            "task": {"id": 1, "short_id": "t_abc"},
-        },
+        "query_scope": {"task": {"id": 1}},
     }
 
-    prompt = json.loads(
-        build_task_session_prompt(
-            task=task,
-            current_message_id="om_1",
-            reply_target_message_ids=["om_1", "om_root"],
-            messages=rows,
-            resources=resources,
-            output_model=InitialTaskSessionOutput,
-            context_metadata={
-                "message_context_mode": "full_task_messages",
-                "included_message_count": 1,
-                "task_message_count": 1,
-                "history_carried_by_agent_session": False,
-            },
-            context_access=context_access,
-        )
+    prompt = build_task_session_prompt(
+        task=task,
+        current_message_id="om_1",
+        reply_target_message_ids=["om_1", "om_root"],
+        messages=rows,
+        resources=resources,
+        output_model=InitialTaskSessionOutput,
+        context_access=context_access,
     )
 
-    assert prompt["output_schema"] == InitialTaskSessionOutput.model_json_schema()
-    assert prompt["output_schema"]["additionalProperties"] is False
-    assert "task_label" in prompt["output_schema"]["properties"]
-    assert "confidence" not in prompt["output_schema"]["properties"]
-    assert "watch_extend_minutes" not in prompt["output_schema"]["properties"]
-    assert "requires_resources" not in prompt["output_schema"]["properties"]
-    assert "context_access" in prompt["instruction"]
-    assert (
-        "Only messages in the messages block are real Feishu messages"
-        in prompt["instruction"]
-    )
-    assert "Previous proposed_reply outputs are not sent" in prompt["instruction"]
-    assert "schema" not in prompt
-    assert prompt["metadata"]["reply_target_message_ids"] == ["om_1", "om_root"]
-    assert prompt["metadata"]["message_context_mode"] == "full_task_messages"
-    assert prompt["resources"][0]["path"] == "data/resources/om_1/img_1.jpg"
-    assert prompt["context_access"] == context_access
+    assert prompt.startswith("# Task Session\n\n## Instructions")
+    assert prompt.index("## Reply Context") < prompt.index("## Messages")
+    assert prompt.index("## Messages") < prompt.index("## Resources")
+    assert prompt.index("## Resources") < prompt.index("## Context Access")
+    assert prompt.index("## Context Access") < prompt.index("## Output Contract")
+    assert "## Metadata" not in prompt
+    assert "## Task" not in prompt
+    assert "## Output Schema" not in prompt
+    assert "message_context_mode" not in prompt
+    assert "history_carried_by_agent_session" not in prompt
+    assert '- `current_message_id`: "om_1"' in prompt
+    assert '- `root_message_id`: "om_root"' in prompt
+    assert '- `allowed_reply_target_message_ids`: ["om_1", "om_root"]' in prompt
+    assert "- `task_label`: a short label for the initial task." in prompt
+    assert task_session_prompt_json_section(prompt, "Resources") == [
+        {
+            "message_id": "om_1",
+            "resource_type": "image",
+            "download_status": "downloaded",
+            "path": "data/resources/om_1/img_1.jpg",
+        }
+    ]
+    assert task_session_prompt_json_section(prompt, "Context Access") == context_access
+    assert "Existing task with ```json fence" not in prompt
+    assert '### Message 1 (current)\n\n- `message_id`: "om_1"' in prompt
+    assert "#### Text\n\n> need help" in prompt
+    assert "`chat_id`" not in prompt
+    assert "`sender_id`" not in prompt
+    assert "`reply_to_message_id`" not in prompt
 
 
 def test_followup_task_session_prompt_omits_task_label_and_rejects_extra_label() -> (
@@ -259,27 +259,22 @@ def test_followup_task_session_prompt_omits_task_label_and_rejects_extra_label()
         watch_until="2026-06-22T12:00:00+08:00",
     )
 
-    prompt = json.loads(
-        build_task_session_prompt(
-            task=task,
-            current_message_id="om_2",
-            reply_target_message_ids=["om_2", "om_root"],
-            messages=[],
-            resources=[],
-            output_model=FollowupTaskSessionOutput,
-            context_metadata={
-                "message_context_mode": "incremental_current_message",
-                "included_message_count": 1,
-                "task_message_count": 2,
-                "history_carried_by_agent_session": True,
-            },
-        )
+    prompt = build_task_session_prompt(
+        task=task,
+        current_message_id="om_2",
+        reply_target_message_ids=["om_2", "om_root"],
+        messages=[],
+        resources=[],
+        output_model=FollowupTaskSessionOutput,
     )
 
-    assert prompt["output_schema"] == FollowupTaskSessionOutput.model_json_schema()
-    assert "task_label" not in prompt["output_schema"]["properties"]
-    assert prompt["metadata"]["message_context_mode"] == "incremental_current_message"
-    assert prompt["metadata"]["history_carried_by_agent_session"] is True
+    assert "- `task_label`:" not in prompt
+    assert "## Metadata" not in prompt
+    assert "## Task" not in prompt
+    assert "## Resources" not in prompt
+    assert '- `current_message_id`: "om_2"' in prompt
+    assert '- `root_message_id`: "om_root"' in prompt
+    assert '- `allowed_reply_target_message_ids`: ["om_2", "om_root"]' in prompt
     with pytest.raises(ValidationError):
         FollowupTaskSessionOutput.model_validate(
             {
@@ -290,6 +285,33 @@ def test_followup_task_session_prompt_omits_task_label_and_rejects_extra_label()
                 "watch_action": "keep_watching",
             }
         )
+
+
+def test_task_session_prompt_uses_current_chat_type_when_task_value_is_missing() -> (
+    None
+):
+    task = TaskRecord(
+        id=1,
+        short_id="t_abc",
+        status="watching",
+        chat_id="ou_chat",
+        chat_type=None,
+        thread_id=None,
+        root_message_id="om_root",
+        task_label="Existing task",
+        watch_until="2026-06-22T12:00:00+08:00",
+    )
+
+    prompt = build_task_session_prompt(
+        task=task,
+        current_message_id="om_1",
+        reply_target_message_ids=["om_1", "om_root"],
+        messages=[],
+        resources=[],
+        chat_type="p2p",
+    )
+
+    assert '- `chat_type`: "p2p"' in prompt
 
 
 @pytest.mark.parametrize(

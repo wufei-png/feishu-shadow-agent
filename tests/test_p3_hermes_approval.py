@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ from feishu_shadow_agent.processing import (
     SendComposer,
     TaskProcessingService,
 )
+from feishu_shadow_agent.prompt import task_session_prompt_json_section
 from feishu_shadow_agent.routing import RoutingResult
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import (
@@ -34,6 +36,10 @@ from feishu_shadow_agent.types import (
     NormalizedMessage,
     ResourceRef,
 )
+
+
+def _task_prompt_message_ids(prompt: str) -> list[str]:
+    return re.findall(r'^- `message_id`: "([^"]+)"$', prompt, flags=re.MULTILINE)
 
 
 class FakeHermes:
@@ -332,6 +338,261 @@ def test_gate_passed_p2p_creates_pending_send_and_persists_session(
     assert action["status"] == "pending"
     assert payload["identity"] == "user"
     assert approvals == 0
+
+
+def test_p2p_resource_only_message_waits_for_text_context(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    cfg = _config(
+        chats={"ou_chat": ChatPolicyConfig(auto_reply=True, bot_joined=False)}
+    )
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    service.process_raw_message(
+        _message(
+            "om_image",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            text="![Image](img_1)",
+            image_key="img_1",
+        ),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        task = conn.execute("SELECT status, agent_session_id FROM tasks").fetchone()
+        resource = conn.execute("SELECT download_status FROM resources").fetchone()
+        processing = conn.execute(
+            "SELECT stage, status FROM message_processing"
+        ).fetchone()
+        action_count = conn.execute("SELECT COUNT(*) AS c FROM actions").fetchone()["c"]
+    assert task["status"] == "watching"
+    assert task["agent_session_id"] is None
+    assert resource["download_status"] == "bot_not_joined"
+    assert (processing["stage"], processing["status"]) == (
+        "resource_download",
+        "processed",
+    )
+    assert action_count == 0
+    assert hermes.session_prompts == []
+
+
+def test_p2p_unavailable_resource_with_text_runs_agent_and_escalates(
+    tmp_path: Path,
+) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(
+        _session_output(
+            answerability="needs_owner",
+            proposed_reply="可以加 --enforce-eager，但修改前需要 owner 确认。",
+            reply_target_message_id="om_request",
+        )
+    )
+    cfg = _config(
+        chats={"ou_chat": ChatPolicyConfig(auto_reply=True, bot_joined=False)}
+    )
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    service.process_raw_message(
+        _message(
+            "om_image",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            text="![Image](img_1)",
+            image_key="img_1",
+        ),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    request = _message(
+        "om_request",
+        chat_id="ou_chat",
+        chat_type="p2p",
+        sender_id="ou_a",
+        text="这个 pod crash 可以看看吗，172.20.26.245",
+        create_time="2026-06-22T10:00:30+08:00",
+    )
+    request["message_app_link"] = (
+        "https://applink.feishu.cn/client/chat/open?openChatId=ou_chat&position=1"
+    )
+    service.process_raw_message(
+        request,
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    prompt = hermes.session_prompts[0]
+    assert _task_prompt_message_ids(prompt) == [
+        "om_image",
+        "om_request",
+    ]
+    assert task_session_prompt_json_section(prompt, "Resources") == [
+        {
+            "message_id": "om_image",
+            "resource_type": "image",
+            "download_status": "bot_not_joined",
+        }
+    ]
+    with store.connect() as conn:
+        task = conn.execute(
+            "SELECT status, watch_until, closed_at, agent_session_id FROM tasks"
+        ).fetchone()
+        notification = conn.execute(
+            "SELECT kind, status, payload_json FROM actions"
+        ).fetchone()
+        approval_count = conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()[
+            "c"
+        ]
+        processing = conn.execute(
+            "SELECT message_id, stage, status FROM message_processing ORDER BY id"
+        ).fetchall()
+    payload = json.loads(notification["payload_json"])
+    assert task["status"] == "closed"
+    assert task["watch_until"] is None
+    assert task["closed_at"] is not None
+    assert task["agent_session_id"] == "sid_1"
+    assert notification["kind"] == "owner_notification"
+    assert notification["status"] == "pending"
+    assert payload["type"] == "owner_escalation"
+    assert payload["reason"] == "p2p_resource_unavailable"
+    assert payload["statuses"] == {"bot_not_joined": 1}
+    assert payload["suggested_reply"].startswith("可以加 --enforce-eager")
+    assert payload["incoming_message"] == {
+        "message_id": "om_request",
+        "text": "这个 pod crash 可以看看吗，172.20.26.245",
+        "message_app_link": request["message_app_link"],
+    }
+    assert approval_count == 0
+    assert [(row["message_id"], row["stage"], row["status"]) for row in processing] == [
+        ("om_image", "resource_download", "processed"),
+        ("om_request", "task_session", "processed"),
+    ]
+
+
+def test_resumed_p2p_session_includes_adjacent_deferred_resource_context(
+    tmp_path: Path,
+) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.extend(
+        [
+            _session_output(_session_id="sid_1", reply_target_message_id="om_start"),
+            _session_output(
+                include_task_label=False,
+                _session_id="sid_1",
+                answerability="needs_owner",
+                proposed_reply="图片不可用，需要 owner 回原会话处理。",
+                reply_target_message_id="om_request",
+            ),
+        ]
+    )
+    cfg = _config(
+        chats={"ou_chat": ChatPolicyConfig(auto_reply=True, bot_joined=False)}
+    )
+    fixed_clock_store = SQLiteStore(
+        tmp_path / "agent.sqlite3",
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    store, service, _ = _service(
+        tmp_path, config=cfg, hermes=hermes, store=fixed_clock_store
+    )
+
+    service.process_raw_message(
+        _message(
+            "om_start",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            text="先看一下这个任务",
+        ),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    service.process_raw_message(
+        _message(
+            "om_image",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            text="![Image](img_1)",
+            image_key="img_1",
+            create_time="2026-06-22T10:00:30+08:00",
+        ),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    service.process_raw_message(
+        _message(
+            "om_request",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            text="这个报错怎么处理？",
+            create_time="2026-06-22T10:00:50+08:00",
+        ),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    assert len(hermes.session_prompts) == 2
+    resumed_prompt = hermes.session_prompts[1]
+    resources = task_session_prompt_json_section(resumed_prompt, "Resources")
+    assert "## Metadata" not in resumed_prompt
+    assert _task_prompt_message_ids(resumed_prompt) == [
+        "om_image",
+        "om_request",
+    ]
+    assert resources[0]["download_status"] == "bot_not_joined"
+    assert "path" not in resources[0]
+    with store.connect() as conn:
+        task = conn.execute("SELECT status FROM tasks").fetchone()
+        actions = conn.execute(
+            "SELECT kind, status FROM actions ORDER BY id"
+        ).fetchall()
+    assert task["status"] == "closed"
+    assert [(row["kind"], row["status"]) for row in actions] == [
+        ("send_reply", "cancelled"),
+        ("owner_notification", "pending"),
+    ]
+
+
+def test_p2p_unavailable_resource_with_text_can_still_auto_reply(
+    tmp_path: Path,
+) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_image"))
+    cfg = _config(
+        chats={"ou_chat": ChatPolicyConfig(auto_reply=True, bot_joined=False)}
+    )
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+
+    service.process_raw_message(
+        _message(
+            "om_image",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            text="see ![Image](img_1)",
+            image_key="img_1",
+        ),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        task = conn.execute("SELECT status FROM tasks").fetchone()
+        action = conn.execute("SELECT kind FROM actions").fetchone()
+    assert task["status"] == "watching"
+    assert action["kind"] == "send_reply"
+    assert len(hermes.session_prompts) == 1
 
 
 def test_new_task_stores_configured_agent_working_dir(tmp_path: Path) -> None:
@@ -2184,36 +2445,23 @@ def test_task_session_followup_uses_stored_hermes_session(tmp_path: Path) -> Non
     )
 
     assert hermes.session_ids_seen == [None, "sid_1"]
-    followup_prompt = json.loads(hermes.session_prompts[1])
-    assert [message["message_id"] for message in followup_prompt["messages"]] == [
-        "om_2"
-    ]
-    assert followup_prompt["metadata"] == {
-        "current_message_id": "om_2",
-        "root_message_id": "om_1",
-        "reply_target_message_ids": ["om_2", "om_1"],
-        "message_context_mode": "incremental_current_message",
-        "included_message_count": 1,
-        "task_message_count": 2,
-        "history_carried_by_agent_session": True,
-    }
-    assert "task_label" not in followup_prompt["output_schema"]["properties"]
-    assert followup_prompt["context_access"]["backend"] == "sqlite"
-    assert followup_prompt["context_access"]["mode"] == "live_read_only"
-    assert followup_prompt["context_access"]["read_only_uri"].endswith(
-        "agent.sqlite3?mode=ro"
-    )
-    assert followup_prompt["context_access"]["allowed_tables"] == [
+    followup_prompt = hermes.session_prompts[1]
+    context_access = task_session_prompt_json_section(followup_prompt, "Context Access")
+    assert _task_prompt_message_ids(followup_prompt) == ["om_2"]
+    assert "## Metadata" not in followup_prompt
+    assert "- `task_label`:" not in followup_prompt
+    assert '- `current_message_id`: "om_2"' in followup_prompt
+    assert '- `root_message_id`: "om_1"' in followup_prompt
+    assert '- `allowed_reply_target_message_ids`: ["om_2", "om_1"]' in followup_prompt
+    assert context_access["read_only_uri"].endswith("agent.sqlite3?mode=ro")
+    assert context_access["allowed_tables"] == [
         "tasks",
         "task_messages",
         "messages",
         "resources",
         "routing_audits",
     ]
-    assert followup_prompt["context_access"]["query_scope"] == {
-        "current_message_id": "om_2",
-        "task": {"id": first.task.id, "short_id": first.task.short_id},
-    }
+    assert context_access["query_scope"] == {"task": {"id": first.task.id}}
     with store.connect() as conn:
         assert (
             conn.execute(
@@ -2325,9 +2573,14 @@ def test_context_access_available_for_read_only_tool_profile(tmp_path: Path) -> 
         run_id="run_1",
     )
 
-    prompt = json.loads(hermes.session_prompts[0])
-    assert prompt["context_access"]["backend"] == "sqlite"
-    assert prompt["context_access"]["mode"] == "live_read_only"
+    context_access = task_session_prompt_json_section(
+        hermes.session_prompts[0], "Context Access"
+    )
+    assert set(context_access) == {
+        "read_only_uri",
+        "allowed_tables",
+        "query_scope",
+    }
 
 
 def test_context_access_omitted_when_database_file_is_missing(tmp_path: Path) -> None:

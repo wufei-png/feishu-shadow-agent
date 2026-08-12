@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import time
 from collections.abc import Callable
@@ -33,6 +34,8 @@ from .reply_postprocess import ReplyPostprocessor, ReplyPostprocessResult
 from .resource_preflight import (
     ResourcePreflight,
     ResourcePreflightResult,
+    is_p2p_resource_unavailable,
+    message_has_substantive_resource_text,
     resource_status_counts,
 )
 from .routing import CandidateCollector, RoutingResult
@@ -194,6 +197,33 @@ class ApprovalService:
                 data["source"] = source
         return self.store.create_owner_notification_action(
             task_id=None if task is None else task.id, payload=data
+        )
+
+    def escalate_task_to_owner(
+        self,
+        *,
+        task: TaskRecord,
+        message: NormalizedMessage,
+        reason: str,
+        task_label: str | None,
+        payload: dict[str, Any],
+    ) -> int | None:
+        current_task = self.store.get_task_by_id(task.id)
+        source_message = self.store.get_message(message.message_id)
+        data = {
+            "type": "owner_escalation",
+            "reason": reason,
+            "task_id": task.short_id,
+            "message_id": message.message_id,
+            "incoming_message": _notification_message(
+                source_message, fallback_message_id=message.message_id
+            ),
+            "source": _notification_source(task=current_task, message=source_message),
+        } | payload
+        return self.store.close_task_for_owner_escalation(
+            task_id=task.id,
+            task_label=task_label,
+            payload=data,
         )
 
     def apply_command(self, *, message: NormalizedMessage) -> dict[str, Any] | None:
@@ -952,7 +982,34 @@ class TaskProcessingService:
             run_id=run_id,
         )
         resources = preflight.resources
-        if not preflight.allow:
+        p2p_resource_unavailable = is_p2p_resource_unavailable(
+            task=task, message=message, preflight=preflight
+        )
+        if p2p_resource_unavailable and not message_has_substantive_resource_text(
+            message
+        ):
+            self._mark_processing_processed(
+                message=message,
+                stage="resource_download",
+                task_id=task.id,
+                attempt_count=preflight.attempt_count,
+            )
+            self.logger.info(
+                "task_session_p2p_resource_waiting_context",
+                run_id=run_id,
+                task_id=str(task.id),
+                data={
+                    "message_id": message.message_id,
+                    "task_short_id": task.short_id,
+                    "statuses": resource_status_counts(resources),
+                },
+            )
+            return ProcessingResult(
+                "watch_only",
+                task.id,
+                reason="p2p_resource_only_waiting_context",
+            )
+        if not preflight.allow and not p2p_resource_unavailable:
             self.logger.warning(
                 "task_session_resource_preflight_blocked",
                 run_id=run_id,
@@ -1139,6 +1196,54 @@ class TaskProcessingService:
                     "task_short_id": task.short_id,
                     "had_previous_session": session_plan.session_id is not None,
                 },
+            )
+
+        if output.answerability == "needs_owner" and p2p_resource_unavailable:
+            action_id = self.approvals.escalate_task_to_owner(
+                task=task,
+                message=message,
+                reason="p2p_resource_unavailable",
+                task_label=output.task_label
+                if isinstance(output, InitialTaskSessionOutput)
+                else None,
+                payload={
+                    "stage": "task_session",
+                    "statuses": resource_status_counts(resources),
+                    "suggested_reply": output.proposed_reply,
+                    "message": (
+                        "Task Session could not safely complete this P2P task without "
+                        "unavailable message resources. Automated handling was closed; "
+                        "continue manually in the original chat."
+                    ),
+                    "dedupe_key": f"owner-escalation:p2p-resource:{message.message_id}",
+                },
+            )
+            self._mark_processing_processed(
+                message=message,
+                stage="task_session",
+                task_id=task.id,
+                attempt_count=outcome.attempt_count,
+            )
+            if action_id is None:
+                return ProcessingResult(
+                    "watch_only", task.id, reason="task_already_closed"
+                )
+            self.logger.warning(
+                "task_session_p2p_resource_owner_escalation",
+                run_id=run_id,
+                task_id=str(task.id),
+                data={
+                    "message_id": message.message_id,
+                    "task_short_id": task.short_id,
+                    "action_id": action_id,
+                    "statuses": resource_status_counts(resources),
+                },
+            )
+            return ProcessingResult(
+                "owner_notification_created",
+                task.id,
+                action_id=action_id,
+                reason="p2p_resource_unavailable",
             )
 
         target_ids = set(session_plan.reply_target_message_ids)
@@ -1619,10 +1724,28 @@ def _notification_source(
 def _notification_message(
     message: Any | None, *, fallback_message_id: str
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "message_id": _row_value(message, "message_id") or fallback_message_id,
         "text": _row_value(message, "text") or "",
     }
+    message_app_link = _message_app_link(message)
+    if message_app_link is not None:
+        payload["message_app_link"] = message_app_link
+    return payload
+
+
+def _message_app_link(message: Any | None) -> str | None:
+    raw_json = _row_value(message, "raw_json")
+    if not isinstance(raw_json, str):
+        return None
+    try:
+        raw = json.loads(raw_json)
+    except (TypeError, ValueError):
+        return None
+    value = raw.get("message_app_link") if isinstance(raw, dict) else None
+    if isinstance(value, str) and value.startswith("https://applink.feishu.cn/"):
+        return value
+    return None
 
 
 def _row_value(row: Any | None, key: str) -> Any | None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -11,6 +12,10 @@ from .store.sqlite_store import SQLiteStore
 from .types import NormalizedMessage, TaskRecord
 
 RESOURCE_MAX_ATTEMPTS = 3
+P2P_UNAVAILABLE_RESOURCE_STATUSES = {"bot_not_joined", "bot_invisible"}
+RESOURCE_PLACEHOLDER_RE = re.compile(
+    r"!\[[^\]]*\]\(\s*(?:img|file)_[^)]+\)", re.IGNORECASE
+)
 
 
 @dataclass(frozen=True)
@@ -168,7 +173,7 @@ def resource_preflight_state(
         return {"allow": True, "reason": "ok", "retryable": False, "error": None}
     if statuses <= {"downloaded"}:
         return {"allow": True, "reason": "ok", "retryable": False, "error": None}
-    if statuses & {"bot_not_joined", "bot_invisible"}:
+    if statuses & P2P_UNAVAILABLE_RESOURCE_STATUSES:
         return {
             "allow": False,
             "reason": "resource_needs_bot",
@@ -266,3 +271,33 @@ def resource_status_error(resources: list[Any]) -> str | None:
     return "resource statuses: " + ", ".join(
         f"{status}={count}" for status, count in sorted(counts.items())
     )
+
+
+def is_p2p_resource_unavailable(
+    *, task: TaskRecord, message: NormalizedMessage, preflight: ResourcePreflightResult
+) -> bool:
+    unavailable_statuses = {
+        str(resource["download_status"])
+        for resource in preflight.resources
+        if str(resource["download_status"]) != "downloaded"
+    }
+    return (
+        (task.chat_type or message.chat_type) == "p2p"
+        and not preflight.allow
+        and preflight.reason == "resource_needs_bot"
+        and bool(unavailable_statuses)
+        and unavailable_statuses <= P2P_UNAVAILABLE_RESOURCE_STATUSES
+    )
+
+
+def message_has_substantive_resource_text(message: NormalizedMessage) -> bool:
+    return has_substantive_resource_text(
+        message.text, file_keys=[resource.file_key for resource in message.resources]
+    )
+
+
+def has_substantive_resource_text(text: str, *, file_keys: list[str]) -> bool:
+    remaining = RESOURCE_PLACEHOLDER_RE.sub("", text)
+    for file_key in file_keys:
+        remaining = remaining.replace(file_key, "")
+    return bool(remaining.strip())

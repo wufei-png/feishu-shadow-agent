@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -9,8 +10,16 @@ from feishu_shadow_agent.agent_invocation import AgentInvoker
 from feishu_shadow_agent.config import AppConfig, OwnerConfig
 from feishu_shadow_agent.context_access import ContextAccessBuilder
 from feishu_shadow_agent.jsonl import JSONLLogger
-from feishu_shadow_agent.resource_preflight import resource_preflight_state
+from feishu_shadow_agent.resource_preflight import (
+    ResourcePreflightResult,
+    is_p2p_resource_unavailable,
+    resource_preflight_state,
+)
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
+from feishu_shadow_agent.task_session_runner import (
+    P2P_ADJACENT_RESOURCE_CONTEXT_LIMIT,
+    TaskSessionRunner,
+)
 from feishu_shadow_agent.types import (
     NormalizedMessage,
     ResourceRef,
@@ -113,9 +122,7 @@ def test_context_access_builder_preserves_router_and_task_scope_cards(
         active_candidates=[TaskCandidate(task=active_task, matched_by="thread")],
         historical=[historical_task],
     )
-    task_session = builder.task_session_context_access(
-        message=message, task=active_task
-    )
+    task_session = builder.task_session_context_access(task=active_task)
 
     assert router is not None
     assert router["backend"] == "sqlite"
@@ -133,26 +140,14 @@ def test_context_access_builder_preserves_router_and_task_scope_cards(
         "historical_tasks": [{"id": 2, "short_id": "t_history"}],
     }
     assert task_session is not None
-    assert task_session["query_scope"] == {
-        "current_message_id": "om_1",
-        "task": {"id": 1, "short_id": "t_active"},
-    }
-    assert task_session["snapshot"] == {
-        "type": "bounded_recent_task_messages",
-        "message_limit_per_task": 5,
-        "tasks": [
-            {
-                "id": 1,
-                "short_id": "t_active",
-                "message_count": 0,
-                "truncated": False,
-                "recent_messages": [],
-            }
-        ],
+    assert task_session == {
+        "read_only_uri": router["read_only_uri"],
+        "allowed_tables": router["allowed_tables"],
+        "query_scope": {"task": {"id": 1}},
     }
 
 
-def test_context_access_snapshot_includes_bounded_recent_task_messages(
+def test_task_session_context_access_omits_redundant_message_snapshot(
     tmp_path: Path,
 ) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
@@ -181,22 +176,61 @@ def test_context_access_snapshot_includes_bounded_recent_task_messages(
         )
 
     builder = ContextAccessBuilder(store=store, config=_config())
-    context = builder.task_session_context_access(
-        message=_message(message_id="om_06"), task=store.get_task_by_id(task.id)
-    )
+    context = builder.task_session_context_access(task=store.get_task_by_id(task.id))
 
     assert context is not None
-    snapshot_task = context["snapshot"]["tasks"][0]
-    assert snapshot_task["message_count"] == 6
-    assert snapshot_task["truncated"] is True
-    assert [row["message_id"] for row in snapshot_task["recent_messages"]] == [
-        "om_02",
-        "om_03",
-        "om_04",
-        "om_05",
-        "om_06",
+    assert "snapshot" not in context
+    assert context["query_scope"] == {"task": {"id": task.id}}
+
+
+def test_adjacent_p2p_resource_context_queries_only_bounded_tail() -> None:
+    class RecordingStore:
+        def __init__(self) -> None:
+            self.resource_ids: list[str] = []
+            self.message_ids: list[str] = []
+
+        def list_resources_for_messages(self, message_ids: list[str]):
+            self.resource_ids = message_ids
+            return [
+                {
+                    "message_id": message_id,
+                    "file_key": f"img_{message_id}",
+                    "download_status": "bot_not_joined",
+                }
+                for message_id in message_ids
+            ]
+
+        def get_messages_by_ids(self, message_ids: list[str]):
+            self.message_ids = message_ids
+            return [
+                {
+                    "message_id": message_id,
+                    "text": f"![Image](img_{message_id})",
+                }
+                for message_id in message_ids
+            ]
+
+    store = RecordingStore()
+    runner = TaskSessionRunner(
+        store=store,  # type: ignore[arg-type]
+        agent_backend=None,  # type: ignore[arg-type]
+        agent_invoker=None,  # type: ignore[arg-type]
+        context_access=None,  # type: ignore[arg-type]
+    )
+    previous_ids = [
+        f"om_{index:03d}" for index in range(P2P_ADJACENT_RESOURCE_CONTEXT_LIMIT + 8)
     ]
-    assert snapshot_task["recent_messages"][-1]["text"] == "follow up 6"
+
+    result = runner._include_adjacent_unavailable_resource_context(
+        current_message_id="om_current",
+        task_message_ids=[*previous_ids, "om_current"],
+        prompt_message_ids=["om_current"],
+    )
+
+    expected_tail = previous_ids[-P2P_ADJACENT_RESOURCE_CONTEXT_LIMIT:]
+    assert store.resource_ids == expected_tail
+    assert store.message_ids == expected_tail
+    assert result == [*expected_tail, "om_current"]
 
 
 @pytest.mark.parametrize(
@@ -232,6 +266,38 @@ def test_resource_preflight_state_preserves_status_mapping(
     assert state["allow"] is (status == "downloaded")
     assert state["reason"] == reason
     assert state["retryable"] is retryable
+
+
+@pytest.mark.parametrize(
+    ("statuses", "expected"),
+    [
+        (["bot_not_joined"], True),
+        (["downloaded", "bot_invisible"], True),
+        (["bot_not_joined", "too_large"], False),
+        (["bot_invisible", "failed"], False),
+    ],
+)
+def test_p2p_resource_unavailable_requires_only_structural_statuses(
+    statuses: list[str], expected: bool
+) -> None:
+    resources = [
+        {"download_status": status, "file_key": f"file_{index}"}
+        for index, status in enumerate(statuses)
+    ]
+    task = replace(_task(), chat_type="p2p")
+
+    assert (
+        is_p2p_resource_unavailable(
+            task=task,
+            message=_message(),
+            preflight=ResourcePreflightResult(
+                allow=False,
+                reason="resource_needs_bot",
+                resources=resources,
+            ),
+        )
+        is expected
+    )
 
 
 def test_resource_preflight_state_retries_missing_current_resource_record() -> None:

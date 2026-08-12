@@ -1014,6 +1014,77 @@ class SQLiteStore:
         with self.connect() as conn:
             self._close_task_for_owner_takeover(conn, task_id, now=now)
 
+    def close_task_for_owner_escalation(
+        self,
+        *,
+        task_id: int,
+        payload: dict[str, Any],
+        task_label: str | None = None,
+    ) -> int | None:
+        """End automated ownership and atomically queue the manual handoff."""
+        self.migrate()
+        now = self.clock()
+        with self.connect() as conn:
+            task = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if task is None:
+                raise KeyError(f"task not found: {task_id}")
+            if task["status"] != TaskStatus.WATCHING.value:
+                return None
+            pending_rows = conn.execute(
+                "SELECT id FROM approvals WHERE task_id = ? AND status = 'pending'",
+                (task_id,),
+            ).fetchall()
+            pending_approval_ids = [int(row["id"]) for row in pending_rows]
+            task_cursor = conn.execute(
+                """
+                UPDATE tasks
+                SET status = ?, task_label = COALESCE(?, task_label), updated_at = ?,
+                    closed_at = ?, watch_until = NULL
+                WHERE id = ? AND status = ?
+                """,
+                (
+                    TaskStatus.CLOSED.value,
+                    None if task_label is None else _truncate(task_label, limit=100),
+                    now,
+                    now,
+                    task_id,
+                    TaskStatus.WATCHING.value,
+                ),
+            )
+            if task_cursor.rowcount != 1:
+                return None
+            conn.execute(
+                """
+                UPDATE actions
+                SET status = ?, updated_at = ?
+                WHERE task_id = ? AND kind = ? AND status IN ('pending', 'sending')
+                """,
+                (
+                    ActionStatus.CANCELLED.value,
+                    now,
+                    task_id,
+                    ActionKind.SEND_REPLY.value,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE approvals
+                SET status = ?, resolved_at = ?
+                WHERE task_id = ? AND status = 'pending'
+                """,
+                (ApprovalStatus.EXPIRED.value, now, task_id),
+            )
+            self._cancel_pending_actions_for_approvals_locked(
+                conn,
+                approval_ids=pending_approval_ids,
+                now=now,
+            )
+            return self._create_owner_notification_action_locked(
+                conn, task_id=task_id, payload=payload, now=now
+            )
+
     def close_task_by_operator(self, task_id: int | str) -> dict[str, Any]:
         self.migrate()
         now = self.clock()
@@ -2065,7 +2136,13 @@ class SQLiteStore:
         self.migrate()
         with self.connect() as conn:
             rows = conn.execute(
-                "SELECT message_id FROM task_messages WHERE task_id = ? ORDER BY created_at, message_id",
+                """
+                SELECT tm.message_id
+                FROM task_messages tm
+                JOIN messages m ON m.message_id = tm.message_id
+                WHERE tm.task_id = ?
+                ORDER BY COALESCE(m.sent_at, tm.created_at), tm.created_at, tm.message_id
+                """,
                 (task_id,),
             ).fetchall()
         return [row["message_id"] for row in rows]

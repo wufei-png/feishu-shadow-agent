@@ -810,6 +810,11 @@ def _owner_notification_incoming_message(value: Any) -> list[str]:
     text = value.get("text")
     if isinstance(text, str) and text.strip():
         lines.append(f"incoming: {_compact_notification_text(text)}")
+    message_app_link = value.get("message_app_link")
+    if isinstance(message_app_link, str) and message_app_link.startswith(
+        "https://applink.feishu.cn/"
+    ):
+        lines.append(f"message_link: {_notification_display_text(message_app_link)}")
     return lines
 
 

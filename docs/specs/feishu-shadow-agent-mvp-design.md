@@ -447,35 +447,31 @@ Hermes 输出必须是严格 JSON，由 Python schema 校验。校验失败降�
 
 ## 12. Hermes 输入格式
 
-Hermes 输入采用混合格式：
+Task Session 对所有 Agent Backend 使用同一份紧凑 Markdown 混合业务输入；Hermes 直接接收该文本，Codex 还可在新 session 的最后一行附加紧凑的原生 `$skill` 调用：
 
 ```text
-system/developer 指令:
-  角色、策略、输出 schema、禁止事项
-
-metadata block:
-  minimal JSON，只放 id、状态、策略和资源引用
-
-context_access block:
-  可选顶层 card，在本地 DB 存在时提供受 query_scope 限制的 bounded snapshot 和 read-only SQLite URI
-
-conversation block:
-  简洁自然语言消息上下文，必须带 sender 信息
+# Task Session
+## Instructions
+## Reply Context
+## Messages
+## Resources       # 仅非空时
+## Context Access  # 仅本地 DB 可用时
+## Output Contract
+Use the following explicitly configured skills ... $docmate
 ```
 
-metadata 不提供关闭选项，MVP 固定 minimal：
+整个 Task Session 不序列化成单一 JSON 对象。Reply Context、Instructions、Messages 和 Output Contract 使用紧凑 Markdown；非空 Resources 与可选 Context Access 使用 fenced JSON。最终 Agent 输出仍是严格 JSON。
 
-```json
-{
-  "task_id": "t_xxx",
-  "state": "watching",
-  "chat_id": "oc_xxx",
-  "root_message_id": "om_root",
-  "current_message_id": "om_current",
-  "resource_ids": ["res_1"],
-  "policy_mode": "balanced"
-}
+Reply Context 只保留回复目标安全所需的字段，不携带 task/message count、history mode 或其他运行诊断信息：
+
+```text
+- current_message_id
+- root_message_id（存在时）
+- allowed_reply_target_message_ids
+- chat_type（非空时）
 ```
+
+Messages 是 prompt 内飞书正文的唯一权威来源。Task Session 不再重复 task label 或 Context Access message snapshot；每条消息保留 message id、sender name/role、sent time 和正文，thread/reply-to 只在非空时展示。资源为空时连 `## Resources` 标题也不出现。Context Access 只提供 read-only URI、allowed tables 与当前 task query scope。Output Contract 精简说明最终字段和交叉约束；完整 Pydantic schema 不重复嵌入业务 prompt，支持结构化输出的 backend 仍通过原生参数接收 schema。
 
 Task Session 初次处理：
 
@@ -495,16 +491,16 @@ Task Session follow-up：
 follow-up 输入必须带发送者：
 
 ```text
-[CURRENT_MESSAGE]
-sender_name: 李四
-sender_id: ou_xxx
-message_id: om_xxx
-create_time: 2026-06-22 10:12:30
-text:
-@张三 分类服务起不来，截图如下
+### Message 1 (current)
 
-attachments:
-- data/resources/om_xxx/img_xxx.jpg
+- `message_id`: "om_xxx"
+- `sender_name`: "李四"
+- `sender_role`: "external_user_message"
+- `sent_at`: "2026-06-22T10:12:30+08:00"
+
+#### Text
+
+> @张三 分类服务起不来，截图如下
 ```
 
 只有当 Hermes 明确表示上下文不足，或者会话恢复/丢失时，Python 才按 id 补发历史消息。
