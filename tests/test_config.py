@@ -37,12 +37,24 @@ def test_load_minimal_config() -> None:
     assert loaded.config.agent_backend.hermes.mode == "cli"
     assert loaded.config.agent_backend.codex.path is None
     assert loaded.config.agent_backend.codex.model is None
+    assert loaded.config.agent_backend.codex.reasoning_effort is None
     assert loaded.config.agent_backend.claude_code.path is None
     assert loaded.config.agent_backend.claude_code.model is None
     assert loaded.config.reply_postprocess.enabled is False
     assert loaded.config.reply_postprocess.max_turns == 4
     assert loaded.config.reply_postprocess.owner_style.enabled is False
     assert loaded.config.reply_postprocess.humanizer_zh.enabled is False
+
+
+def test_agent_backend_timeouts_default_to_unlimited(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("owner:\n  open_id: ou_owner\n", encoding="utf-8")
+
+    loaded = ConfigService().load(config_path)
+
+    assert loaded.config.agent_backend.hermes.timeout_seconds is None
+    assert loaded.config.agent_backend.codex.timeout_seconds is None
+    assert loaded.config.agent_backend.claude_code.timeout_seconds is None
 
 
 def test_tracked_config_schema_matches_generated_schema() -> None:
@@ -421,7 +433,9 @@ agent_backend:
   provider: codex
   codex:
     path: /bin/codex
-    model: gpt-5
+    model: gpt-5.6-luna
+    reasoning_effort: xhigh
+    skills: [docmate, review-agent]
 """,
         encoding="utf-8",
     )
@@ -430,7 +444,47 @@ agent_backend:
 
     assert loaded.config.agent_backend.provider == "codex"
     assert loaded.config.agent_backend.codex.path == "/bin/codex"
-    assert loaded.config.agent_backend.codex.model == "gpt-5"
+    assert loaded.config.agent_backend.codex.model == "gpt-5.6-luna"
+    assert loaded.config.agent_backend.codex.reasoning_effort == "xhigh"
+    assert loaded.config.agent_backend.codex.skills == ["docmate", "review-agent"]
+
+
+@pytest.mark.parametrize("name", ["DocMate", "bad_name", "-bad", "bad-"])
+def test_codex_skill_names_reject_non_native_syntax(tmp_path: Path, name: str) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+owner:
+  open_id: ou_owner
+agent_backend:
+  codex:
+    skills: [{name}]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="codex.skills"):
+        ConfigService().load(config_path)
+
+
+def test_explicit_context_paths_must_be_absolute_and_prompt_safe(
+    tmp_path: Path,
+) -> None:
+    for value in ["relative/skill", "/tmp/`skill`", "/tmp/skill\\nname"]:
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            f"""
+owner:
+  open_id: ou_owner
+agent_backend:
+  explicit_context:
+    paths: ["{value}"]
+""",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ConfigError, match="explicit_context.paths"):
+            ConfigService().load(config_path)
 
 
 def test_claude_code_agent_backend_provider_is_accepted(tmp_path: Path) -> None:

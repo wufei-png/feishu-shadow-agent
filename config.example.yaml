@@ -34,8 +34,8 @@ agent_backend:
   config_scope: isolated
   auto_context: disabled
   explicit_context:
-    # Skill directories or SKILL.md file paths; only injected into task-session turns.
-    skills: []
+    # Absolute non-native skill paths shown as not-yet-loaded context only when a Task Session is created.
+    paths: []
   hermes:
     mode: cli
     path: null
@@ -44,18 +44,25 @@ agent_backend:
     session_max_turns: 8
     model: null
     provider: null
-    timeout_seconds: 60
+    # null lets the Agent finish its configured turns without a wall-clock cutoff.
+    timeout_seconds: null
+    # Native Hermes skill directories or SKILL.md paths passed with --skills.
+    skill_paths: []
     # HTTP mode compatibility. Used only when mode: http.
     health_url: null
     api_key_env: HERMES_API_KEY
   codex:
     path: null
     model: null
-    timeout_seconds: 60
+    # minimal, low, medium, high, or xhigh; null uses the Codex default.
+    reasoning_effort: null
+    timeout_seconds: null
+    # Codex-native skill names. Each new Task Session prompt ends with $name.
+    skills: []
   claude_code:
     path: null
     model: null
-    timeout_seconds: 60
+    timeout_seconds: null
 
 reply_policy:
   p2p_auto_reply: true
@@ -65,7 +72,7 @@ reply_postprocess:
   # Disabled by default. To enable, turn on this flag plus at least one guidance source below.
   enabled: false
   max_turns: 4
-  # null inherits agent_backend.hermes.model/provider.
+  # null inherits the selected backend's model/provider where supported.
   model: null
   provider: null
   owner_style:

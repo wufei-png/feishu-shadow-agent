@@ -67,7 +67,7 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `agent_backend.working_dir` | string/null | `null` | Agent 子进程运行目录；`null` 表示 `config.yaml` 所在目录。相对路径基于配置文件目录解析。新 task 创建时会把解析后的绝对路径固化到 `tasks.agent_working_dir`；后续 follow-up/reopen 继续使用 task 内记录的目录，不随配置漂移。无 task 的 router 使用当前配置解析结果。 |
 | `agent_backend.config_scope` | `isolated`/`native` | `isolated` | 是否加载普通用户级配置；不等同于清除 credentials、managed policy 或 auth state。各 provider 映射见“Agent Backend 上下文语义”。 |
 | `agent_backend.auto_context` | `disabled`/`enabled` | `disabled` | 是否加载 CLI 自带规则、memory、默认 skill 等隐式上下文。不同 CLI 的实际含义不同，见“Agent Backend 上下文语义”。 |
-| `agent_backend.explicit_context.skills` | list[string] | `[]` | 显式注入 task session 的 skill 目录或 `SKILL.md` 文件路径。相对路径基于配置文件目录解析；`SKILL.md` 文件路径会规范化为其父目录。当前只传给 Hermes task session；Codex/Claude Code v1 不暴露 skill 注入 argv。 |
+| `agent_backend.explicit_context.paths` | list[string] | `[]` | 非原生 skill 的绝对路径。仅在新建 Task Session prompt 中以“尚未加载、需要时先读取”方式展示；程序不读取、复制、链接或安装这些路径。路径必须是绝对路径，不能包含反引号或控制字符。Hermes 和 Codex 支持；Claude Code v1 不支持。 |
 | `agent_backend.hermes.mode` | `cli`/`http` | `cli` | 只影响 `doctor`/运行时 health 探测方式；**无论取何值，任务处理和 runtime backend readiness 都会检查并使用本机 `hermes chat` CLI**。`http` 会额外探测 Hermes gateway/API server 是否可达。 |
 | `agent_backend.hermes.path` | string/null | `null` | `cli` 模式下指定 Hermes 路径；`null` 使用当前 `PATH`。 |
 | `agent_backend.hermes.source` | string | `feishu-shadow-agent` | 传给 Hermes 会话和审计数据的来源标记；不能为空。官方建议第三方集成可用 `tool` 以从用户 session 列表中过滤；本项目保留自定义标签便于审计区分。 |
@@ -75,12 +75,15 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `agent_backend.hermes.session_max_turns` | int `> 0` | `8` | Hermes 单任务会话调用的最大 tool iteration 轮数（`--max-turns`）。 |
 | `agent_backend.hermes.model` | string/null | `null` | 可选模型覆盖；`null` 时由 Hermes CLI 决定。`config_scope: isolated` 下不会读取用户全局 Hermes 配置。 |
 | `agent_backend.hermes.provider` | string/null | `null` | 可选 provider 覆盖；`null` 时由 Hermes CLI 决定。`config_scope: isolated` 下不会读取用户全局 Hermes 配置。 |
-| `agent_backend.hermes.timeout_seconds` | int `> 0` | `60` | Hermes 子进程或 health 调用超时。 |
+| `agent_backend.hermes.timeout_seconds` | int `> 0`/null | `null` | Hermes Agent 子进程超时；`null` 不设置 wall-clock 截止时间。health/doctor 始终使用独立的 `health.timeout_seconds`。 |
+| `agent_backend.hermes.skill_paths` | list[string] | `[]` | Hermes 原生 skill 目录或 `SKILL.md` 路径；路径基于配置文件目录解析并通过 `--skills` 传入 Task Session。`doctor` 要求对应 `SKILL.md` 含有效 `name`。 |
 | `agent_backend.hermes.health_url` | string/null | `null` | `agent_backend.hermes.mode: http` 时追加使用；必须以 `http://` 或 `https://` 开头，HTTP 模式下必填。典型值为 `http://127.0.0.1:8642/health`。**不用于 chat/路由/会话调用**。 |
 | `agent_backend.hermes.api_key_env` | string/null | `HERMES_API_KEY` | `agent_backend.hermes.mode: http` 时可选 Bearer token 环境变量名。Hermes 官方 API server 常用 `API_SERVER_KEY`；`/health` 端点通常无需认证，此字段主要留给需要鉴权的 health URL。 |
 | `agent_backend.codex.path` | string/null | `null` | 指定 Codex CLI 路径；`null` 使用当前 `PATH`。 |
 | `agent_backend.codex.model` | string/null | `null` | 可选 Codex model 覆盖；`null` 时由 Codex CLI 决定。 |
-| `agent_backend.codex.timeout_seconds` | int `> 0` | `60` | Codex 子进程调用和 Codex readiness 探测超时。 |
+| `agent_backend.codex.reasoning_effort` | `minimal`/`low`/`medium`/`high`/`xhigh`/null | `null` | 可选 Codex reasoning effort 覆盖；配置后通过 `model_reasoning_effort` 传给 Codex CLI。Hermes 不读取此字段。 |
+| `agent_backend.codex.timeout_seconds` | int `> 0`/null | `null` | Codex Agent 子进程超时；`null` 不设置 wall-clock 截止时间。readiness 探测使用 `health.timeout_seconds`。 |
+| `agent_backend.codex.skills` | list[string] | `[]` | 已由部署环境安装到 Codex 原生发现范围的 skill 名称。名称只能使用小写字母、数字和内部连字符，最长 64 字符；新建 Task Session prompt 最后一行追加 `$name`。配置表示 requested/configured，不代表 runtime loaded。 |
 | `agent_backend.claude_code.path` | string/null | `null` | 指定 Claude Code CLI 路径；`null` 使用当前 `PATH`。 |
 | `agent_backend.claude_code.model` | string/null | `null` | 可选 Claude Code model 覆盖；`null` 时由 Claude Code CLI 决定。 |
 | `agent_backend.claude_code.timeout_seconds` | int `> 0` | `60` | Claude Code 子进程调用和 Claude Code readiness 探测超时。 |
@@ -151,9 +154,9 @@ Console 覆盖 Dashboard、Approvals、Tasks、Dispatch、Policy、Settings 和 
 
 | Provider | `config_scope: isolated` | `auto_context: disabled` | `explicit_context` |
 | --- | --- | --- | --- |
-| Hermes | 传 `--ignore-user-config`。 | 传 `--ignore-rules`，跳过 Hermes 自动规则、memory 和预加载 skill。 | 当前只在 task session 传 `--skills <path>`，task router 不注入。 |
-| Codex | 传 `codex exec --ignore-user-config`，但它只是不加载 `$CODEX_HOME/config.toml`；auth 仍使用 `CODEX_HOME`。 | 传 `--ignore-rules`，但该 flag 只跳过 user/project execpolicy `.rules`；禁用 `AGENTS.md`、memory、skills、MCP 等需要更强 wrapper 层隔离。 | Codex v1 不传 skill 注入 argv；需要通过受控工作目录、prompt 和后续 wrapper 层实现更强显式上下文。 |
-| Claude Code | 传 `--setting-sources local`，避免加载 user/project settings；auth 和 managed policy 仍由 Claude Code 自身处理。 | 传 `--safe-mode`，禁用 CLAUDE.md、skills、plugins、hooks、MCP servers、custom commands/agents 等自定义上下文；不使用 `--bare` 作为默认 baseline。 | Claude Code v1 不传 skill 注入 argv；每次调用都传 `--strict-mcp-config` 和空 MCP config，避免加载全局 MCP。 |
+| Hermes | 传 `--ignore-user-config`。 | 传 `--ignore-rules`，跳过 Hermes 自动规则、memory 和预加载 skill。 | `hermes.skill_paths` 通过原生 `--skills <path>` 传给 Task Session；`explicit_context.paths` 只在新建 session 的 prompt 中标为尚未加载。Router 不接收二者。Hermes resume 可再次携带 `--skills`，但不重复 prompt 路径块。 |
+| Codex | 传 `codex exec --ignore-user-config`，但它只是不加载 `$CODEX_HOME/config.toml`；auth 仍使用 `CODEX_HOME`。 | 传 `--ignore-rules`，但该 flag 只跳过 user/project execpolicy `.rules`；禁用 `AGENTS.md`、memory、skills、MCP 等需要更强 wrapper 层隔离。 | 仅在新建 Task Session 的 stdin 末尾追加 `codex.skills` 对应的 `$name`；`explicit_context.paths` 先以尚未加载的路径块展示。程序不使用 `skills.config`，也不判断 Codex 是否实际发现。resume、Router、judge 和 postprocess 不重复加入。 |
+| Claude Code | 传 `--setting-sources local`，避免加载 user/project settings；auth 和 managed policy 仍由 Claude Code 自身处理。 | 传 `--safe-mode`，禁用 CLAUDE.md、skills、plugins、hooks、MCP servers、custom commands/agents 等自定义上下文；不使用 `--bare` 作为默认 baseline。 | Claude Code v1 不支持 native skill 或 `explicit_context.paths`；每次调用都传 `--strict-mcp-config` 和空 MCP config，避免加载全局 MCP。 |
 
 最重要的边界：Codex `--ignore-rules` 不是“禁项目规则、memory、skills”的总开关；它只处理 execpolicy `.rules`。如果 `agent_backend.provider: codex` 指向含项目规则的工作目录，这些规则仍可能影响 Codex 行为。
 
@@ -191,7 +194,13 @@ hermes chat -q <prompt> -Q --source <source> --toolsets <...> [--yolo] --max-tur
 - `-Q`：程序化模式，stdout 为模型最终回复，stderr 输出 `session_id:`。
 - `--ignore-user-config`：默认由 `agent_backend.config_scope: isolated` 启用，避免用户全局配置改变后台服务行为。
 - `--ignore-rules`：默认由 `agent_backend.auto_context: disabled` 启用，跳过 `AGENTS.md`、`SOUL.md`、memory 和预加载 skill 的自动注入，避免仓库/编辑器规则污染飞书任务 prompt。
-- `--skills <path>`：只在 task session 中根据 `agent_backend.explicit_context.skills` 注入；task router 默认不加载 skill，保持路由决策更窄、更稳定。
+- `--skills <path>`：只在 task session 中根据 `agent_backend.hermes.skill_paths` 注入；task router 默认不请求 skill，保持路由决策更窄、更稳定。
+
+Codex 只按 `agent_backend.codex.skills` 中的名称生成原生显式调用，例如新 Task Session 业务 prompt 最后一行的 `$docmate`。skill 必须由部署环境预先安装到 Codex 原生发现范围；本程序不读取 `SKILL.md`、不注册任意路径，也不模拟 Codex 的仓库根发现算法。完整 skill 是否加载由 Codex 决定，配置只表示 requested/configured。运行中的旧 session 不因配置变化自动增加 skill，需要新建或显式重置 session。生产 prompt、输出 schema 和 audit response 不增加 skill trace 字段。
+
+Codex Task Session 还会通过 CLI `-c developer_instructions=...` 传入固定的非交互约束：工具探索保持静默，只返回一个最终 JSON 对象。该约束属于 Codex adapter，不进入 backend-neutral 业务 prompt，也不用于 Router、judge、reply postprocess 或 owner style refresh；`--output-schema`、`--output-last-message` 和 Python schema 校验仍共同约束最终输出。
+
+生产 Task Session 输入使用紧凑的 Markdown 混合格式，固定顺序为 Instructions、Reply Context、Messages、非空 Resources、可选 Context Access、Output Contract，Codex 新 session 的显式 skill 引用随后占最后一行。Messages 是飞书正文的唯一嵌入来源；Reply Context 只保留 current/root id、合法回复目标和非空 chat type；Context Access 不复制消息 snapshot；空 Resources section 和 null message 字段完全省略。Output Contract 是模型可见的精简字段约束，最终 JSON 仍由 provider-native schema（支持时）和 Python schema 双重校验。Router、reply postprocess 和 owner style refresh 保持各自现有输入格式。
 
 Reply postprocess 和 owner style refresh 也是 `hermes chat -q -Q` 一次性调用，但固定使用 read-only tool policy：
 
@@ -199,7 +208,7 @@ Reply postprocess 和 owner style refresh 也是 `hermes chat -q -Q` 一次性�
 --toolsets safe --max-turns reply_postprocess.max_turns
 ```
 
-它们不传 `--resume`，不注入 `agent_backend.explicit_context.skills`，也不改变 task session。`reply_postprocess.model/provider` 为 `null` 时继承 `agent_backend.hermes.model/provider`。
+它们不传 `--resume`，不注入 native skill 请求或 `agent_backend.explicit_context.paths`，也不改变 task session。`reply_postprocess.model/provider` 为 `null` 时继承所选 backend 支持的 model/provider 配置。
 
 `reply-style refresh --dry-run` 只拉取和过滤 owner 样本，输出计数和基础字符统计，不调用 Hermes、不写 profile。非 dry-run 在样本数达到 `min_samples` 后调用 summarizer，成功后通过临时文件原子替换 `owner_style.profile_path`。
 
@@ -218,13 +227,14 @@ codex --search --ask-for-approval never exec --sandbox read-only --json --output
 codex --search --ask-for-approval never exec --sandbox read-only --json --output-schema <schema.json> --output-last-message <out.json> resume <session_id> -
 ```
 
-`full_access` 会把 `--sandbox read-only` 替换为 `--dangerously-bypass-approvals-and-sandbox`。当 `agent_backend.codex.model` 或 `reply_postprocess.model` 配置后，会传 `--model <model>`。
+`full_access` 会把 `--sandbox read-only` 替换为 `--dangerously-bypass-approvals-and-sandbox`。当 `agent_backend.codex.model` 或 `reply_postprocess.model` 配置后，会传 `--model <model>`；`agent_backend.codex.reasoning_effort` 会通过 `-c model_reasoning_effort=<effort>` 应用于 Codex 调用。新 Task Session 只在 stdin 最后一行追加配置的 `$name`；不会生成 `skills.config`，后续 resume 不重复注入。
 
 - prompt 通过 stdin 传入，不放进 argv。
 - `--output-schema` 使用当前 Pydantic 输出模型生成的临时 JSON Schema。
 - `--output-last-message` 是最终 JSON 输出来源；stdout JSONL 中的 `thread.started.thread_id` 会作为 agent session id 持久化。
 - task session follow-up 使用 `codex exec resume <session_id> -`。如果配置切换 provider，已有非 Codex session id 不会被 Codex 复用。
 - `doctor` 的 selected-backend readiness 对 Codex 检查 `--version`、`login status`、`exec --help` 和 `exec resume --help`，不运行完整 `codex doctor`，避免把安装更新、terminal 状态或历史线程扫描等无关项变成 daemon 阻塞条件。
+- `doctor` 只把 `agent_backend.codex.skills` 报告为 `configured` 并依赖上述 backend readiness；没有稳定公共接口时，不把名称伪报为 loaded/available。
 
 ## Claude Code 集成说明
 

@@ -441,6 +441,44 @@ def test_hermes_cli_checker_version_critical_and_status_warning(
     ]
 
 
+def test_backend_health_probe_keeps_finite_health_timeout_when_agent_is_unbounded(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+health:
+  timeout_seconds: 7
+agent_backend:
+  hermes:
+    timeout_seconds: null
+""",
+        encoding="utf-8",
+    )
+    loaded = ConfigService().load(config_path)
+    timeouts: list[int] = []
+
+    def fake_run(argv, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        stdout = (
+            "usage: hermes chat [--toolsets TOOLSETS] [--ignore-user-config] "
+            "[--ignore-rules]\n"
+            if argv[1:3] == ["chat", "--help"]
+            else "ok\n"
+        )
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    HermesCliChecker()(loaded)
+
+    assert loaded.config.agent_backend.hermes.timeout_seconds is None
+    assert timeouts == [7, 7, 7]
+
+
 def test_hermes_cli_checker_fails_when_full_access_yolo_is_missing(
     monkeypatch,
     tmp_path: Path,
@@ -521,8 +559,8 @@ def test_hermes_cli_checker_requires_skills_flag_only_when_skills_are_configured
 owner:
   open_id: ou_owner
 agent_backend:
-  explicit_context:
-    skills:
+  hermes:
+    skill_paths:
       - skills/support
 """,
         encoding="utf-8",
@@ -902,8 +940,8 @@ def test_doctor_warns_when_explicit_agent_skill_is_missing(tmp_path: Path) -> No
 owner:
   open_id: ou_owner
 agent_backend:
-  explicit_context:
-    skills:
+  hermes:
+    skill_paths:
       - skills/missing
 """,
         encoding="utf-8",
@@ -932,15 +970,17 @@ agent_backend:
 def test_doctor_accepts_explicit_agent_skill_directory(tmp_path: Path) -> None:
     skill_dir = tmp_path / "skills" / "support"
     skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text("# Support\n", encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: support\n---\n# Support\n", encoding="utf-8"
+    )
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
 owner:
   open_id: ou_owner
 agent_backend:
-  explicit_context:
-    skills:
+  hermes:
+    skill_paths:
       - skills/support
 """,
         encoding="utf-8",
@@ -962,22 +1002,23 @@ agent_backend:
         result for result in results if result.name == "agent_explicit_skills"
     )
     assert explicit_skills.status == "ok"
-    assert explicit_skills.details["resolved"] == [str(skill_dir)]
+    assert explicit_skills.details["resolved_hermes_skill_paths"] == [str(skill_dir)]
+    assert explicit_skills.details["configured_hermes_skill_names"] == ["support"]
 
 
 def test_doctor_accepts_explicit_agent_skill_file_path(tmp_path: Path) -> None:
     skill_dir = tmp_path / "skills" / "support"
     skill_dir.mkdir(parents=True)
     skill_file = skill_dir / "SKILL.md"
-    skill_file.write_text("# Support\n", encoding="utf-8")
+    skill_file.write_text("---\nname: support\n---\n# Support\n", encoding="utf-8")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
 owner:
   open_id: ou_owner
 agent_backend:
-  explicit_context:
-    skills:
+  hermes:
+    skill_paths:
       - skills/support/SKILL.md
 """,
         encoding="utf-8",
@@ -999,4 +1040,75 @@ agent_backend:
         result for result in results if result.name == "agent_explicit_skills"
     )
     assert explicit_skills.status == "ok"
-    assert explicit_skills.details["resolved"] == [str(skill_dir)]
+    assert explicit_skills.details["resolved_hermes_skill_paths"] == [str(skill_dir)]
+
+
+def test_doctor_rejects_hermes_skill_without_valid_frontmatter_name(
+    tmp_path: Path,
+) -> None:
+    skill_dir = tmp_path / "skills" / "support"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Support\n", encoding="utf-8")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+agent_backend:
+  hermes:
+    skill_paths:
+      - skills/support
+""",
+        encoding="utf-8",
+    )
+    loaded = ConfigService().load(config_path)
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=_initialized_store(tmp_path, loaded),
+        feishu_client=FakeFeishuClient(),
+        hermes_checker=ok_hermes,
+        run_id="doctor_1",
+    )
+
+    results = suite.run(send_test=False)
+
+    explicit_skills = next(
+        result for result in results if result.name == "agent_explicit_skills"
+    )
+    assert explicit_skills.status == "failed"
+    assert explicit_skills.details["invalid_hermes_skills"] == [str(skill_dir)]
+
+
+def test_doctor_reports_codex_native_skill_name_as_configured(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+agent_backend:
+  provider: codex
+  working_dir: .
+  codex:
+    skills:
+      - docmate
+""",
+        encoding="utf-8",
+    )
+    loaded = ConfigService().load(config_path)
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=_initialized_store(tmp_path, loaded),
+        feishu_client=FakeFeishuClient(),
+        agent_backend_checker=ok_hermes,
+        run_id="doctor_1",
+    )
+
+    results = suite.run(send_test=False)
+
+    explicit_skills = next(
+        result for result in results if result.name == "agent_explicit_skills"
+    )
+    assert explicit_skills.status == "ok"
+    assert explicit_skills.details["configured_skill_names"] == ["docmate"]
+    assert "available" not in explicit_skills.message
+    assert "loaded" not in explicit_skills.message

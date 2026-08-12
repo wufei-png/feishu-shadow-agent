@@ -3,6 +3,7 @@ from __future__ import annotations
 from feishu_shadow_agent.agent_backend import AgentRunResult
 from feishu_shadow_agent.config import HermesConfig, ReplyPostprocessConfig
 from feishu_shadow_agent.hermes import HermesCliClient
+from feishu_shadow_agent.prompt import TaskRouterOutput
 
 
 def test_hermes_cli_builds_default_read_only_chat_command_with_model_provider_and_resume() -> (
@@ -100,6 +101,29 @@ def test_hermes_cli_injects_explicit_skills_only_for_task_session() -> None:
         ]
         == "/skills/support"
     )
+
+
+def test_hermes_structured_output_does_not_inject_task_session_skills() -> None:
+    seen: list[list[str]] = []
+
+    def runner(argv: list[str], timeout: int) -> AgentRunResult:
+        seen.append(argv)
+        return AgentRunResult(
+            argv=argv,
+            exit_code=0,
+            stdout='{"route":"ignore","target_task_id":null,"reason":"done"}',
+        )
+
+    client = HermesCliClient(
+        config=HermesConfig(path="hermes"),
+        session_skills=["/skills/docmate"],
+        runner=runner,
+    )
+
+    result = client.structured_output("judge", output_model=TaskRouterOutput)
+
+    assert result.ok
+    assert "--skills" not in seen[0]
 
 
 def test_hermes_cli_parses_json_and_session_id() -> None:

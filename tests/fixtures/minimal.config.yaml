@@ -33,8 +33,7 @@ agent_backend:
   config_scope: isolated
   auto_context: disabled
   explicit_context:
-    # Skill directories or SKILL.md file paths; only injected into task-session turns.
-    skills: []
+    paths: []
   hermes:
     mode: cli
     path: hermes
@@ -44,12 +43,15 @@ agent_backend:
     model: null
     provider: null
     timeout_seconds: 1
+    skill_paths: []
     health_url: null
     api_key_env: HERMES_API_KEY
   codex:
     path: null
     model: null
+    reasoning_effort: null
     timeout_seconds: 1
+    skills: []
   claude_code:
     path: null
     model: null

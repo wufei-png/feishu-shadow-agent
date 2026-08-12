@@ -12,18 +12,20 @@ from .paths import resolve_agent_skill_path
 
 def create_agent_backend(config: AppConfig, *, base_dir: str | Path) -> AgentBackend:
     backend = config.agent_backend
+    explicit_context_paths = list(backend.explicit_context.paths)
+    hermes_skill_paths = [
+        resolve_agent_skill_path(skill, base_dir)
+        for skill in backend.hermes.skill_paths
+    ]
     if backend.provider == "hermes":
-        session_skills = [
-            resolve_agent_skill_path(skill, base_dir)
-            for skill in backend.explicit_context.skills
-        ]
         return HermesCliClient(
             config=backend.hermes,
             tool_permissions=config.tool_permissions,
             config_scope=backend.config_scope,
             auto_context=backend.auto_context,
             reply_postprocess=config.reply_postprocess,
-            session_skills=session_skills,
+            session_skills=hermes_skill_paths,
+            explicit_context_paths=explicit_context_paths,
         )
     if backend.provider == "codex":
         return CodexCliClient(
@@ -32,6 +34,8 @@ def create_agent_backend(config: AppConfig, *, base_dir: str | Path) -> AgentBac
             config_scope=backend.config_scope,
             auto_context=backend.auto_context,
             reply_postprocess=config.reply_postprocess,
+            session_skill_names=backend.codex.skills,
+            explicit_context_paths=explicit_context_paths,
         )
     if backend.provider == "claude_code":
         return ClaudeCodeCliClient(

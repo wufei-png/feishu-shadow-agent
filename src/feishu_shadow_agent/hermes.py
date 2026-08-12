@@ -12,6 +12,10 @@ from typing import Any
 from pydantic import BaseModel
 
 from .agent_backend import AgentRunResult
+from .agent_skill_context import (
+    append_explicit_context_paths,
+    configured_agent_skill_names,
+)
 from .config import (
     AutoContextMode,
     ConfigScopeMode,
@@ -20,7 +24,7 @@ from .config import (
     ToolPermissionsProfile,
 )
 
-HermesRunner = Callable[[list[str], int], AgentRunResult]
+HermesRunner = Callable[[list[str], int | None], AgentRunResult]
 SESSION_ID_RE = re.compile(r"session_id:\s*([^\s]+)")
 
 
@@ -56,6 +60,7 @@ class HermesCliClient:
         auto_context: AutoContextMode = "disabled",
         reply_postprocess: ReplyPostprocessConfig | None = None,
         session_skills: Sequence[str | Path] = (),
+        explicit_context_paths: Sequence[str | Path] = (),
         cwd: str | Path | None = None,
         runner: HermesRunner | None = None,
     ):
@@ -66,6 +71,7 @@ class HermesCliClient:
         self.auto_context = auto_context
         self.reply_postprocess_config = reply_postprocess or ReplyPostprocessConfig()
         self.session_skills = [str(skill) for skill in session_skills]
+        self.explicit_context_paths = [str(path) for path in explicit_context_paths]
         self.path = config.path or "hermes"
         self.cwd = None if cwd is None else Path(cwd)
         self._runner = runner
@@ -128,9 +134,14 @@ class HermesCliClient:
         session_id: str | None = None,
         cwd: str | Path | None = None,
     ) -> AgentRunResult:
+        effective_prompt = (
+            append_explicit_context_paths(prompt, self.explicit_context_paths)
+            if session_id is None
+            else prompt
+        )
         return self._run(
             self.build_chat_command(
-                prompt=prompt,
+                prompt=effective_prompt,
                 max_turns=self.config.session_max_turns,
                 session_id=session_id,
                 include_session_skills=True,
@@ -152,10 +163,12 @@ class HermesCliClient:
                 prompt=prompt,
                 max_turns=self.config.session_max_turns,
                 session_id=session_id,
-                include_session_skills=True,
             ),
             cwd=cwd,
         )
+
+    def requested_skill_names(self) -> list[str]:
+        return configured_agent_skill_names(self.session_skills)
 
     def reply_postprocess(
         self, prompt: str, *, cwd: str | Path | None = None
@@ -223,7 +236,7 @@ class HermesCliClient:
 
 
 def _run_subprocess(
-    argv: Sequence[str], timeout_seconds: int, *, cwd: Path | None = None
+    argv: Sequence[str], timeout_seconds: int | None, *, cwd: Path | None = None
 ) -> AgentRunResult:
     started = time.monotonic()
     try:

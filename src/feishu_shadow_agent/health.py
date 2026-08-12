@@ -10,6 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .agent_backend import AgentRunResult
+from .agent_skill_context import load_agent_skill_names
 from .claude_code import claude_code_execution_policy
 from .codex import codex_execution_policy
 from .config import LoadedConfig
@@ -45,6 +46,7 @@ ClaudeCodeChecker = BackendReadinessChecker
 class HermesHttpChecker:
     def __call__(self, loaded: LoadedConfig) -> HealthCheckResult:
         hermes = loaded.config.agent_backend.hermes
+        timeout_seconds = loaded.config.health.timeout_seconds
         if not hermes.health_url:
             return HealthCheckResult(
                 "hermes_reachable",
@@ -67,9 +69,7 @@ class HermesHttpChecker:
             hermes.health_url, headers=headers, method="GET"
         )
         try:
-            with urllib.request.urlopen(
-                request, timeout=hermes.timeout_seconds
-            ) as response:
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
                 status = response.status
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             return HealthCheckResult(
@@ -99,12 +99,13 @@ class HermesHttpChecker:
 class HermesCliChecker:
     def __call__(self, loaded: LoadedConfig) -> list[HealthCheckResult]:
         hermes = loaded.config.agent_backend.hermes
+        timeout_seconds = loaded.config.health.timeout_seconds
         path = hermes.path or "hermes"
         cwd = resolve_agent_working_dir(
             loaded.config.agent_backend.working_dir, loaded.base_dir
         )
         version = _run_hermes_command(
-            [path, "--version"], timeout_seconds=hermes.timeout_seconds, cwd=cwd
+            [path, "--version"], timeout_seconds=timeout_seconds, cwd=cwd
         )
         version_result = _hermes_command_result(
             "hermes_cli_version",
@@ -116,7 +117,7 @@ class HermesCliChecker:
         if version_result.is_critical_failure:
             return [version_result]
         status = _run_hermes_command(
-            [path, "status"], timeout_seconds=hermes.timeout_seconds, cwd=cwd
+            [path, "status"], timeout_seconds=timeout_seconds, cwd=cwd
         )
         status_result = _hermes_command_result(
             "hermes_cli_status",
@@ -126,7 +127,7 @@ class HermesCliChecker:
             severity="warning",
         )
         chat_help = _run_hermes_command(
-            [path, "chat", "--help"], timeout_seconds=hermes.timeout_seconds, cwd=cwd
+            [path, "chat", "--help"], timeout_seconds=timeout_seconds, cwd=cwd
         )
         permissions_result = _hermes_tool_permissions_result(loaded, chat_help)
         return [version_result, status_result, permissions_result]
@@ -152,12 +153,13 @@ class HermesHealthChecker:
 class CodexCliChecker:
     def __call__(self, loaded: LoadedConfig) -> list[HealthCheckResult]:
         codex = loaded.config.agent_backend.codex
+        timeout_seconds = loaded.config.health.timeout_seconds
         path = codex.path or "codex"
         cwd = resolve_agent_working_dir(
             loaded.config.agent_backend.working_dir, loaded.base_dir
         )
         version = _run_codex_command(
-            [path, "--version"], timeout_seconds=codex.timeout_seconds, cwd=cwd
+            [path, "--version"], timeout_seconds=timeout_seconds, cwd=cwd
         )
         version_result = _agent_command_result(
             "codex_cli_version",
@@ -169,7 +171,7 @@ class CodexCliChecker:
         if version_result.is_critical_failure:
             return [version_result]
         login_status = _run_codex_command(
-            [path, "login", "status"], timeout_seconds=codex.timeout_seconds, cwd=cwd
+            [path, "login", "status"], timeout_seconds=timeout_seconds, cwd=cwd
         )
         login_result = _agent_command_result(
             "codex_login_status",
@@ -180,7 +182,7 @@ class CodexCliChecker:
         )
         exec_help = _run_codex_command(
             [path, *codex_execution_policy("read_only").root_args, "exec", "--help"],
-            timeout_seconds=codex.timeout_seconds,
+            timeout_seconds=timeout_seconds,
             cwd=cwd,
         )
         resume_help = _run_codex_command(
@@ -193,7 +195,7 @@ class CodexCliChecker:
                 "resume",
                 "--help",
             ],
-            timeout_seconds=codex.timeout_seconds,
+            timeout_seconds=timeout_seconds,
             cwd=cwd,
         )
         permissions_result = _codex_capabilities_result(
@@ -205,13 +207,14 @@ class CodexCliChecker:
 class ClaudeCodeCliChecker:
     def __call__(self, loaded: LoadedConfig) -> list[HealthCheckResult]:
         claude_code = loaded.config.agent_backend.claude_code
+        timeout_seconds = loaded.config.health.timeout_seconds
         path = claude_code.path or "claude"
         cwd = resolve_agent_working_dir(
             loaded.config.agent_backend.working_dir, loaded.base_dir
         )
         version = _run_claude_code_command(
             [path, "--version"],
-            timeout_seconds=claude_code.timeout_seconds,
+            timeout_seconds=timeout_seconds,
             cwd=cwd,
         )
         version_result = _agent_command_result(
@@ -225,7 +228,7 @@ class ClaudeCodeCliChecker:
             return [version_result]
         auth_status = _run_claude_code_command(
             [path, "auth", "status"],
-            timeout_seconds=claude_code.timeout_seconds,
+            timeout_seconds=timeout_seconds,
             cwd=cwd,
         )
         auth_result = _agent_command_result(
@@ -237,7 +240,7 @@ class ClaudeCodeCliChecker:
         )
         print_help = _run_claude_code_command(
             [path, "-p", "--help"],
-            timeout_seconds=claude_code.timeout_seconds,
+            timeout_seconds=timeout_seconds,
             cwd=cwd,
         )
         capabilities_result = _claude_code_capabilities_result(
@@ -574,44 +577,82 @@ class HealthSuite:
         )
 
     def _check_agent_explicit_skills(self) -> HealthCheckResult:
-        skills = self.loaded_config.config.agent_backend.explicit_context.skills
-        if not skills:
+        backend = self.loaded_config.config.agent_backend
+        explicit_paths = backend.explicit_context.paths
+        codex_skills = backend.codex.skills if backend.provider == "codex" else []
+        hermes_skills = (
+            backend.hermes.skill_paths if backend.provider == "hermes" else []
+        )
+        if not explicit_paths and not codex_skills and not hermes_skills:
             return HealthCheckResult(
                 "agent_explicit_skills",
                 "warning",
                 "ok",
-                "no explicit agent skills configured",
+                "no Task Session skills or explicit context paths configured",
             )
-        missing: list[str] = []
-        invalid: list[str] = []
-        resolved: list[str] = []
-        for skill in skills:
-            path = resolve_agent_skill_path(skill, self.loaded_config.base_dir)
-            resolved.append(str(path))
-            if not path.exists():
-                missing.append(str(path))
-                continue
-            if not path.is_dir() or not (path / "SKILL.md").is_file():
-                invalid.append(str(path))
-        if missing or invalid:
+        details: dict[str, object] = {
+            "provider": backend.provider,
+            "configured_skill_names": codex_skills,
+            "configured_explicit_context_paths": explicit_paths,
+            "configured_hermes_skill_paths": hermes_skills,
+        }
+        if backend.provider == "claude_code" and explicit_paths:
             return HealthCheckResult(
                 "agent_explicit_skills",
                 "warning",
                 "failed",
-                "some explicit agent skills are missing or invalid",
-                {
-                    "configured": skills,
-                    "resolved": resolved,
-                    "missing": missing,
-                    "invalid": invalid,
-                },
+                "explicit context paths are not supported by the Claude Code backend",
+                details,
+            )
+        missing: list[str] = []
+        unreadable: list[str] = []
+        for value in explicit_paths:
+            path = Path(value)
+            if not path.exists():
+                missing.append(str(path))
+            elif not os.access(path, os.R_OK):
+                unreadable.append(str(path))
+        resolved_hermes_paths: list[str] = []
+        invalid_hermes_skills: list[str] = []
+        hermes_skill_names: list[str] = []
+        for skill in hermes_skills:
+            path = resolve_agent_skill_path(skill, self.loaded_config.base_dir)
+            resolved_hermes_paths.append(str(path))
+            if not path.exists():
+                missing.append(str(path))
+                continue
+            if not path.is_dir() or not (path / "SKILL.md").is_file():
+                invalid_hermes_skills.append(str(path))
+                continue
+            try:
+                hermes_skill_names.extend(load_agent_skill_names([path]))
+            except (OSError, ValueError):
+                invalid_hermes_skills.append(str(path))
+        details.update(
+            {
+                "resolved_hermes_skill_paths": resolved_hermes_paths,
+                "configured_hermes_skill_names": list(
+                    dict.fromkeys(hermes_skill_names)
+                ),
+                "missing": missing,
+                "unreadable": unreadable,
+                "invalid_hermes_skills": invalid_hermes_skills,
+            }
+        )
+        if missing or unreadable or invalid_hermes_skills:
+            return HealthCheckResult(
+                "agent_explicit_skills",
+                "warning",
+                "failed",
+                "some configured Task Session skill paths or explicit context paths are invalid",
+                details,
             )
         return HealthCheckResult(
             "agent_explicit_skills",
             "warning",
             "ok",
-            "explicit agent skills are present",
-            {"configured": skills, "resolved": resolved},
+            "Task Session skills and explicit context paths are configured",
+            details,
         )
 
     def _check_reply_postprocess_guidance(self) -> list[HealthCheckResult]:
@@ -919,7 +960,8 @@ def _codex_capabilities_result(
         "effective_exec_args": policy.exec_args,
         "config_scope": backend.config_scope,
         "auto_context": backend.auto_context,
-        "explicit_skills_count": len(backend.explicit_context.skills),
+        "configured_skill_names_count": len(backend.codex.skills),
+        "explicit_context_paths_count": len(backend.explicit_context.paths),
         "exec_help_argv": exec_help.argv,
         "resume_help_argv": resume_help.argv,
         "exec_help_exit_code": exec_help.exit_code,
@@ -983,7 +1025,7 @@ def _claude_code_capabilities_result(
         "effective_args": policy.args,
         "config_scope": backend.config_scope,
         "auto_context": backend.auto_context,
-        "explicit_skills_count": len(backend.explicit_context.skills),
+        "explicit_context_paths_count": len(backend.explicit_context.paths),
         "print_help_argv": print_help.argv,
         "print_help_exit_code": print_help.exit_code,
         "print_help_error": print_help.error,
@@ -1078,7 +1120,8 @@ def _hermes_tool_permissions_result(
         "effective_args": policy.cli_args(),
         "config_scope": backend.config_scope,
         "auto_context": backend.auto_context,
-        "explicit_skills_count": len(backend.explicit_context.skills),
+        "native_skill_paths_count": len(backend.hermes.skill_paths),
+        "explicit_context_paths_count": len(backend.explicit_context.paths),
         "argv": result.argv,
         "stdout": result.stdout.strip(),
         "stderr": result.stderr.strip(),
@@ -1124,7 +1167,7 @@ def _required_hermes_backend_flags(loaded: LoadedConfig) -> list[str]:
         flags.append("--ignore-user-config")
     if backend.auto_context == "disabled":
         flags.append("--ignore-rules")
-    if backend.explicit_context.skills:
+    if backend.hermes.skill_paths:
         flags.append("--skills")
     if hermes.model:
         flags.append("--model")

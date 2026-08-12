@@ -1,0 +1,5 @@
+# Request native skills when a Task Session is created
+
+Native skill configuration is provider-specific and is a request, not proof of runtime loading. Hermes receives `agent_backend.hermes.skill_paths` through `--skills` on Task Session calls. Codex receives each validated `agent_backend.codex.skills` name as a compact `$name` reference on the final line of a newly created Task Session prompt; Codex skills must already be installed in its native discovery range. The program does not read, copy, link, install, register with `skills.config`, or infer discovery for Codex skills.
+
+Codex resume, Router, judge, reply postprocess, and owner-style refresh calls do not repeat the `$name` references. Hermes resume may repeat its native `--skills` arguments. `agent_backend.explicit_context.paths` is a separate non-native fallback: absolute paths are rendered as explicitly not loaded and only in the initial Task Session prompt. This preserves progressive disclosure without presenting configured or requested skills as runtime-loaded evidence.

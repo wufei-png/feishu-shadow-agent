@@ -27,7 +27,9 @@ from .prompt import (
     TaskRouterOutput,
 )
 
-ClaudeCodeRunner = Callable[[list[str], int, str | None, Path | None], AgentRunResult]
+ClaudeCodeRunner = Callable[
+    [list[str], int | None, str | None, Path | None], AgentRunResult
+]
 
 READ_ONLY_TOOLS = ("Read", "Grep", "Glob", "LS", "WebFetch", "WebSearch")
 EMPTY_MCP_CONFIG = '{"mcpServers":{}}'
@@ -234,7 +236,7 @@ class ClaudeCodeCliClient:
 
 def _run_subprocess(
     argv: Sequence[str],
-    timeout_seconds: int,
+    timeout_seconds: int | None,
     *,
     stdin: str | None = None,
     cwd: Path | None = None,

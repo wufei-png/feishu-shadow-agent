@@ -145,11 +145,18 @@
           "title": "Model"
         },
         "timeout_seconds": {
-          "default": 60,
-          "description": "Timeout in seconds for Claude Code subprocess calls.",
-          "exclusiveMinimum": 0,
-          "title": "Timeout Seconds",
-          "type": "integer"
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional timeout in seconds for Claude Code agent subprocess calls; null disables the timeout.",
+          "title": "Timeout Seconds"
         }
       },
       "title": "ClaudeCodeConfig",
@@ -184,12 +191,47 @@
           "description": "Optional Codex model override; null uses the Codex default.",
           "title": "Model"
         },
+        "reasoning_effort": {
+          "anyOf": [
+            {
+              "enum": [
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional Codex reasoning effort override; null uses the Codex default.",
+          "title": "Reasoning Effort"
+        },
         "timeout_seconds": {
-          "default": 60,
-          "description": "Timeout in seconds for Codex subprocess calls.",
-          "exclusiveMinimum": 0,
-          "title": "Timeout Seconds",
-          "type": "integer"
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional timeout in seconds for Codex agent subprocess calls; null disables the timeout.",
+          "title": "Timeout Seconds"
+        },
+        "skills": {
+          "description": "Codex-native skill names appended as $name only to a new Task Session prompt.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Skills",
+          "type": "array"
         }
       },
       "title": "CodexConfig",
@@ -232,12 +274,12 @@
     "ExplicitAgentContextConfig": {
       "additionalProperties": false,
       "properties": {
-        "skills": {
-          "description": "Explicit skill directory paths or SKILL.md file paths to pass only to task-session agent turns.",
+        "paths": {
+          "description": "Absolute non-native skill paths shown only in the initial Task Session prompt; paths are not loaded or installed.",
           "items": {
             "type": "string"
           },
-          "title": "Skills",
+          "title": "Paths",
           "type": "array"
         }
       },
@@ -345,11 +387,26 @@
           "title": "Provider"
         },
         "timeout_seconds": {
-          "default": 60,
-          "description": "Timeout in seconds for Hermes subprocess or health calls.",
-          "exclusiveMinimum": 0,
-          "title": "Timeout Seconds",
-          "type": "integer"
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional timeout in seconds for Hermes agent subprocess calls; null disables the timeout.",
+          "title": "Timeout Seconds"
+        },
+        "skill_paths": {
+          "description": "Native Hermes skill directory or SKILL.md paths passed to Task Sessions with --skills.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Skill Paths",
+          "type": "array"
         },
         "health_url": {
           "anyOf": [

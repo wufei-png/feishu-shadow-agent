@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -18,10 +19,18 @@ from pydantic import (
 )
 
 CONFIG_ENV_VAR = "FEISHU_SHADOW_AGENT_CONFIG"
+SKILL_NAME_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
 
 
 class ConfigError(ValueError):
     pass
+
+
+def _non_empty_strings(value: list[str], *, field: str) -> list[str]:
+    cleaned = [item.strip() for item in value]
+    if any(not item for item in cleaned):
+        raise ValueError(f"{field} entries must not be empty")
+    return cleaned
 
 
 class StrictModel(BaseModel):
@@ -151,10 +160,14 @@ class HermesConfig(StrictModel):
         default=None,
         description="Optional Hermes provider override; null uses the Hermes default.",
     )
-    timeout_seconds: int = Field(
-        default=60,
+    timeout_seconds: int | None = Field(
+        default=None,
         gt=0,
-        description="Timeout in seconds for Hermes subprocess or health calls.",
+        description="Optional timeout in seconds for Hermes agent subprocess calls; null disables the timeout.",
+    )
+    skill_paths: list[str] = Field(
+        default_factory=list,
+        description="Native Hermes skill directory or SKILL.md paths passed to Task Sessions with --skills.",
     )
     health_url: str | None = Field(
         default=None,
@@ -183,6 +196,11 @@ class HermesConfig(StrictModel):
             raise ValueError("value must not be empty")
         return value
 
+    @field_validator("skill_paths")
+    @classmethod
+    def validate_skill_paths(cls, value: list[str]) -> list[str]:
+        return _non_empty_strings(value, field="agent_backend.hermes.skill_paths")
+
     @model_validator(mode="after")
     def validate_http_mode(self) -> HermesConfig:
         if self.mode == "http" and not self.health_url:
@@ -201,11 +219,34 @@ class CodexConfig(StrictModel):
         default=None,
         description="Optional Codex model override; null uses the Codex default.",
     )
-    timeout_seconds: int = Field(
-        default=60,
-        gt=0,
-        description="Timeout in seconds for Codex subprocess calls.",
+    reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None = (
+        Field(
+            default=None,
+            description="Optional Codex reasoning effort override; null uses the Codex default.",
+        )
     )
+    timeout_seconds: int | None = Field(
+        default=None,
+        gt=0,
+        description="Optional timeout in seconds for Codex agent subprocess calls; null disables the timeout.",
+    )
+    skills: list[str] = Field(
+        default_factory=list,
+        description="Codex-native skill names appended as $name only to a new Task Session prompt.",
+    )
+
+    @field_validator("skills")
+    @classmethod
+    def validate_skills(cls, value: list[str]) -> list[str]:
+        cleaned = _non_empty_strings(value, field="agent_backend.codex.skills")
+        invalid = [
+            item for item in cleaned if SKILL_NAME_PATTERN.fullmatch(item) is None
+        ]
+        if invalid:
+            raise ValueError(
+                "agent_backend.codex.skills entries must use lowercase letters, digits, or internal hyphens and be at most 64 characters"
+            )
+        return list(dict.fromkeys(cleaned))
 
 
 class ClaudeCodeConfig(StrictModel):
@@ -217,10 +258,10 @@ class ClaudeCodeConfig(StrictModel):
         default=None,
         description="Optional Claude Code model override; null uses the Claude Code default.",
     )
-    timeout_seconds: int = Field(
-        default=60,
+    timeout_seconds: int | None = Field(
+        default=None,
         gt=0,
-        description="Timeout in seconds for Claude Code subprocess calls.",
+        description="Optional timeout in seconds for Claude Code agent subprocess calls; null disables the timeout.",
     )
 
 
@@ -231,20 +272,30 @@ ConfigAgentBackendProvider = Literal["hermes", "codex", "claude_code"]
 
 
 class ExplicitAgentContextConfig(StrictModel):
-    skills: list[str] = Field(
+    paths: list[str] = Field(
         default_factory=list,
-        description="Explicit skill directory paths or SKILL.md file paths to pass only to task-session agent turns.",
+        description="Absolute non-native skill paths shown only in the initial Task Session prompt; paths are not loaded or installed.",
     )
 
-    @field_validator("skills")
+    @field_validator("paths")
     @classmethod
-    def validate_skills(cls, value: list[str]) -> list[str]:
-        cleaned = [item.strip() for item in value]
-        if any(not item for item in cleaned):
+    def validate_paths(cls, value: list[str]) -> list[str]:
+        if any(
+            "`" in item or any(ord(character) < 32 for character in item)
+            for item in value
+        ):
             raise ValueError(
-                "agent_backend.explicit_context.skills entries must not be empty"
+                "agent_backend.explicit_context.paths entries must not contain backticks or control characters"
             )
-        return cleaned
+        cleaned = _non_empty_strings(
+            value, field="agent_backend.explicit_context.paths"
+        )
+        for item in cleaned:
+            if not Path(item).is_absolute():
+                raise ValueError(
+                    "agent_backend.explicit_context.paths entries must be absolute paths"
+                )
+        return list(dict.fromkeys(cleaned))
 
 
 class AgentBackendConfig(StrictModel):

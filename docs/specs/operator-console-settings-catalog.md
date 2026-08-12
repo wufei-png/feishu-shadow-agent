@@ -194,7 +194,9 @@ runtime availability.
 | `agent_backend.working_dir` | Agent working directory | `config_yaml` | `advanced` | no | yes | future config audit | future `ConfigCommandService` |
 | `agent_backend.config_scope` | Agent config scope | `config_yaml` | `advanced` | no | yes | future config audit | future `ConfigCommandService` |
 | `agent_backend.auto_context` | Agent auto context | `config_yaml` | `advanced` | no | yes | future config audit | future `ConfigCommandService` |
-| `agent_backend.explicit_context.skills` | Explicit skills | `config_yaml` | `advanced` | no | yes | future config audit | future `ConfigCommandService` |
+| `agent_backend.explicit_context.paths` | Explicit context paths | `config_yaml` | `advanced` | no | yes | future config audit | future `ConfigCommandService` |
+| `agent_backend.hermes.skill_paths` | Hermes native skill paths | `config_yaml` | `advanced` | no | yes | future config audit | future `ConfigCommandService` |
+| `agent_backend.codex.skills` | Codex native skills | `config_yaml` | `advanced` | no | yes | future config audit | future `ConfigCommandService` |
 | `agent_backend.hermes.mode` | Hermes health mode | `config_yaml` | `advanced` | no | yes | future config audit | future `ConfigCommandService` |
 | `agent_backend.hermes.model` | Hermes model | `config_yaml` | `advanced` | no | yes | future config audit | future `ConfigCommandService` |
 | `agent_backend.hermes.provider` | Hermes provider | `config_yaml` | `advanced` | no | yes | future config audit | future `ConfigCommandService` |
@@ -205,6 +207,7 @@ runtime availability.
 | `agent_backend.hermes.health_url` | Hermes health URL | `config_yaml` | `diagnostic` | no | yes | none | none |
 | `agent_backend.hermes.api_key_env` | Hermes API key env | `config_yaml` | `diagnostic` | no | yes | none | none |
 | `agent_backend.codex.model` | Codex model | `config_yaml` | `advanced` | no | yes | future config audit | future `ConfigCommandService` |
+| `agent_backend.codex.reasoning_effort` | Codex reasoning effort | `config_yaml` | `advanced` | no | yes | future config audit | future `ConfigCommandService` |
 | `agent_backend.codex.timeout_seconds` | Codex timeout | `config_yaml` | `advanced` | no | yes | future config audit | future `ConfigCommandService` |
 | `agent_backend.codex.path` | Codex executable | `config_yaml` | `diagnostic` | no | yes | none | none |
 | `agent_backend.claude_code.model` | Claude Code model | `config_yaml` | `advanced` | no | yes | future config audit | future `ConfigCommandService` |

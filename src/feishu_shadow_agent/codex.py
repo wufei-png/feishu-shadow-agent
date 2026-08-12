@@ -14,6 +14,10 @@ from pydantic import BaseModel
 
 from .agent_backend import AgentRunResult
 from .agent_output_schema import agent_output_schema
+from .agent_skill_context import (
+    append_codex_skill_mentions,
+    append_explicit_context_paths,
+)
 from .config import (
     AutoContextMode,
     CodexConfig,
@@ -29,7 +33,12 @@ from .prompt import (
     TaskRouterOutput,
 )
 
-CodexRunner = Callable[[list[str], int, str | None, Path | None], AgentRunResult]
+CodexRunner = Callable[[list[str], int | None, str | None, Path | None], AgentRunResult]
+
+TASK_SESSION_DEVELOPER_INSTRUCTIONS = (
+    "This is a non-interactive structured Task Session. Use tools silently and do "
+    "not emit progress or commentary messages. Return exactly one final JSON object."
+)
 
 
 @dataclass(frozen=True)
@@ -63,6 +72,8 @@ class CodexCliClient:
         config_scope: ConfigScopeMode = "isolated",
         auto_context: AutoContextMode = "disabled",
         reply_postprocess: ReplyPostprocessConfig | None = None,
+        session_skill_names: Sequence[str] | None = None,
+        explicit_context_paths: Sequence[str | Path] = (),
         cwd: str | Path | None = None,
         runner: CodexRunner | None = None,
     ):
@@ -72,6 +83,11 @@ class CodexCliClient:
         self.config_scope = config_scope
         self.auto_context = auto_context
         self.reply_postprocess_config = reply_postprocess or ReplyPostprocessConfig()
+        configured_skill_names = (
+            config.skills if session_skill_names is None else session_skill_names
+        )
+        self.session_skill_names = list(dict.fromkeys(configured_skill_names))
+        self.explicit_context_paths = [str(path) for path in explicit_context_paths]
         self.path = config.path or "codex"
         self.cwd = None if cwd is None else Path(cwd)
         self._runner = runner
@@ -85,15 +101,32 @@ class CodexCliClient:
         cwd: str | Path | None = None,
         execution_policy: CodexExecutionPolicy | None = None,
         model: str | None = None,
+        developer_instructions: str | None = None,
     ) -> list[str]:
         policy = execution_policy or self.execution_policy
-        argv = [
-            self.path,
-            *policy.root_args,
-            "exec",
-            "--skip-git-repo-check",
-            *policy.exec_args,
-        ]
+        argv = [self.path, *policy.root_args]
+        if self.config.reasoning_effort:
+            argv.extend(
+                [
+                    "-c",
+                    "model_reasoning_effort="
+                    f"{json.dumps(self.config.reasoning_effort)}",
+                ]
+            )
+        if developer_instructions:
+            argv.extend(
+                [
+                    "-c",
+                    f"developer_instructions={json.dumps(developer_instructions)}",
+                ]
+            )
+        argv.extend(
+            [
+                "exec",
+                "--skip-git-repo-check",
+                *policy.exec_args,
+            ]
+        )
         if self.config_scope == "isolated":
             argv.append("--ignore-user-config")
         if self.auto_context == "disabled":
@@ -137,7 +170,12 @@ class CodexCliClient:
             else FollowupTaskSessionOutput
         )
         return self._run(
-            prompt, output_model=output_model, session_id=session_id, cwd=cwd
+            prompt,
+            output_model=output_model,
+            session_id=session_id,
+            cwd=cwd,
+            include_session_skills=session_id is None,
+            developer_instructions=TASK_SESSION_DEVELOPER_INSTRUCTIONS,
         )
 
     def structured_output(
@@ -183,10 +221,20 @@ class CodexCliClient:
         cwd: str | Path | None = None,
         execution_policy: CodexExecutionPolicy | None = None,
         model: str | None = None,
+        include_session_skills: bool = False,
+        developer_instructions: str | None = None,
     ) -> AgentRunResult:
+        effective_prompt = prompt
+        run_cwd = self.cwd if cwd is None else Path(cwd)
+        if include_session_skills:
+            effective_prompt = append_explicit_context_paths(
+                effective_prompt, self.explicit_context_paths
+            )
+            effective_prompt = append_codex_skill_mentions(
+                effective_prompt, self.session_skill_names
+            )
         schema_path = _write_temp_json(agent_output_schema(output_model))
         output_path = _empty_temp_path()
-        run_cwd = self.cwd if cwd is None else Path(cwd)
         argv = self.build_exec_command(
             output_schema_path=schema_path,
             output_path=output_path,
@@ -194,15 +242,19 @@ class CodexCliClient:
             cwd=run_cwd,
             execution_policy=execution_policy,
             model=model,
+            developer_instructions=developer_instructions,
         )
         try:
             if self._runner is not None:
                 result = self._runner(
-                    argv, self.config.timeout_seconds, prompt, run_cwd
+                    argv, self.config.timeout_seconds, effective_prompt, run_cwd
                 )
             else:
                 result = _run_subprocess(
-                    argv, self.config.timeout_seconds, stdin=prompt, cwd=run_cwd
+                    argv,
+                    self.config.timeout_seconds,
+                    stdin=effective_prompt,
+                    cwd=run_cwd,
                 )
             parsed_session_id = result.session_id or _parse_thread_id(result.stdout)
             if not result.ok:
@@ -246,10 +298,13 @@ class CodexCliClient:
             _unlink_quietly(schema_path)
             _unlink_quietly(output_path)
 
+    def requested_skill_names(self) -> list[str]:
+        return list(self.session_skill_names)
+
 
 def _run_subprocess(
     argv: Sequence[str],
-    timeout_seconds: int,
+    timeout_seconds: int | None,
     *,
     stdin: str | None = None,
     cwd: Path | None = None,
@@ -269,8 +324,8 @@ def _run_subprocess(
         return AgentRunResult(
             argv=list(argv),
             exit_code=None,
-            stdout=exc.stdout or "",
-            stderr=exc.stderr or "",
+            stdout=_subprocess_text(exc.stdout),
+            stderr=_subprocess_text(exc.stderr),
             error=f"command timed out after {timeout_seconds}s",
             timed_out=True,
             latency_ms=_latency_ms(started),
@@ -388,3 +443,9 @@ def _unlink_quietly(path: Path) -> None:
 
 def _latency_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
+
+
+def _subprocess_text(value: str | bytes | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value or ""

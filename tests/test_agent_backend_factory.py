@@ -15,8 +15,10 @@ def test_backend_factory_builds_selected_hermes_backend_with_resolved_skills(
     config = AppConfig(
         owner=OwnerConfig(open_id="ou_owner"),
         agent_backend={
-            "explicit_context": {"skills": ["skills/support/SKILL.md"]},
-            "hermes": {"path": "/bin/hermes"},
+            "hermes": {
+                "path": "/bin/hermes",
+                "skill_paths": ["skills/support/SKILL.md"],
+            },
         },
     )
 
@@ -49,6 +51,26 @@ def test_backend_factory_builds_selected_codex_backend() -> None:
     assert backend.provider == "codex"
     assert argv[0] == "/bin/codex"
     assert argv[argv.index("--sandbox") + 1] == "read-only"
+
+
+def test_backend_factory_configures_native_names_and_explicit_paths_for_codex(
+    tmp_path: Path,
+) -> None:
+    context_path = tmp_path / "skills" / "support"
+    config = AppConfig(
+        owner=OwnerConfig(open_id="ou_owner"),
+        agent_backend={
+            "provider": "codex",
+            "explicit_context": {"paths": [str(context_path)]},
+            "codex": {"path": "/bin/codex", "skills": ["docmate"]},
+        },
+    )
+
+    backend = create_agent_backend(config, base_dir=tmp_path)
+
+    assert isinstance(backend, CodexCliClient)
+    assert backend.session_skill_names == ["docmate"]
+    assert backend.explicit_context_paths == [str(context_path)]
 
 
 def test_backend_factory_builds_selected_claude_code_backend() -> None:
