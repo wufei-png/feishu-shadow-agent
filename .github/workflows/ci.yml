@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend quality and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install project and optional card SDK
+        run: python -m pip install -e ".[dev,cards]"
+      - name: Ruff lint
+        run: python -m ruff check .
+      - name: Ruff format
+        run: python -m ruff format --check .
+      - name: Strict type checks for new modules
+        run: python -m pyright --pythonpath "$(command -v python)"
+      - name: Full test suite
+        run: python -m pytest -q
+      - name: Migration check
+        run: python -m pytest -q tests/test_store_migrations.py
+      - name: Evaluation smoke check
+        run: >-
+          python -m pytest -q
+          tests/test_eval_cli.py::test_eval_task_session_dry_run_draft_case
+
+  frontend:
+    name: Operator Console build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/operator-console/package-lock.json
+      - name: Install frontend dependencies
+        run: npm --prefix frontend/operator-console ci
+      - name: Build bundled Operator Console
+        run: npm --prefix frontend/operator-console run build
+      - name: Verify bundled assets are current
+        run: git diff --exit-code -- src/feishu_shadow_agent/console_static
+
+  package:
+    name: Build and inspect package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install build dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Build distributions
+        run: python -m build
+      - name: Inspect wheel assets
+        run: |
+          python - <<'PY'
+          import zipfile
+          from pathlib import Path
+
+          wheel = next(Path("dist").glob("*.whl"))
+          with zipfile.ZipFile(wheel) as archive:
+              names = set(archive.namelist())
+              index = "feishu_shadow_agent/console_static/index.html"
+              assert index in names, f"missing {index}"
+              html = archive.read(index).decode("utf-8")
+              for ref in html.split('/assets/')[1:]:
+                  asset = ref.split('"', 1)[0].split("'", 1)[0]
+                  path = f"feishu_shadow_agent/console_static/assets/{asset}"
+                  assert path in names, f"missing {path}"
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/*
+
+  coverage:
+    name: Coverage (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install project
+        run: python -m pip install -e ".[dev,cards]"
+      - name: Report coverage
+        run: >-
+          python -m pytest -q
+          --cov=feishu_shadow_agent
+          --cov-report=term-missing

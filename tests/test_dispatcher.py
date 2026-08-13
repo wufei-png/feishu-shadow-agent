@@ -364,6 +364,13 @@ def test_actual_dispatch_send_exception_after_boundary_needs_review(
     attempts = _attempts(store, action_id)
     assert attempts[0].status == "uncertain"
     assert attempts[0].error_stage == "send"
+    notifications = store.list_dispatchable_actions(kind="owner_notification")
+    assert len(notifications) == 1
+    assert notifications[0].payload["type"] == "dispatch_uncertain"
+    assert notifications[0].payload["task_id"] == "t_1"
+    assert notifications[0].payload["reason"] == "failed_needs_review"
+    assert notifications[0].payload["stage"] == "send"
+    assert notifications[0].payload["error"] == "send exploded"
 
 
 def test_actual_dispatch_send_timeout_needs_review(tmp_path: Path) -> None:
@@ -893,7 +900,8 @@ def test_stale_sending_is_marked_failed_needs_review_without_resend(
     )
 
     action = store.get_action(action_id)
-    assert summary.processed == 0
+    assert summary.processed == 1
+    assert summary.previewed == 1
     assert fake.reply_calls == []
     assert action is not None
     assert action.status == "failed_needs_review"
@@ -901,6 +909,11 @@ def test_stale_sending_is_marked_failed_needs_review_without_resend(
     attempts = _attempts(store, action_id)
     assert attempts[0].status == "uncertain"
     assert attempts[0].error_stage == "recovery"
+    notifications = store.list_dispatchable_actions(kind="owner_notification")
+    assert len(notifications) == 1
+    assert notifications[0].payload["type"] == "dispatch_uncertain"
+    assert notifications[0].payload["task_id"] == "t_1"
+    assert notifications[0].payload["stage"] == "recovery"
 
 
 def test_owner_notification_actual_has_budget_beyond_blocked_send_reply_previews(

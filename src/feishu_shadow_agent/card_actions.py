@@ -1,3 +1,5 @@
+# pyright: reportMissingTypeStubs=false
+
 from __future__ import annotations
 
 import asyncio
@@ -229,7 +231,7 @@ class FeishuCardActionConnection:
         channel.on("cardAction", self.processor.handle)
         channel.on("reconnecting", lambda: self._set_status("unhealthy"))
         channel.on("reconnected", lambda: self._set_status("healthy"))
-        channel.on("error", lambda exc: self._set_status("unhealthy", str(exc)))
+        channel.on("error", self._on_channel_error)
         try:
             await channel.connect_until_ready(timeout=self.startup_timeout_seconds)
             self._set_status("healthy")
@@ -239,6 +241,9 @@ class FeishuCardActionConnection:
                 await asyncio.sleep(0.1)
         finally:
             await channel.disconnect()
+
+    def _on_channel_error(self, exc: object) -> None:
+        self._set_status("unhealthy", str(exc))
 
     def _set_status(self, status: ConnectionStatus, error: str | None = None) -> None:
         with self._state_lock:
@@ -287,16 +292,17 @@ def parse_card_action(event: Any) -> CardActionRequest:
     value = getattr(action, "value", None)
     if not isinstance(value, dict):
         raise ValueError("card action value must be an object")
-    if value.get("protocol") != CARD_ACTION_PROTOCOL:
+    action_value = cast(dict[str, object], value)
+    if action_value.get("protocol") != CARD_ACTION_PROTOCOL:
         raise ValueError("unsupported card action protocol")
-    action_name = value.get("action")
-    if action_name not in VALID_CARD_ACTIONS:
+    action_name = action_value.get("action")
+    if not isinstance(action_name, str) or action_name not in VALID_CARD_ACTIONS:
         raise ValueError("unsupported card action")
-    approval_id = value.get("approval_id")
+    approval_id = action_value.get("approval_id")
     if not isinstance(approval_id, str) or not approval_id.startswith("a_"):
         raise ValueError("card action requires a concrete approval_id")
     form_value = getattr(action, "form_value", None)
-    form = form_value if isinstance(form_value, dict) else {}
+    form = cast(dict[str, object], form_value) if isinstance(form_value, dict) else {}
     final_reply = _optional_text(form.get("final_reply"))
     if action_name == "edit_send" and not final_reply:
         raise ValueError("编辑后发送需要填写回复内容")
@@ -321,9 +327,10 @@ def parse_card_action(event: Any) -> CardActionRequest:
 def _event_id(event: Any) -> str:
     raw = getattr(event, "raw", None)
     if isinstance(raw, dict):
-        header = raw.get("header")
+        raw_payload = cast(dict[str, object], raw)
+        header = raw_payload.get("header")
         if isinstance(header, dict):
-            event_id = header.get("event_id")
+            event_id = cast(dict[str, object], header).get("event_id")
             if isinstance(event_id, str) and event_id:
                 return event_id
     stable = {

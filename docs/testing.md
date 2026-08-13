@@ -32,7 +32,10 @@ python -m pytest -q
 ```bash
 python -m ruff check .
 python -m ruff format --check .
+python -m pyright --pythonpath "$(command -v python)"
 ```
+
+Pyright 以 strict 模式只覆盖本轮纳入基线的新模块；全仓既有类型债务不作为新功能的阻断项。CI 中 Ruff、全量 pytest、前端 build、migration、包构建/静态资源检查和 eval smoke 都是阻断项，coverage 仅报告、不阻断。
 
 如需验证 git hook 行为，或提交前跑同一套 Ruff autofix/format hooks：
 

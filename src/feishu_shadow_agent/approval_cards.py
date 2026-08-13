@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from .types import FeedbackReason
 
@@ -169,19 +169,21 @@ def _required_string(payload: dict[str, Any], key: str) -> str:
 
 def _incoming_text(value: Any) -> str:
     if isinstance(value, dict):
-        return _bounded(_string(value.get("text")), 800)
+        payload = cast(dict[str, object], value)
+        return _bounded(_string(payload.get("text")), 800)
     return _bounded(_string(value), 800)
 
 
 def _source_text(value: Any) -> str:
     if not isinstance(value, dict):
         return _bounded(_string(value), 300)
+    payload = cast(dict[str, object], value)
     return " / ".join(
         part
         for part in (
-            _string(value.get("chat_type")),
-            _string(value.get("chat_id")),
-            _string(value.get("sender_name") or value.get("sender_id")),
+            _string(payload.get("chat_type")),
+            _string(payload.get("chat_id")),
+            _string(payload.get("sender_name") or payload.get("sender_id")),
         )
         if part
     )

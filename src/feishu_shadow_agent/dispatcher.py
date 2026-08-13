@@ -86,6 +86,18 @@ class Dispatcher:
                 run_id=run_id,
                 data={"actions": recovered},
             )
+            for recovery in recovered:
+                if recovery.get("status") != ActionStatus.FAILED_NEEDS_REVIEW.value:
+                    continue
+                recovered_action = self.store.get_action(int(recovery["action_id"]))
+                if recovered_action is not None:
+                    self._queue_failed_reply_notification(
+                        recovered_action,
+                        status=ActionStatus.FAILED_NEEDS_REVIEW.value,
+                        result=recovered_action.result,
+                        run_id=run_id,
+                        dedupe_suffix="stale_recovery",
+                    )
         actions = self.store.list_dispatchable_actions(limit=limit)
         if allow_owner_notification_actual:
             seen_action_ids = {action.id for action in actions}
@@ -180,6 +192,14 @@ class Dispatcher:
                             "warnings": result.get("warnings", []),
                         },
                     )
+                if not sent:
+                    self._queue_failed_reply_notification(
+                        claimed,
+                        status=action_status,
+                        result=result,
+                        run_id=run_id,
+                        dedupe_suffix=f"attempt:{claim.attempt.id}",
+                    )
                 summary = _bump(
                     summary, processed=1, sent=1 if sent else 0, failed=0 if sent else 1
                 )
@@ -198,6 +218,73 @@ class Dispatcher:
             )
             summary = _bump(summary, processed=1, previewed=1)
         return summary
+
+    def _queue_failed_reply_notification(
+        self,
+        action: ActionRecord,
+        *,
+        status: str,
+        result: dict[str, Any],
+        run_id: str,
+        dedupe_suffix: str,
+    ) -> None:
+        if action.kind != "send_reply":
+            return
+        uncertain = status == ActionStatus.FAILED_NEEDS_REVIEW.value
+        stage = result.get("error_stage") or result.get("recovery_reason") or "unknown"
+        stage_result = result.get(str(result.get("error_stage") or ""))
+        error = stage_result.get("error") if isinstance(stage_result, dict) else None
+        if not error:
+            warnings = result.get("warnings")
+            error = warnings if isinstance(warnings, list) and warnings else None
+        task_id: int | str | None = action.task_id
+        if action.task_id is not None:
+            try:
+                task_id = self.store.get_task_by_id(action.task_id).short_id
+            except KeyError:
+                pass
+        payload = {
+            "type": "dispatch_uncertain" if uncertain else "dispatch_failed",
+            "task_id": task_id,
+            "reason": status,
+            "message": (
+                f"Reply dispatch action {action.id} is uncertain; inspect evidence "
+                "before retrying."
+                if uncertain
+                else f"Reply dispatch action {action.id} failed before completion."
+            ),
+            "stage": stage,
+            "target": action.target_message_id,
+            "error": error,
+            "dedupe_key": f"dispatch:{action.id}:{dedupe_suffix}",
+        }
+        try:
+            notification_action_id = self.store.create_owner_notification_action(
+                task_id=action.task_id,
+                payload=payload,
+                execution_mode=action.execution_mode,
+            )
+        except Exception as exc:
+            self.logger.emit(
+                "error",
+                "dispatch_failure_notification_queue_failed",
+                run_id=run_id,
+                data={
+                    "action_id": action.id,
+                    "status": status,
+                    "error": str(exc),
+                },
+            )
+            return
+        self.logger.warning(
+            "dispatch_failure_notification_queued",
+            run_id=run_id,
+            data={
+                "action_id": action.id,
+                "notification_action_id": notification_action_id,
+                "status": status,
+            },
+        )
 
     def preview_action(self, action_id: int, *, run_id: str) -> dict[str, Any] | None:
         action = self.store.get_action(action_id)
