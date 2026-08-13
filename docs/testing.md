@@ -125,7 +125,7 @@ git diff --check
 - `tests/test_operator_query.py`：OperatorQueryService 只读 dashboard/detail DTO、overdue 派生、effective policy、Policy Import Diff 和 audit history。
 - `tests/test_operator_commands.py`：OperatorCommandService 审批/dispatch/maintenance/policy mutation 结果 shape、policy 直接写入和 audit actor/reason。
 - `tests/test_console_api.py`：本地 Operator Console 的 token/Host 校验、dashboard/queue/detail/policy/settings/health API、静态资源 serving 和 `console` CLI 启动输出。
-- `tests/test_retention.py`：消息 raw JSON、资源和反馈内容/元数据分阶段保留策略。
+- `tests/test_retention.py`：有效 watch 延迟、全链路字段级 scrub、最小审计保留、资源删除和 JSONL/text 日志原子脱敏。
 
 这些测试验证代码契约，不证明当前机器的 `lark-cli` 授权、飞书权限或所选 Agent CLI 可用；真实环境要跑下面的端到端流程。
 

@@ -330,8 +330,8 @@ _SETTINGS_CATALOG: list[dict[str, Any]] = [
     ),
     _entry(
         "retention.raw_message_days",
-        "Raw message retention",
-        "Days to keep raw Feishu message payloads.",
+        "Sensitive content retention",
+        "Days to keep message-chain and log payloads after an effective task watch ends.",
         source="config_yaml",
         scope="retention",
         visibility="normal",

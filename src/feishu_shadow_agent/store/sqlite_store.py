@@ -815,37 +815,231 @@ class SQLiteStore:
                 ),
             )
 
-    def count_prunable_message_raw_json(
-        self, *, cutoff: str, replacement_json: str
-    ) -> int:
-        self.initialize()
-        with self.connect() as conn:
-            row = conn.execute(
-                """
-                SELECT COUNT(*) AS count
-                FROM messages
-                WHERE julianday(inserted_at) <= julianday(?)
-                  AND raw_json != ?
-                """,
-                (cutoff, replacement_json),
-            ).fetchone()
-        return int(row["count"])
-
-    def prune_message_raw_json(self, *, cutoff: str, replacement_json: str) -> int:
-        self.initialize()
-        with self.connect() as conn:
-            cursor = conn.execute(
-                """
-                UPDATE messages
-                SET raw_json = ?
-                WHERE julianday(inserted_at) <= julianday(?)
-                  AND raw_json != ?
-                """,
-                (replacement_json, cutoff, replacement_json),
+    def scrub_sensitive_content(
+        self,
+        *,
+        cutoff: str,
+        feedback_cutoff: str,
+        now: str,
+        replacement_json: str,
+        dry_run: bool,
+    ) -> dict[str, int]:
+        """Scrub expired content while retaining relational and audit metadata."""
+        active_task_for_message = """
+            NOT EXISTS (
+              SELECT 1
+              FROM tasks t
+              LEFT JOIN task_messages tm ON tm.task_id = t.id
+              WHERE (t.root_message_id = {table}.message_id
+                     OR tm.message_id = {table}.message_id)
+                AND t.status = 'watching'
+                AND t.watch_until IS NOT NULL
+                AND julianday(t.watch_until) > julianday(?)
             )
-        return int(cursor.rowcount)
+        """
+        active_task_by_id = """
+            NOT EXISTS (
+              SELECT 1 FROM tasks t
+              WHERE t.id = {table}.task_id
+                AND t.status = 'watching'
+                AND t.watch_until IS NOT NULL
+                AND julianday(t.watch_until) > julianday(?)
+            )
+        """
+        specs: list[tuple[str, str, str, tuple[Any, ...], str, tuple[Any, ...]]] = [
+            (
+                "messages",
+                "messages",
+                "sender_name = NULL, text = NULL, normalized_json = ?, raw_json = ?",
+                (replacement_json, replacement_json),
+                f"""
+                julianday(inserted_at) <= julianday(?)
+                AND (sender_name IS NOT NULL OR text IS NOT NULL
+                     OR normalized_json != ? OR raw_json != ?)
+                AND {active_task_for_message.format(table="messages")}
+                """,
+                (cutoff, replacement_json, replacement_json, now),
+            ),
+            (
+                "tasks",
+                "tasks",
+                """task_label = NULL, agent_session_id = NULL,
+                   agent_working_dir = NULL, last_user_message = NULL,
+                   last_agent_reply = NULL""",
+                (),
+                """
+                julianday(updated_at) <= julianday(?)
+                AND (task_label IS NOT NULL OR agent_session_id IS NOT NULL
+                     OR agent_working_dir IS NOT NULL
+                     OR last_user_message IS NOT NULL OR last_agent_reply IS NOT NULL)
+                AND NOT (
+                  status = 'watching' AND watch_until IS NOT NULL
+                  AND julianday(watch_until) > julianday(?)
+                )
+                """,
+                (cutoff, now),
+            ),
+            (
+                "task_watch_keys",
+                "task_watch_keys",
+                "key = printf('retention-pruned:%d:%d', task_id, rowid)",
+                (),
+                """
+                key NOT LIKE 'retention-pruned:%'
+                AND EXISTS (
+                  SELECT 1 FROM tasks t
+                  WHERE t.id = task_watch_keys.task_id
+                    AND julianday(t.updated_at) <= julianday(?)
+                    AND NOT (
+                      t.status = 'watching' AND t.watch_until IS NOT NULL
+                      AND julianday(t.watch_until) > julianday(?)
+                    )
+                )
+                """,
+                (cutoff, now),
+            ),
+            (
+                "approvals",
+                "approvals",
+                "payload_json = ?, preview = NULL",
+                (replacement_json,),
+                f"""
+                julianday(COALESCE(resolved_at, created_at)) <= julianday(?)
+                AND (payload_json != ? OR preview IS NOT NULL)
+                AND {active_task_by_id.format(table="approvals")}
+                """,
+                (cutoff, replacement_json, now),
+            ),
+            (
+                "actions",
+                "actions",
+                "payload_json = ?, result_json = NULL",
+                (replacement_json,),
+                f"""
+                julianday(updated_at) <= julianday(?)
+                AND (payload_json != ? OR result_json IS NOT NULL)
+                AND {active_task_by_id.format(table="actions")}
+                """,
+                (cutoff, replacement_json, now),
+            ),
+            (
+                "dispatch_attempts",
+                "dispatch_attempts",
+                """dry_run_result_json = NULL, send_result_json = NULL,
+                   readback_result_json = NULL""",
+                (),
+                """
+                julianday(COALESCE(finished_at, started_at)) <= julianday(?)
+                AND (dry_run_result_json IS NOT NULL OR send_result_json IS NOT NULL
+                     OR readback_result_json IS NOT NULL)
+                AND NOT EXISTS (
+                  SELECT 1 FROM actions a JOIN tasks t ON t.id = a.task_id
+                  WHERE a.id = dispatch_attempts.action_id
+                    AND t.status = 'watching' AND t.watch_until IS NOT NULL
+                    AND julianday(t.watch_until) > julianday(?)
+                )
+                """,
+                (cutoff, now),
+            ),
+            (
+                "resources",
+                "resources",
+                "raw_json = ?, file_key = printf('retention-pruned:%d', id)",
+                (replacement_json,),
+                f"""
+                julianday(created_at) <= julianday(?)
+                AND (raw_json != ? OR file_key NOT LIKE 'retention-pruned:%')
+                AND {active_task_for_message.format(table="resources")}
+                """,
+                (cutoff, replacement_json, now),
+            ),
+            (
+                "agent_audits",
+                "agent_audits",
+                """agent_session_id = NULL, input_resource_ids_json = '[]',
+                   response_json = NULL, error = NULL, prompt_json = NULL""",
+                (),
+                f"""
+                julianday(created_at) <= julianday(?)
+                AND (agent_session_id IS NOT NULL OR input_resource_ids_json != '[]'
+                     OR response_json IS NOT NULL OR error IS NOT NULL
+                     OR prompt_json IS NOT NULL)
+                AND {active_task_by_id.format(table="agent_audits")}
+                """,
+                (cutoff, now),
+            ),
+            (
+                "approval_commands",
+                "approval_commands",
+                "command = '[retention_pruned]', result_json = ?",
+                (replacement_json,),
+                """
+                julianday(updated_at) <= julianday(?)
+                AND (command != '[retention_pruned]' OR result_json != ?)
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM approval_feedback af JOIN tasks t ON t.id = af.task_id
+                  WHERE af.command_id = approval_commands.message_id
+                    AND t.status = 'watching' AND t.watch_until IS NOT NULL
+                    AND julianday(t.watch_until) > julianday(?)
+                )
+                """,
+                (cutoff, replacement_json, now),
+            ),
+            (
+                "approval_feedback",
+                "approval_feedback",
+                """suggested_reply = NULL, final_reply = NULL, note = NULL,
+                   content_expired_at = ?""",
+                (now,),
+                f"""
+                content_expired_at IS NULL
+                AND julianday(created_at) <= julianday(?)
+                AND {active_task_by_id.format(table="approval_feedback")}
+                """,
+                (feedback_cutoff, now),
+            ),
+            (
+                "message_processing",
+                "message_processing",
+                "last_error = NULL",
+                (),
+                """
+                last_error IS NOT NULL
+                AND julianday(updated_at) <= julianday(?)
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM tasks t
+                  LEFT JOIN task_messages tm ON tm.task_id = t.id
+                  WHERE (t.id = message_processing.task_id
+                         OR t.root_message_id = message_processing.message_id
+                         OR tm.message_id = message_processing.message_id)
+                    AND t.status = 'watching' AND t.watch_until IS NOT NULL
+                    AND julianday(t.watch_until) > julianday(?)
+                )
+                """,
+                (cutoff, now),
+            ),
+        ]
+        self.initialize()
+        counts: dict[str, int] = {}
+        with self.connect() as conn:
+            for name, table, set_sql, set_params, where_sql, where_params in specs:
+                if dry_run:
+                    row = conn.execute(
+                        f"SELECT COUNT(*) AS count FROM {table} WHERE {where_sql}",
+                        where_params,
+                    ).fetchone()
+                    counts[name] = int(row["count"])
+                    continue
+                cursor = conn.execute(
+                    f"UPDATE {table} SET {set_sql} WHERE {where_sql}",
+                    (*set_params, *where_params),
+                )
+                counts[name] = int(cursor.rowcount)
+        return counts
 
-    def list_prunable_resources(self, *, cutoff: str) -> list[sqlite3.Row]:
+    def list_prunable_resources(self, *, cutoff: str, now: str) -> list[sqlite3.Row]:
         self.initialize()
         with self.connect() as conn:
             return conn.execute(
@@ -861,18 +1055,12 @@ class SQLiteStore:
                     LEFT JOIN task_messages tm ON tm.task_id = t.id
                     WHERE (t.root_message_id = r.message_id OR tm.message_id = r.message_id)
                       AND t.status = 'watching'
-                  )
-                  AND NOT EXISTS (
-                    SELECT 1
-                    FROM approvals a
-                    LEFT JOIN tasks t ON t.id = a.task_id
-                    LEFT JOIN task_messages tm ON tm.task_id = t.id
-                    WHERE a.status = 'pending'
-                      AND (t.root_message_id = r.message_id OR tm.message_id = r.message_id)
+                      AND t.watch_until IS NOT NULL
+                      AND julianday(t.watch_until) > julianday(?)
                   )
                 ORDER BY r.updated_at, r.id
                 """,
-                (cutoff,),
+                (cutoff, now),
             ).fetchall()
 
     def mark_resources_expired(self, resource_ids: Iterable[int]) -> int:
@@ -893,71 +1081,6 @@ class SQLiteStore:
                 [self.clock(), *ids],
             )
         return int(cursor.rowcount)
-
-    def approval_feedback_retention_candidates(
-        self,
-        *,
-        content_cutoff: str,
-        metadata_cutoff: str | None,
-    ) -> dict[str, int]:
-        self.initialize()
-        content_query = """
-            SELECT COUNT(*) AS count
-            FROM approval_feedback
-            WHERE content_expired_at IS NULL
-              AND julianday(created_at) <= julianday(?)
-        """
-        content_params: list[Any] = [content_cutoff]
-        if metadata_cutoff is not None:
-            content_query += " AND julianday(created_at) > julianday(?)"
-            content_params.append(metadata_cutoff)
-        with self.connect() as conn:
-            content = conn.execute(content_query, content_params).fetchone()
-            metadata_count = 0
-            if metadata_cutoff is not None:
-                metadata = conn.execute(
-                    """
-                    SELECT COUNT(*) AS count
-                    FROM approval_feedback
-                    WHERE julianday(created_at) <= julianday(?)
-                    """,
-                    (metadata_cutoff,),
-                ).fetchone()
-                metadata_count = int(metadata["count"])
-        return {"content": int(content["count"]), "metadata": metadata_count}
-
-    def prune_approval_feedback(
-        self,
-        *,
-        content_cutoff: str,
-        metadata_cutoff: str | None,
-        expired_at: str,
-    ) -> tuple[int, int]:
-        self.initialize()
-        with self.connect() as conn:
-            metadata_deleted = 0
-            if metadata_cutoff is not None:
-                deleted = conn.execute(
-                    """
-                    DELETE FROM approval_feedback
-                    WHERE julianday(created_at) <= julianday(?)
-                    """,
-                    (metadata_cutoff,),
-                )
-                metadata_deleted = int(deleted.rowcount)
-            expired = conn.execute(
-                """
-                UPDATE approval_feedback
-                SET suggested_reply = NULL,
-                    final_reply = NULL,
-                    note = NULL,
-                    content_expired_at = ?
-                WHERE content_expired_at IS NULL
-                  AND julianday(created_at) <= julianday(?)
-                """,
-                (expired_at, content_cutoff),
-            )
-        return int(expired.rowcount), metadata_deleted
 
     def create_task_for_message(
         self,

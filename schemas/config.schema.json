@@ -767,7 +767,7 @@
       "properties": {
         "raw_message_days": {
           "default": 30,
-          "description": "Days to retain raw message payloads.",
+          "description": "Days to retain sensitive message, task, approval, action, and agent content after it is no longer protected by an active watch.",
           "minimum": 1,
           "title": "Raw Message Days",
           "type": "integer"
@@ -785,20 +785,6 @@
           "minimum": 1,
           "title": "Feedback Content Days",
           "type": "integer"
-        },
-        "feedback_metadata_days": {
-          "anyOf": [
-            {
-              "minimum": 1,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": 365,
-          "description": "Days to retain approval feedback rows; null retains metadata indefinitely.",
-          "title": "Feedback Metadata Days"
         }
       },
       "title": "RetentionConfig",

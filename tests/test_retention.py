@@ -8,6 +8,7 @@ import yaml
 
 from feishu_shadow_agent.cli import main
 from feishu_shadow_agent.config import AppConfig, OwnerConfig, RetentionConfig
+from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.retention import (
     RAW_JSON_PRUNED_PLACEHOLDER,
     RetentionService,
@@ -53,15 +54,15 @@ def test_retention_prunes_raw_json_and_downloaded_resources(tmp_path: Path) -> N
     )
 
     assert summary.raw_messages_pruned == 1
-    assert summary.resources_candidates == 3
-    assert summary.resources_deleted == 1
-    assert summary.resources_expired == 2
+    assert summary.resources_candidates == 4
+    assert summary.resources_deleted == 2
+    assert summary.resources_expired == 3
     assert [resource.reason for resource in summary.resources_skipped] == [
         "unsafe_path"
     ]
     assert not free_path.exists()
     assert active_path.exists()
-    assert pending_path.exists()
+    assert not pending_path.exists()
     with store.connect() as conn:
         messages = {
             row["message_id"]: row["raw_json"]
@@ -80,13 +81,14 @@ def test_retention_prunes_raw_json_and_downloaded_resources(tmp_path: Path) -> N
     assert resources["om_free"]["download_status"] == "expired"
     assert resources["om_free"]["path"] is None
     assert resources["om_free"]["sha256"] == "hash-img_free"
-    assert resources["om_free"]["file_key"] == "img_free"
+    assert resources["om_free"]["file_key"].startswith("retention-pruned:")
     assert resources["om_missing"]["download_status"] == "expired"
     assert resources["om_missing"]["path"] is None
     assert resources["om_missing"]["sha256"] == "hash-img_missing"
-    assert resources["om_missing"]["file_key"] == "img_missing"
+    assert resources["om_missing"]["file_key"].startswith("retention-pruned:")
     assert resources["om_active"]["download_status"] == "downloaded"
-    assert resources["om_pending"]["download_status"] == "downloaded"
+    assert resources["om_active"]["file_key"] == "img_active"
+    assert resources["om_pending"]["download_status"] == "expired"
     assert resources["om_unsafe"]["download_status"] == "downloaded"
 
 
@@ -150,13 +152,13 @@ logging:
     assert resource["path"] is None
 
 
-def test_feedback_retention_expires_content_then_deletes_metadata(
+def test_feedback_retention_scrubs_content_and_preserves_audit_metadata(
     tmp_path: Path,
 ) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     config = AppConfig(
         owner=OwnerConfig(open_id="ou_owner"),
-        retention=RetentionConfig(feedback_content_days=30, feedback_metadata_days=365),
+        retention=RetentionConfig(feedback_content_days=30),
     )
     _insert_feedback(store, "old", created_at=OLD)
     _insert_feedback(store, "ancient", created_at=ANCIENT)
@@ -169,10 +171,8 @@ def test_feedback_retention_expires_content_then_deletes_metadata(
             "SELECT suggested_reply, content_expired_at FROM approval_feedback"
         ).fetchall()
 
-    assert preview.feedback_content_candidates == 1
-    assert preview.feedback_metadata_candidates == 1
+    assert preview.feedback_content_candidates == 2
     assert preview.feedback_content_expired == 0
-    assert preview.feedback_metadata_deleted == 0
     assert all(row["suggested_reply"] is not None for row in preview_rows)
     assert all(row["content_expired_at"] is None for row in preview_rows)
 
@@ -185,25 +185,24 @@ def test_feedback_retention_expires_content_then_deletes_metadata(
             ).fetchall()
         }
 
-    assert applied.feedback_content_expired == 1
-    assert applied.feedback_metadata_deleted == 1
-    assert set(rows) == {"cmd_old", "cmd_recent"}
+    assert applied.feedback_content_expired == 2
+    assert set(rows) == {"cmd_ancient", "cmd_old", "cmd_recent"}
     assert rows["cmd_old"]["suggested_reply"] is None
     assert rows["cmd_old"]["final_reply"] is None
     assert rows["cmd_old"]["note"] is None
     assert rows["cmd_old"]["content_expired_at"] == NOW.isoformat(timespec="seconds")
     assert rows["cmd_old"]["decision_reason"] == "insufficient_evidence"
+    assert rows["cmd_ancient"]["suggested_reply"] is None
+    assert rows["cmd_ancient"]["decision_reason"] == "insufficient_evidence"
     assert rows["cmd_recent"]["suggested_reply"] == "suggested recent"
     assert rows["cmd_recent"]["content_expired_at"] is None
 
 
-def test_feedback_metadata_null_keeps_row_after_content_expiry(tmp_path: Path) -> None:
+def test_feedback_audit_row_is_always_kept_after_content_expiry(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     config = AppConfig(
         owner=OwnerConfig(open_id="ou_owner"),
-        retention=RetentionConfig(
-            feedback_content_days=30, feedback_metadata_days=None
-        ),
+        retention=RetentionConfig(feedback_content_days=30),
     )
     _insert_feedback(store, "ancient", created_at=ANCIENT)
 
@@ -213,12 +212,225 @@ def test_feedback_metadata_null_keeps_row_after_content_expiry(tmp_path: Path) -
 
     with store.connect() as conn:
         feedback = conn.execute("SELECT * FROM approval_feedback").fetchone()
-    assert summary.feedback_metadata_cutoff is None
-    assert summary.feedback_metadata_deleted == 0
     assert summary.feedback_content_expired == 1
     assert feedback is not None
     assert feedback["suggested_reply"] is None
     assert feedback["decision_reason"] == "insufficient_evidence"
+
+
+def test_retention_scrubs_full_chain_except_effective_watch(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    _insert_sensitive_chain(
+        store,
+        "closed",
+        status="closed",
+        watch_until=None,
+        created_at=OLD,
+    )
+    _insert_sensitive_chain(
+        store,
+        "active",
+        status="watching",
+        watch_until="2026-07-01T00:00:00+00:00",
+        created_at=OLD,
+    )
+    _insert_sensitive_chain(
+        store,
+        "expired_watch",
+        status="watching",
+        watch_until="2026-06-01T00:00:00+00:00",
+        created_at=OLD,
+    )
+    _insert_sensitive_chain(
+        store,
+        "recent",
+        status="closed",
+        watch_until=None,
+        created_at=RECENT,
+    )
+    service = RetentionService(
+        store=store,
+        config=AppConfig(owner=OwnerConfig(open_id="ou_owner")),
+        base_dir=tmp_path,
+    )
+
+    preview = service.prune(now=NOW, dry_run=True)
+    applied = service.prune(now=NOW)
+
+    expected = {
+        "messages",
+        "tasks",
+        "task_watch_keys",
+        "approvals",
+        "actions",
+        "dispatch_attempts",
+        "resources",
+        "agent_audits",
+        "approval_commands",
+        "approval_feedback",
+        "message_processing",
+    }
+    assert set(preview.content_candidates) == expected
+    assert set(applied.content_scrubbed) == expected
+    assert all(count == 2 for count in preview.content_candidates.values())
+    assert all(count == 2 for count in applied.content_scrubbed.values())
+
+    with store.connect() as conn:
+        messages = {
+            row["message_id"]: dict(row)
+            for row in conn.execute("SELECT * FROM messages ORDER BY message_id")
+        }
+        tasks = {
+            row["short_id"]: dict(row)
+            for row in conn.execute("SELECT * FROM tasks ORDER BY short_id")
+        }
+        approvals = {
+            row["short_id"]: dict(row)
+            for row in conn.execute("SELECT * FROM approvals ORDER BY short_id")
+        }
+        actions = {
+            row["idempotency_key"]: dict(row)
+            for row in conn.execute("SELECT * FROM actions ORDER BY idempotency_key")
+        }
+        resources = {
+            row["message_id"]: dict(row)
+            for row in conn.execute("SELECT * FROM resources ORDER BY message_id")
+        }
+        audits = {
+            row["task_id"]: dict(row)
+            for row in conn.execute("SELECT * FROM agent_audits ORDER BY task_id")
+        }
+        commands = {
+            row["message_id"]: dict(row)
+            for row in conn.execute(
+                "SELECT * FROM approval_commands ORDER BY message_id"
+            )
+        }
+        feedback = {
+            row["command_id"]: dict(row)
+            for row in conn.execute(
+                "SELECT * FROM approval_feedback ORDER BY command_id"
+            )
+        }
+        processing = {
+            row["message_id"]: dict(row)
+            for row in conn.execute(
+                "SELECT * FROM message_processing ORDER BY message_id"
+            )
+        }
+        watch_keys = {
+            row["task_id"]: row["key"]
+            for row in conn.execute("SELECT * FROM task_watch_keys ORDER BY task_id")
+        }
+
+    for suffix in ("closed", "expired_watch"):
+        message = messages[f"om_{suffix}"]
+        assert message["text"] is None
+        assert message["raw_json"] == RAW_JSON_PRUNED_PLACEHOLDER
+        task = tasks[f"t_{suffix}"]
+        assert task["task_label"] is None
+        assert task["agent_session_id"] is None
+        assert task["status"] in {"closed", "watching"}
+        assert approvals[f"a_{suffix}"]["preview"] is None
+        assert (
+            actions[f"action_{suffix}"]["payload_json"] == RAW_JSON_PRUNED_PLACEHOLDER
+        )
+        assert resources[f"om_{suffix}"]["file_key"].startswith("retention-pruned:")
+        assert audits[task["id"]]["prompt_json"] is None
+        assert audits[task["id"]]["input_resource_ids_json"] == "[]"
+        assert commands[f"cmd_{suffix}"]["command"] == "[retention_pruned]"
+        assert feedback[f"cmd_{suffix}"]["suggested_reply"] is None
+        assert processing[f"om_{suffix}"]["last_error"] is None
+        assert watch_keys[task["id"]].startswith("retention-pruned:")
+
+    active = tasks["t_active"]
+    assert messages["om_active"]["text"] == "secret active"
+    assert active["task_label"] == "secret label active"
+    assert approvals["a_active"]["preview"] == "secret preview active"
+    assert commands["cmd_active"]["command"] == "/approve secret active"
+    assert feedback["cmd_active"]["suggested_reply"] == "secret suggested active"
+    assert processing["om_active"]["last_error"] == "secret error active"
+    assert watch_keys[active["id"]] == "secret-key-active"
+
+    recent = tasks["t_recent"]
+    assert messages["om_recent"]["text"] == "secret recent"
+    assert recent["task_label"] == "secret label recent"
+    assert len(messages) == len(tasks) == len(approvals) == len(actions) == 4
+    assert len(resources) == len(audits) == len(commands) == len(feedback) == 4
+    assert len(processing) == len(watch_keys) == 4
+
+
+def test_retention_scrubs_jsonl_and_text_log_payloads_atomically(
+    tmp_path: Path,
+) -> None:
+    jsonl_path = tmp_path / "agent.jsonl"
+    text_path = tmp_path / "agent.log"
+    jsonl_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": OLD,
+                        "level": "info",
+                        "run_id": "run_old",
+                        "task_id": "t_old",
+                        "event": "old_event",
+                        "data": {"secret": "old"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": RECENT,
+                        "level": "info",
+                        "run_id": "run_recent",
+                        "task_id": "t_recent",
+                        "event": "recent_event",
+                        "data": {"secret": "recent"},
+                    }
+                ),
+                "malformed secret line",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    text_path.write_text(
+        f"{OLD} info old_event secret=old\n"
+        f"{RECENT} info recent_event secret=recent\n"
+        "malformed secret line\n",
+        encoding="utf-8",
+    )
+    logger = JSONLLogger(jsonl_path, text_path=text_path)
+    service = RetentionService(
+        store=SQLiteStore(tmp_path / "agent.sqlite3"),
+        config=AppConfig(owner=OwnerConfig(open_id="ou_owner")),
+        base_dir=tmp_path,
+        logger=logger,
+    )
+
+    preview = service.prune(now=NOW, dry_run=True)
+
+    assert preview.log_content_candidates == {"jsonl": 2, "text": 2}
+    assert "secret=old" in text_path.read_text(encoding="utf-8")
+
+    applied = service.prune(now=NOW)
+
+    assert applied.log_content_scrubbed == {"jsonl": 2, "text": 2}
+    json_rows = [
+        json.loads(line) for line in jsonl_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert json_rows[0]["data"] == {"retention_pruned": True}
+    assert json_rows[1]["data"] == {"secret": "recent"}
+    assert json_rows[2]["event"] == "retention_unparseable_line_pruned"
+    text = text_path.read_text(encoding="utf-8")
+    assert "secret=old" not in text
+    assert "secret=recent" in text
+    assert "malformed secret line" not in text
+    assert jsonl_path.stat().st_mode & 0o777 == 0o600
+    assert text_path.stat().st_mode & 0o777 == 0o600
+
+    second = service.prune(now=NOW)
+    assert second.log_content_candidates == {"jsonl": 0, "text": 0}
 
 
 def test_daemon_retention_checkpoint_runs_at_most_daily(tmp_path: Path) -> None:
@@ -231,7 +443,6 @@ def test_daemon_retention_checkpoint_runs_at_most_daily(tmp_path: Path) -> None:
         raw_message_cutoff=OLD,
         resource_cutoff=OLD,
         feedback_content_cutoff=OLD,
-        feedback_metadata_cutoff=OLD,
     )
     record_daemon_retention_checkpoint(store, summary=summary, now=NOW)
 
@@ -297,8 +508,10 @@ def _insert_task(
     with store.connect() as conn:
         cursor = conn.execute(
             """
-            INSERT INTO tasks(short_id, status, chat_id, root_message_id, task_label, created_at, updated_at, closed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO tasks(
+              short_id, status, chat_id, root_message_id, task_label,
+              watch_until, created_at, updated_at, closed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 short_id,
@@ -306,6 +519,7 @@ def _insert_task(
                 "oc_1",
                 root_message_id,
                 "label",
+                "2026-07-01T00:00:00+00:00" if status == "watching" else None,
                 OLD,
                 OLD,
                 None if status == "watching" else OLD,
@@ -368,6 +582,200 @@ def _insert_feedback(store: SQLiteStore, suffix: str, *, created_at: str) -> Non
                 "production",
                 created_at,
             ),
+        )
+
+
+def _insert_sensitive_chain(
+    store: SQLiteStore,
+    suffix: str,
+    *,
+    status: str,
+    watch_until: str | None,
+    created_at: str,
+) -> None:
+    store.initialize()
+    message_id = f"om_{suffix}"
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO messages(
+              message_id, chat_id, sender_name, sent_at, text,
+              normalized_json, raw_json, inserted_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                message_id,
+                "oc_1",
+                f"secret sender {suffix}",
+                created_at,
+                f"secret {suffix}",
+                json.dumps({"text": f"secret {suffix}"}),
+                json.dumps({"raw": f"secret {suffix}"}),
+                created_at,
+            ),
+        )
+        task = conn.execute(
+            """
+            INSERT INTO tasks(
+              short_id, status, chat_id, root_message_id, task_label,
+              agent_session_id, agent_session_provider, agent_working_dir,
+              watch_until, last_user_message, last_agent_reply,
+              created_at, updated_at, closed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"t_{suffix}",
+                status,
+                "oc_1",
+                message_id,
+                f"secret label {suffix}",
+                f"secret-session-{suffix}",
+                "test",
+                f"/secret/{suffix}",
+                watch_until,
+                f"secret user {suffix}",
+                f"secret reply {suffix}",
+                created_at,
+                created_at,
+                created_at if status == "closed" else None,
+            ),
+        )
+        task_id = int(task.lastrowid)
+        conn.execute(
+            "INSERT INTO task_messages(task_id, message_id, role, created_at) VALUES (?, ?, ?, ?)",
+            (task_id, message_id, "trigger", created_at),
+        )
+        conn.execute(
+            "INSERT INTO task_watch_keys(task_id, key, created_at) VALUES (?, ?, ?)",
+            (task_id, f"secret-key-{suffix}", created_at),
+        )
+        approval = conn.execute(
+            """
+            INSERT INTO approvals(
+              short_id, task_id, kind, status, payload_json, preview,
+              created_at, resolved_at
+            ) VALUES (?, ?, 'send_reply', 'approved', ?, ?, ?, ?)
+            """,
+            (
+                f"a_{suffix}",
+                task_id,
+                json.dumps({"text": f"secret payload {suffix}"}),
+                f"secret preview {suffix}",
+                created_at,
+                created_at,
+            ),
+        )
+        approval_id = int(approval.lastrowid)
+        action = conn.execute(
+            """
+            INSERT INTO actions(
+              idempotency_key, task_id, approval_id, kind, status,
+              target_message_id, dry_run, execution_mode, payload_json,
+              result_json, created_at, updated_at
+            ) VALUES (?, ?, ?, 'send_reply', 'sent', ?, 0, 'production', ?, ?, ?, ?)
+            """,
+            (
+                f"action_{suffix}",
+                task_id,
+                approval_id,
+                message_id,
+                json.dumps({"text": f"secret action {suffix}"}),
+                json.dumps({"reply": f"secret result {suffix}"}),
+                created_at,
+                created_at,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO dispatch_attempts(
+              action_id, claim_token, status, dry_run_result_json,
+              send_result_json, readback_result_json, started_at, finished_at
+            ) VALUES (?, ?, 'readback_ok', ?, ?, ?, ?, ?)
+            """,
+            (
+                int(action.lastrowid),
+                f"claim_{suffix}",
+                json.dumps({"secret": suffix}),
+                json.dumps({"secret": suffix}),
+                json.dumps({"secret": suffix}),
+                created_at,
+                created_at,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO resources(
+              message_id, file_key, resource_type, download_status,
+              raw_json, created_at, updated_at
+            ) VALUES (?, ?, 'file', 'failed', ?, ?, ?)
+            """,
+            (
+                message_id,
+                f"secret-file-key-{suffix}",
+                json.dumps({"secret": suffix}),
+                created_at,
+                created_at,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO agent_audits(
+              backend_provider, request_type, task_id, agent_session_id,
+              input_resource_ids_json, response_json, error, prompt_json, created_at
+            ) VALUES ('test', 'task_session', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                f"secret-session-{suffix}",
+                json.dumps([f"secret-file-key-{suffix}"]),
+                json.dumps({"secret": suffix}),
+                f"secret agent error {suffix}",
+                json.dumps({"secret": suffix}),
+                created_at,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO approval_commands(
+              message_id, command, status, result_json, created_at, updated_at
+            ) VALUES (?, ?, 'applied', ?, ?, ?)
+            """,
+            (
+                f"cmd_{suffix}",
+                f"/approve secret {suffix}",
+                json.dumps({"secret": suffix}),
+                created_at,
+                created_at,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO approval_feedback(
+              approval_id, task_id, command_id, outcome, decision_reason,
+              suggested_reply, final_reply, feedback_reason, note, actor,
+              execution_mode, created_at
+            ) VALUES (?, ?, ?, 'suggestion_sent', 'supported', ?, ?, 'other', ?,
+                      'owner', 'production', ?)
+            """,
+            (
+                approval_id,
+                task_id,
+                f"cmd_{suffix}",
+                f"secret suggested {suffix}",
+                f"secret final {suffix}",
+                f"secret note {suffix}",
+                created_at,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO message_processing(
+              message_id, task_id, stage, status, attempt_count, last_error,
+              terminal_reason, created_at, updated_at
+            ) VALUES (?, ?, 'task_session', 'processing_failed_terminal', 3, ?,
+                      'attempts_exhausted', ?, ?)
+            """,
+            (message_id, task_id, f"secret error {suffix}", created_at, created_at),
         )
 
 

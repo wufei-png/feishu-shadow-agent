@@ -42,7 +42,7 @@ These rules belong in deterministic code and tests. Do not delegate them to prom
 - Operator mutations: all state-changing owner actions, including card callbacks, go through Operator Command services and return `CommandResult`.
 - Operator read models: CLI status and console reads go through `OperatorQueryService`, not direct store DTO snapshots.
 - Approval provenance: dry-run approvals/actions never become production sends; production requires a fresh production approval.
-- Feedback retention: owner resolutions are immutable audit facts; retention first expires sensitive content in place, then optionally deletes metadata.
+- Full-chain retention: after the configured content window, messages, inactive task state, approvals, actions, dispatch results, resources, agent audits, approval commands/feedback, processing errors, and log payloads are scrubbed in place. Minimal audit rows remain; only a watching task whose `watch_until` is still in the future delays scrubbing.
 
 ## Agent-Owned Judgement
 

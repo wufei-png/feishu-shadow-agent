@@ -112,10 +112,9 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `chats.<chat_id>.reply_identity` | `bot_preferred`/`bot`/`user` | `bot_preferred` | 群回复身份策略：优先 bot、强制 bot、或 user 代发。 |
 | `chats.<chat_id>.allow_user_fallback` | bool | `true` | `bot_preferred` 无法用 bot 时是否允许 fallback 到 user。 |
 | `chats.<chat_id>.resource_download` | bool | `true` | 是否允许保存该群消息中的可下载资源。 |
-| `retention.raw_message_days` | int `>= 1` | `30` | 原始消息 payload 保留天数。 |
+| `retention.raw_message_days` | int `>= 1` | `30` | 非活动任务的消息、任务、审批、动作、Agent 审计和处理错误等敏感内容保留天数；仍处于有效 `watch_until` 的 watching task 暂缓清理。只清空敏感字段，保留最小审计元数据。 |
 | `retention.resource_days` | int `>= 1` | `30` | 下载资源文件保留天数。 |
 | `retention.feedback_content_days` | int `>= 1` | `30` | 审批反馈中候选回复、最终回复、短备注等敏感文本的保留天数。到期后在原记录中清空并写入 `content_expired_at`。 |
-| `retention.feedback_metadata_days` | int `>= feedback_content_days`/null | `365` | 审批反馈统计元数据的保留天数；到期删除整行。`null` 表示长期保留，非空时不得短于内容保留期。 |
 | `lifecycle.watch_minutes` | int `> 0` | `120` | 新消息、follow-up 或 agent 回复后继续监听任务的分钟数。 |
 | `lifecycle.burst_attach_seconds` | int `>= 0` | `60` | 同一 chat、同一 sender 的连续触发消息可跳过 TaskRouter 并自动 append 到过滤后唯一 burst-eligible active task 的秒数窗口；`0` 表示关闭。 |
 | `lifecycle.closed_recall_days` | int `>= 1` | `7` | 新触发事件可召回 closed task 的天数窗口。 |

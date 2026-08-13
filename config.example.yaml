@@ -113,7 +113,6 @@ retention:
   raw_message_days: 30
   resource_days: 30
   feedback_content_days: 30
-  feedback_metadata_days: 365
 
 lifecycle:
   watch_minutes: 120

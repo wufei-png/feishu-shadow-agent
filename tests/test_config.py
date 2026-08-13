@@ -31,7 +31,6 @@ def test_load_minimal_config() -> None:
     assert loaded.config.lifecycle.closed_recall_days == 7
     assert loaded.config.lifecycle.approval_timeout_hours == 24
     assert loaded.config.retention.feedback_content_days == 30
-    assert loaded.config.retention.feedback_metadata_days == 365
     assert loaded.config.interactive_cards.enabled is False
     assert loaded.config.interactive_cards.app_id_env == "FEISHU_APP_ID"
     assert loaded.config.agent_backend.provider == "hermes"
@@ -120,42 +119,20 @@ def test_tracked_config_schema_matches_generated_schema() -> None:
     assert tracked_schema == ConfigService().json_schema_dict()
 
 
-@pytest.mark.parametrize("metadata_days", [1, 29])
-def test_feedback_metadata_retention_cannot_precede_content_expiry(
-    tmp_path: Path, metadata_days: int
-) -> None:
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        f"""
-owner:
-  open_id: ou_owner
-retention:
-  feedback_content_days: 30
-  feedback_metadata_days: {metadata_days}
-""",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ConfigError, match="feedback_metadata_days"):
-        ConfigService().load(config_path)
-
-
-def test_feedback_metadata_can_be_retained_indefinitely(tmp_path: Path) -> None:
+def test_feedback_metadata_deletion_setting_is_rejected(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
 owner:
   open_id: ou_owner
 retention:
-  feedback_content_days: 30
-  feedback_metadata_days: null
+  feedback_metadata_days: 365
 """,
         encoding="utf-8",
     )
 
-    loaded = ConfigService().load(config_path)
-
-    assert loaded.config.retention.feedback_metadata_days is None
+    with pytest.raises(ConfigError, match="feedback_metadata_days"):
+        ConfigService().load(config_path)
 
 
 def test_agent_backend_provider_schema_accepts_supported_backends() -> None:

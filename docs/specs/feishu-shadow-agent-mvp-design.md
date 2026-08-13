@@ -974,15 +974,16 @@ task_watch_keys(task_id, key) unique
 task_messages(task_id, message_id) unique
 ```
 
-`raw_json` 保存飞书消息原始 JSON，默认保留 30 天。标准化字段长期保留。
+敏感内容默认保留 30 天。到期后按字段清空消息正文/标准化 JSON、inactive task 上下文、审批与动作 payload、dispatch 结果、Agent prompt/response/error、approval command/feedback、processing error 和日志 payload；保留状态、时间、哈希、分类等最小审计元数据，不级联删除任务链记录。只有 `status=watching` 且 `watch_until` 仍在未来的任务暂缓清理。
 
 ```yaml
 retention:
   raw_message_days: 30
   resource_days: 30
+  feedback_content_days: 30
 ```
 
-资源文件默认保留 30 天；任务未关闭或 approval pending 时不清理。清理后 `resources` 表保留元数据、hash、file_key、download_status。
+资源文件默认保留 30 天；只有仍在有效 watch 窗口内的任务暂缓清理。清理后 `resources` 表保留最小元数据、hash 和 download_status，清空下载路径、原始 payload 和可复用的 file key。
 
 ## 23. 日志与审计
 
@@ -991,6 +992,8 @@ retention:
 ```text
 logs/agent.jsonl
 ```
+
+日志使用 `0600` 权限创建；retention 到期后原位保留时间、级别、run/task ID 和 event，清空 `data` payload。可选文本日志遵循同一规则。
 
 示例：
 

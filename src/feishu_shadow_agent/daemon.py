@@ -531,10 +531,9 @@ class Daemon:
             "retention",
             ok=True,
             processed=(
-                summary.raw_messages_pruned
+                sum(summary.content_scrubbed.values())
+                + sum(summary.log_content_scrubbed.values())
                 + summary.resources_expired
-                + summary.feedback_content_expired
-                + summary.feedback_metadata_deleted
             ),
         )
 

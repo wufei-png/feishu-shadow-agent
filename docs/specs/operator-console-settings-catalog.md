@@ -155,7 +155,7 @@ in v1 because the console does not write `config.yaml`.
 
 | key | label | source | visibility | editable_v1 | requires_restart | audit_behavior | write_boundary |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `retention.raw_message_days` | Raw message retention | `config_yaml` | `normal` | no | yes | future config audit | future `ConfigCommandService` |
+| `retention.raw_message_days` | Sensitive content retention | `config_yaml` | `normal` | no | yes | future config audit | future `ConfigCommandService` |
 | `retention.resource_days` | Resource retention | `config_yaml` | `normal` | no | yes | future config audit | future `ConfigCommandService` |
 
 ## Runtime And Daemon Settings
