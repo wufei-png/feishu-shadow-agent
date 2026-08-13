@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Protocol
 
 from ..types import LarkCliResult, MessagePage
 
@@ -15,6 +15,15 @@ class FeishuClient(Protocol):
         *,
         owner_open_id: str,
         text: str,
+        idempotency_key: str,
+        dry_run: bool = True,
+    ) -> LarkCliResult: ...
+
+    def owner_card(
+        self,
+        *,
+        owner_open_id: str,
+        card: dict[str, Any],
         idempotency_key: str,
         dry_run: bool = True,
     ) -> LarkCliResult: ...

@@ -20,6 +20,7 @@ from pydantic import (
 
 CONFIG_ENV_VAR = "FEISHU_SHADOW_AGENT_CONFIG"
 SKILL_NAME_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
+ENV_VAR_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 class ConfigError(ValueError):
@@ -131,6 +132,41 @@ class LarkCliConfig(StrictModel):
         gt=0,
         description="Timeout in seconds for lark-cli subprocess calls.",
     )
+
+
+class InteractiveCardsConfig(StrictModel):
+    enabled: StrictBool = Field(
+        default=False,
+        description="Whether approval notifications use interactive Feishu cards when the callback channel is healthy.",
+    )
+    app_id_env: str = Field(
+        default="FEISHU_APP_ID",
+        description="Environment variable name holding the Feishu app ID; never put the credential itself in YAML.",
+    )
+    app_secret_env: str = Field(
+        default="FEISHU_APP_SECRET",
+        description="Environment variable name holding the Feishu app secret; never put the credential itself in YAML.",
+    )
+    startup_timeout_seconds: int = Field(
+        default=10,
+        gt=0,
+        description="Seconds to wait for the card callback long connection before falling back to text notifications.",
+    )
+
+    @field_validator("app_id_env", "app_secret_env")
+    @classmethod
+    def validate_env_name(cls, value: str) -> str:
+        if ENV_VAR_NAME_PATTERN.fullmatch(value) is None:
+            raise ValueError(
+                "interactive card credentials must name environment variables"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def validate_distinct_env_names(self) -> InteractiveCardsConfig:
+        if self.app_id_env == self.app_secret_env:
+            raise ValueError("interactive card app ID and secret env names must differ")
+        return self
 
 
 class HermesConfig(StrictModel):
@@ -566,6 +602,10 @@ class AppConfig(StrictModel):
     lark_cli: LarkCliConfig = Field(
         default_factory=LarkCliConfig,
         description="lark-cli executable and timeout settings.",
+    )
+    interactive_cards: InteractiveCardsConfig = Field(
+        default_factory=InteractiveCardsConfig,
+        description="Optional Feishu CardKit approval notifications and callback channel.",
     )
     agent_backend: AgentBackendConfig = Field(
         default_factory=AgentBackendConfig,

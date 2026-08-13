@@ -27,6 +27,14 @@ lark_cli:
   path: null
   timeout_seconds: 30
 
+# Optional CardKit approval UI. Credentials are read from the named environment
+# variables; never put the credential values in this file.
+interactive_cards:
+  enabled: false
+  app_id_env: FEISHU_APP_ID
+  app_secret_env: FEISHU_APP_SECRET
+  startup_timeout_seconds: 10
+
 agent_backend:
   provider: hermes
   # Agent subprocess working directory. null means the directory containing config.yaml.

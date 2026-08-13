@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from html import escape
 from typing import Any
 
+from .approval_cards import build_approval_card
 from .config import AppConfig
 from .feishu.client import FeishuClient
 from .ingestion import MessageNormalizer
@@ -59,11 +60,13 @@ class Dispatcher:
         feishu_client: FeishuClient,
         config: AppConfig,
         logger: JSONLLogger,
+        interactive_cards_available: bool = False,
     ):
         self.store = store
         self.feishu = feishu_client
         self.config = config
         self.logger = logger
+        self.interactive_cards_available = interactive_cards_available
         self.normalizer = MessageNormalizer(owner_open_id=config.owner.open_id)
 
     def dispatch(
@@ -459,6 +462,20 @@ class Dispatcher:
                 dry_run=dry_run,
             )
         if action.kind == "owner_notification":
+            if (
+                self.interactive_cards_available
+                and action.payload.get("type") == "approval_required"
+            ):
+                try:
+                    card = build_approval_card(action.payload)
+                except ValueError as exc:
+                    return _local_error(action, str(exc))
+                return self.feishu.owner_card(
+                    owner_open_id=self.config.owner.open_id,
+                    card=card,
+                    idempotency_key=action.idempotency_key,
+                    dry_run=dry_run,
+                )
             text = _owner_notification_text(action.payload)
             return self.feishu.owner_message(
                 owner_open_id=self.config.owner.open_id,

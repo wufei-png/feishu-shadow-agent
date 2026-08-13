@@ -18,6 +18,7 @@ class FakeFeishu:
         self.readback_pages: list[MessagePage] = []
         self.reply_calls: list[dict[str, Any]] = []
         self.owner_calls: list[dict[str, Any]] = []
+        self.owner_card_calls: list[dict[str, Any]] = []
         self.mget_calls: list[dict[str, Any]] = []
         self.raise_reply_dry_run = False
         self.raise_reply_send = False
@@ -38,6 +39,12 @@ class FakeFeishu:
             return self.owner_results.pop(0)
         return LarkCliResult(["lark-cli", "im", "+messages-send"], 0, json_data={})
 
+    def owner_card(self, **kwargs: Any) -> LarkCliResult:
+        self.owner_card_calls.append(kwargs)
+        if self.owner_results:
+            return self.owner_results.pop(0)
+        return LarkCliResult(["lark-cli", "im", "+messages-send"], 0, json_data={})
+
     def get_messages(self, **kwargs: Any) -> MessagePage:
         self.mget_calls.append(kwargs)
         if self.readback_pages:
@@ -53,6 +60,8 @@ def _dispatcher(
     tmp_path: Path,
     fake: FakeFeishu | None = None,
     config: AppConfig | None = None,
+    *,
+    interactive_cards_available: bool = False,
 ) -> tuple[SQLiteStore, Dispatcher, FakeFeishu]:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     client = fake or FakeFeishu()
@@ -63,6 +72,7 @@ def _dispatcher(
             feishu_client=client,  # type: ignore[arg-type]
             config=config or _config(),
             logger=JSONLLogger(tmp_path / "agent.jsonl"),
+            interactive_cards_available=interactive_cards_available,
         ),
         client,
     )
@@ -747,6 +757,38 @@ def test_owner_notification_can_be_sent_independently(tmp_path: Path) -> None:
     assert "/send t_1 <final reply>" in sent_text
     attempts = _attempts(store, action_id)
     assert attempts[0].status == "readback_ok"
+
+
+def test_approval_notification_uses_card_only_when_callback_is_healthy(
+    tmp_path: Path,
+) -> None:
+    fake = FakeFeishu()
+    store, dispatcher, _ = _dispatcher(tmp_path, fake, interactive_cards_available=True)
+    task_id = _insert_task(store)
+    store.create_owner_notification_action(
+        task_id=task_id,
+        payload={
+            "type": "approval_required",
+            "task_id": "t_1",
+            "approval_id": "a_1",
+            "reason": "commitment_or_authorization",
+            "suggested_reply": "I will finish Friday.",
+            "approvable": True,
+        },
+    )
+    fake.owner_results.append(LarkCliResult(["dry"], 0, json_data={"api": []}))
+
+    summary = dispatcher.dispatch(
+        run_id="run_card",
+        allow_send_reply_actual=False,
+        allow_owner_notification_actual=False,
+    )
+
+    assert summary.previewed == 1
+    assert fake.owner_calls == []
+    assert len(fake.owner_card_calls) == 1
+    assert fake.owner_card_calls[0]["card"]["schema"] == "2.0"
+    assert fake.owner_card_calls[0]["dry_run"] is True
 
 
 def test_owner_notification_neutralizes_freeform_mentions(tmp_path: Path) -> None:

@@ -210,6 +210,42 @@ class LarkCliClient:
             argv.append("--dry-run")
         return argv
 
+    def build_messages_send_card(
+        self,
+        *,
+        as_identity: str,
+        card: dict[str, Any],
+        idempotency_key: str,
+        chat_id: str | None = None,
+        user_id: str | None = None,
+        dry_run: bool = True,
+    ) -> list[str]:
+        _validate_identity(as_identity)
+        _validate_exactly_one(chat_id=chat_id, user_id=user_id)
+        if not card:
+            raise ValueError("card is required")
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required")
+        argv = [
+            self.path,
+            "im",
+            "+messages-send",
+            "--as",
+            as_identity,
+            "--json",
+            "--content",
+            json.dumps(card, ensure_ascii=False, separators=(",", ":")),
+            "--msg-type",
+            "interactive",
+            "--idempotency-key",
+            idempotency_key,
+        ]
+        _extend_option(argv, "--chat-id", chat_id)
+        _extend_option(argv, "--user-id", user_id)
+        if dry_run:
+            argv.append("--dry-run")
+        return argv
+
     def build_messages_mget(
         self,
         *,
@@ -297,6 +333,24 @@ class LarkCliClient:
                 as_identity="bot",
                 user_id=owner_open_id,
                 text=text,
+                idempotency_key=idempotency_key,
+                dry_run=dry_run,
+            )
+        )
+
+    def owner_card(
+        self,
+        *,
+        owner_open_id: str,
+        card: dict[str, Any],
+        idempotency_key: str,
+        dry_run: bool = True,
+    ) -> LarkCliResult:
+        return self.run_json(
+            self.build_messages_send_card(
+                as_identity="bot",
+                user_id=owner_open_id,
+                card=card,
                 idempotency_key=idempotency_key,
                 dry_run=dry_run,
             )

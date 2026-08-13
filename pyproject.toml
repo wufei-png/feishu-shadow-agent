@@ -15,6 +15,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+cards = [
+  "lark-channel-sdk>=1.2,<2",
+]
 dev = [
   "build>=1.2,<2",
   "httpx2>=2.0,<3",

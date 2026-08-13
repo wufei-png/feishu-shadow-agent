@@ -12,6 +12,7 @@ import yaml
 
 from .agent_backend_factory import create_agent_backend
 from .agent_invocation import AgentInvoker
+from .card_actions import create_card_action_connection
 from .config import ConfigError, ConfigService, LoadedConfig
 from .console_api import (
     console_static_ready,
@@ -446,6 +447,14 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         run_metadata=_git_info(Path.cwd()),
         config_base_dir=loaded.base_dir,
     )
+    if loaded.config.interactive_cards.enabled:
+        daemon.card_action_connection = create_card_action_connection(
+            store=store,
+            config=loaded.config,
+            logger=logger,
+            wake=daemon.wake,
+            execution_mode="dry_run" if args.dry_run else "production",
+        )
     return daemon.run_forever()
 
 

@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .card_actions import FeishuCardActionConnection
 from .config import AppConfig
 from .dispatcher import Dispatcher
 from .feishu.client import FeishuClient
@@ -40,6 +41,7 @@ class Daemon:
         config_base_dir: str | Path | None = None,
         runtime_health_interval_seconds: int | None = None,
         sleep_func: Callable[[float], None] = time.sleep,
+        card_action_connection: FeishuCardActionConnection | None = None,
     ):
         self.store = store
         self.logger = logger
@@ -61,6 +63,7 @@ class Daemon:
         self._lifecycle_condition = threading.Condition()
         self._wakeup_generation = 0
         self._stop_requested = False
+        self.card_action_connection = card_action_connection
 
     def wake(self) -> None:
         """Wake the daemon loop so queued operator actions dispatch promptly."""
@@ -222,6 +225,10 @@ class Daemon:
                 feishu_client=self.feishu_client,
                 config=self.app_config,
                 logger=self.logger,
+                interactive_cards_available=(
+                    self.card_action_connection is not None
+                    and self.card_action_connection.is_healthy()
+                ),
             )
             # Owner commands are the safety valve for outgoing replies. If the inbox is
             # unhealthy, external send_reply actions stay preview-only while owner
@@ -296,6 +303,7 @@ class Daemon:
                     run_id=run_id, status="health_failed", health_summary=summary
                 )
                 return 2
+            self._start_card_action_connection(run_id=run_id)
             self.logger.emit(
                 "info",
                 "daemon_started",
@@ -328,7 +336,32 @@ class Daemon:
             self.store.record_run_finish(run_id=run_id, status="stopped")
             return 0
         finally:
+            if self.card_action_connection is not None:
+                self.card_action_connection.stop()
             self._restore_signal_handlers(previous_signal_handlers)
+
+    def _start_card_action_connection(self, *, run_id: str) -> None:
+        connection = self.card_action_connection
+        if connection is None:
+            return
+        healthy = connection.start()
+        snapshot = connection.snapshot()
+        result = HealthCheckResult(
+            "card_action_connection",
+            "warning",
+            "ok" if healthy else "failed",
+            "interactive card callback connection is ready"
+            if healthy
+            else "interactive cards disabled at runtime; owner notifications use text fallback",
+            snapshot,
+        )
+        self.store.record_health_results(run_id=run_id, results=[result])
+        self.logger.emit(
+            "info" if healthy else "warning",
+            "card_action_connection_health",
+            run_id=run_id,
+            data=snapshot | {"text_fallback": not healthy},
+        )
 
     def _current_wakeup_generation(self) -> int:
         with self._lifecycle_condition:

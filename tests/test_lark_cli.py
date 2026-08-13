@@ -88,6 +88,22 @@ def test_build_messages_send_defaults_to_dry_run_and_can_send_test() -> None:
     assert "--dry-run" not in send_argv
 
 
+def test_build_messages_send_card_uses_interactive_content() -> None:
+    client = LarkCliClient(path="lark-cli")
+
+    argv = client.build_messages_send_card(
+        as_identity="bot",
+        user_id="ou_owner",
+        card={"schema": "2.0", "body": {"elements": []}},
+        idempotency_key="idem_card",
+    )
+
+    assert argv[:5] == ["lark-cli", "im", "+messages-send", "--as", "bot"]
+    assert argv[argv.index("--msg-type") + 1] == "interactive"
+    assert '"schema":"2.0"' in argv[argv.index("--content") + 1]
+    assert "--dry-run" in argv
+
+
 def test_build_messages_mget_uses_comma_separated_ids_and_limit() -> None:
     client = LarkCliClient(path="lark-cli")
 

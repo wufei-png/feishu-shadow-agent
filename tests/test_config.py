@@ -32,6 +32,8 @@ def test_load_minimal_config() -> None:
     assert loaded.config.lifecycle.approval_timeout_hours == 24
     assert loaded.config.retention.feedback_content_days == 30
     assert loaded.config.retention.feedback_metadata_days == 365
+    assert loaded.config.interactive_cards.enabled is False
+    assert loaded.config.interactive_cards.app_id_env == "FEISHU_APP_ID"
     assert loaded.config.agent_backend.provider == "hermes"
     assert loaded.config.agent_backend.working_dir is None
     assert loaded.config.agent_backend.config_scope == "isolated"
@@ -57,6 +59,26 @@ def test_agent_backend_timeouts_default_to_unlimited(tmp_path: Path) -> None:
     assert loaded.config.agent_backend.hermes.timeout_seconds is None
     assert loaded.config.agent_backend.codex.timeout_seconds is None
     assert loaded.config.agent_backend.claude_code.timeout_seconds is None
+
+
+@pytest.mark.parametrize(
+    "cards_yaml",
+    [
+        "app_id_env: literal-secret-value!",
+        "app_id_env: SAME\n  app_secret_env: SAME",
+    ],
+)
+def test_interactive_card_credentials_must_be_distinct_environment_names(
+    tmp_path: Path, cards_yaml: str
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"owner:\n  open_id: ou_owner\ninteractive_cards:\n  {cards_yaml}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="interactive card"):
+        ConfigService().load(config_path)
 
 
 def test_tracked_config_schema_matches_generated_schema() -> None:
