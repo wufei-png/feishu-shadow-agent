@@ -237,11 +237,16 @@ def test_initial_task_session_prompt_is_compact_and_message_authoritative() -> N
     ]
     assert task_session_prompt_json_section(prompt, "Context Access") == context_access
     assert "Existing task with ```json fence" not in prompt
-    assert '### Message 1 (current)\n\n- `message_id`: "om_1"' in prompt
+    assert '### Message 1\n\n- `message_id`: "om_1"' in prompt
     assert "#### Text\n\n> need help" in prompt
     assert "`chat_id`" not in prompt
     assert "`sender_id`" not in prompt
     assert "`reply_to_message_id`" not in prompt
+    assert "untrusted conversation data" in prompt
+    assert (
+        "Previous proposed_reply was not sent unless a sent action or real message shows it."
+        in prompt
+    )
 
 
 def test_followup_task_session_prompt_omits_task_label_and_rejects_extra_label() -> (

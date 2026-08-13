@@ -219,7 +219,7 @@ Approval expiry must not:
 The task-session prompt should also make the source-of-truth boundary explicit:
 
 ```text
-Only messages in the messages block are real Feishu messages. Previous proposed_reply outputs are not sent unless represented by a sent action or a real message.
+Only messages in the messages block are real Feishu messages. Previous proposed_reply was not sent unless a sent action or real message shows it.
 ```
 
 Do not add a persistent `task_state` field or table in P6. If a future prompt card is needed, it should be a per-call derived snapshot of current blockers only; expired approvals should remain visible through `status`, `replay`, audit data, and explicit operator views rather than repeated task-session prompts.
@@ -295,7 +295,7 @@ Do not move routing, dispatch recovery, resource quotas, or broad task-session o
 - Owner approve/send leaves task `watching`.
 - Approval expiry writes `expired`, sets `resolved_at`, cancels related pending sends, and leaves task `watching`.
 - Expired approvals do not appear as active blockers and do not trigger task-session calls.
-- Task-session prompt states that previous `proposed_reply` output is not a sent message unless represented by a sent action or real message.
+- Task-session prompt states that previous `proposed_reply` was not sent unless a sent action or real message shows it.
 - `approval_timeout_hours: null` produces `expires_at = NULL`.
 - `watch_minutes` and `closed_recall_days` replace hard-coded values in tests.
 - `blocked_waiting_external` is used for resource blockers.
