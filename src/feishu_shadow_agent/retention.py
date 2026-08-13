@@ -36,17 +36,25 @@ class RetentionSummary:
     dry_run: bool
     raw_message_cutoff: str
     resource_cutoff: str
+    feedback_content_cutoff: str
+    feedback_metadata_cutoff: str | None
     raw_messages_pruned: int = 0
     resources_candidates: int = 0
     resources_deleted: int = 0
     resources_expired: int = 0
     resources_skipped: list[RetentionSkippedResource] = field(default_factory=list)
+    feedback_content_candidates: int = 0
+    feedback_content_expired: int = 0
+    feedback_metadata_candidates: int = 0
+    feedback_metadata_deleted: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "dry_run": self.dry_run,
             "raw_message_cutoff": self.raw_message_cutoff,
             "resource_cutoff": self.resource_cutoff,
+            "feedback_content_cutoff": self.feedback_content_cutoff,
+            "feedback_metadata_cutoff": self.feedback_metadata_cutoff,
             "raw_messages_pruned": self.raw_messages_pruned,
             "resources_candidates": self.resources_candidates,
             "resources_deleted": self.resources_deleted,
@@ -54,6 +62,10 @@ class RetentionSummary:
             "resources_skipped": [
                 resource.as_dict() for resource in self.resources_skipped
             ],
+            "feedback_content_candidates": self.feedback_content_candidates,
+            "feedback_content_expired": self.feedback_content_expired,
+            "feedback_metadata_candidates": self.feedback_metadata_candidates,
+            "feedback_metadata_deleted": self.feedback_metadata_deleted,
         }
 
 
@@ -81,11 +93,23 @@ class RetentionService:
         now = now or datetime.now().astimezone()
         raw_cutoff = _cutoff_iso(now, self.config.retention.raw_message_days)
         resource_cutoff = _cutoff_iso(now, self.config.retention.resource_days)
+        feedback_content_cutoff = _cutoff_iso(
+            now, self.config.retention.feedback_content_days
+        )
+        feedback_metadata_cutoff = (
+            None
+            if self.config.retention.feedback_metadata_days is None
+            else _cutoff_iso(now, self.config.retention.feedback_metadata_days)
+        )
         raw_count = self.store.count_prunable_message_raw_json(
             cutoff=raw_cutoff,
             replacement_json=RAW_JSON_PRUNED_PLACEHOLDER,
         )
         resource_rows = self.store.list_prunable_resources(cutoff=resource_cutoff)
+        feedback_candidates = self.store.approval_feedback_retention_candidates(
+            content_cutoff=feedback_content_cutoff,
+            metadata_cutoff=feedback_metadata_cutoff,
+        )
         skipped: list[RetentionSkippedResource] = []
         deleted_resource_ids: list[int] = []
         expired_resource_ids: list[int] = []
@@ -113,22 +137,38 @@ class RetentionService:
 
         raw_pruned = raw_count
         expired = len(expired_resource_ids)
+        feedback_content_expired = 0
+        feedback_metadata_deleted = 0
         if not dry_run:
             raw_pruned = self.store.prune_message_raw_json(
                 cutoff=raw_cutoff,
                 replacement_json=RAW_JSON_PRUNED_PLACEHOLDER,
             )
             expired = self.store.mark_resources_expired(expired_resource_ids)
+            (
+                feedback_content_expired,
+                feedback_metadata_deleted,
+            ) = self.store.prune_approval_feedback(
+                content_cutoff=feedback_content_cutoff,
+                metadata_cutoff=feedback_metadata_cutoff,
+                expired_at=now.isoformat(timespec="seconds"),
+            )
 
         summary = RetentionSummary(
             dry_run=dry_run,
             raw_message_cutoff=raw_cutoff,
             resource_cutoff=resource_cutoff,
+            feedback_content_cutoff=feedback_content_cutoff,
+            feedback_metadata_cutoff=feedback_metadata_cutoff,
             raw_messages_pruned=raw_pruned,
             resources_candidates=len(resource_rows),
             resources_deleted=0 if dry_run else len(deleted_resource_ids),
             resources_expired=0 if dry_run else expired,
             resources_skipped=skipped,
+            feedback_content_candidates=feedback_candidates["content"],
+            feedback_content_expired=feedback_content_expired,
+            feedback_metadata_candidates=feedback_candidates["metadata"],
+            feedback_metadata_deleted=feedback_metadata_deleted,
         )
         if self.logger is not None:
             self.logger.emit(

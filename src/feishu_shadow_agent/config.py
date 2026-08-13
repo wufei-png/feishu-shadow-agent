@@ -493,6 +493,27 @@ class RetentionConfig(StrictModel):
     resource_days: int = Field(
         default=30, ge=1, description="Days to retain downloaded resource files."
     )
+    feedback_content_days: int = Field(
+        default=30,
+        ge=1,
+        description="Days to retain approval feedback reply text and free-form notes.",
+    )
+    feedback_metadata_days: int | None = Field(
+        default=365,
+        ge=1,
+        description="Days to retain approval feedback rows; null retains metadata indefinitely.",
+    )
+
+    @model_validator(mode="after")
+    def validate_feedback_retention_order(self) -> RetentionConfig:
+        if (
+            self.feedback_metadata_days is not None
+            and self.feedback_metadata_days < self.feedback_content_days
+        ):
+            raise ValueError(
+                "retention.feedback_metadata_days must be greater than or equal to feedback_content_days"
+            )
+        return self
 
 
 class LifecycleConfig(StrictModel):

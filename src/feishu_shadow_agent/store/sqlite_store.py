@@ -912,6 +912,71 @@ class SQLiteStore:
             )
         return int(cursor.rowcount)
 
+    def approval_feedback_retention_candidates(
+        self,
+        *,
+        content_cutoff: str,
+        metadata_cutoff: str | None,
+    ) -> dict[str, int]:
+        self.migrate()
+        content_query = """
+            SELECT COUNT(*) AS count
+            FROM approval_feedback
+            WHERE content_expired_at IS NULL
+              AND datetime(created_at) <= datetime(?)
+        """
+        content_params: list[Any] = [content_cutoff]
+        if metadata_cutoff is not None:
+            content_query += " AND datetime(created_at) > datetime(?)"
+            content_params.append(metadata_cutoff)
+        with self.connect() as conn:
+            content = conn.execute(content_query, content_params).fetchone()
+            metadata_count = 0
+            if metadata_cutoff is not None:
+                metadata = conn.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM approval_feedback
+                    WHERE datetime(created_at) <= datetime(?)
+                    """,
+                    (metadata_cutoff,),
+                ).fetchone()
+                metadata_count = int(metadata["count"])
+        return {"content": int(content["count"]), "metadata": metadata_count}
+
+    def prune_approval_feedback(
+        self,
+        *,
+        content_cutoff: str,
+        metadata_cutoff: str | None,
+        expired_at: str,
+    ) -> tuple[int, int]:
+        self.migrate()
+        with self.connect() as conn:
+            metadata_deleted = 0
+            if metadata_cutoff is not None:
+                deleted = conn.execute(
+                    """
+                    DELETE FROM approval_feedback
+                    WHERE datetime(created_at) <= datetime(?)
+                    """,
+                    (metadata_cutoff,),
+                )
+                metadata_deleted = int(deleted.rowcount)
+            expired = conn.execute(
+                """
+                UPDATE approval_feedback
+                SET suggested_reply = NULL,
+                    final_reply = NULL,
+                    note = NULL,
+                    content_expired_at = ?
+                WHERE content_expired_at IS NULL
+                  AND datetime(created_at) <= datetime(?)
+                """,
+                (expired_at, content_cutoff),
+            )
+        return int(expired.rowcount), metadata_deleted
+
     def create_task_for_message(
         self,
         message: NormalizedMessage,

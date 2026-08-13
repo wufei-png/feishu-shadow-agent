@@ -30,6 +30,8 @@ def test_load_minimal_config() -> None:
     assert loaded.config.lifecycle.burst_attach_seconds == 60
     assert loaded.config.lifecycle.closed_recall_days == 7
     assert loaded.config.lifecycle.approval_timeout_hours == 24
+    assert loaded.config.retention.feedback_content_days == 30
+    assert loaded.config.retention.feedback_metadata_days == 365
     assert loaded.config.agent_backend.provider == "hermes"
     assert loaded.config.agent_backend.working_dir is None
     assert loaded.config.agent_backend.config_scope == "isolated"
@@ -61,6 +63,44 @@ def test_tracked_config_schema_matches_generated_schema() -> None:
     tracked_schema = json.loads(SCHEMA_FILE.read_text(encoding="utf-8"))
 
     assert tracked_schema == ConfigService().json_schema_dict()
+
+
+@pytest.mark.parametrize("metadata_days", [1, 29])
+def test_feedback_metadata_retention_cannot_precede_content_expiry(
+    tmp_path: Path, metadata_days: int
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+owner:
+  open_id: ou_owner
+retention:
+  feedback_content_days: 30
+  feedback_metadata_days: {metadata_days}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="feedback_metadata_days"):
+        ConfigService().load(config_path)
+
+
+def test_feedback_metadata_can_be_retained_indefinitely(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+retention:
+  feedback_content_days: 30
+  feedback_metadata_days: null
+""",
+        encoding="utf-8",
+    )
+
+    loaded = ConfigService().load(config_path)
+
+    assert loaded.config.retention.feedback_metadata_days is None
 
 
 def test_agent_backend_provider_schema_accepts_supported_backends() -> None:

@@ -732,6 +732,27 @@
           "minimum": 1,
           "title": "Resource Days",
           "type": "integer"
+        },
+        "feedback_content_days": {
+          "default": 30,
+          "description": "Days to retain approval feedback reply text and free-form notes.",
+          "minimum": 1,
+          "title": "Feedback Content Days",
+          "type": "integer"
+        },
+        "feedback_metadata_days": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 365,
+          "description": "Days to retain approval feedback rows; null retains metadata indefinitely.",
+          "title": "Feedback Metadata Days"
         }
       },
       "title": "RetentionConfig",
