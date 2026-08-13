@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Activity, Bell, ClipboardList, Database, FileText, HeartPulse, Home, MessageSquareDiff, Send, Settings, ShieldCheck, Wrench } from "lucide-react";
 import { getDashboard } from "./api";
 import { Badge, EmptyState } from "./components/Primitives";
+import { bootstrapTokenFromHash } from "./consoleSession";
 import { queryKeys } from "./queryKeys";
 import { ApprovalsScreen } from "./screens/ApprovalsScreen";
 import { DashboardScreen } from "./screens/DashboardScreen";
@@ -41,12 +42,15 @@ export function App() {
 
   useEffect(() => {
     const url = new URL(window.location.href);
-    const urlToken = url.searchParams.get("token");
-    if (urlToken) {
-      sessionStorage.setItem(TOKEN_STORAGE_KEY, urlToken);
-      setToken(urlToken);
-      url.searchParams.delete("token");
-      window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash || "#dashboard"}`);
+    const fragmentToken = bootstrapTokenFromHash(url.hash);
+    const hadQueryToken = url.searchParams.has("token");
+    url.searchParams.delete("token");
+    if (fragmentToken) {
+      sessionStorage.setItem(TOKEN_STORAGE_KEY, fragmentToken);
+      setToken(fragmentToken);
+    }
+    if (fragmentToken || hadQueryToken) {
+      window.history.replaceState(null, "", `${url.pathname}${url.search}#dashboard`);
     }
   }, []);
 

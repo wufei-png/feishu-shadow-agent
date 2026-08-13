@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bell, Bot, ClipboardList, MessageSquare, RotateCcw, Send, XCircle } from "lucide-react";
+import { Bell, Bot, MessageSquare, RotateCcw, Send, XCircle } from "lucide-react";
 import { closeTask, getTask, listTasks, reopenTask } from "../api";
 import {
   Badge,

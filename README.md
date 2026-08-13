@@ -80,13 +80,13 @@ python -m feishu_shadow_agent retention prune --config config.yaml --dry-run
 python -m feishu_shadow_agent console --config config.yaml
 ```
 
-本地 Operator Console 默认绑定 `127.0.0.1`，通过启动时生成的一次性 bearer token 访问。Console 覆盖 Dashboard、Approvals、Tasks、Dispatch、Feedback、Policy、Settings、Health 和 Maintenance；Feedback 提供 7/30 天结果统计、决策原因切片和原始/最终回复差异。Console 只通过本地 `/api/*` 调用 `OperatorQueryService` / `OperatorCommandService`，不直接读 SQLite，也不写 `config.yaml`。Maintenance 是本机运维命令台，承载 doctor、config validate、retention prune 和 reply style refresh 等低频显式命令；审批队列清理仍放在 Approvals/Dashboard 的工作流语境中。
+本地 Operator Console 默认绑定 `127.0.0.1`，通过启动时生成的一次性 bearer token 访问。token 只放在 URL fragment 中（不会随 HTTP 请求发送），renderer 随后保存到当前 tab 的 `sessionStorage` 并立即清除 fragment；所有响应启用 no-store、no-referrer、CSP、nosniff 和禁止嵌入等安全头。Console 覆盖 Dashboard、Approvals、Tasks、Dispatch、Feedback、Policy、Settings、Health 和 Maintenance；Feedback 提供 7/30 天结果统计、决策原因切片和原始/最终回复差异。Console 只通过本地 `/api/*` 调用 `OperatorQueryService` / `OperatorCommandService`，不直接读 SQLite，也不写 `config.yaml`。Maintenance 是本机运维命令台，承载 doctor、config validate、retention prune 和 reply style refresh 等低频显式命令；审批队列清理仍放在 Approvals/Dashboard 的工作流语境中。
 
 审批通知始终保留文本命令兜底。启用 `interactive_cards` 且回调长连接健康时，owner 还会收到绑定具体 approval 的四操作卡片：直接发送建议、编辑后发送、不发送并继续关注、不发送并结束任务。回调只接受配置 owner 的操作，事件 ID 用作幂等键；连接不健康时自动回退为纯文本通知。
 
 每次 owner 处理审批都会写一条不可变反馈，区分建议直接发送、编辑后发送、不发送继续关注和不发送结束任务。反馈不会自动修改 Product Policy。默认保留敏感文本 30 天；到期只清空原记录中的敏感字段，保留最小审计元数据，不级联删除任务链记录。仍处于有效 `watch_until` 的 watching task 暂缓清理，具体可通过 `retention` 配置。
 
-从源码修改 `frontend/operator-console/` 后，需要运行 `npm --prefix frontend/operator-console run build`，把 renderer 重新写入 Python 包内的 bundled static assets。
+从源码修改 `frontend/operator-console/` 后，需要依次运行 `lint`、`test` 和 `build`；build 会把 renderer 重新写入 Python 包内的 bundled static assets。
 
 ## 测试
 
@@ -107,6 +107,8 @@ pre-commit run --all-files
 
 ```bash
 npm --prefix frontend/operator-console ci
+npm --prefix frontend/operator-console run lint
+npm --prefix frontend/operator-console test
 npm --prefix frontend/operator-console run build
 python -m build
 ```

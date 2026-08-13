@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, AlertTriangle, CheckCircle2, Database, ExternalLink, HeartPulse, Send } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ExternalLink, HeartPulse, Send } from "lucide-react";
 import { getHealthIssues } from "../api";
 import {
   Badge,

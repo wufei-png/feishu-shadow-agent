@@ -62,6 +62,8 @@ Operator Console 前端验证：
 
 ```bash
 npm --prefix frontend/operator-console install
+npm --prefix frontend/operator-console run lint
+npm --prefix frontend/operator-console test
 npm --prefix frontend/operator-console run typecheck
 npm --prefix frontend/operator-console run build
 ```
@@ -71,6 +73,8 @@ Operator Console 发布产物验证：
 ```bash
 rm -rf dist build
 npm --prefix frontend/operator-console ci
+npm --prefix frontend/operator-console run lint
+npm --prefix frontend/operator-console test
 npm --prefix frontend/operator-console run build
 python -m pytest -q
 python -m ruff check .

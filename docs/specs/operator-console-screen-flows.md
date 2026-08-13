@@ -512,7 +512,7 @@ Every screen implementation phase should include:
 
 - backend route tests for new API routes
 - command route tests for mutations
-- frontend typecheck and build
+- frontend lint, unit tests, typecheck, and build
 - browser or screenshot verification for changed screens
 - narrow-width verification
 - reduced-motion sanity check when motion is added

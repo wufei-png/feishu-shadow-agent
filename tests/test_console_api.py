@@ -107,7 +107,7 @@ def test_console_command_defaults_to_loopback_and_prints_token_url(
 
     assert called["host"] == "127.0.0.1"
     assert called["port"] == 8765
-    assert "http://127.0.0.1:8765/?token=fixed-token" in capsys.readouterr().out
+    assert "http://127.0.0.1:8765/#token=fixed-token" in capsys.readouterr().out
 
 
 def test_dashboard_rejects_missing_and_invalid_token(tmp_path: Path) -> None:
@@ -269,6 +269,29 @@ def test_static_renderer_assets_are_served(tmp_path: Path) -> None:
     assert '<div id="root"></div>' in index.text
     assert asset.status_code == 200
     assert "console.log" in asset.text
+    for response in (index, asset):
+        assert response.headers["cache-control"] == "no-store"
+        assert response.headers["referrer-policy"] == "no-referrer"
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["x-frame-options"] == "DENY"
+        assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
+
+
+def test_console_security_headers_cover_api_errors(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+
+    unauthorized = client.get("/api/dashboard")
+    invalid_host = client.get(
+        "/api/dashboard", headers={**_auth(), "Host": "example.com"}
+    )
+
+    for response in (unauthorized, invalid_host):
+        assert response.headers["cache-control"] == "no-store"
+        assert response.headers["referrer-policy"] == "no-referrer"
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["permissions-policy"] == (
+            "camera=(), microphone=(), geolocation=()"
+        )
 
 
 def test_incomplete_static_assets_fail_ready_check_and_do_not_fall_back_to_index(

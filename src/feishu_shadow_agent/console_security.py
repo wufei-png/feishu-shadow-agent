@@ -70,4 +70,4 @@ def console_access_url(*, host: str, port: int, token: str) -> str:
         if ":" in normalized and not normalized.startswith("[")
         else normalized
     )
-    return f"http://{display_host}:{port}/?token={quote(token)}"
+    return f"http://{display_host}:{port}/#token={quote(token, safe='')}"

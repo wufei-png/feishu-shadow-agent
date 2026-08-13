@@ -14,6 +14,7 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
 )
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
@@ -55,6 +56,20 @@ from .types import ActionStatus, ApprovalStatus, TaskStatus, utc_now_iso
 
 _ASSET_REF_PATTERN = re.compile(r"""(?:src|href)=["'](/assets/[^"']+)["']""")
 LOCAL_CONSOLE_ACTOR = "local_console"
+_CONSOLE_SECURITY_HEADERS = {
+    "Cache-Control": "no-store",
+    "Content-Security-Policy": (
+        "default-src 'self'; base-uri 'none'; connect-src 'self'; "
+        "font-src 'self'; form-action 'none'; frame-ancestors 'none'; "
+        "img-src 'self' data:; manifest-src 'self'; object-src 'none'; "
+        "script-src 'self'; style-src 'self' 'unsafe-inline'"
+    ),
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+}
 
 
 class CommandRequest(BaseModel):
@@ -186,12 +201,14 @@ def create_console_app(
     @app.middleware("http")
     async def validate_host_header(request: Request, call_next):
         if not host_header_allowed(request.headers.get("host"), host=host, port=port):
-            return _error_response(
+            response = _error_response(
                 403,
                 "forbidden_origin_or_host",
                 "Host header is not allowed for this local console.",
             )
-        return await call_next(request)
+        else:
+            response = await call_next(request)
+        return _add_console_security_headers(response)
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
@@ -881,6 +898,12 @@ def _error_response(
         status_code=status_code,
         content={"error": {"code": code, "message": message, "details": details or {}}},
     )
+
+
+def _add_console_security_headers(response: Response) -> Response:
+    for name, value in _CONSOLE_SECURITY_HEADERS.items():
+        response.headers[name] = value
+    return response
 
 
 def _details_dict(value: Any) -> dict[str, Any]:

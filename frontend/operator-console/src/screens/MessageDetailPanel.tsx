@@ -1,6 +1,5 @@
 import { useMutation } from "@tanstack/react-query";
 import { useQuery } from "@tanstack/react-query";
-import { useEffect } from "react";
 import type { ReactNode } from "react";
 import { Bot, FileText, GitBranch, PackageSearch, RotateCcw, Send } from "lucide-react";
 import { getMessageDetail, replayMessage } from "../api";
@@ -35,10 +34,6 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
     replay.variables === messageId
       ? (replay.data as CommandResult | undefined) ?? (replay.error ? errorResult("message.replay_dry_run", replay.error) : null)
       : null;
-
-  useEffect(() => {
-    replay.reset();
-  }, [messageId]);
 
   if (!messageId) {
     return <EmptyState title="Select a message" detail="Message processing context will appear here." />;

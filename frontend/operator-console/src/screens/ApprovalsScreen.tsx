@@ -44,7 +44,7 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
   });
   const visibleApprovals = useMemo(() => {
     return approvals.data ?? [];
-  }, [approvals.data, filter]);
+  }, [approvals.data]);
   const selectedApproval = visibleApprovals.find((approval) => approval.approval_id === selectedApprovalId) ?? null;
   const detail = useQuery({
     queryKey: queryKeys.approval(selectedApprovalId),

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { FileDiff, History, MessageSquarePlus, Save, ShieldCheck, Trash2, Upload } from "lucide-react";
+import { FileDiff, History, Save, Trash2, Upload } from "lucide-react";
 import {
   deleteChatPolicy,
   getSettingsCatalog,

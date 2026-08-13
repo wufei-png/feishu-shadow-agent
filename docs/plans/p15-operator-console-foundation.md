@@ -167,7 +167,7 @@ Generate a token on startup. Print a local URL that includes the token, for
 example:
 
 ```text
-http://127.0.0.1:8765/?token=<token>
+http://127.0.0.1:8765/#token=<token>
 ```
 
 The renderer should store the token for the current browser session and remove

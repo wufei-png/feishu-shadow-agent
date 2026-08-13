@@ -149,7 +149,7 @@ python -m feishu_shadow_agent maintenance expire-approvals --config config.yaml
 python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --port 8765
 ```
 
-启动时会生成一次性的 bearer token，并在 stdout 输出带 `token` 的本地访问 URL。API 默认只接受 loopback Host header 和 `Authorization: Bearer <token>`；renderer 会把 URL token 保存到当前浏览器 session 并从可见 URL 中移除。
+启动时会生成一次性的 bearer token，并在 stdout 输出把 token 放在 URL fragment 的本地访问地址。fragment 不会随 HTTP 请求发送；renderer 会把 token 保存到当前 tab 的 `sessionStorage`，立即从可见 URL 中移除。API 默认只接受 loopback Host header 和 `Authorization: Bearer <token>`，所有响应带 no-store、no-referrer、CSP、nosniff 和禁止嵌入等安全头。
 
 Console 覆盖 Dashboard、Approvals、Tasks、Dispatch、Feedback、Policy、Settings 和 Health。读路径通过 `OperatorQueryService` 暴露 dashboard、queue/detail、反馈统计与差异、Policy/Settings、Message Detail 和 Health DTO；写路径通过 `OperatorCommandService` 执行 approval、dispatch recovery、maintenance expiry 和 Product Policy 命令。它不写 `config.yaml`，不直接读 SQLite，不生成 dispatch preview，也不绕过 Product Policy / OperatorCommandService 边界。Health 展示规范化 issue、runtime liveness 和失败命令/dispatch 摘要，不作为默认 raw log viewer。
 

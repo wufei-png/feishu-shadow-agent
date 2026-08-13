@@ -63,9 +63,13 @@ Rules:
 - Do not enable broad CORS.
 - Validate `Host` against the selected local host and port.
 - Generate a random bearer token on process start.
-- Print an access URL that carries the token for the local browser session.
-- The renderer stores the token for the session and removes it from the visible
-  URL.
+- Print an access URL that carries the token in the URL fragment, which is not
+  sent to the HTTP server.
+- The renderer stores the token in tab-scoped `sessionStorage` and immediately
+  removes it from the visible URL.
+- Return `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, a restrictive
+  Content Security Policy, `X-Content-Type-Options: nosniff`, and anti-framing
+  headers on static, API, and error responses.
 - All `/api/*` routes require the bearer token unless explicitly documented as a
   bootstrap route.
 - Mutations set `actor` to `local_console`.
