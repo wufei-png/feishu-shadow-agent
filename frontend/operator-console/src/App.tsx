@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Bell, ClipboardList, Database, FileText, HeartPulse, Home, Send, Settings, ShieldCheck, Wrench } from "lucide-react";
+import { Activity, Bell, ClipboardList, Database, FileText, HeartPulse, Home, MessageSquareDiff, Send, Settings, ShieldCheck, Wrench } from "lucide-react";
 import { getDashboard } from "./api";
 import { Badge, EmptyState } from "./components/Primitives";
 import { queryKeys } from "./queryKeys";
 import { ApprovalsScreen } from "./screens/ApprovalsScreen";
 import { DashboardScreen } from "./screens/DashboardScreen";
 import { DispatchScreen } from "./screens/DispatchScreen";
+import { FeedbackScreen } from "./screens/FeedbackScreen";
 import { HealthScreen } from "./screens/HealthScreen";
 import { MaintenanceScreen } from "./screens/MaintenanceScreen";
 import { PolicyScreen } from "./screens/PolicyScreen";
@@ -21,6 +22,7 @@ const navItems: Array<{ key: RouteKey; label: string; icon: typeof Home }> = [
   { key: "approvals", label: "Approvals", icon: Bell },
   { key: "tasks", label: "Tasks", icon: ClipboardList },
   { key: "dispatch", label: "Dispatch", icon: Send },
+  { key: "feedback", label: "Feedback", icon: MessageSquareDiff },
   { key: "policy", label: "Policy", icon: ShieldCheck },
   { key: "settings", label: "Settings", icon: Settings },
   { key: "health", label: "Health", icon: HeartPulse },
@@ -99,6 +101,8 @@ export function App() {
             <TasksScreen selectedId={location.selectedId} token={token} />
           ) : location.route === "dispatch" ? (
             <DispatchScreen selectedId={location.selectedId} token={token} />
+          ) : location.route === "feedback" ? (
+            <FeedbackScreen token={token} />
           ) : location.route === "policy" ? (
             <PolicyScreen selectedId={location.selectedId} token={token} />
           ) : location.route === "settings" ? (

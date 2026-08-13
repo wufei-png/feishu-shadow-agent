@@ -1,11 +1,12 @@
 import type { QueryClient } from "@tanstack/react-query";
-import type { ActionStatus, ApprovalStatus, TaskStatus } from "./types";
+import type { ActionStatus, ApprovalStatus, FeedbackExecutionMode, TaskStatus } from "./types";
 
 export type ApprovalFilter = "all" | "pending" | "expired" | "resolved";
 
 export const queryKeys = {
   dashboard: () => ["dashboard"] as const,
   healthIssues: () => ["health-issues"] as const,
+  feedbackOverview: (executionMode: FeedbackExecutionMode) => ["feedback-overview", executionMode] as const,
   approvals: (filters: { status?: ApprovalStatus | ApprovalFilter; limit?: number; offset?: number }) =>
     ["approvals", filters] as const,
   approval: (approvalId: string | null) => ["approval", approvalId] as const,
@@ -35,7 +36,8 @@ export function invalidateAfterApprovalCommand(queryClient: QueryClient): Promis
     queryClient.invalidateQueries({ queryKey: ["task"] }),
     queryClient.invalidateQueries({ queryKey: ["dispatch-actions"] }),
     queryClient.invalidateQueries({ queryKey: ["dispatch-action"] }),
-    queryClient.invalidateQueries({ queryKey: ["message-detail"] })
+    queryClient.invalidateQueries({ queryKey: ["message-detail"] }),
+    queryClient.invalidateQueries({ queryKey: ["feedback-overview"] })
   ]);
 }
 

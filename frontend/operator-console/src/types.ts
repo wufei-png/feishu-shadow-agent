@@ -1,4 +1,4 @@
-export type RouteKey = "dashboard" | "approvals" | "tasks" | "dispatch" | "policy" | "settings" | "health" | "maintenance";
+export type RouteKey = "dashboard" | "approvals" | "tasks" | "dispatch" | "feedback" | "policy" | "settings" | "health" | "maintenance";
 
 export type Tone = "neutral" | "success" | "warning" | "danger" | "info" | "muted";
 
@@ -167,6 +167,65 @@ export type ApprovalSummary = {
 
 export type ApprovalDetail = ApprovalSummary & {
   payload?: Record<string, unknown>;
+};
+
+export type FeedbackExecutionMode = "production" | "dry_run" | "all";
+
+export type FeedbackCount = {
+  value: string;
+  count: number;
+  rate: number | null;
+};
+
+export type FeedbackMetrics = {
+  days: number;
+  since: string;
+  total: number;
+  suggestion_sent: number;
+  edited_sent: number;
+  no_send: number;
+  changed_reply_count: number;
+  feedback_reason_count: number;
+  content_expired_count: number;
+  sent_without_edit_rate: number | null;
+  edit_rate_among_sends: number | null;
+  no_send_rate: number | null;
+  by_outcome: FeedbackCount[];
+  by_decision_reason: FeedbackCount[];
+  by_feedback_reason: FeedbackCount[];
+};
+
+export type ReplyDiffPart = {
+  op: "equal" | "insert" | "delete" | "replace";
+  before?: string;
+  after?: string;
+};
+
+export type FeedbackRecord = {
+  id: number;
+  approval_id: string;
+  task_id: string | null;
+  outcome: "suggestion_sent" | "edited_sent" | "no_send_keep_watching" | "no_send_end_task";
+  decision_reason: string | null;
+  feedback_reason: string | null;
+  note: string | null;
+  actor: string;
+  execution_mode: "production" | "dry_run";
+  content_expired_at: string | null;
+  created_at: string;
+  reply_comparison: {
+    status: "changed" | "unchanged" | "expired" | "not_applicable" | "unavailable";
+    suggested_reply: string | null;
+    final_reply: string | null;
+    diff: ReplyDiffPart[];
+  };
+};
+
+export type FeedbackOverview = {
+  generated_at: string;
+  execution_mode: FeedbackExecutionMode;
+  windows: FeedbackMetrics[];
+  recent: FeedbackRecord[];
 };
 
 export type TaskStatus = "watching" | "closed" | "closed_by_owner" | "human_taken_over";

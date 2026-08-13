@@ -8,6 +8,8 @@ import type {
   DispatchActionSummary,
   ActionStatus,
   HealthIssuesResponse,
+  FeedbackExecutionMode,
+  FeedbackOverview,
   MessageDetail,
   PolicyAudit,
   PolicyImpactPreview,
@@ -97,6 +99,13 @@ export function getDashboard(token: string): Promise<DashboardSnapshot> {
 
 export function getHealthIssues(token: string): Promise<HealthIssuesResponse> {
   return fetchApi("/api/health/issues", token);
+}
+
+export function getFeedbackOverview(
+  token: string,
+  executionMode: FeedbackExecutionMode
+): Promise<FeedbackOverview> {
+  return fetchApi(`/api/feedback/overview?execution_mode=${encodeURIComponent(executionMode)}`, token);
 }
 
 export function listApprovals(
