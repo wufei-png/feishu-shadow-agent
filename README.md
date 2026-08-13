@@ -4,21 +4,22 @@
   <img src="docs/assets/covers/shadow-assistant-night-office.png" alt="Feishu Shadow Agent Cover" width="100%">
 </p>
 
-Feishu Shadow Agent 是一个本机运行的飞书个人办公影子助手。它定时读取群聊里 `@我` 的消息和 P2P 私聊消息，交给 Hermes 处理；低风险、高置信的回复可以自动发出，不确定、高风险或需要人工判断的内容会先通过 bot 私聊 owner 审批。
+Feishu Shadow Agent 是一个本机运行的飞书个人办公影子助手。它定时读取群聊里 `@我` 的消息和 P2P 私聊消息，交给可插拔的 Agent backend 处理；低风险、高置信的回复可以自动发出，不确定、高风险或需要人工判断的内容会先通过 bot 私聊 owner 审批。
 
 当前项目处于 MVP 阶段，核心形态是：
 
-- `Python + SQLite + lark-cli subprocess`
+- `Python + SQLite + lark-cli subprocess + pluggable agent backend`
 - 长驻 `daemon/watch`，附带本机 Operator Console；不做 LaunchAgent、cron、systemd、远程 Web UI 或桌面二进制
 - 飞书 user 身份负责读消息和必要的代发回复
 - 飞书 bot 身份负责 owner 通知、审批入口、群聊自动回复和资源下载
-- Hermes CLI 负责任务路由和单任务会话处理
+- Hermes、Codex 或 Claude Code CLI 负责任务路由和单任务会话处理
+- 可选官方飞书 Python SDK 长连接只接收 `card.action.trigger`；消息正文仍通过 user 身份轮询获取
 
 当前扩展边界见 [当前架构边界](docs/architecture/current-boundaries.md)；更多设计背景见 [MVP 设计](docs/specs/feishu-shadow-agent-mvp-design.md) 和 [流程图](docs/specs/feishu-shadow-agent-flows.md)。
 
 ## 快速启动
 
-要求 Python 3.11+，并确保本机已经可以使用 `lark-cli` 和 `hermes`。
+要求 Python 3.11+，并确保本机已经可以使用 `lark-cli`，以及配置所选择的 Hermes、Codex 或 Claude Code CLI。
 
 ```bash
 python3.11 -m venv .venv
@@ -27,12 +28,19 @@ python -m pip install -e ".[dev]"
 cp config.example.yaml config.yaml
 ```
 
+如需启用交互式审批卡片，同时安装可选的官方回调 SDK：
+
+```bash
+python -m pip install -e ".[dev,cards]"
+```
+
 编辑 `config.yaml`，至少确认：
 
 - `owner.open_id` 是 owner 的飞书 open_id
 - Policy Import Source 中需要自动回复的群配置了 `chats.<chat_id>.auto_reply: true`
 - 需要下载图片/文件资源的群在 Policy Import Source 中配置了 `chats.<chat_id>.bot_joined: true`
-- `lark_cli.path` 和 `agent_backend.hermes.path` 留空时会使用当前 `PATH`
+- `lark_cli.path` 和所选 backend 的 `path` 留空时会使用当前 `PATH`
+- 交互式卡片默认关闭；启用时只在 YAML 中配置凭证环境变量名，真实 `app_id` / `app_secret` 由环境变量提供
 
 完整配置项见 [配置参考](docs/configuration.md)；JSON Schema 见 [schemas/config.schema.json](schemas/config.schema.json)。
 
@@ -48,7 +56,7 @@ python -m feishu_shadow_agent policy import-config --config config.yaml
 python -m feishu_shadow_agent doctor --config config.yaml
 ```
 
-推荐先用 dry-run 跑 daemon。这个模式会执行拉取、路由、Hermes、审批和 dispatch preview，但不会真实对外回复；加上 `--send-owner-notifications` 后，owner 通知仍会真实发送，方便验证审批闭环。
+推荐先用 dry-run 跑 daemon。这个模式会执行拉取、路由、Agent、审批和 dispatch preview，但不会真实对外回复；加上 `--send-owner-notifications` 后，owner 通知仍会真实发送，方便验证审批闭环。dry-run 中产生的审批和动作不会被提升为生产发送；生产模式必须重新生成审批。
 
 ```bash
 python -m feishu_shadow_agent daemon --config config.yaml --dry-run --send-owner-notifications
@@ -72,13 +80,17 @@ python -m feishu_shadow_agent retention prune --config config.yaml --dry-run
 python -m feishu_shadow_agent console --config config.yaml
 ```
 
-本地 Operator Console 默认绑定 `127.0.0.1`，通过启动时生成的一次性 bearer token 访问。Console 覆盖 Dashboard、Approvals、Tasks、Dispatch、Policy、Settings、Health 和 Maintenance；它只通过本地 `/api/*` 调用 `OperatorQueryService` / `OperatorCommandService`，不直接读 SQLite，也不写 `config.yaml`。Maintenance 是本机运维命令台，承载 doctor、config validate、retention prune 和 reply style refresh 等低频显式命令；审批队列清理仍放在 Approvals/Dashboard 的工作流语境中。
+本地 Operator Console 默认绑定 `127.0.0.1`，通过启动时生成的一次性 bearer token 访问。Console 覆盖 Dashboard、Approvals、Tasks、Dispatch、Feedback、Policy、Settings、Health 和 Maintenance；Feedback 提供 7/30 天结果统计、决策原因切片和原始/最终回复差异。Console 只通过本地 `/api/*` 调用 `OperatorQueryService` / `OperatorCommandService`，不直接读 SQLite，也不写 `config.yaml`。Maintenance 是本机运维命令台，承载 doctor、config validate、retention prune 和 reply style refresh 等低频显式命令；审批队列清理仍放在 Approvals/Dashboard 的工作流语境中。
+
+审批通知始终保留文本命令兜底。启用 `interactive_cards` 且回调长连接健康时，owner 还会收到绑定具体 approval 的四操作卡片：直接发送建议、编辑后发送、不发送并继续关注、不发送并结束任务。回调只接受配置 owner 的操作，事件 ID 用作幂等键；连接不健康时自动回退为纯文本通知。
+
+每次 owner 处理审批都会写一条不可变反馈，区分建议直接发送、编辑后发送、不发送继续关注和不发送结束任务。反馈不会自动修改 Product Policy。默认保留敏感文本 30 天、统计元数据 365 天；到期先清空同一记录中的文本字段，再删除整行，具体可通过 `retention` 配置。
 
 从源码修改 `frontend/operator-console/` 后，需要运行 `npm --prefix frontend/operator-console run build`，把 renderer 重新写入 Python 包内的 bundled static assets。
 
 ## 测试
 
-本地单元测试不会真实访问飞书或 Hermes：
+本地单元测试不会真实访问飞书或 Agent backend：
 
 ```bash
 python -m pytest -q
@@ -87,7 +99,7 @@ python -m ruff format --check .
 pre-commit run --all-files
 ```
 
-端到端测试需要真实 `lark-cli`、飞书 user/bot 授权、owner open_id、测试群或测试 P2P 会话，以及可用的 Hermes CLI。完整步骤见 [测试方式](docs/testing.md)。
+端到端测试需要真实 `lark-cli`、飞书 user/bot 授权、owner open_id、测试群或测试 P2P 会话，以及可用的所选 Agent CLI。交互式卡片还需要安装 `cards` extra、配置应用凭证环境变量并启用飞书卡片回调长连接。完整步骤见 [测试方式](docs/testing.md)。
 
 ## 发布产物
 

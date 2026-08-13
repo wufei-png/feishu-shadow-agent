@@ -13,6 +13,8 @@ Current non-goals remain deliberate:
 - No runtime merge between `config.yaml` and Product Policy Store.
 - No automatic resend when dispatch state is uncertain.
 - No agent-side execution of Feishu sends.
+- No full WebSocket message ingestion. User-authenticated polling remains the message source; the optional official SDK connection handles card actions only.
+- No automatic Product Policy changes learned from approval feedback.
 
 ## Document Precedence
 
@@ -35,10 +37,12 @@ These rules belong in deterministic code and tests. Do not delegate them to prom
 - Deterministic routing shortcuts: reply-to, thread, and burst-window attachment.
 - Product Policy resolution: Product Policy Store as runtime truth, explicit Policy Import Source comparison, and fail-closed behavior when global policy is missing.
 - Resource gates: bot joined, resource download enabled, size/quota checks, retryable download failures, and owner notification on blocked resources.
-- Reply gates: answerability gate, direct group mention requirement, empty reply rejection, forbidden mention cleanup, and identity fallback rules.
+- Reply gates: answerability/decision-reason combination validation, direct group mention requirement, empty reply rejection, forbidden mention cleanup, and identity fallback rules.
 - Dispatch safety: dry-run before send, idempotency key reuse, single active send constraint, readback verification, and manual recovery for uncertain sends.
-- Operator mutations: all state-changing owner actions go through Operator Command services and return `CommandResult`.
+- Operator mutations: all state-changing owner actions, including card callbacks, go through Operator Command services and return `CommandResult`.
 - Operator read models: CLI status and console reads go through `OperatorQueryService`, not direct store DTO snapshots.
+- Approval provenance: dry-run approvals/actions never become production sends; production requires a fresh production approval.
+- Feedback retention: owner resolutions are immutable audit facts; retention first expires sensitive content in place, then optionally deletes metadata.
 
 ## Agent-Owned Judgement
 
@@ -46,6 +50,7 @@ These decisions can be handled by the agent, but only inside code-provided candi
 
 - Ambiguous task ownership after deterministic routing fails.
 - Whether the task has enough evidence for `auto_reply`, `needs_owner`, or `no_reply`.
+- Selecting a decision reason valid for that answerability: `needs_owner` and `no_reply` require one, while `auto_reply` may omit it or use only `sufficient_evidence_low_risk`.
 - Drafting the plain reply text before `SendComposer` applies Feishu-safe mention handling.
 - Choosing `reply_target_message_id` from code-provided candidates such as current message and root message.
 - Choosing `watch_action` for keeping a task open or closing it.
@@ -59,11 +64,25 @@ If an agent output crosses these bounds, the code should reject it, downgrade to
 - `policy.py`: Product Policy resolution for resource and reply decisions. Keep chat policy fallback rules here instead of copying them into processing, UI, or store code.
 - `processing.py`: task-level orchestration from route result to task session, postprocess, reply gate, approval, or send action. New feature branches should prefer extracting helpers over adding more nested branches here.
 - `dispatcher.py`: dispatch claiming, dry-run, actual send, readback, stale sending detection, and manual recovery.
-- `operator_query.py`: read-only operator DTOs. It may derive status, overdue fields, health issues, and recommended actions, but it must not mutate state.
+- `approval_cards.py`: deterministic Card JSON construction. Cards bind one concrete approval and expose only the supported resolution actions.
+- `card_actions.py`: owner-only `card.action.trigger` parsing, event-id idempotency, atomic command/feedback application, callback connection health, and daemon wake-up.
+- `operator_queries/`: read-only operator DTOs. It may derive status, overdue fields, feedback metrics, health issues, and recommended actions, but it must not mutate state.
 - `operator_commands.py`: explicit operator mutations. Console and CLI commands should call this facade instead of reaching into store transactions directly.
 - `store/sqlite_store.py`: SQLite persistence and transactional primitives. Avoid adding new product-facing read models here.
 - `prompt.py` and `context_access.py`: agent input contracts. Every model-visible field must have a current decision purpose.
 - `console_api.py`: local HTTP adapter only. Keep business decisions in query/command services.
+
+## Approval Decisions And Feedback
+
+The task-session output keeps `answerability` as the send decision and uses `decision_reason` for audit and feedback slices. Valid combinations are intentionally asymmetric:
+
+- `auto_reply`: `decision_reason` may be `null`; if present it must be `sufficient_evidence_low_risk`.
+- `no_reply`: requires `no_response_needed`, `already_resolved`, or `duplicate_or_stale`.
+- `needs_owner`: requires `insufficient_evidence`, `commitment_or_authorization`, `sensitive_or_high_impact`, `write_or_permission`, or `human_judgment_required`.
+
+Owner resolution writes exactly one immutable feedback outcome: `suggestion_sent`, `edited_sent`, `no_send_keep_watching`, or `no_send_end_task`. A fixed optional feedback reason and short note may accompany the outcome. Metrics and UI can aggregate these facts, but runtime policy must not mutate itself from them.
+
+Interactive approval cards are optional. Outbound cards still use `lark-cli`; the official Python SDK long connection receives only `card.action.trigger`. Each callback is scoped to its approval, validates the owner open ID, uses the Feishu event ID as the command idempotency key, applies the operator command and feedback atomically, returns a queued acknowledgement, and wakes the daemon. Text commands remain available regardless of connection health.
 
 ## Agent Input Field Checklist
 

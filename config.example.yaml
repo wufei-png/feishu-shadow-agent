@@ -27,7 +27,7 @@ lark_cli:
   path: null
   timeout_seconds: 30
 
-# Optional CardKit approval UI. Credentials are read from the named environment
+# Optional interactive approval cards. Credentials are read from the named environment
 # variables; never put the credential values in this file.
 interactive_cards:
   enabled: false
@@ -93,7 +93,8 @@ reply_postprocess:
       min_samples: 20
   humanizer_zh:
     enabled: false
-    skill_path: /Users/wufei2/.agents/skills/humanizer-zh/SKILL.md
+    # Required when enabled; null avoids a machine-specific default path.
+    skill_path: null
 
 chats:
   oc_xxx:

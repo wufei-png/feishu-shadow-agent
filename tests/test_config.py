@@ -389,6 +389,44 @@ reply_postprocess:
         ConfigService().load(config_path)
 
 
+def test_disabled_humanizer_allows_null_skill_path(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+reply_postprocess:
+  humanizer_zh:
+    enabled: false
+    skill_path: null
+""",
+        encoding="utf-8",
+    )
+
+    loaded = ConfigService().load(config_path)
+
+    assert loaded.config.reply_postprocess.humanizer_zh.skill_path is None
+
+
+def test_enabled_humanizer_requires_skill_path(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+reply_postprocess:
+  enabled: true
+  humanizer_zh:
+    enabled: true
+    skill_path: null
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="humanizer_zh.enabled requires skill_path"):
+        ConfigService().load(config_path)
+
+
 def test_reply_postprocess_model_provider_can_inherit_main_hermes_settings(
     tmp_path: Path,
 ) -> None:

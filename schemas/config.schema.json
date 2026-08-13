@@ -716,10 +716,17 @@
           "type": "boolean"
         },
         "skill_path": {
-          "default": "/Users/wufei2/.agents/skills/humanizer-zh/SKILL.md",
-          "description": "Path to the humanizer-zh SKILL.md guidance file.",
-          "title": "Skill Path",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional path to the humanizer-zh SKILL.md guidance file.",
+          "title": "Skill Path"
         }
       },
       "title": "ReplyPostprocessHumanizerZhConfig",

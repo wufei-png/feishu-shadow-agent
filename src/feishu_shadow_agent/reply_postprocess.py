@@ -196,6 +196,7 @@ class ReplyPostprocessor:
         if cfg.humanizer_zh.enabled:
             enabled.append("humanizer_zh")
             humanizer_configured = cfg.humanizer_zh.skill_path
+            assert humanizer_configured is not None
             humanizer_resolved = resolve_relative_path(
                 humanizer_configured, self.base_dir
             )

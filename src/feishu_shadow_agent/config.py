@@ -443,20 +443,30 @@ class ReplyPostprocessHumanizerZhConfig(StrictModel):
     enabled: StrictBool = Field(
         default=False, description="Whether to use the humanizer-zh guidance skill."
     )
-    skill_path: str = Field(
-        default="/Users/wufei2/.agents/skills/humanizer-zh/SKILL.md",
-        description="Path to the humanizer-zh SKILL.md guidance file.",
+    skill_path: str | None = Field(
+        default=None,
+        description="Optional path to the humanizer-zh SKILL.md guidance file.",
     )
 
     @field_validator("skill_path")
     @classmethod
-    def validate_skill_path(cls, value: str) -> str:
+    def validate_skill_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         cleaned = value.strip()
         if not cleaned:
             raise ValueError(
                 "reply_postprocess.humanizer_zh.skill_path must not be empty"
             )
         return cleaned
+
+    @model_validator(mode="after")
+    def validate_enabled_skill_path(self) -> ReplyPostprocessHumanizerZhConfig:
+        if self.enabled and self.skill_path is None:
+            raise ValueError(
+                "reply_postprocess.humanizer_zh.enabled requires skill_path"
+            )
+        return self
 
 
 class ReplyPostprocessConfig(StrictModel):

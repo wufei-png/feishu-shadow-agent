@@ -674,14 +674,14 @@ class HealthSuite:
                 )
             )
         if cfg.humanizer_zh.enabled:
-            path = resolve_relative_path(
-                cfg.humanizer_zh.skill_path, self.loaded_config.base_dir
-            )
+            skill_path = cfg.humanizer_zh.skill_path
+            assert skill_path is not None
+            path = resolve_relative_path(skill_path, self.loaded_config.base_dir)
             results.append(
                 _readable_file_result(
                     name="reply_postprocess_humanizer_zh_skill",
                     path=path,
-                    configured=cfg.humanizer_zh.skill_path,
+                    configured=skill_path,
                     ok_message="reply postprocess humanizer-zh skill is readable",
                     failed_message="reply postprocess humanizer-zh skill is missing or unreadable",
                 )

@@ -15,6 +15,12 @@ python3.11 -m venv .venv
 python -m pip install -e ".[dev]"
 ```
 
+交互式审批卡片测试需要额外安装官方回调 SDK：
+
+```bash
+python -m pip install -e ".[dev,cards]"
+```
+
 运行完整单元测试：
 
 ```bash
@@ -38,6 +44,7 @@ pre-commit run --all-files
 
 ```bash
 python -m pytest -q tests/test_config.py tests/test_lark_cli.py
+python -m pytest -q tests/test_card_actions.py
 python -m pytest -q tests/test_p2_ingestion_routing.py tests/test_p3_hermes_approval.py
 python -m pytest -q tests/test_daemon.py tests/test_dispatcher.py tests/test_cli.py
 python -m pytest -q tests/test_store_migrations.py tests/test_retention.py
@@ -105,7 +112,8 @@ git diff --check
 - `tests/test_config.py`：配置 schema、严格布尔值、路径安全、资源限额默认值、脱敏输出。
 - `tests/test_lark_cli.py`：`lark-cli` 命令构造、JSON 解析、dry-run banner、资源下载身份。
 - `tests/test_p2_ingestion_routing.py`：消息 normalize、入口拉取、checkpoint、任务归属、资源下载限额。
-- `tests/test_p3_hermes_approval.py`：Hermes 输出 schema、reply gate、审批队列、`/approve`、`/reject`、`/send`。
+- `tests/test_p3_hermes_approval.py`：Agent 输出 schema、answerability/decision-reason 组合、reply gate、审批队列、`/approve`、`/reject`、`/send`。
+- `tests/test_card_actions.py`：四种审批操作的 Card JSON、approval 绑定、owner 校验、event-id 幂等、原子 command/feedback、daemon wake-up、连接健康与文本兜底。
 - `tests/test_daemon.py`：tick 顺序、heartbeat、运行中 health fail-closed、approval inbox 失败保护、dispatch 行为。
 - `tests/test_dispatcher.py`：dry-run、真实发送、dispatch attempt、读回验证、stale sending 恢复。
 - `tests/test_store_migrations.py`：SQLite migration、busy timeout、约束、状态 enum 契约、幂等动作。
@@ -114,9 +122,9 @@ git diff --check
 - `tests/test_operator_query.py`：OperatorQueryService 只读 dashboard/detail DTO、overdue 派生、effective policy、Policy Import Diff 和 audit history。
 - `tests/test_operator_commands.py`：OperatorCommandService 审批/dispatch/maintenance/policy mutation 结果 shape、policy 直接写入和 audit actor/reason。
 - `tests/test_console_api.py`：本地 Operator Console 的 token/Host 校验、dashboard/queue/detail/policy/settings/health API、静态资源 serving 和 `console` CLI 启动输出。
-- `tests/test_retention.py`：消息 raw JSON 和资源保留策略。
+- `tests/test_retention.py`：消息 raw JSON、资源和反馈内容/元数据分阶段保留策略。
 
-这些测试验证代码契约，不证明当前机器的 `lark-cli` 授权、飞书权限或 Hermes 可执行文件可用；真实环境要跑下面的端到端流程。
+这些测试验证代码契约，不证明当前机器的 `lark-cli` 授权、飞书权限或所选 Agent CLI 可用；真实环境要跑下面的端到端流程。
 
 ## 3. 端到端测试准备
 
@@ -128,8 +136,15 @@ git diff --check
 - `lark-cli auth status --verify --json` 在同一个 shell 环境下可通过。
 - 飞书 bot 可私聊 owner。
 - 如果要测群聊资源下载，bot 已加入测试群，且该群在 `chats` 中配置 `bot_joined: true`。
-- `hermes --version` 和 `hermes status` 可执行。
+- 配置选择的 Hermes、Codex 或 Claude Code CLI 已登录且 readiness 检查可通过。
 - 测试群如需自动回复，在 `config.yaml` 的 Policy Import Source 中配置 `auto_reply: true`。
+
+如需测试交互式审批卡片，还要完成：
+
+- 安装 `cards` extra，并在飞书应用中启用卡片交互回调能力。
+- 设置 `interactive_cards.enabled: true`，YAML 只填写 `app_id_env` / `app_secret_env` 的环境变量名。
+- 在 daemon 的 shell 中导出对应应用 ID 和密钥；不要把真实值写入配置或仓库。
+- 确认官方 SDK 长连接能接收 `card.action.trigger`。连接未健康时 daemon 应继续运行，并发送包含文本命令的 owner notification。
 
 Product Policy Store 初始化是显式 operator 动作，不会由 daemon 启动自动同步。首次运行 `doctor` 或 daemon 前先导入：
 
@@ -205,9 +220,10 @@ python -m feishu_shadow_agent replay --config config.yaml --message-id <message_
 
 预期结果：
 
-- `data/agent.sqlite3` 中出现消息、任务、routing audit、Hermes audit 或 approval/action 记录。
+- `data/agent.sqlite3` 中出现消息、任务、routing audit、Agent audit 或 approval/action 记录。
 - `logs/agent.jsonl` 中出现 `message_ingested`、`task_processing_completed`、`dispatch_action_previewed` 等事件。
 - dry-run 模式不会真实对外回复；只有 owner notification 在显式加 `--send-owner-notifications` 时会真实发送。
+- dry-run 产生的 approval/action 带 dry-run provenance，切换到生产模式后不能复用；生产发送必须由生产运行重新生成 approval。
 
 ## 5. 真实发送端到端
 
@@ -231,6 +247,8 @@ python -m feishu_shadow_agent daemon --config config.yaml
 /reject <a_or_t_id>
 ```
 
+启用且连接健康时，还应验证卡片四条路径：直接发送建议、编辑后发送、不发送并继续关注、不发送并结束任务。重复提交同一个 callback event 不得产生第二条 command 或 feedback；非 owner 操作必须被拒绝。处理后在 Feedback 页面确认 outcome、decision reason 和原始/最终回复差异。文本命令在卡片关闭、断连或 SDK 不可用时仍应可用。
+
 `status` 通过只读 OperatorQueryService 输出 daemon liveness、Product Policy 状态、pending approvals、active tasks、dispatch actions 和最近错误；`replay` 只读取本地状态并预览相关 dispatch。两者都不推进审批过期。超过 `expires_at` 但尚未被显式推进的 approval 仍显示为 `pending`，并通过 `is_overdue`、`overdue_seconds` 和 `recommended_action: expire` 提示 operator。
 
 本地 operator mutation 命令通过 OperatorCommandService 输出统一 YAML 结果，顶层字段包括 `status`、`command`、`actor`、`target`、`changed`、`result`、`warnings` 和 `next_actions`。`approve` / `reject` / `send`、dispatch recovery 和 maintenance expiry 都使用这个结构；`status: applied` 或 `no_change` 返回退出码 0，其余失败类状态返回退出码 2。
@@ -241,7 +259,7 @@ python -m feishu_shadow_agent daemon --config config.yaml
 python -m feishu_shadow_agent maintenance expire-approvals --config config.yaml
 ```
 
-本地 Operator Console 可用于查看 Dashboard、Approvals、Tasks、Dispatch、Policy、Settings 和 Health，并通过本地 command facade 执行 approval、dispatch recovery、maintenance expiry 和 Product Policy import/update：
+本地 Operator Console 可用于查看 Dashboard、Approvals、Tasks、Dispatch、Feedback、Policy、Settings 和 Health，并通过本地 command facade 执行 approval、dispatch recovery、maintenance expiry 和 Product Policy import/update：
 
 ```bash
 python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --port 8765

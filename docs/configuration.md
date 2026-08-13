@@ -31,6 +31,7 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `storage` | object | 见下表 | 本地 SQLite 和资源下载目录。 |
 | `logging` | object | 见下表 | 本地 JSONL 日志路径。 |
 | `lark_cli` | object | 见下表 | `lark-cli` 可执行文件和超时。 |
+| `interactive_cards` | object | 见下表 | 可选的审批卡片回调长连接；默认关闭，消息获取仍走 user 轮询。 |
 | `agent_backend` | object | 见下表 | Agent backend 选择、上下文隔离策略和 provider 专属参数。 |
 | `reply_policy` | object | 见下表 | Policy Import Source 中的全局自动回复策略。 |
 | `reply_postprocess` | object | 见下表 | 可选的一次性回复表达改写；默认关闭，不改变现有回复路径。 |
@@ -63,6 +64,10 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `logging.text_path` | string/null | `null` | 可选普通文本日志文件路径；相对路径基于配置文件目录解析。 |
 | `lark_cli.path` | string/null | `null` | 指定 `lark-cli` 路径；`null` 使用当前 `PATH`。 |
 | `lark_cli.timeout_seconds` | int `> 0` | `30` | `lark-cli` 子进程调用超时。 |
+| `interactive_cards.enabled` | bool | `false` | 是否启用审批卡片与官方 SDK 的 `card.action.trigger` 长连接。关闭或连接不健康时，owner notification 使用文本兜底。 |
+| `interactive_cards.app_id_env` | string | `FEISHU_APP_ID` | 保存飞书应用 ID 的环境变量名。这里只能配置环境变量名，不能写真实凭证。 |
+| `interactive_cards.app_secret_env` | string | `FEISHU_APP_SECRET` | 保存飞书应用密钥的环境变量名；必须与 `app_id_env` 不同。 |
+| `interactive_cards.startup_timeout_seconds` | int `> 0` | `10` | daemon 启动时等待卡片回调长连接变为健康的最长秒数；超时后继续以文本兜底运行。 |
 | `agent_backend.provider` | `hermes`/`codex`/`claude_code` | `hermes` | Agent backend provider。被选中的 provider 必须覆盖 task router、task session、reply postprocess 和 owner style refresh。 |
 | `agent_backend.working_dir` | string/null | `null` | Agent 子进程运行目录；`null` 表示 `config.yaml` 所在目录。相对路径基于配置文件目录解析。新 task 创建时会把解析后的绝对路径固化到 `tasks.agent_working_dir`；后续 follow-up/reopen 继续使用 task 内记录的目录，不随配置漂移。无 task 的 router 使用当前配置解析结果。 |
 | `agent_backend.config_scope` | `isolated`/`native` | `isolated` | 是否加载普通用户级配置；不等同于清除 credentials、managed policy 或 auth state。各 provider 映射见“Agent Backend 上下文语义”。 |
@@ -99,7 +104,7 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `reply_postprocess.owner_style.refresh.max_samples` | int `>= 1` | `300` | refresh 送给 summarizer 的最大过滤后样本数。 |
 | `reply_postprocess.owner_style.refresh.min_samples` | int `>= 1` | `20` | refresh 写入 profile 前要求的最小过滤后样本数。 |
 | `reply_postprocess.humanizer_zh.enabled` | bool | `false` | 是否让 postprocess 读取 humanizer-zh skill guidance，避免常见 AI 写作痕迹。 |
-| `reply_postprocess.humanizer_zh.skill_path` | string | `/Users/wufei2/.agents/skills/humanizer-zh/SKILL.md` | humanizer-zh guidance 文件路径。缺失或不可读时不自动发送，候选回复转 owner review。 |
+| `reply_postprocess.humanizer_zh.skill_path` | string/null | `null` | humanizer-zh guidance 文件路径。启用 `humanizer_zh` 时必填；缺失或不可读时不自动发送，候选回复转 owner review。关闭时可保持 `null`。 |
 | `chats.<chat_id>.name` | string | `""` | 方便 operator 识别的群名，不作为 chat_id。 |
 | `chats.<chat_id>.auto_reply` | bool | `false` | 该群在所有 gate 通过时是否允许自动回复。 |
 | `chats.<chat_id>.bot_joined` | bool | `false` | bot 是否已进群；影响 bot 回复和资源访问能力判断。 |
@@ -108,6 +113,8 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `chats.<chat_id>.resource_download` | bool | `true` | 是否允许保存该群消息中的可下载资源。 |
 | `retention.raw_message_days` | int `>= 1` | `30` | 原始消息 payload 保留天数。 |
 | `retention.resource_days` | int `>= 1` | `30` | 下载资源文件保留天数。 |
+| `retention.feedback_content_days` | int `>= 1` | `30` | 审批反馈中候选回复、最终回复、短备注等敏感文本的保留天数。到期后在原记录中清空并写入 `content_expired_at`。 |
+| `retention.feedback_metadata_days` | int `>= feedback_content_days`/null | `365` | 审批反馈统计元数据的保留天数；到期删除整行。`null` 表示长期保留，非空时不得短于内容保留期。 |
 | `lifecycle.watch_minutes` | int `> 0` | `120` | 新消息、follow-up 或 agent 回复后继续监听任务的分钟数。 |
 | `lifecycle.burst_attach_seconds` | int `>= 0` | `60` | 同一 chat、同一 sender 的连续触发消息可跳过 TaskRouter 并自动 append 到过滤后唯一 burst-eligible active task 的秒数窗口；`0` 表示关闭。 |
 | `lifecycle.closed_recall_days` | int `>= 1` | `7` | 新触发事件可召回 closed task 的天数窗口。 |
@@ -144,7 +151,7 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 
 启动时会生成一次性的 bearer token，并在 stdout 输出带 `token` 的本地访问 URL。API 默认只接受 loopback Host header 和 `Authorization: Bearer <token>`；renderer 会把 URL token 保存到当前浏览器 session 并从可见 URL 中移除。
 
-Console 覆盖 Dashboard、Approvals、Tasks、Dispatch、Policy、Settings 和 Health。读路径通过 `OperatorQueryService` 暴露 dashboard、queue/detail、Policy/Settings、Message Detail 和 Health DTO；写路径通过 `OperatorCommandService` 执行 approval、dispatch recovery、maintenance expiry 和 Product Policy 命令。它不写 `config.yaml`，不直接读 SQLite，不生成 dispatch preview，也不绕过 Product Policy / OperatorCommandService 边界。Health 展示规范化 issue、runtime liveness 和失败命令/dispatch 摘要，不作为默认 raw log viewer。
+Console 覆盖 Dashboard、Approvals、Tasks、Dispatch、Feedback、Policy、Settings 和 Health。读路径通过 `OperatorQueryService` 暴露 dashboard、queue/detail、反馈统计与差异、Policy/Settings、Message Detail 和 Health DTO；写路径通过 `OperatorCommandService` 执行 approval、dispatch recovery、maintenance expiry 和 Product Policy 命令。它不写 `config.yaml`，不直接读 SQLite，不生成 dispatch preview，也不绕过 Product Policy / OperatorCommandService 边界。Health 展示规范化 issue、runtime liveness 和失败命令/dispatch 摘要，不作为默认 raw log viewer。
 
 资源下载先通过 chat policy，再受本地限额保护。单文件超过 `storage.max_resource_bytes` 时，刚下载的文件会被删除，`resources.download_status` 置为 `too_large`，`path` 置空，并把尝试路径和大小写入 `raw_json`。`resource_dir` 用量超过 `storage.max_resource_dir_bytes` 时，刚下载文件会被删除，当前和后续资源标记为 `quota_exceeded` 且 `path` 置空。`too_large` / `quota_exceeded` 会阻塞 task session agent，并创建 owner notification；第一版不让 agent 在缺少资源的情况下语义降级回答。
 
