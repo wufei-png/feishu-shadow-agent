@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -8,6 +9,7 @@ from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Any
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from .config import AppConfig
@@ -305,19 +307,26 @@ class ResourceProcessor:
                     "output": output,
                 },
             )
+            temporary_output = f"{output}.part-{uuid4().hex}"
+            temporary_path = self.resource_base_dir / temporary_output
             try:
+                self.quota.validate_download_target(local_output)
+                self.quota.validate_download_target(temporary_path)
                 local_output.parent.mkdir(parents=True, exist_ok=True)
+                self.quota.validate_download_target(local_output)
+                self.quota.validate_download_target(temporary_path)
                 result = self.feishu_client.download_resource(
                     message_id=resource.message_id,
                     file_key=resource.file_key,
                     resource_type=resource.resource_type,
-                    output=output,
+                    output=temporary_output,
                 )
             except Exception as exc:
+                self.quota.delete_downloaded_file(temporary_path)
                 self.store.upsert_resource(
                     resource,
                     download_status="failed",
-                    path=stored_path,
+                    path=None,
                     raw={"error": str(exc)},
                 )
                 self.logger.warning(
@@ -330,14 +339,40 @@ class ResourceProcessor:
                     },
                 )
                 continue
+            result_json = _normalized_download_result(
+                result.json_data,
+                temporary_output=temporary_output,
+                final_output=output,
+            )
+            try:
+                self.quota.validate_download_target(temporary_path)
+            except ValueError as exc:
+                self.quota.delete_downloaded_file(temporary_path)
+                self.store.upsert_resource(
+                    resource,
+                    download_status="failed",
+                    path=None,
+                    raw={"error": str(exc), "phase": "download_validation"},
+                )
+                self.logger.warning(
+                    "resource_download_failed",
+                    run_id=run_id,
+                    data={
+                        "message_id": resource.message_id,
+                        "file_key": resource.file_key,
+                        "error": str(exc),
+                        "phase": "download_validation",
+                    },
+                )
+                continue
             if result.ok:
-                if not local_output.exists() or not local_output.is_file():
+                if not temporary_path.exists() or not temporary_path.is_file():
                     self.store.upsert_resource(
                         resource,
                         download_status="missing_file",
-                        path=stored_path,
+                        path=None,
                         raw={
-                            "result": result.json_data,
+                            "result": result_json,
                             "error": "download output file missing",
                         },
                     )
@@ -352,24 +387,24 @@ class ResourceProcessor:
                     )
                     continue
                 quota_result = self.quota.after_download(
-                    local_output, attempted_path=output
+                    temporary_path, attempted_path=output
                 )
                 if not quota_result.allow:
-                    raw = {"result": result.json_data} | (quota_result.raw or {})
+                    raw = {"result": result_json} | (quota_result.raw or {})
                     self._record_quota_blocked(
                         resource, run_id=run_id, decision=quota_result, raw=raw
                     )
                     if quota_result.status == ResourceStatus.QUOTA_EXCEEDED.value:
                         self._quota_downloads_blocked = True
                     continue
-                sha256_hex = _sha256_if_exists(local_output)
+                sha256_hex = _sha256_if_exists(temporary_path)
                 if sha256_hex is None:
                     self.store.upsert_resource(
                         resource,
                         download_status="missing_file",
-                        path=stored_path,
+                        path=None,
                         raw={
-                            "result": result.json_data,
+                            "result": result_json,
                             "error": "download output file missing",
                         },
                     )
@@ -383,12 +418,33 @@ class ResourceProcessor:
                         },
                     )
                     continue
+                try:
+                    _publish_download(temporary_path, local_output)
+                except OSError as exc:
+                    self.quota.delete_downloaded_file(temporary_path)
+                    self.store.upsert_resource(
+                        resource,
+                        download_status="failed",
+                        path=None,
+                        raw={"error": str(exc), "phase": "atomic_publish"},
+                    )
+                    self.logger.warning(
+                        "resource_download_failed",
+                        run_id=run_id,
+                        data={
+                            "message_id": resource.message_id,
+                            "file_key": resource.file_key,
+                            "error": str(exc),
+                            "phase": "atomic_publish",
+                        },
+                    )
+                    continue
                 self.store.upsert_resource(
                     resource,
                     download_status="downloaded",
                     path=stored_path,
                     sha256_hex=sha256_hex,
-                    raw={"result": result.json_data},
+                    raw={"result": result_json},
                 )
                 self.logger.info(
                     "resource_downloaded",
@@ -402,11 +458,12 @@ class ResourceProcessor:
                     },
                 )
             else:
+                self.quota.delete_downloaded_file(temporary_path)
                 status = "bot_invisible" if _bot_invisible_error(result) else "failed"
                 self.store.upsert_resource(
                     resource,
                     download_status=status,
-                    path=stored_path,
+                    path=None,
                     raw={
                         "error": result.error,
                         "stderr": result.stderr,
@@ -460,9 +517,23 @@ class ResourceQuotaGuard:
     def __init__(self, *, config: AppConfig, base_dir: Path):
         self.config = config
         self.base_dir = base_dir
-        self.resource_root = (base_dir / config.storage.resource_dir).resolve(
-            strict=False
-        )
+        self.resource_path = (base_dir / config.storage.resource_dir).absolute()
+        self.resource_root = self.resource_path.resolve(strict=False)
+
+    def validate_download_target(self, path: Path) -> None:
+        try:
+            relative = path.absolute().relative_to(self.resource_path)
+        except ValueError as exc:
+            raise ValueError("download target is outside resource directory") from exc
+        current = self.resource_path
+        for part in relative.parts:
+            current /= part
+            if current.is_symlink():
+                raise ValueError("download target contains a symbolic link")
+        try:
+            path.resolve(strict=False).relative_to(self.resource_root)
+        except ValueError as exc:
+            raise ValueError("download target is outside resource directory") from exc
 
     def before_download(self) -> ResourceQuotaDecision:
         usage = self.resource_dir_usage_bytes()
@@ -531,9 +602,14 @@ class ResourceQuotaGuard:
 
     def delete_downloaded_file(self, path: Path) -> str | None:
         try:
-            path.resolve(strict=False).relative_to(self.resource_root)
+            path.absolute().relative_to(self.resource_path)
         except ValueError:
             return "outside_resource_dir"
+        if not path.is_symlink():
+            try:
+                path.resolve(strict=False).relative_to(self.resource_root)
+            except ValueError:
+                return "outside_resource_dir"
         try:
             path.unlink(missing_ok=True)
         except OSError as exc:
@@ -1364,6 +1440,37 @@ def _sha256_if_exists(path: str | Path) -> str | None:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _publish_download(temporary_path: Path, final_path: Path) -> None:
+    """Durably publish a validated download without exposing partial contents."""
+    with temporary_path.open("rb") as handle:
+        os.fsync(handle.fileno())
+    os.replace(temporary_path, final_path)
+    try:
+        directory_fd = os.open(final_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return
+    try:
+        try:
+            os.fsync(directory_fd)
+        except OSError:
+            # Some filesystems do not support directory fsync; the atomic
+            # replace has still completed and the validated file is usable.
+            pass
+    finally:
+        os.close(directory_fd)
+
+
+def _normalized_download_result(
+    result: Any,
+    *,
+    temporary_output: str,
+    final_output: str,
+) -> Any:
+    if not isinstance(result, dict) or result.get("output") != temporary_output:
+        return result
+    return result | {"output": final_output}
 
 
 def _bot_invisible_error(result: Any) -> bool:

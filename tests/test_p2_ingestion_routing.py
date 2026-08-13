@@ -130,6 +130,16 @@ class FakeFeishuClient:
         )
 
 
+class PartialFailureFeishuClient(FakeFeishuClient):
+    def download_resource(self, **kwargs: Any) -> LarkCliResult:
+        super().download_resource(**kwargs)
+        return LarkCliResult(
+            ["lark-cli", "im", "+messages-resources-download"],
+            1,
+            stderr="download interrupted",
+        )
+
+
 class FailingOnceRouter:
     def __init__(self, store: SQLiteStore):
         self.inner = MessageRouter(store=store)
@@ -1542,6 +1552,7 @@ def test_resource_status_downloaded_and_bot_not_joined(
 
     assert fake.downloads[0]["file_key"] == "img_1"
     assert fake.downloads[0]["output"].startswith("data/resources/om_img/image_")
+    assert ".bin.part-" in fake.downloads[0]["output"]
     assert not Path(fake.downloads[0]["output"]).is_absolute()
     with store.connect() as conn:
         statuses = {
@@ -1554,6 +1565,8 @@ def test_resource_status_downloaded_and_bot_not_joined(
         ).fetchone()["path"]
     assert statuses == {"img_1": "downloaded", "img_2": "bot_not_joined"}
     assert stored_path.startswith("data/resources/om_img/image_")
+    assert ".part-" not in stored_path
+    assert (tmp_path / stored_path).read_bytes() == b"resource"
     assert not Path(stored_path).is_absolute()
 
 
@@ -1713,7 +1726,83 @@ def test_resource_download_success_without_file_records_missing_file(
             ("img_missing",),
         ).fetchone()
     assert resource["download_status"] == "missing_file"
-    assert Path(resource["path"]).parent.exists()
+    assert resource["path"] is None
+    assert (tmp_path / "data/resources/om_missing_file").is_dir()
+
+
+def test_failed_resource_download_never_publishes_partial_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake = PartialFailureFeishuClient()
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(bot_joined=True)})
+    _seed_policy(store, cfg)
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+    )
+
+    service.process_raw_message(
+        _message(
+            "om_partial", mentions=[{"open_id": "ou_owner"}], image_key="img_partial"
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        resource = conn.execute(
+            "SELECT download_status, path FROM resources WHERE file_key = ?",
+            ("img_partial",),
+        ).fetchone()
+    assert resource["download_status"] == "failed"
+    assert resource["path"] is None
+    assert not list((tmp_path / "data/resources").rglob("*.*"))
+
+
+def test_resource_download_rejects_symlinked_parent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    resource_parent = tmp_path / "data/resources"
+    resource_parent.mkdir(parents=True)
+    (resource_parent / "om_symlink").symlink_to(outside, target_is_directory=True)
+    fake = FakeFeishuClient()
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(bot_joined=True)})
+    _seed_policy(store, cfg)
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+    )
+
+    service.process_raw_message(
+        _message(
+            "om_symlink", mentions=[{"open_id": "ou_owner"}], image_key="img_link"
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        resource = conn.execute(
+            "SELECT download_status, path, raw_json FROM resources WHERE file_key = ?",
+            ("img_link",),
+        ).fetchone()
+    assert fake.downloads == []
+    assert resource["download_status"] == "failed"
+    assert resource["path"] is None
+    assert "symbolic link" in resource["raw_json"]
+    assert list(outside.iterdir()) == []
 
 
 def test_oversized_resource_download_is_deleted_and_marked_too_large(

@@ -204,6 +204,65 @@ def test_doctor_all_green_and_default_owner_notification_is_dry_run(
     assert client.owner_message_dry_runs == [True]
 
 
+def test_doctor_rejects_symlinked_resource_directory(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "resources").symlink_to(outside, target_is_directory=True)
+    loaded = ConfigService().load(config_path)
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=_initialized_store(tmp_path, loaded),
+        feishu_client=FakeFeishuClient(),
+        hermes_checker=ok_hermes,
+    )
+
+    result = suite._check_runtime_storage_paths()
+
+    assert result.status == "failed"
+    assert result.details["errors"] == [
+        {
+            "name": "resources",
+            "path": str(data_dir / "resources"),
+            "reason": "symbolic_link_not_allowed",
+            "component": str(data_dir / "resources"),
+        }
+    ]
+
+
+def test_doctor_rejects_wrong_storage_type_and_read_only_directory(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+    resource_path = tmp_path / "data/resources"
+    resource_path.parent.mkdir()
+    resource_path.write_text("not a directory", encoding="utf-8")
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    logs_dir.chmod(0o500)
+    loaded = ConfigService().load(config_path)
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=_initialized_store(tmp_path, loaded),
+        feishu_client=FakeFeishuClient(),
+        hermes_checker=ok_hermes,
+    )
+
+    try:
+        result = suite._check_runtime_storage_paths()
+    finally:
+        logs_dir.chmod(0o700)
+
+    assert result.status == "failed"
+    errors = {item["name"]: item for item in result.details["errors"]}
+    assert errors["resources"]["reason"] == "expected_directory"
+    assert errors["jsonl_log"]["reason"] == "parent_directory_not_writable"
+
+
 def test_doctor_fails_when_product_policy_store_is_not_initialized(
     tmp_path: Path,
 ) -> None:

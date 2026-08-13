@@ -304,6 +304,7 @@ class HealthSuite:
     def run(self, *, send_test: bool = False) -> list[HealthCheckResult]:
         results: list[HealthCheckResult] = [
             self._check_config_schema(),
+            self._check_runtime_storage_paths(),
             self._check_sqlite_writable(),
             self._check_product_policy_initialized(),
             self._check_lark_cli_version(),
@@ -331,6 +332,7 @@ class HealthSuite:
     def run_runtime_critical(self) -> list[HealthCheckResult]:
         results: list[HealthCheckResult] = [
             self._check_config_schema(),
+            self._check_runtime_storage_paths(),
             self._check_sqlite_writable(),
             self._check_product_policy_initialized(),
             self._check_lark_cli_version(),
@@ -379,6 +381,109 @@ class HealthSuite:
             "ok",
             "SQLite is writable",
             {"path": str(self.store.path)},
+        )
+
+    def _check_runtime_storage_paths(self) -> HealthCheckResult:
+        config = self.loaded_config.config
+        paths: list[tuple[str, Path, str]] = [
+            ("sqlite", Path(self.store.path), "file"),
+            (
+                "resources",
+                resolve_relative_path(
+                    config.storage.resource_dir, self.loaded_config.base_dir
+                ),
+                "directory",
+            ),
+            (
+                "jsonl_log",
+                resolve_relative_path(
+                    config.logging.jsonl_path, self.loaded_config.base_dir
+                ),
+                "file",
+            ),
+        ]
+        if config.logging.text_path is not None:
+            paths.append(
+                (
+                    "text_log",
+                    resolve_relative_path(
+                        config.logging.text_path, self.loaded_config.base_dir
+                    ),
+                    "file",
+                )
+            )
+
+        errors: list[dict[str, str]] = []
+        checked: dict[str, str] = {}
+        for name, configured_path, expected_type in paths:
+            path = configured_path.expanduser().absolute()
+            checked[name] = str(path)
+            symlink = _first_symlink_component(path)
+            if symlink is not None:
+                errors.append(
+                    {
+                        "name": name,
+                        "path": str(path),
+                        "reason": "symbolic_link_not_allowed",
+                        "component": str(symlink),
+                    }
+                )
+                continue
+            if path.exists():
+                correct_type = (
+                    path.is_dir() if expected_type == "directory" else path.is_file()
+                )
+                if not correct_type:
+                    errors.append(
+                        {
+                            "name": name,
+                            "path": str(path),
+                            "reason": f"expected_{expected_type}",
+                        }
+                    )
+                    continue
+                writable_path = path if expected_type == "directory" else path.parent
+            else:
+                writable_path = _nearest_existing_ancestor(
+                    path if expected_type == "directory" else path.parent
+                )
+            if not writable_path.is_dir() or not _directory_is_writable(writable_path):
+                errors.append(
+                    {
+                        "name": name,
+                        "path": str(path),
+                        "reason": "parent_directory_not_writable",
+                        "component": str(writable_path),
+                    }
+                )
+                continue
+            if (
+                expected_type == "file"
+                and path.exists()
+                and not _file_is_writable(path)
+            ):
+                errors.append(
+                    {
+                        "name": name,
+                        "path": str(path),
+                        "reason": "file_not_writable",
+                    }
+                )
+
+        if errors:
+            return HealthCheckResult(
+                "runtime_storage_paths",
+                "critical",
+                "failed",
+                "runtime storage paths are unsafe or not writable",
+                {"errors": errors, "paths": checked},
+            )
+        return HealthCheckResult(
+            "runtime_storage_paths",
+            "critical",
+            "ok",
+            "runtime storage paths have safe types and permissions",
+            {"paths": checked},
         )
 
     def _check_product_policy_initialized(self) -> HealthCheckResult:
@@ -1182,6 +1287,34 @@ def _resolve_executable_path(path: str | None) -> str | None:
     if os.path.isabs(path):
         return path
     return shutil.which(path)
+
+
+def _first_symlink_component(path: Path) -> Path | None:
+    absolute = path.absolute()
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            return current
+    return None
+
+
+def _nearest_existing_ancestor(path: Path) -> Path:
+    current = path
+    while not current.exists() and current != current.parent:
+        current = current.parent
+    return current
+
+
+def _directory_is_writable(path: Path) -> bool:
+    mode = path.stat().st_mode
+    return (
+        bool(mode & 0o222) and bool(mode & 0o111) and os.access(path, os.W_OK | os.X_OK)
+    )
+
+
+def _file_is_writable(path: Path) -> bool:
+    return bool(path.stat().st_mode & 0o222) and os.access(path, os.W_OK)
 
 
 def _readable_file_result(
