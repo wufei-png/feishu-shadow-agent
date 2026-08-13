@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -164,6 +165,48 @@ class ApprovalCommandService:
             requested_outcome="edited_sent",
         )
 
+    def apply_text(
+        self,
+        command: str,
+        *,
+        command_id: str,
+        actor: str,
+        execution_mode: ExecutionMode,
+        keep_watching_until: str,
+    ) -> CommandResult | None:
+        normalized = command.strip()
+        if not normalized.startswith("/"):
+            return None
+        match = re.match(r"^/(\S+)(?:\s+(\S+))?(?:\s+([\s\S]*))?$", normalized)
+        if match is None:
+            return None
+        verb = match.group(1)
+        target_id = match.group(2)
+        final_reply = match.group(3)
+        valid = (
+            verb in {"approve", "reject"}
+            and target_id is not None
+            and final_reply is None
+        ) or (verb == "send" and target_id is not None and final_reply is not None)
+        return self._apply(
+            verb if valid else "invalid",
+            target_id if valid and target_id is not None else "",
+            final_reply=final_reply if valid else None,
+            actor=actor,
+            reason=None,
+            command_id=command_id,
+            execution_mode=execution_mode,
+            requested_outcome=(
+                "suggestion_sent"
+                if verb == "approve" and valid
+                else "edited_sent"
+                if verb == "send" and valid
+                else None
+            ),
+            command_text=normalized,
+            keep_watching_until=keep_watching_until,
+        )
+
     def _apply(
         self,
         verb: str,
@@ -177,20 +220,24 @@ class ApprovalCommandService:
         note: str | None = None,
         execution_mode: ExecutionMode = "production",
         requested_outcome: ApprovalOutcome | None = None,
+        command_text: str | None = None,
+        keep_watching_until: str | None = None,
     ) -> CommandResult:
-        command_text = (
+        effective_command_text = command_text or (
             f"/{verb} {target_id}"
             if final_reply is None
             else f"/{verb} {target_id} {final_reply}"
         )
         raw = self.store.apply_approval_command(
             message_id=command_id or new_run_id(f"operator_{verb}"),
-            command=command_text,
+            command=effective_command_text,
             verb=verb,
             target_id=target_id,
             final_reply=final_reply,
             keep_watching_until=(
-                self.keep_watching_until_factory()
+                keep_watching_until
+                if keep_watching_until is not None
+                else self.keep_watching_until_factory()
                 if verb == "reject" and self.keep_watching_until_factory is not None
                 else None
             ),
@@ -706,6 +753,23 @@ class OperatorCommandService:
             feedback_reason=feedback_reason,
             note=note,
             execution_mode=execution_mode,
+        )
+
+    def apply_approval_text(
+        self,
+        command: str,
+        *,
+        command_id: str,
+        actor: str,
+        execution_mode: ExecutionMode,
+        keep_watching_until: str,
+    ) -> CommandResult | None:
+        return self.approvals.apply_text(
+            command,
+            command_id=command_id,
+            actor=actor,
+            execution_mode=execution_mode,
+            keep_watching_until=keep_watching_until,
         )
 
     def reject(

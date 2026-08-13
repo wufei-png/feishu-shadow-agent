@@ -15,7 +15,7 @@ from typing import Any, Literal, Protocol, cast
 from .approval_cards import CARD_ACTION_PROTOCOL
 from .config import AppConfig
 from .jsonl import JSONLLogger
-from .operator_commands import ApprovalCommandService, CommandResult
+from .operator_commands import CommandResult, OperatorCommandService
 from .store.sqlite_store import SQLiteStore
 from .time_utils import format_instant, utc_now
 from .types import ExecutionMode, FeedbackReason
@@ -86,7 +86,7 @@ class CardActionProcessor:
         self.logger = logger
         self.wake = wake
         self.execution_mode = execution_mode
-        self.commands = ApprovalCommandService(
+        self.commands = OperatorCommandService(
             store,
             keep_watching_until_factory=lambda: format_instant(
                 utc_now() + timedelta(minutes=config.lifecycle.watch_minutes)

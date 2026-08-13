@@ -2850,6 +2850,57 @@ def test_duplicate_with_routing_audit_but_no_processing_reruns_task_session(
     assert processing["attempt_count"] == 1
 
 
+def test_duplicate_after_resource_stage_recovers_unstarted_task_session(
+    tmp_path: Path,
+) -> None:
+    cfg = _config()
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    _seed_policy(store, cfg)
+    raw = _message("om_crash", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a")
+    routing_only = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    first = routing_only.process_raw_message(
+        raw, source="p2p", default_chat_type="p2p", run_id="run_1"
+    )
+    assert first is not None and first.task is not None
+    store.record_message_processing(
+        message_id="om_crash",
+        task_id=first.task.id,
+        stage="resource_download",
+        status="processed",
+    )
+
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_crash"))
+    processor = TaskProcessingService(
+        store=store,
+        config=cfg,
+        agent_backend=hermes,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        agent_retry_delays_seconds=(0.0, 0.0),
+    )
+    recovered = IngestionService(
+        store=store,
+        feishu_client=FakeFeishu(),
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        task_processor=processor,
+        clock=lambda: "2026-06-22T10:11:00+08:00",
+    ).process_raw_message(raw, source="p2p", default_chat_type="p2p", run_id="run_2")
+
+    assert recovered is not None
+    assert recovered.decision.route == "new_task"
+    assert hermes.session_ids_seen == [None]
+    assert (
+        store.message_processing_status("om_crash", stage="task_session") == "processed"
+    )
+
+
 def test_empty_auto_reply_is_schema_failure(tmp_path: Path) -> None:
     hermes = FakeHermes()
     hermes.session_outputs.append(
@@ -2908,6 +2959,23 @@ def test_send_composer_mentions_reply_target_sender_once() -> None:
 
     assert reply.text == '<at user_id="ou_a">Alice</at> 建议看日志'
     assert reply.had_forbidden_mentions is False
+
+
+def test_send_composer_preserves_semantic_line_breaks_and_indentation() -> None:
+    composer = SendComposer(owner_open_id="ou_owner")
+    proposed = (
+        "第一段\r\n\r\n- 项目一  \r\n- 项目二\r\n\r\n```python\r\n    print('x')\r\n```"
+    )
+
+    reply = composer.compose(
+        proposed_reply=proposed,
+        reply_target=None,
+        chat_type="p2p",
+    )
+
+    assert reply.text == (
+        "第一段\n\n- 项目一\n- 项目二\n\n```python\n    print('x')\n```"
+    )
 
 
 def test_send_composer_removes_complete_hermes_at_span_before_target_mention() -> None:
@@ -3265,7 +3333,9 @@ def test_approval_command_with_extra_text_fails_without_consuming_approval(
     result = approval_service.apply_command(message=message)
 
     assert result is not None
-    assert result["status"] == "failed"
+    assert result["status"] == "validation_failed"
+    assert result["command"] == "approval.invalid"
+    assert result["actor"] == "owner"
     with store.connect() as conn:
         approval = conn.execute(
             "SELECT status FROM approvals WHERE short_id = ?", (approval_short_id,)
@@ -4615,6 +4685,8 @@ def test_send_command_preserves_owner_final_reply_format(tmp_path: Path) -> None
 
     assert result is not None
     assert result["status"] == "applied"
+    assert result["command"] == "approval.send"
+    assert result["actor"] == "owner"
     with store.connect() as conn:
         approval = conn.execute("SELECT payload_json FROM approvals").fetchone()
         action = conn.execute(

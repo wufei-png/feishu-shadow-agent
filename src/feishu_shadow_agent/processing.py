@@ -22,6 +22,7 @@ from .agent_invocation import (
 from .config import AppConfig
 from .context_access import ContextAccessBuilder
 from .jsonl import JSONLLogger
+from .operator_commands import OperatorCommandService
 from .policy import PolicyResolver
 from .prompt import (
     BaseTaskSessionOutput,
@@ -88,9 +89,10 @@ class SendComposer:
             AGENT_AT_SPAN_RE.search(proposed_reply)
             or FORBIDDEN_MENTION_RE.search(proposed_reply)
         )
-        cleaned = AGENT_AT_SPAN_RE.sub("", proposed_reply)
+        cleaned = proposed_reply.replace("\r\n", "\n").replace("\r", "\n")
+        cleaned = AGENT_AT_SPAN_RE.sub("", cleaned)
         cleaned = FORBIDDEN_MENTION_RE.sub("", cleaned)
-        cleaned = " ".join(cleaned.split())
+        cleaned = "\n".join(line.rstrip() for line in cleaned.split("\n")).strip()
         if chat_type == "group" and reply_target is not None:
             sender_id = reply_target["sender_id"]
             sender_role = reply_target["sender_role"]
@@ -117,6 +119,7 @@ class ApprovalService:
         self.store = store
         self.config = config
         self.execution_mode = execution_mode
+        self.operator_commands = OperatorCommandService(store)
 
     def request_send_reply(
         self,
@@ -243,48 +246,16 @@ class ApprovalService:
         )
 
     def apply_command(self, *, message: NormalizedMessage) -> dict[str, Any] | None:
-        command = message.text.strip()
-        if not command.startswith("/"):
-            return None
-        match = re.match(r"^/(\S+)(?:\s+(\S+))?(?:\s+([\s\S]*))?$", command)
-        if match is None:
-            return None
-        verb = match.group(1)
-        target_id = match.group(2)
-        final_reply = match.group(3)
-        if verb in {"approve", "reject"} and target_id and final_reply is None:
-            return self.store.apply_approval_command(
-                message_id=message.message_id,
-                command=command,
-                verb=verb,
-                target_id=target_id,
-                keep_watching_until=_plus_minutes(
-                    message.sent_at, self.config.lifecycle.watch_minutes
-                ),
-                actor="owner",
-                execution_mode=self.execution_mode,
-            )
-        if verb == "send" and target_id and final_reply is not None:
-            return self.store.apply_approval_command(
-                message_id=message.message_id,
-                command=command,
-                verb=verb,
-                target_id=target_id,
-                final_reply=final_reply,
-                keep_watching_until=_plus_minutes(
-                    message.sent_at, self.config.lifecycle.watch_minutes
-                ),
-                actor="owner",
-                execution_mode=self.execution_mode,
-            )
-        return self.store.apply_approval_command(
-            message_id=message.message_id,
-            command=command,
-            verb="invalid",
-            target_id="",
+        result = self.operator_commands.apply_approval_text(
+            message.text,
+            command_id=message.message_id,
             actor="owner",
             execution_mode=self.execution_mode,
+            keep_watching_until=_plus_minutes(
+                message.sent_at, self.config.lifecycle.watch_minutes
+            ),
         )
+        return None if result is None else result.as_dict()
 
 
 class TaskProcessingService:

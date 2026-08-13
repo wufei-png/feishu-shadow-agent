@@ -714,20 +714,26 @@ class SQLiteStore:
         return decision, task
 
     def message_processing_is_final(self, message_id: str, *, stage: str) -> bool:
+        return self.message_processing_status(message_id, stage=stage) in {
+            "processed",
+            "processing_failed_terminal",
+            "blocked_waiting_external",
+        }
+
+    def message_processing_status(self, message_id: str, *, stage: str) -> str | None:
         self.initialize()
         with self.connect() as conn:
             row = conn.execute(
                 """
-                SELECT 1
+                SELECT status
                 FROM message_processing
                 WHERE message_id = ?
                   AND stage = ?
-                  AND status IN ('processed', 'processing_failed_terminal', 'blocked_waiting_external')
                 LIMIT 1
                 """,
                 (message_id, stage),
             ).fetchone()
-        return row is not None
+        return None if row is None else str(row["status"])
 
     def record_message_processing(
         self,
