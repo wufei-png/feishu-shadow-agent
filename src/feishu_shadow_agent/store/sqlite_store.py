@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import AppConfig, ChatPolicyConfig, ReplyPolicyConfig
+from ..time_utils import normalize_instant, parse_instant_or_none, shift_instant
 from ..types import (
     ActionKind,
     ActionRecord,
@@ -46,14 +47,14 @@ WHERE hc.status != 'ok'
       FROM health_checks newer
       WHERE newer.check_name = hc.check_name
         AND (
-            datetime(newer.checked_at) > datetime(hc.checked_at)
+            julianday(newer.checked_at) > julianday(hc.checked_at)
             OR (
-                datetime(newer.checked_at) = datetime(hc.checked_at)
+                julianday(newer.checked_at) = julianday(hc.checked_at)
                 AND newer.id > hc.id
             )
         )
   )
-ORDER BY datetime(hc.checked_at) DESC, hc.id DESC
+ORDER BY julianday(hc.checked_at) DESC, hc.id DESC
 LIMIT ?
 """
 
@@ -61,7 +62,7 @@ LIMIT ?
 class SQLiteStore:
     def __init__(self, path: str | Path, *, clock: Callable[[], str] = utc_now_iso):
         self.path = Path(path)
-        self.clock = clock
+        self.clock = lambda: normalize_instant(clock())
 
     def connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -600,7 +601,7 @@ class SQLiteStore:
                 SELECT status
                 FROM health_checks
                 WHERE check_name = ?
-                ORDER BY datetime(checked_at) DESC, id DESC
+                ORDER BY julianday(checked_at) DESC, id DESC
                 LIMIT 1
                 """,
                 (check_name,),
@@ -658,7 +659,7 @@ class SQLiteStore:
         placeholders = ",".join("?" for _ in ids)
         with self.connect() as conn:
             rows = conn.execute(
-                f"SELECT * FROM messages WHERE message_id IN ({placeholders}) ORDER BY sent_at, message_id",
+                f"SELECT * FROM messages WHERE message_id IN ({placeholders}) ORDER BY julianday(sent_at), message_id",
                 ids,
             ).fetchall()
         by_id = {row["message_id"]: row for row in rows}
@@ -817,7 +818,7 @@ class SQLiteStore:
                 """
                 SELECT COUNT(*) AS count
                 FROM messages
-                WHERE datetime(inserted_at) <= datetime(?)
+                WHERE julianday(inserted_at) <= julianday(?)
                   AND raw_json != ?
                 """,
                 (cutoff, replacement_json),
@@ -831,7 +832,7 @@ class SQLiteStore:
                 """
                 UPDATE messages
                 SET raw_json = ?
-                WHERE datetime(inserted_at) <= datetime(?)
+                WHERE julianday(inserted_at) <= julianday(?)
                   AND raw_json != ?
                 """,
                 (replacement_json, cutoff, replacement_json),
@@ -847,7 +848,7 @@ class SQLiteStore:
                 FROM resources r
                 WHERE r.download_status = 'downloaded'
                   AND r.path IS NOT NULL
-                  AND datetime(r.updated_at) <= datetime(?)
+                  AND julianday(r.updated_at) <= julianday(?)
                   AND NOT EXISTS (
                     SELECT 1
                     FROM tasks t
@@ -898,11 +899,11 @@ class SQLiteStore:
             SELECT COUNT(*) AS count
             FROM approval_feedback
             WHERE content_expired_at IS NULL
-              AND datetime(created_at) <= datetime(?)
+              AND julianday(created_at) <= julianday(?)
         """
         content_params: list[Any] = [content_cutoff]
         if metadata_cutoff is not None:
-            content_query += " AND datetime(created_at) > datetime(?)"
+            content_query += " AND julianday(created_at) > julianday(?)"
             content_params.append(metadata_cutoff)
         with self.connect() as conn:
             content = conn.execute(content_query, content_params).fetchone()
@@ -912,7 +913,7 @@ class SQLiteStore:
                     """
                     SELECT COUNT(*) AS count
                     FROM approval_feedback
-                    WHERE datetime(created_at) <= datetime(?)
+                    WHERE julianday(created_at) <= julianday(?)
                     """,
                     (metadata_cutoff,),
                 ).fetchone()
@@ -933,7 +934,7 @@ class SQLiteStore:
                 deleted = conn.execute(
                     """
                     DELETE FROM approval_feedback
-                    WHERE datetime(created_at) <= datetime(?)
+                    WHERE julianday(created_at) <= julianday(?)
                     """,
                     (metadata_cutoff,),
                 )
@@ -946,7 +947,7 @@ class SQLiteStore:
                     note = NULL,
                     content_expired_at = ?
                 WHERE content_expired_at IS NULL
-                  AND datetime(created_at) <= datetime(?)
+                  AND julianday(created_at) <= julianday(?)
                 """,
                 (expired_at, content_cutoff),
             )
@@ -1234,7 +1235,7 @@ class SQLiteStore:
                 SELECT * FROM tasks
                 WHERE chat_id = ?
                   AND status = 'watching'
-                  AND (watch_until IS NULL OR watch_until > ?)
+                  AND (watch_until IS NULL OR julianday(watch_until) > julianday(?))
                 ORDER BY updated_at DESC, id DESC
                 """,
                 (chat_id, now),
@@ -1258,7 +1259,7 @@ class SQLiteStore:
                 WHERE t.chat_id = ?
                   AND wk.key = ?
                   AND t.status = 'watching'
-                  AND (t.watch_until IS NULL OR t.watch_until > ?)
+                  AND (t.watch_until IS NULL OR julianday(t.watch_until) > julianday(?))
                 ORDER BY t.updated_at DESC, t.id DESC
                 """,
                 (chat_id, key, now),
@@ -1390,7 +1391,7 @@ class SQLiteStore:
                 FROM tasks t
                 WHERE t.chat_id = ?
                   AND t.status != 'watching'
-                  AND datetime(t.updated_at) >= datetime(?)
+                  AND julianday(t.updated_at) >= julianday(?)
                   AND ({where_related})
                 ORDER BY t.updated_at DESC, t.id DESC
                 LIMIT ?
@@ -1486,7 +1487,7 @@ class SQLiteStore:
                 FROM tasks t
                 JOIN task_watch_keys wk ON wk.task_id = t.id
                 WHERE t.status = 'watching'
-                  AND (t.watch_until IS NULL OR t.watch_until > ?)
+                  AND (t.watch_until IS NULL OR julianday(t.watch_until) > julianday(?))
                   AND t.chat_id IS NOT NULL
                   AND wk.key LIKE 'thread:%'
                   AND length(wk.key) > ?
@@ -1497,7 +1498,7 @@ class SQLiteStore:
                   NULL AS thread_id
                 FROM tasks t
                 WHERE t.status = 'watching'
-                  AND (t.watch_until IS NULL OR t.watch_until > ?)
+                  AND (t.watch_until IS NULL OR julianday(t.watch_until) > julianday(?))
                   AND t.chat_id IS NOT NULL
                   AND NOT EXISTS (
                     SELECT 1
@@ -1756,7 +1757,7 @@ class SQLiteStore:
                 SELECT *
                 FROM actions
                 WHERE status = 'sending'
-                  AND datetime(updated_at) <= datetime(?)
+                  AND julianday(updated_at) <= julianday(?)
                 ORDER BY updated_at, id
                 """,
                 (cutoff,),
@@ -1779,7 +1780,7 @@ class SQLiteStore:
                 SELECT *
                 FROM actions
                 WHERE status = 'sending'
-                  AND datetime(updated_at) <= datetime(?)
+                  AND julianday(updated_at) <= julianday(?)
                 ORDER BY updated_at, id
                 """,
                 (cutoff,),
@@ -2583,7 +2584,7 @@ class SQLiteStore:
             FROM approvals
             WHERE status = 'pending'
               AND expires_at IS NOT NULL
-              AND datetime(expires_at) < datetime(?)
+              AND julianday(expires_at) < julianday(?)
         """
         params: list[Any] = [now]
         if exclude_task_id is not None:
@@ -4270,15 +4271,7 @@ def _daemon_liveness(
 
 
 def _parse_datetime_or_none(value: Any) -> datetime | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.astimezone()
-    return parsed.astimezone()
+    return parse_instant_or_none(value)
 
 
 def _watch_keys_for_message(message: NormalizedMessage) -> set[str]:
@@ -4313,21 +4306,11 @@ def _task_is_watching(row: sqlite3.Row | None) -> bool:
 
 
 def _plus_hours(value: str, hours: int) -> str:
-    try:
-        base = datetime.fromisoformat(value)
-    except ValueError:
-        base = datetime.now().astimezone()
-    return (base + timedelta(hours=hours)).astimezone().isoformat(timespec="seconds")
+    return shift_instant(value, delta=timedelta(hours=hours))
 
 
 def _minus_seconds(value: str, seconds: int) -> str:
-    try:
-        base = datetime.fromisoformat(value)
-    except ValueError:
-        base = datetime.now().astimezone()
-    return (
-        (base - timedelta(seconds=seconds)).astimezone().isoformat(timespec="seconds")
-    )
+    return shift_instant(value, delta=-timedelta(seconds=seconds))
 
 
 def _action_idempotency_key(

@@ -3,10 +3,11 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import timedelta
 from difflib import SequenceMatcher
 from typing import Any, Literal
 
+from ..time_utils import shift_instant
 from .common import OperatorQueryReadError, OperatorQueryUnavailable
 
 FeedbackExecutionMode = Literal["production", "dry_run", "all"]
@@ -76,7 +77,7 @@ class FeedbackQuery:
                             THEN 1 ELSE 0
                           END) AS changed_reply_count
                     FROM approval_feedback
-                    WHERE datetime(created_at) >= datetime(?)
+                    WHERE julianday(created_at) >= julianday(?)
                     {mode_sql}
                     """,
                     [since, *mode_params],
@@ -160,9 +161,9 @@ class FeedbackQuery:
                     FROM approval_feedback f
                     JOIN approvals a ON a.id = f.approval_id
                     LEFT JOIN tasks t ON t.id = f.task_id
-                    WHERE datetime(f.created_at) >= datetime(?)
+                    WHERE julianday(f.created_at) >= julianday(?)
                     {mode_sql.replace("execution_mode", "f.execution_mode")}
-                    ORDER BY datetime(f.created_at) DESC, f.id DESC
+                    ORDER BY julianday(f.created_at) DESC, f.id DESC
                     LIMIT ? OFFSET ?
                     """,
                     [since, *mode_params, _limit(limit), _offset(offset)],
@@ -190,7 +191,7 @@ def _group_counts(
         f"""
         SELECT COALESCE({column}, 'unclassified') AS value, COUNT(*) AS count
         FROM approval_feedback
-        WHERE datetime(created_at) >= datetime(?)
+        WHERE julianday(created_at) >= julianday(?)
         {mode_sql}
         GROUP BY COALESCE({column}, 'unclassified')
         ORDER BY count DESC, value
@@ -313,10 +314,9 @@ def _offset(value: int) -> int:
 
 def _since(now: str, days: int) -> str:
     try:
-        parsed = datetime.fromisoformat(now.replace("Z", "+00:00"))
+        return shift_instant(now, delta=-timedelta(days=days))
     except ValueError as exc:
         raise OperatorQueryReadError(f"invalid query clock: {now}") from exc
-    return (parsed - timedelta(days=days)).isoformat(timespec="seconds")
 
 
 def _ratio(numerator: int, denominator: int) -> float | None:

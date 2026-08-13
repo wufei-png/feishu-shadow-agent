@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 from ..agent_backend import AgentBackend
@@ -13,6 +13,7 @@ from ..routing import (
     MessageRouter,
     RoutingResult,
 )
+from ..time_utils import shift_instant
 from .artifacts import EvalError
 from .cases import LoadedEvalCase, message_sent_at
 from .runtime import TrialRuntime, seed_router_scenario
@@ -197,8 +198,8 @@ def _score(
 
 
 def _plus_minutes(value: str, minutes: int) -> str:
-    return (datetime.fromisoformat(value) + timedelta(minutes=minutes)).isoformat()
+    return shift_instant(value, delta=timedelta(minutes=minutes))
 
 
 def _minus_days(value: str, days: int) -> str:
-    return (datetime.fromisoformat(value) - timedelta(days=days)).isoformat()
+    return shift_instant(value, delta=-timedelta(days=days))

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .config import AppConfig
 from .feishu.client import FeishuClient
@@ -18,6 +19,13 @@ from .policy import PolicyResolver
 from .processing import ApprovalService, TaskProcessingService
 from .routing import MessageRouter, RoutingResult
 from .store.sqlite_store import SQLiteStore
+from .time_utils import (
+    format_instant,
+    normalize_instant,
+    parse_instant,
+    parse_instant_or_none,
+    shift_instant,
+)
 from .types import (
     MessagePage,
     NormalizedMessage,
@@ -28,6 +36,7 @@ from .types import (
 )
 
 PAGE_SIZE = 50
+FEISHU_MESSAGE_TIMEZONE = ZoneInfo("Asia/Shanghai")
 IMAGE_KEY_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])(img_[A-Za-z0-9_-]+)(?![A-Za-z0-9_-])"
 )
@@ -58,12 +67,18 @@ def normalize_message_sent_at(value: str | None) -> str | None:
     if value is None:
         return None
     try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return value
-    if parsed.utcoffset() is None:
-        return parsed.astimezone().isoformat(timespec="seconds")
-    return value
+        return normalize_instant(value)
+    except ValueError as exc:
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            raise exc from None
+        if parsed.tzinfo is not None and parsed.utcoffset() is not None:
+            raise exc
+        # lark-cli renders Feishu message timestamps in China Standard Time
+        # without an offset. Resolve that at the adapter boundary so domain
+        # time never depends on the host timezone.
+        return format_instant(parsed.replace(tzinfo=FEISHU_MESSAGE_TIMEZONE))
 
 
 class MessageNormalizer:
@@ -580,7 +595,7 @@ class IngestionService:
                     message, run_id=retry_run_id
                 )
             )
-        self.clock = clock
+        self.clock = lambda: normalize_instant(clock())
 
     def run_approval_inbox_placeholder(self, *, run_id: str) -> StageResult:
         self.logger.emit(
@@ -1263,9 +1278,11 @@ def _first_string(source: dict[str, Any], *keys: str) -> str | None:
     return None
 
 
-def _raw_sort_key(raw: dict[str, Any]) -> tuple[str, str]:
+def _raw_sort_key(raw: dict[str, Any]) -> tuple[float, str]:
+    sent_at = _first_string(raw, "create_time", "created_at", "sent_at", "timestamp")
+    parsed = parse_instant_or_none(sent_at)
     return (
-        _first_string(raw, "create_time", "created_at", "sent_at", "timestamp") or "",
+        parsed.timestamp() if parsed is not None else float("-inf"),
         _first_string(raw, "message_id", "messageId", "id") or "",
     )
 
@@ -1273,10 +1290,8 @@ def _raw_sort_key(raw: dict[str, Any]) -> tuple[str, str]:
 def _filter_raws_in_window(
     raws: list[dict[str, Any]], *, start: str, end: str
 ) -> list[dict[str, Any]]:
-    start_dt = _parse_dt_or_none(start)
-    end_dt = _parse_dt_or_none(end)
-    if start_dt is None or end_dt is None:
-        return raws
+    start_dt = parse_instant(start)
+    end_dt = parse_instant(end)
     filtered: list[dict[str, Any]] = []
     for raw in raws:
         sent_at = _first_string(
@@ -1315,33 +1330,15 @@ def _should_process_resources(
 
 
 def _minus_seconds(value: str, seconds: int) -> str:
-    return (
-        (_parse_dt(value) - timedelta(seconds=seconds))
-        .astimezone()
-        .isoformat(timespec="seconds")
-    )
+    return shift_instant(value, delta=-timedelta(seconds=seconds))
 
 
 def _plus_minutes(value: str, minutes: int) -> str:
-    return (
-        (_parse_dt(value) + timedelta(minutes=minutes))
-        .astimezone()
-        .isoformat(timespec="seconds")
-    )
-
-
-def _parse_dt(value: str) -> datetime:
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return datetime.now().astimezone()
+    return shift_instant(value, delta=timedelta(minutes=minutes))
 
 
 def _parse_dt_or_none(value: str) -> datetime | None:
-    try:
-        return datetime.fromisoformat(value).astimezone()
-    except ValueError:
-        return None
+    return parse_instant_or_none(value)
 
 
 def _resource_output(resource: ResourceRef, resource_dir: str) -> str:

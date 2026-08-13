@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from ..agent_backend import AgentBackend
 from ..config import ConfigService, LoadedConfig
+from ..time_utils import parse_instant
 from .artifacts import (
     EvalError,
     copy_config_or_raise,
@@ -467,7 +467,7 @@ def _initial_time(case: LoadedEvalCase) -> str:
         message_sent_at(case.raw_messages[message_id])
         for message_id in scenario_message_ids(case.scenario)
     ]
-    return min(values, key=datetime.fromisoformat)
+    return min(values, key=parse_instant)
 
 
 def _matching_case_dirs(cases_dir: Path, eval_type: str) -> list[Path]:

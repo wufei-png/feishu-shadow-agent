@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -50,6 +50,7 @@ from .policy_preview import (
 from .replay import replay_message_dry_run
 from .settings_catalog import settings_catalog
 from .store.sqlite_store import SQLiteStore
+from .time_utils import shift_instant
 from .types import ActionStatus, ApprovalStatus, TaskStatus, utc_now_iso
 
 _ASSET_REF_PATTERN = re.compile(r"""(?:src|href)=["'](/assets/[^"']+)["']""")
@@ -840,15 +841,7 @@ def _required_text(value: str | None, *, field: str) -> str:
 
 
 def _watch_until_from_now(minutes: int) -> str:
-    return (
-        (_parse_dt(utc_now_iso()) + timedelta(minutes=minutes))
-        .astimezone()
-        .isoformat(timespec="seconds")
-    )
-
-
-def _parse_dt(value: str) -> datetime:
-    return datetime.fromisoformat(value)
+    return shift_instant(utc_now_iso(), delta=timedelta(minutes=minutes))
 
 
 def _policy_request_changes(body: BaseModel, fields: tuple[str, ...]) -> dict[str, Any]:

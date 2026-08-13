@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal, TypeAlias
 from uuid import uuid4
+
+from .time_utils import utc_now_iso as _utc_now_iso
 
 ChatType = Literal["group", "p2p"]
 HealthSeverity = Literal["critical", "warning"]
@@ -179,7 +180,7 @@ class StateSchemaContract:
 
 
 def utc_now_iso() -> str:
-    return datetime.now().astimezone().isoformat(timespec="seconds")
+    return _utc_now_iso()
 
 
 def new_run_id(prefix: str = "run") -> str:

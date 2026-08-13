@@ -264,7 +264,9 @@ class OperatorQueryService:
             where.append("t.chat_id = ?")
             params.append(chat_id)
         if active_only:
-            where.append("(t.watch_until IS NULL OR t.watch_until > ?)")
+            where.append(
+                "(t.watch_until IS NULL OR julianday(t.watch_until) > julianday(?))"
+            )
             params.append(now)
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         params.extend([_coerce_limit(limit), _coerce_offset(offset)])
@@ -288,7 +290,7 @@ class OperatorQueryService:
                              WHERE ap.task_id = t.id
                                AND ap.status = 'pending'
                                AND ap.expires_at IS NOT NULL
-                               AND datetime(ap.expires_at) < datetime(?)
+                               AND julianday(ap.expires_at) < julianday(?)
                            ) AS overdue_approval_count,
                            (
                              SELECT COUNT(*)

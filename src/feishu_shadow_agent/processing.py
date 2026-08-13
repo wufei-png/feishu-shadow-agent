@@ -5,7 +5,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -41,6 +41,7 @@ from .resource_preflight import (
 from .routing import CandidateCollector, RoutingResult
 from .store.sqlite_store import SQLiteStore
 from .task_session_runner import TaskSessionRunner
+from .time_utils import shift_instant
 from .types import (
     ExecutionMode,
     LifecycleStatePolicy,
@@ -1801,18 +1802,8 @@ def _escape_mention_display(value: str) -> str:
 
 
 def _plus_minutes(value: str, minutes: int) -> str:
-    try:
-        base = datetime.fromisoformat(value)
-    except ValueError:
-        base = datetime.now().astimezone()
-    return (
-        (base + timedelta(minutes=minutes)).astimezone().isoformat(timespec="seconds")
-    )
+    return shift_instant(value, delta=timedelta(minutes=minutes))
 
 
 def _minus_days(value: str, days: int) -> str:
-    try:
-        base = datetime.fromisoformat(value)
-    except ValueError:
-        base = datetime.now().astimezone()
-    return (base - timedelta(days=days)).astimezone().isoformat(timespec="seconds")
+    return shift_instant(value, delta=-timedelta(days=days))

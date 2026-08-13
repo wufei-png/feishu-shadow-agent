@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 from html import escape
 from typing import Any
 
@@ -13,6 +13,7 @@ from .feishu.client import FeishuClient
 from .ingestion import MessageNormalizer
 from .jsonl import JSONLLogger
 from .store.sqlite_store import SQLiteStore
+from .time_utils import format_instant, utc_now
 from .types import (
     ActionRecord,
     ActionStatus,
@@ -1031,9 +1032,7 @@ def _expected_mentions(text: str) -> set[str]:
 
 
 def _watch_until(watch_minutes: int) -> str:
-    return (datetime.now().astimezone() + timedelta(minutes=watch_minutes)).isoformat(
-        timespec="seconds"
-    )
+    return format_instant(utc_now() + timedelta(minutes=watch_minutes))
 
 
 def _bump(

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .store.sqlite_store import SQLiteStore
+from .time_utils import parse_instant, parse_instant_or_none, shift_instant
 from .types import (
     LifecycleStatePolicy,
     NormalizedMessage,
@@ -338,7 +339,7 @@ class MessageRouter:
 
 def _is_active(task: TaskRecord, *, now: str) -> bool:
     return LifecycleStatePolicy.is_active_task_status(task.status) and (
-        task.watch_until is None or task.watch_until > now
+        task.watch_until is None or parse_instant(task.watch_until) > parse_instant(now)
     )
 
 
@@ -351,18 +352,8 @@ def _processing_stage_for_decision(decision: RouteDecision) -> str | None:
 
 
 def _minus_days(value: str, days: int) -> str:
-    try:
-        base = datetime.fromisoformat(value)
-    except ValueError:
-        base = datetime.now().astimezone()
-    return (base - timedelta(days=days)).astimezone().isoformat(timespec="seconds")
+    return shift_instant(value, delta=-timedelta(days=days))
 
 
 def _parse_datetime_or_none(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    return parsed.astimezone()
+    return parse_instant_or_none(value)

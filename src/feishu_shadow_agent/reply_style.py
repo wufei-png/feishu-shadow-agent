@@ -4,7 +4,7 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +17,7 @@ from .feishu.client import FeishuClient
 from .ingestion import MessageNormalizer
 from .paths import resolve_agent_working_dir, resolve_relative_path
 from .prompt import OwnerStyleRefreshOutput, build_owner_style_refresh_prompt
+from .time_utils import shift_instant
 from .types import utc_now_iso
 
 MAX_SAMPLE_CHARS = 1000
@@ -263,8 +264,4 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 
 def _minus_days(value: str, days: int) -> str:
-    return (
-        (datetime.fromisoformat(value) - timedelta(days=days))
-        .astimezone()
-        .isoformat(timespec="seconds")
-    )
+    return shift_instant(value, delta=-timedelta(days=days))

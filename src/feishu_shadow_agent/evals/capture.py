@@ -10,6 +10,7 @@ from ..config import LoadedConfig
 from ..feishu.lark_cli import LarkCliClient
 from ..ingestion import MessageNormalizer, normalize_message_sent_at
 from ..paths import resolve_relative_path
+from ..time_utils import format_instant, parse_instant_or_none, utc_now
 from ..types import NormalizedMessage
 from .artifacts import (
     EvalError,
@@ -262,13 +263,15 @@ class CaptureService:
         watch_keys = _message_watch_keys(seed_message)
         if seed_message.direct_mention:
             active_condition = (
-                "t.status = 'watching' AND (t.watch_until IS NULL OR t.watch_until > ?)"
+                "t.status = 'watching' AND "
+                "(t.watch_until IS NULL OR julianday(t.watch_until) > julianday(?))"
             )
         elif watch_keys:
             watch_placeholders = ",".join("?" for _ in watch_keys)
             active_condition = (
                 "t.status = 'watching' "
-                "AND (t.watch_until IS NULL OR t.watch_until > ?) "
+                "AND (t.watch_until IS NULL OR "
+                "julianday(t.watch_until) > julianday(?)) "
                 "AND EXISTS ("
                 "SELECT 1 FROM task_watch_keys wk "
                 "WHERE wk.task_id = t.id "
@@ -336,8 +339,10 @@ class CaptureService:
                     SELECT m.message_id, m.sent_at, m.raw_json
                     FROM task_messages tm
                     JOIN messages m ON m.message_id = tm.message_id
-                    WHERE tm.task_id = ? AND (m.sent_at IS NULL OR m.sent_at < ?)
-                    ORDER BY m.sent_at, m.message_id
+                    WHERE tm.task_id = ? AND (
+                        m.sent_at IS NULL OR julianday(m.sent_at) < julianday(?)
+                    )
+                    ORDER BY julianday(m.sent_at), m.message_id
                     """,
                     (task_row["id"], target_time),
                 ).fetchall()
@@ -545,17 +550,12 @@ def _infer_source(message: Any) -> str:
 
 
 def _lookback_window(days: int) -> tuple[str, str]:
-    end = datetime.now().astimezone().replace(microsecond=0)
-    return (end - timedelta(days=days)).isoformat(), end.isoformat()
+    end = utc_now().replace(microsecond=0)
+    return format_instant(end - timedelta(days=days)), format_instant(end)
 
 
 def _parse_datetime(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return None
+    return parse_instant_or_none(value)
 
 
 def _raw_chat_id(raw: dict[str, Any]) -> str | None:

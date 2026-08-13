@@ -5,7 +5,7 @@ import json
 import subprocess
 import sys
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 import yaml
@@ -40,6 +40,7 @@ from .replay import replay_message_dry_run
 from .reply_style import ReplyStyleRefresher
 from .retention import RetentionService
 from .store.sqlite_store import SQLiteStore
+from .time_utils import shift_instant
 from .types import new_run_id, utc_now_iso
 
 
@@ -1035,15 +1036,7 @@ def _git_output(argv: list[str], cwd: Path) -> str | None:
 
 
 def _watch_until_from_now(minutes: int) -> str:
-    return (
-        (_parse_dt(utc_now_iso()) + timedelta(minutes=minutes))
-        .astimezone()
-        .isoformat(timespec="seconds")
-    )
-
-
-def _parse_dt(value: str) -> datetime:
-    return datetime.fromisoformat(value)
+    return shift_instant(utc_now_iso(), delta=timedelta(minutes=minutes))
 
 
 def _run_console_server(app: object, *, host: str, port: int) -> None:

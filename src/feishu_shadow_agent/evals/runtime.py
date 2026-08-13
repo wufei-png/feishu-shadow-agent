@@ -13,6 +13,7 @@ from ..ingestion import MessageNormalizer
 from ..jsonl import JSONLLogger
 from ..paths import resolve_agent_working_dir
 from ..store.sqlite_store import SQLiteStore
+from ..time_utils import normalize_instant, parse_instant, shift_instant
 from ..types import NormalizedMessage, ResourceRef, TaskRecord
 from .artifacts import EvalError, evals_base_dir
 from .cases import LoadedEvalCase, message_sent_at, resource_fixture_path
@@ -26,14 +27,13 @@ from .schemas import (
 
 class EvaluationClock:
     def __init__(self, value: str):
-        self._value = value
+        self._value = normalize_instant(value)
 
     def __call__(self) -> str:
         return self._value
 
     def set(self, value: str) -> None:
-        _parse_datetime(value)
-        self._value = value
+        self._value = normalize_instant(value)
 
 
 @dataclass
@@ -427,17 +427,14 @@ def _message_time(message: NormalizedMessage) -> str:
 
 
 def _watch_until(value: str, minutes: int) -> str:
-    return (_parse_datetime(value) + timedelta(minutes=minutes)).isoformat()
+    return shift_instant(value, delta=timedelta(minutes=minutes))
 
 
 def _parse_datetime(value: str) -> datetime:
     try:
-        parsed = datetime.fromisoformat(value)
+        return parse_instant(value)
     except ValueError as exc:
         raise EvalError(f"invalid evaluation time: {value}") from exc
-    if parsed.utcoffset() is None:
-        raise EvalError(f"evaluation time must include timezone: {value}")
-    return parsed
 
 
 def _json_columns(row: dict[str, Any], *columns: str) -> dict[str, Any]:

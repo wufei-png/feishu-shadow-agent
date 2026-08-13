@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from ..config import LoadedConfig
 from ..ingestion import MessageNormalizer, normalize_message_sent_at
+from ..time_utils import parse_instant
 from .artifacts import (
     EvalError,
     file_sha256,
@@ -324,12 +325,9 @@ def _message_datetime(raw: dict[str, Any]) -> datetime:
 
 def _parse_aware_datetime(value: str, *, field: str = "message sent_at") -> datetime:
     try:
-        parsed = datetime.fromisoformat(value)
+        return parse_instant(value)
     except ValueError as exc:
         raise EvalError(f"invalid {field}: {value}") from exc
-    if parsed.utcoffset() is None:
-        raise EvalError(f"{field} must include timezone: {value}")
-    return parsed
 
 
 def _require_strictly_increasing(values: list[datetime], field: str) -> None:

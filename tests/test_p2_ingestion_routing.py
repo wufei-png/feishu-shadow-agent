@@ -351,7 +351,7 @@ def test_group_ingest_drains_pages_sorts_dedupes_and_advances_checkpoint(
 
     assert result.processed == 4
     assert store.get_checkpoint("ingest.group_at_me") == {
-        "last_success_at": "2026-06-22T10:10:00+08:00"
+        "last_success_at": "2026-06-22T02:10:00+00:00"
     }
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"] == 3
@@ -1278,7 +1278,7 @@ def test_sent_user_identity_agent_message_is_self_message(tmp_path: Path) -> Non
         ).fetchone()
     assert task["status"] == "watching"
     assert task["last_agent_reply"] == "agent reply sent as user"
-    assert task["watch_until"] == "2026-06-22T12:10:00+08:00"
+    assert task["watch_until"] == "2026-06-22T04:10:00+00:00"
     assert task_message["role"] == "agent_reply"
 
 
@@ -1336,7 +1336,36 @@ def test_lifecycle_watch_minutes_controls_new_task_watch_until(tmp_path: Path) -
         task = conn.execute(
             "SELECT watch_until FROM tasks WHERE id = ?", (created.task.id,)
         ).fetchone()
-    assert task["watch_until"] == "2026-06-22T10:15:00+08:00"
+    assert task["watch_until"] == "2026-06-22T02:15:00+00:00"
+
+
+def test_active_task_lookup_compares_mixed_offsets_as_instants(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    message = MessageNormalizer(owner_open_id="ou_owner").normalize(
+        _message("om_mixed_offset", mentions=[{"open_id": "ou_owner"}]),
+        default_chat_type="group",
+    )
+    store.upsert_message(message)
+    task = store.create_task_for_message(
+        message,
+        watch_until="2026-06-22T01:00:00+08:00",
+    )
+
+    assert (
+        store.get_active_tasks_for_chat("oc_1", now="2026-06-21T18:00:00+00:00") == []
+    )
+
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE tasks SET watch_until = ? WHERE id = ?",
+            ("2026-06-21T23:00:00-07:00", task.id),
+        )
+    assert [
+        row.id
+        for row in store.get_active_tasks_for_chat(
+            "oc_1", now="2026-06-22T05:00:00+00:00"
+        )
+    ] == [task.id]
 
 
 def test_lifecycle_closed_recall_days_bounds_historical_candidates(
@@ -2040,7 +2069,7 @@ def test_thread_active_watch_filters_by_checkpoint_window(tmp_path: Path) -> Non
 
     assert result.processed == 1
     assert store.get_checkpoint("active_watch.thread.omt_1") == {
-        "last_success_at": "2026-06-22T10:20:00+08:00"
+        "last_success_at": "2026-06-22T02:20:00+00:00"
     }
     assert store.get_message("om_old_thread") is None
     assert store.get_message("om_new_thread") is not None

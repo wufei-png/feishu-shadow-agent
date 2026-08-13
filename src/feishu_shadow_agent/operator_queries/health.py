@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -14,6 +14,7 @@ from ..store.sqlite_store import (
     RUN_HEARTBEAT_STALE_AFTER_SECONDS,
     SQLiteStore,
 )
+from ..time_utils import shift_instant
 from ..types import ActionStatus
 from .common import (
     _action_dto,
@@ -138,7 +139,7 @@ class HealthQuery:
                     FROM actions a
                     LEFT JOIN tasks t ON t.id = a.task_id
                     WHERE a.status = 'sending'
-                      AND datetime(a.updated_at) <= datetime(?)
+                      AND julianday(a.updated_at) <= julianday(?)
                     ORDER BY a.updated_at, a.id
                     """,
                     (_minus_seconds(now, stale_after_seconds),),
@@ -292,7 +293,7 @@ class HealthQuery:
                     FROM actions a
                     LEFT JOIN tasks t ON t.id = a.task_id
                     WHERE a.status = 'sending'
-                      AND datetime(a.updated_at) <= datetime(?)
+                      AND julianday(a.updated_at) <= julianday(?)
                     ORDER BY a.updated_at, a.id
                     LIMIT ?
                     """,
@@ -742,10 +743,4 @@ def _policy_health_issue(
 
 
 def _minus_seconds(value: str, seconds: int) -> str:
-    try:
-        base = datetime.fromisoformat(value)
-    except ValueError:
-        base = datetime.now().astimezone()
-    return (
-        (base - timedelta(seconds=seconds)).astimezone().isoformat(timespec="seconds")
-    )
+    return shift_instant(value, delta=-timedelta(seconds=seconds))

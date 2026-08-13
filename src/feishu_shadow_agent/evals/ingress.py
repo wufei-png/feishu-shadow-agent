@@ -7,7 +7,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from ..agent_backend import AgentBackend
-from ..ingestion import MessageNormalizer
+from ..ingestion import MessageNormalizer, normalize_message_sent_at
 from ..message_eligibility import MessageEligibilityPolicy
 from ..types import NormalizedMessage
 from .artifacts import EvalError, message_id_from_raw, text_excerpt
@@ -377,8 +377,9 @@ def _current_decision_by_id(timeline: dict[str, Any], message_id: str) -> str:
 
 
 def _raw_sort_key(raw: dict[str, Any]) -> tuple[str, str]:
+    raw_time = _first_string(raw, "create_time", "created_at", "sent_at", "timestamp")
     return (
-        _first_string(raw, "create_time", "created_at", "sent_at", "timestamp") or "",
+        normalize_message_sent_at(raw_time) or "",
         message_id_from_raw(raw),
     )
 

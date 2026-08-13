@@ -9,7 +9,7 @@ import os
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any, Literal, Protocol, cast
 
 from .approval_cards import CARD_ACTION_PROTOCOL
@@ -17,6 +17,7 @@ from .config import AppConfig
 from .jsonl import JSONLLogger
 from .operator_commands import ApprovalCommandService, CommandResult
 from .store.sqlite_store import SQLiteStore
+from .time_utils import format_instant, utc_now
 from .types import ExecutionMode, FeedbackReason
 
 CardActionName = Literal[
@@ -87,10 +88,9 @@ class CardActionProcessor:
         self.execution_mode = execution_mode
         self.commands = ApprovalCommandService(
             store,
-            keep_watching_until_factory=lambda: (
-                datetime.now().astimezone()
-                + timedelta(minutes=config.lifecycle.watch_minutes)
-            ).isoformat(timespec="seconds"),
+            keep_watching_until_factory=lambda: format_instant(
+                utc_now() + timedelta(minutes=config.lifecycle.watch_minutes)
+            ),
         )
 
     def handle(self, event: Any) -> CardActionOutcome:

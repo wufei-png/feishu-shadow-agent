@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 from ..agent_backend import AgentBackend
@@ -9,6 +9,7 @@ from ..ingestion import IngestionService, MessageNormalizer
 from ..paths import resolve_agent_working_dir
 from ..processing import FORBIDDEN_MENTION_RE, TaskProcessingService
 from ..routing import TRIGGER_SOURCES, CandidateCollector
+from ..time_utils import shift_instant
 from ..types import NormalizedMessage
 from .artifacts import EvalError
 from .cases import LoadedEvalCase, message_sent_at
@@ -271,10 +272,10 @@ def _router_candidates(
 
 
 def _minus_days(value: str, days: int) -> str:
-    parsed = datetime.fromisoformat(value)
-    if parsed.utcoffset() is None:
-        raise EvalError(f"evaluation time must include timezone: {value}")
-    return (parsed - timedelta(days=days)).isoformat()
+    try:
+        return shift_instant(value, delta=-timedelta(days=days))
+    except ValueError as exc:
+        raise EvalError(f"evaluation time must include timezone: {value}") from exc
 
 
 def _effective_reply(

@@ -5,6 +5,7 @@ import sqlite3
 from datetime import datetime
 from typing import Any
 
+from ..time_utils import parse_instant_or_none
 from ..types import ActionStatus, ApprovalStatus, TaskStatus
 
 _CORE_TABLES = frozenset(
@@ -356,15 +357,7 @@ def _loads_json_list(value: Any) -> list[Any]:
 
 
 def _parse_datetime_or_none(value: Any) -> datetime | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.astimezone()
-    return parsed.astimezone()
+    return parse_instant_or_none(value)
 
 
 def _has_core_schema(conn: sqlite3.Connection) -> bool:

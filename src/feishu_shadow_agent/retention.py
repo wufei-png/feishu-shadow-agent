@@ -9,6 +9,7 @@ from typing import Any
 from .config import AppConfig
 from .jsonl import JSONLLogger
 from .store.sqlite_store import SQLiteStore
+from .time_utils import format_instant, parse_instant, utc_now
 
 RAW_JSON_PRUNED_PLACEHOLDER = json.dumps({"retention_pruned": True}, sort_keys=True)
 RETENTION_CHECKPOINT_KEY = "retention.last_pruned_at"
@@ -90,7 +91,7 @@ class RetentionService:
         dry_run: bool = False,
         now: datetime | None = None,
     ) -> RetentionSummary:
-        now = now or datetime.now().astimezone()
+        now = _aware_utc(now or utc_now())
         raw_cutoff = _cutoff_iso(now, self.config.retention.raw_message_days)
         resource_cutoff = _cutoff_iso(now, self.config.retention.resource_days)
         feedback_content_cutoff = _cutoff_iso(
@@ -151,7 +152,7 @@ class RetentionService:
             ) = self.store.prune_approval_feedback(
                 content_cutoff=feedback_content_cutoff,
                 metadata_cutoff=feedback_metadata_cutoff,
-                expired_at=now.isoformat(timespec="seconds"),
+                expired_at=format_instant(now),
             )
 
         summary = RetentionSummary(
@@ -204,13 +205,11 @@ def daemon_retention_is_due(store: SQLiteStore, *, now: datetime | None = None) 
     checkpoint = store.get_checkpoint(RETENTION_CHECKPOINT_KEY)
     if not checkpoint or not isinstance(checkpoint.get("last_pruned_at"), str):
         return True
-    now = now or datetime.now().astimezone()
+    now = _aware_utc(now or utc_now())
     try:
-        last_pruned = datetime.fromisoformat(checkpoint["last_pruned_at"])
+        last_pruned = parse_instant(checkpoint["last_pruned_at"])
     except ValueError:
         return True
-    if last_pruned.tzinfo is None:
-        last_pruned = last_pruned.astimezone()
     return now - last_pruned >= timedelta(seconds=RETENTION_DAEMON_INTERVAL_SECONDS)
 
 
@@ -220,18 +219,22 @@ def record_daemon_retention_checkpoint(
     summary: RetentionSummary,
     now: datetime | None = None,
 ) -> None:
-    now = now or datetime.now().astimezone()
+    now = _aware_utc(now or utc_now())
     store.set_checkpoint(
         RETENTION_CHECKPOINT_KEY,
         {
-            "last_pruned_at": now.isoformat(timespec="seconds"),
+            "last_pruned_at": format_instant(now),
             "summary": summary.as_dict(),
         },
     )
 
 
 def _cutoff_iso(now: datetime, days: int) -> str:
-    return (now - timedelta(days=days)).isoformat(timespec="seconds")
+    return format_instant(now - timedelta(days=days))
+
+
+def _aware_utc(value: datetime) -> datetime:
+    return parse_instant(format_instant(value))
 
 
 def _skipped(row: Any, reason: str) -> RetentionSkippedResource:

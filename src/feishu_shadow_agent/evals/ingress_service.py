@@ -12,6 +12,7 @@ from ..agent_backend import AgentBackend
 from ..config import LoadedConfig
 from ..feishu.lark_cli import LarkCliClient
 from ..paths import resolve_relative_path
+from ..time_utils import format_instant, parse_instant, utc_now, utc_now_iso
 from .artifacts import (
     EvalError,
     copy_config_or_raise,
@@ -89,7 +90,7 @@ class IngressEvalService:
             active_tasks = _active_task_fixtures(
                 loaded=self.loaded,
                 chat_id=chat_id,
-                now=datetime.now().astimezone().isoformat(),
+                now=utc_now_iso(),
             )
             scenario = IngressScenario.model_validate(
                 {"acquisition": {"active_tasks": active_tasks}}
@@ -395,7 +396,7 @@ def _active_task_fixtures(
             FROM tasks t
             JOIN task_watch_keys wk ON wk.task_id = t.id
             WHERE t.status = 'watching'
-              AND (t.watch_until IS NULL OR t.watch_until > ?)
+              AND (t.watch_until IS NULL OR julianday(t.watch_until) > julianday(?))
               AND t.chat_id = ?
             ORDER BY t.id, wk.key
             """,
@@ -439,19 +440,16 @@ def _window(
         return start, end
     if lookback_days is None or lookback_days < 1:
         raise EvalError("live run-ingress requires --lookback-days or --start/--end")
-    end_dt = datetime.now().astimezone()
+    end_dt = utc_now()
     start_dt = end_dt - timedelta(days=lookback_days)
-    return start_dt.isoformat(), end_dt.isoformat()
+    return format_instant(start_dt), format_instant(end_dt)
 
 
 def _aware_datetime(value: str) -> datetime:
     try:
-        parsed = datetime.fromisoformat(value)
+        return parse_instant(value)
     except ValueError as exc:
         raise EvalError(f"invalid datetime: {value}") from exc
-    if parsed.utcoffset() is None:
-        raise EvalError(f"datetime must include timezone: {value}")
-    return parsed
 
 
 def _raw_chat_id(raw: dict[str, Any]) -> str | None:

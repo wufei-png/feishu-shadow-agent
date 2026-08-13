@@ -862,7 +862,7 @@ def test_group_auto_reply_disabled_downgrades_to_approval(tmp_path: Path) -> Non
         "chat_type": "group",
         "sender_name": "Ext",
         "sender_id": "ou_ext",
-        "sent_at": "2026-06-22T10:00:00+08:00",
+        "sent_at": "2026-06-22T02:00:00+00:00",
     }
     assert notify_payload["incoming_message"] == {"message_id": "om_1", "text": "hello"}
     assert (
@@ -3002,7 +3002,7 @@ def test_approval_inbox_approves_pending_request_and_advances_checkpoint(
     assert result.processed == 1
     assert fake.calls == ["p2p:ou_bot:None"]
     assert store.get_checkpoint("approval_inbox") == {
-        "last_success_at": "2026-06-22T10:10:00+08:00"
+        "last_success_at": "2026-06-22T02:10:00+00:00"
     }
     with store.connect() as conn:
         approval = conn.execute(
