@@ -38,7 +38,7 @@ def _insert_task(
     chat_type: str = "group",
     root_message_id: str = "om_root",
 ) -> int:
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         cursor = conn.execute(
             """
@@ -64,7 +64,7 @@ def _insert_task(
 def _insert_message(
     store: SQLiteStore, *, task_id: int, message_id: str = "om_root"
 ) -> None:
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         conn.execute(
             """
@@ -99,7 +99,7 @@ def _insert_approval(
     expires_at: str = "2999-01-01T00:00:00+00:00",
     payload: dict[str, object] | None = None,
 ) -> int:
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         cursor = conn.execute(
             """
@@ -910,7 +910,7 @@ def test_health_issues_reports_store_availability_without_migrating(
     unreadable = OperatorQueryService(SQLiteStore(directory_db)).health_issues()
 
     bad_schema_store = _store(tmp_path / "bad_schema")
-    bad_schema_store.migrate()
+    bad_schema_store.initialize()
     with bad_schema_store.connect() as conn:
         conn.execute("ALTER TABLE product_policies DROP COLUMN updated_at")
     schema_incompatible = OperatorQueryService(bad_schema_store).health_issues()
@@ -928,7 +928,7 @@ def test_health_issues_summary_count_is_not_truncated_by_list_limit(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
-    store.migrate()
+    store.initialize()
     task_id = _insert_task(store)
     for target_message_id in ("om_failed_1", "om_failed_2"):
         action_id = store.create_send_reply_action(
@@ -952,7 +952,7 @@ def test_health_issues_summary_count_is_not_truncated_by_list_limit(
 
 def test_health_issues_only_counts_latest_health_check_status(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         conn.execute(
             """
@@ -997,7 +997,7 @@ def test_health_issues_only_counts_latest_health_check_status(tmp_path: Path) ->
 
 def test_health_issues_redacts_failed_approval_command_body(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         conn.execute(
             """

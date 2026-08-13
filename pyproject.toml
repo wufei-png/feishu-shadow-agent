@@ -33,7 +33,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "feishu_shadow_agent" = ["console_static/*", "console_static/assets/*"]
-"feishu_shadow_agent.store" = ["migrations/*.sql"]
+"feishu_shadow_agent.store" = ["schema.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

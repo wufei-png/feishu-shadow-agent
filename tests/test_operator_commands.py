@@ -23,7 +23,7 @@ def _store(tmp_path: Path) -> SQLiteStore:
 
 
 def _insert_task(store: SQLiteStore, short_id: str, root_message_id: str) -> int:
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         cursor = conn.execute(
             """

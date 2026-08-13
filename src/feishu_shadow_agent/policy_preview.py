@@ -317,7 +317,7 @@ def _effective_changes(
 
 
 def _chat_policy_count(store: SQLiteStore) -> int:
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         row = conn.execute("SELECT COUNT(*) AS count FROM chat_policies").fetchone()
     if row is None:

@@ -25,7 +25,7 @@ def _config(
 
 def test_product_policy_probe_reports_missing_then_initialized(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    store.migrate()
+    store.initialize()
 
     assert store.product_policy_initialization_probe() == {
         "initialized": False,

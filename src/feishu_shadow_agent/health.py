@@ -363,7 +363,7 @@ class HealthSuite:
 
     def _check_sqlite_writable(self) -> HealthCheckResult:
         try:
-            self.store.migrate()
+            self.store.initialize()
             self.store.health_probe()
         except Exception as exc:  # pragma: no cover - platform-specific detail
             return HealthCheckResult(

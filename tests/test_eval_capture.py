@@ -318,7 +318,7 @@ def test_capture_reads_minimal_task_fixture_from_production_store(
     first = _message("om_1", minute=1, direct=True)
     target = _message("om_2", minute=2, direct=True)
     store = SQLiteStore(tmp_path / "data/test.sqlite3")
-    store.migrate()
+    store.initialize()
     normalized = MessageNormalizer(owner_open_id="ou_owner").normalize(first)
     store.upsert_message(normalized)
     store.create_task_for_message(

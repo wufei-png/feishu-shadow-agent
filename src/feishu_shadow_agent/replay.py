@@ -33,7 +33,7 @@ def replay_message_dry_run(
         if store.path.exists():
             shutil.copy2(store.path, temp_db)
         temp_store = SQLiteStore(temp_db)
-        temp_store.migrate()
+        temp_store.initialize()
         summary = temp_store.replay_summary(message_id)
         if summary is None:
             return None

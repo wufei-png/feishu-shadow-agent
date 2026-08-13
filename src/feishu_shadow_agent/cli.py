@@ -480,7 +480,7 @@ def _handle_console(args: argparse.Namespace) -> int:
         loaded.config.storage.sqlite_path, loaded.base_dir
     )
     store = SQLiteStore(sqlite_path)
-    store.migrate()
+    store.initialize()
     token = generate_console_token()
     app = create_console_app(
         loaded_config=loaded,
@@ -529,7 +529,7 @@ def _handle_status(args: argparse.Namespace) -> int:
     )
     store = SQLiteStore(sqlite_path)
     if sqlite_path.exists():
-        store.migrate()
+        store.initialize()
     snapshot = OperatorQueryService(
         store, policy_import_source=loaded.config
     ).dashboard_snapshot()

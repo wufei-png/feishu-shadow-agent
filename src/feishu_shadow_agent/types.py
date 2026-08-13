@@ -12,7 +12,7 @@ HealthStatus = Literal["ok", "warning", "failed"]
 SenderRole = Literal[
     "external_user_message", "owner_message", "bot_message", "agent_message"
 ]
-ExecutionMode: TypeAlias = Literal["dry_run", "production", "legacy_untrusted"]
+ExecutionMode: TypeAlias = Literal["dry_run", "production"]
 ApprovalOutcome: TypeAlias = Literal[
     "suggestion_sent",
     "edited_sent",

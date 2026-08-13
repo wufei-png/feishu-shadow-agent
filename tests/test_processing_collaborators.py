@@ -111,7 +111,7 @@ def test_context_access_builder_preserves_router_and_task_scope_cards(
     tmp_path: Path,
 ) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    store.migrate()
+    store.initialize()
     builder = ContextAccessBuilder(store=store, config=_config())
     active_task = _task(task_id=1, short_id="t_active")
     historical_task = _task(task_id=2, short_id="t_history")

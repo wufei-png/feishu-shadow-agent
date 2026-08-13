@@ -20,7 +20,7 @@ from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 
 def _store_with_approval(tmp_path: Path) -> tuple[SQLiteStore, str]:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         task_id = int(
             conn.execute(

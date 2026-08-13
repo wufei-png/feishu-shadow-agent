@@ -79,7 +79,7 @@ def _dispatcher(
 
 
 def _insert_task(store: SQLiteStore) -> int:
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         cursor = conn.execute(
             """

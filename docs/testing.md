@@ -50,7 +50,7 @@ python -m pytest -q tests/test_config.py tests/test_lark_cli.py
 python -m pytest -q tests/test_card_actions.py
 python -m pytest -q tests/test_p2_ingestion_routing.py tests/test_p3_hermes_approval.py
 python -m pytest -q tests/test_daemon.py tests/test_dispatcher.py tests/test_cli.py
-python -m pytest -q tests/test_store_migrations.py tests/test_retention.py
+python -m pytest -q tests/test_store_schema.py tests/test_retention.py
 python -m pytest -q tests/test_product_policy_store.py
 python -m pytest -q tests/test_policy_runtime.py
 python -m pytest -q tests/test_operator_query.py tests/test_operator_commands.py
@@ -119,7 +119,7 @@ git diff --check
 - `tests/test_card_actions.py`：四种审批操作的 Card JSON、approval 绑定、owner 校验、event-id 幂等、原子 command/feedback、daemon wake-up、连接健康与文本兜底。
 - `tests/test_daemon.py`：tick 顺序、heartbeat、运行中 health fail-closed、approval inbox 失败保护、dispatch 行为。
 - `tests/test_dispatcher.py`：dry-run、真实发送、dispatch attempt、读回验证、stale sending 恢复。
-- `tests/test_store_migrations.py`：SQLite migration、busy timeout、约束、状态 enum 契约、幂等动作。
+- `tests/test_store_schema.py`：SQLite current schema bootstrap、busy timeout、约束、状态 enum 契约、幂等动作；项目不升级或兼容旧 schema。
 - `tests/test_product_policy_store.py`：Product Policy Store 初始化探针、config import/replace、chat policy skip、audit old/new。
 - `tests/test_policy_runtime.py`：runtime resolver 从 Product Policy Store 读取、缺失全局策略 fail closed、DB policy 覆盖 YAML import source。
 - `tests/test_operator_query.py`：OperatorQueryService 只读 dashboard/detail DTO、overdue 派生、effective policy、Policy Import Diff 和 audit history。

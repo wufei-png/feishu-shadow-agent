@@ -5,7 +5,6 @@ import sqlite3
 from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta
 from hashlib import sha256
-from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -72,35 +71,11 @@ class SQLiteStore:
         conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
         return conn
 
-    def migrate(self) -> None:
+    def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
-            migration_dir = resources.files("feishu_shadow_agent.store").joinpath(
-                "migrations"
-            )
-            for migration in sorted(
-                path for path in migration_dir.iterdir() if path.name.endswith(".sql")
-            ):
-                version = migration.name.removesuffix(".sql")
-                if self._migration_applied(conn, version):
-                    continue
-                conn.executescript(migration.read_text(encoding="utf-8"))
-                conn.execute(
-                    "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                    (version, self.clock()),
-                )
-
-    def _migration_applied(self, conn: sqlite3.Connection, version: str) -> bool:
-        table = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
-        ).fetchone()
-        if table is None:
-            return False
-        row = conn.execute(
-            "SELECT 1 FROM schema_migrations WHERE version = ?",
-            (version,),
-        ).fetchone()
-        return row is not None
+            schema = Path(__file__).with_name("schema.sql")
+            conn.executescript(schema.read_text(encoding="utf-8"))
 
     def health_probe(self) -> None:
         with self.connect() as conn:
@@ -109,7 +84,7 @@ class SQLiteStore:
     def get_product_policy(
         self, key: str = PRODUCT_POLICY_KEY
     ) -> dict[str, Any] | None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT policy_json FROM product_policies WHERE key = ?",
@@ -118,7 +93,7 @@ class SQLiteStore:
         return None if row is None else json.loads(row["policy_json"])
 
     def get_chat_product_policy(self, chat_id: str) -> dict[str, Any] | None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             row = conn.execute(
                 """
@@ -132,7 +107,7 @@ class SQLiteStore:
         return None if row is None else _chat_policy_from_row(row)
 
     def product_policy_initialization_probe(self) -> dict[str, Any]:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT 1 FROM product_policies WHERE key = ?",
@@ -145,7 +120,7 @@ class SQLiteStore:
         }
 
     def list_policy_audits(self, *, limit: int = 20) -> list[dict[str, Any]]:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             rows = conn.execute(
                 """
@@ -167,7 +142,7 @@ class SQLiteStore:
         actor: str = "import_config",
         reason: str | None = None,
     ) -> dict[str, Any]:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         audit_reason = reason or (
             "policy import-config --replace" if replace else "policy import-config"
@@ -284,7 +259,7 @@ class SQLiteStore:
         actor: str,
         reason: str | None = None,
     ) -> dict[str, Any]:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         new_policy = _normalize_global_product_policy(policy)
         with self.connect() as conn:
@@ -347,7 +322,7 @@ class SQLiteStore:
         actor: str,
         reason: str | None = None,
     ) -> dict[str, Any]:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         new_policy = _normalize_chat_product_policy(policy)
         chat_id = str(new_policy["chat_id"])
@@ -401,7 +376,7 @@ class SQLiteStore:
         actor: str,
         reason: str | None = None,
     ) -> dict[str, Any]:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         normalized_chat_id = chat_id.strip()
         with self.connect() as conn:
@@ -455,7 +430,7 @@ class SQLiteStore:
         git_commit: str | None = None,
         git_dirty: bool | None = None,
     ) -> None:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         with self.connect() as conn:
             conn.execute(
@@ -483,7 +458,7 @@ class SQLiteStore:
         status: str,
         health_summary: dict[str, Any] | None = None,
     ) -> None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             conn.execute(
                 """
@@ -500,7 +475,7 @@ class SQLiteStore:
             )
 
     def record_run_tick_started(self, *, run_id: str, dry_run: bool) -> None:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         with self.connect() as conn:
             conn.execute(
@@ -537,7 +512,7 @@ class SQLiteStore:
         run_id: str,
         summary: dict[str, Any],
     ) -> None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             conn.execute(
                 """
@@ -560,7 +535,7 @@ class SQLiteStore:
         status: str,
         summary: dict[str, Any],
     ) -> None:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         with self.connect() as conn:
             conn.execute(
@@ -587,7 +562,7 @@ class SQLiteStore:
         run_id: str | None,
         results: Iterable[HealthCheckResult],
     ) -> None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             if run_id is not None:
                 conn.execute(
@@ -618,7 +593,7 @@ class SQLiteStore:
             )
 
     def latest_health_check_status(self, check_name: str) -> str | None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             row = conn.execute(
                 """
@@ -633,7 +608,7 @@ class SQLiteStore:
         return str(row["status"]) if row is not None else None
 
     def set_checkpoint(self, key: str, value: dict[str, Any]) -> None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             conn.execute(
                 """
@@ -651,7 +626,7 @@ class SQLiteStore:
             )
 
     def get_checkpoint(self, key: str) -> dict[str, Any] | None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT value_json FROM checkpoints WHERE key = ?",
@@ -662,13 +637,13 @@ class SQLiteStore:
         return json.loads(row["value_json"])
 
     def upsert_message(self, message: NormalizedMessage) -> bool:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         with self.connect() as conn:
             return self._upsert_message_locked(conn, message, now=now)
 
     def get_message(self, message_id: str) -> sqlite3.Row | None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             return conn.execute(
                 "SELECT * FROM messages WHERE message_id = ?",
@@ -676,7 +651,7 @@ class SQLiteStore:
             ).fetchone()
 
     def get_messages_by_ids(self, message_ids: Iterable[str]) -> list[sqlite3.Row]:
-        self.migrate()
+        self.initialize()
         ids = list(dict.fromkeys(message_ids))
         if not ids:
             return []
@@ -690,7 +665,7 @@ class SQLiteStore:
         return [by_id[message_id] for message_id in ids if message_id in by_id]
 
     def message_has_routing_audit(self, message_id: str) -> bool:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT 1 FROM routing_audits WHERE message_id = ? LIMIT 1",
@@ -702,7 +677,7 @@ class SQLiteStore:
         self,
         message_id: str,
     ) -> tuple[RouteDecision, TaskRecord | None] | None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             row = conn.execute(
                 """
@@ -738,7 +713,7 @@ class SQLiteStore:
         return decision, task
 
     def message_processing_is_final(self, message_id: str, *, stage: str) -> bool:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             row = conn.execute(
                 """
@@ -764,7 +739,7 @@ class SQLiteStore:
         last_error: str | None = None,
         terminal_reason: str | None = None,
     ) -> None:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         with self.connect() as conn:
             conn.execute(
@@ -803,7 +778,7 @@ class SQLiteStore:
         sha256_hex: str | None = None,
         raw: dict[str, Any] | None = None,
     ) -> None:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         payload = resource.raw | (raw or {})
         with self.connect() as conn:
@@ -836,7 +811,7 @@ class SQLiteStore:
     def count_prunable_message_raw_json(
         self, *, cutoff: str, replacement_json: str
     ) -> int:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             row = conn.execute(
                 """
@@ -850,7 +825,7 @@ class SQLiteStore:
         return int(row["count"])
 
     def prune_message_raw_json(self, *, cutoff: str, replacement_json: str) -> int:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             cursor = conn.execute(
                 """
@@ -864,7 +839,7 @@ class SQLiteStore:
         return int(cursor.rowcount)
 
     def list_prunable_resources(self, *, cutoff: str) -> list[sqlite3.Row]:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             return conn.execute(
                 """
@@ -894,7 +869,7 @@ class SQLiteStore:
             ).fetchall()
 
     def mark_resources_expired(self, resource_ids: Iterable[int]) -> int:
-        self.migrate()
+        self.initialize()
         ids = list(dict.fromkeys(int(resource_id) for resource_id in resource_ids))
         if not ids:
             return 0
@@ -918,7 +893,7 @@ class SQLiteStore:
         content_cutoff: str,
         metadata_cutoff: str | None,
     ) -> dict[str, int]:
-        self.migrate()
+        self.initialize()
         content_query = """
             SELECT COUNT(*) AS count
             FROM approval_feedback
@@ -951,7 +926,7 @@ class SQLiteStore:
         metadata_cutoff: str | None,
         expired_at: str,
     ) -> tuple[int, int]:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             metadata_deleted = 0
             if metadata_cutoff is not None:
@@ -985,7 +960,7 @@ class SQLiteStore:
         task_label: str | None = None,
         agent_working_dir: str | None = None,
     ) -> TaskRecord:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         with self.connect() as conn:
             task_id = self._create_task_for_message(
@@ -1009,7 +984,7 @@ class SQLiteStore:
         matched_by: str = "new_trigger",
         agent_working_dir: str | None = None,
     ) -> tuple[TaskRecord, RouteDecision]:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         with self.connect() as conn:
             task_id = self._create_task_for_message(
@@ -1039,7 +1014,7 @@ class SQLiteStore:
     def attach_message_to_task(
         self, task_id: int, message: NormalizedMessage, *, watch_until: str
     ) -> None:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         with self.connect() as conn:
             self._attach_message_to_task(
@@ -1056,7 +1031,7 @@ class SQLiteStore:
         matched_by: str,
         reason: str = "deterministic_shortcut",
     ) -> RouteDecision:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         decision = RouteDecision(
             "attach_task",
@@ -1077,7 +1052,7 @@ class SQLiteStore:
         return decision
 
     def close_task_for_owner_takeover(self, task_id: int) -> None:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         with self.connect() as conn:
             self._close_task_for_owner_takeover(conn, task_id, now=now)
@@ -1091,7 +1066,7 @@ class SQLiteStore:
         execution_mode: ExecutionMode = "production",
     ) -> int | None:
         """End automated ownership and atomically queue the manual handoff."""
-        self.migrate()
+        self.initialize()
         now = self.clock()
         with self.connect() as conn:
             task = conn.execute(
@@ -1159,7 +1134,7 @@ class SQLiteStore:
             )
 
     def close_task_by_operator(self, task_id: int | str) -> dict[str, Any]:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         with self.connect() as conn:
             task = self._get_task_by_lookup(conn, task_id)
@@ -1188,7 +1163,7 @@ class SQLiteStore:
     def reopen_task_by_operator(
         self, task_id: int | str, *, watch_until: str
     ) -> dict[str, Any]:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         with self.connect() as conn:
             task = self._get_task_by_lookup(conn, task_id)
@@ -1220,7 +1195,7 @@ class SQLiteStore:
         task: TaskRecord,
         message: NormalizedMessage,
     ) -> RouteDecision:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         decision = RouteDecision(
             "human_taken_over",
@@ -1238,12 +1213,12 @@ class SQLiteStore:
         return decision
 
     def get_task_by_id(self, task_id: int) -> TaskRecord:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             return self._get_task_by_id(conn, task_id)
 
     def get_task_by_short_id(self, short_id: str) -> TaskRecord | None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT * FROM tasks WHERE short_id = ?",
@@ -1252,7 +1227,7 @@ class SQLiteStore:
         return None if row is None else _task_from_row(row)
 
     def get_active_tasks_for_chat(self, chat_id: str, *, now: str) -> list[TaskRecord]:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             rows = conn.execute(
                 """
@@ -1273,7 +1248,7 @@ class SQLiteStore:
         *,
         now: str,
     ) -> list[TaskRecord]:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             rows = conn.execute(
                 """
@@ -1297,7 +1272,7 @@ class SQLiteStore:
         *,
         exclude_message_id: str | None = None,
     ) -> str | None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             rows = conn.execute(
                 """
@@ -1326,7 +1301,7 @@ class SQLiteStore:
     def get_recent_closed_tasks(
         self, chat_id: str, *, limit: int = 20
     ) -> list[TaskRecord]:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             rows = conn.execute(
                 """
@@ -1425,7 +1400,7 @@ class SQLiteStore:
         return [_task_from_row(row) for row in rows]
 
     def find_task_ids_for_message(self, message_id: str) -> list[int]:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             rows = conn.execute(
                 "SELECT task_id FROM task_messages WHERE message_id = ? ORDER BY task_id",
@@ -1434,7 +1409,7 @@ class SQLiteStore:
         return [int(row["task_id"]) for row in rows]
 
     def find_task_for_sent_action_message(self, message_id: str) -> TaskRecord | None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             rows = conn.execute(
                 """
@@ -1463,7 +1438,7 @@ class SQLiteStore:
         *,
         watch_until: str,
     ) -> None:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         with self.connect() as conn:
             self._record_agent_message_for_task(
@@ -1477,7 +1452,7 @@ class SQLiteStore:
         *,
         watch_until: str,
     ) -> RouteDecision:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         decision = RouteDecision(
             "ignore",
@@ -1500,7 +1475,7 @@ class SQLiteStore:
         return decision
 
     def list_active_watch_targets(self, *, now: str) -> list[dict[str, str | None]]:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             rows = conn.execute(
                 """
@@ -1544,12 +1519,12 @@ class SQLiteStore:
         ]
 
     def record_routing_audit(self, *, message_id: str, decision: RouteDecision) -> None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             self._record_routing_audit(conn, message_id=message_id, decision=decision)
 
     def add_task_watch_keys(self, task_id: int, keys: Iterable[str]) -> None:
-        self.migrate()
+        self.initialize()
         unique_keys = sorted(set(keys))
         if not unique_keys:
             return
@@ -1557,7 +1532,7 @@ class SQLiteStore:
             self._add_watch_keys(conn, task_id, unique_keys, self.clock())
 
     def has_resource_eligible_routing_audit(self, message_id: str) -> bool:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             row = conn.execute(
                 """
@@ -1571,7 +1546,7 @@ class SQLiteStore:
         return row is not None
 
     def has_missing_resources(self, resources: Iterable[ResourceRef]) -> bool:
-        self.migrate()
+        self.initialize()
         refs = list(resources)
         if not refs:
             return False
@@ -1590,7 +1565,7 @@ class SQLiteStore:
         return False
 
     def count_pending_actions(self) -> int:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT COUNT(*) AS count FROM actions WHERE status IN ('pending', 'sending')"
@@ -1600,7 +1575,7 @@ class SQLiteStore:
     def list_dispatchable_actions(
         self, *, limit: int = 50, kind: str | None = None
     ) -> list[ActionRecord]:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             if kind is None:
                 rows = conn.execute(
@@ -1631,7 +1606,7 @@ class SQLiteStore:
         return [_action_from_row(row) for row in rows]
 
     def get_action(self, action_id: int) -> ActionRecord | None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT * FROM actions WHERE id = ?", (action_id,)
@@ -1641,7 +1616,7 @@ class SQLiteStore:
     def claim_action_for_dispatch(
         self, action_id: int, *, run_id: str | None = None
     ) -> DispatchClaim | None:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         claim_token = new_run_id("claim")
         with self.connect() as conn:
@@ -1682,7 +1657,7 @@ class SQLiteStore:
         )
 
     def list_dispatch_attempts(self, action_id: int) -> list[DispatchAttemptRecord]:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             rows = conn.execute(
                 """
@@ -1707,7 +1682,7 @@ class SQLiteStore:
         error_stage: str | None = None,
         finish: bool = False,
     ) -> DispatchAttemptRecord:
-        self.migrate()
+        self.initialize()
         assignments = ["status = ?"]
         params: list[Any] = [status]
         if dry_run_result is not None:
@@ -1746,7 +1721,7 @@ class SQLiteStore:
         return _dispatch_attempt_from_row(row)
 
     def get_dispatch_inspection(self, action_id: int) -> dict[str, Any] | None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             action = conn.execute(
                 "SELECT * FROM actions WHERE id = ?", (action_id,)
@@ -1773,7 +1748,7 @@ class SQLiteStore:
     def find_stale_sending_actions(
         self, *, stale_after_seconds: int = 900, now: str | None = None
     ) -> list[ActionRecord]:
-        self.migrate()
+        self.initialize()
         cutoff = _minus_seconds(now or self.clock(), stale_after_seconds)
         with self.connect() as conn:
             rows = conn.execute(
@@ -1794,7 +1769,7 @@ class SQLiteStore:
         stale_after_seconds: int = 900,
         now: str | None = None,
     ) -> list[dict[str, Any]]:
-        self.migrate()
+        self.initialize()
         effective_now = now or self.clock()
         cutoff = _minus_seconds(effective_now, stale_after_seconds)
         recovered: list[dict[str, Any]] = []
@@ -1890,7 +1865,7 @@ class SQLiteStore:
         return recovered
 
     def retry_dispatch_action(self, action_id: int) -> ActionRecord:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         with self.connect() as conn:
             row = conn.execute(
@@ -1936,7 +1911,7 @@ class SQLiteStore:
         return _action_from_row(updated)
 
     def cancel_dispatch_action(self, action_id: int) -> ActionRecord:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         with self.connect() as conn:
             row = conn.execute(
@@ -1972,7 +1947,7 @@ class SQLiteStore:
         readback_message: NormalizedMessage | None = None,
         watch_until: str | None = None,
     ) -> ActionRecord:
-        self.migrate()
+        self.initialize()
         if not sent_message_id:
             raise ValueError("sent_message_id is required")
         readback = result.get("readback")
@@ -2065,7 +2040,7 @@ class SQLiteStore:
         return _action_from_row(updated)
 
     def record_action_preview(self, action_id: int, result: dict[str, Any]) -> None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             conn.execute(
                 """
@@ -2087,7 +2062,7 @@ class SQLiteStore:
         status: str,
         result: dict[str, Any],
     ) -> None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             conn.execute(
                 """
@@ -2111,7 +2086,7 @@ class SQLiteStore:
         status: str,
         result: dict[str, Any],
     ) -> ActionRecord | None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             latest = _latest_dispatch_attempt_locked(conn, action_id=action_id)
             if latest is None or int(latest["id"]) != attempt_id:
@@ -2137,7 +2112,7 @@ class SQLiteStore:
         return None if row is None else _action_from_row(row)
 
     def expire_pending_approvals(self, *, now: str | None = None) -> int:
-        self.migrate()
+        self.initialize()
         effective_now = now or self.clock()
         with self.connect() as conn:
             return self._expire_pending_approvals_locked(conn, now=effective_now)
@@ -2145,7 +2120,7 @@ class SQLiteStore:
     def replay_summary(
         self, message_id: str, *, now: str | None = None
     ) -> dict[str, Any] | None:
-        self.migrate()
+        self.initialize()
         effective_now = now or self.clock()
         with self.connect() as conn:
             message = conn.execute(
@@ -2209,7 +2184,7 @@ class SQLiteStore:
         }
 
     def list_task_message_ids(self, task_id: int) -> list[str]:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             rows = conn.execute(
                 """
@@ -2229,7 +2204,7 @@ class SQLiteStore:
         ids = list(dict.fromkeys(int(task_id) for task_id in task_ids))
         if not ids:
             return {}
-        self.migrate()
+        self.initialize()
         placeholders = ",".join("?" for _ in ids)
         with self.connect() as conn:
             rows = conn.execute(
@@ -2251,7 +2226,7 @@ class SQLiteStore:
         if not ids:
             return {}
         limit = max(0, int(messages_per_task))
-        self.migrate()
+        self.initialize()
         contexts: dict[int, dict[str, Any]] = {}
         with self.connect() as conn:
             for task_id in ids:
@@ -2294,7 +2269,7 @@ class SQLiteStore:
     def list_resources_for_messages(
         self, message_ids: Iterable[str]
     ) -> list[sqlite3.Row]:
-        self.migrate()
+        self.initialize()
         ids = list(dict.fromkeys(message_ids))
         if not ids:
             return []
@@ -2313,7 +2288,7 @@ class SQLiteStore:
     def get_initialized_agent_session_id(
         self, task_id: int, *, backend_provider: str
     ) -> str | None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT agent_session_id, agent_session_provider FROM tasks WHERE id = ?",
@@ -2331,7 +2306,7 @@ class SQLiteStore:
     def set_task_agent_session_id(
         self, task_id: int, session_id: str, *, backend_provider: str
     ) -> None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             conn.execute(
                 """
@@ -2350,7 +2325,7 @@ class SQLiteStore:
         status: str | None = None,
         watch_until: str | None = None,
     ) -> None:
-        self.migrate()
+        self.initialize()
         assignments = ["updated_at = ?"]
         params: list[Any] = [self.clock()]
         if task_label is not None:
@@ -2389,7 +2364,7 @@ class SQLiteStore:
         prompt: dict[str, Any] | None = None,
         tool_permissions_profile: str | None = None,
     ) -> None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             conn.execute(
                 """
@@ -2432,7 +2407,7 @@ class SQLiteStore:
         approval_id: int | None = None,
         execution_mode: ExecutionMode = "production",
     ) -> int | None:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         with self.connect() as conn:
             return self._create_send_reply_action_locked(
@@ -2452,7 +2427,7 @@ class SQLiteStore:
         payload: dict[str, Any],
         execution_mode: ExecutionMode = "production",
     ) -> int:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         with self.connect() as conn:
             return self._create_owner_notification_action_locked(
@@ -2473,7 +2448,7 @@ class SQLiteStore:
         approval_timeout_hours: int | None = 24,
         execution_mode: ExecutionMode = "production",
     ) -> int:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         expires_at = (
             None
@@ -2531,7 +2506,7 @@ class SQLiteStore:
         execution_mode: ExecutionMode = "production",
         requested_outcome: ApprovalOutcome | None = None,
     ) -> dict[str, Any]:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         with self.connect() as conn:
             keep_watching_reject_task_id = self._keep_watching_reject_task_id_locked(
@@ -3496,7 +3471,7 @@ class SQLiteStore:
         status: str = "pending",
         result: dict[str, Any] | None = None,
     ) -> None:
-        self.migrate()
+        self.initialize()
         now = self.clock()
         with self.connect() as conn:
             conn.execute(
@@ -3526,7 +3501,7 @@ class SQLiteStore:
         kind: str = "send_reply",
         status: str = "pending",
     ) -> None:
-        self.migrate()
+        self.initialize()
         with self.connect() as conn:
             conn.execute(
                 """

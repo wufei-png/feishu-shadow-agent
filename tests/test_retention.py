@@ -245,7 +245,7 @@ def test_daemon_retention_checkpoint_runs_at_most_daily(tmp_path: Path) -> None:
 def _insert_message(
     store: SQLiteStore, message_id: str, inserted_at: str, *, raw: dict[str, object]
 ) -> None:
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         conn.execute(
             """
@@ -268,7 +268,7 @@ def _insert_message(
 def _insert_resource(
     store: SQLiteStore, message_id: str, file_key: str, path: str
 ) -> None:
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         conn.execute(
             """
@@ -293,7 +293,7 @@ def _insert_resource(
 def _insert_task(
     store: SQLiteStore, short_id: str, status: str, root_message_id: str
 ) -> int:
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         cursor = conn.execute(
             """
@@ -315,7 +315,7 @@ def _insert_task(
 
 
 def _insert_pending_approval(store: SQLiteStore, task_id: int) -> None:
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         conn.execute(
             """

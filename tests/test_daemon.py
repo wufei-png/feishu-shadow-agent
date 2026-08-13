@@ -574,7 +574,7 @@ def test_runtime_critical_health_failure_blocks_ingestion_and_all_sends(
 
 def test_dashboard_snapshot_flags_stale_running_daemon(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         conn.execute(
             """
@@ -609,7 +609,7 @@ def test_dashboard_snapshot_daemon_liveness_ignores_newer_doctor_run(
     tmp_path: Path,
 ) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         conn.execute(
             """
@@ -1223,7 +1223,7 @@ def test_dispatch_failure_is_reflected_in_tick_heartbeat_summary(
 
 
 def _insert_task(store: SQLiteStore) -> int:
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         cursor = conn.execute(
             """

@@ -10,7 +10,6 @@ from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import HealthCheckResult, StateSchemaContract
 
 EXPECTED_TABLES = {
-    "schema_migrations",
     "messages",
     "tasks",
     "task_messages",
@@ -34,22 +33,25 @@ EXPECTED_TABLES = {
 }
 
 
-def test_migration_is_idempotent_and_creates_tables(tmp_path: Path) -> None:
+def test_schema_initialize_is_idempotent_and_creates_current_tables(
+    tmp_path: Path,
+) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
 
-    store.migrate()
-    store.migrate()
+    store.initialize()
+    store.initialize()
 
     with store.connect() as conn:
         rows = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'"
         ).fetchall()
     assert EXPECTED_TABLES <= {row["name"] for row in rows}
+    assert "schema_migrations" not in {row["name"] for row in rows}
 
 
 def test_unique_constraints_are_enforced(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    store.migrate()
+    store.initialize()
 
     with store.connect() as conn:
         conn.execute(
@@ -117,7 +119,7 @@ def test_checkpoint_and_run_health_roundtrip(tmp_path: Path) -> None:
 
 def test_baseline_schema_includes_current_columns(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    store.migrate()
+    store.initialize()
 
     with store.connect() as conn:
         message_columns = {
@@ -242,159 +244,32 @@ def test_baseline_schema_includes_current_columns(tmp_path: Path) -> None:
     assert "idx_policy_audits_policy" in indexes
 
 
-def test_migration_relaxes_legacy_policy_audit_new_json_for_delete(
+def test_initialize_does_not_upgrade_an_incompatible_existing_table(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "agent.sqlite3"
     with sqlite3.connect(db_path) as conn:
-        conn.executescript(
-            """
-            CREATE TABLE schema_migrations (
-              version TEXT PRIMARY KEY,
-              applied_at TEXT NOT NULL
-            );
-            INSERT INTO schema_migrations(version, applied_at)
-                VALUES
-                  ('0001_foundation', 'now'),
-                  ('0002_add_task_agent_working_dir', 'now'),
-                  ('0005_add_approval_feedback_and_action_provenance', 'now');
-
-            CREATE TABLE tasks (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              short_id TEXT NOT NULL UNIQUE,
-              status TEXT NOT NULL,
-              agent_session_id TEXT,
-              agent_working_dir TEXT,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE chat_policies (
-              chat_id TEXT PRIMARY KEY,
-              name TEXT,
-              auto_reply INTEGER NOT NULL DEFAULT 0,
-              bot_joined INTEGER NOT NULL DEFAULT 0,
-              reply_identity TEXT NOT NULL DEFAULT 'bot_preferred',
-              allow_user_fallback INTEGER NOT NULL DEFAULT 1,
-              resource_download INTEGER NOT NULL DEFAULT 1,
-              updated_at TEXT NOT NULL
-            );
-            INSERT INTO chat_policies(
-              chat_id, name, auto_reply, bot_joined, reply_identity,
-              allow_user_fallback, resource_download, updated_at
-            )
-            VALUES ('oc_legacy', 'Legacy', 1, 0, 'bot_preferred', 1, 1, 'now');
-
-            CREATE TABLE policy_audits (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              scope TEXT NOT NULL CHECK (scope IN ('global', 'chat')),
-              policy_key TEXT NOT NULL,
-              actor TEXT NOT NULL,
-              old_json TEXT,
-              new_json TEXT NOT NULL,
-              reason TEXT,
-              created_at TEXT NOT NULL
-            );
-            INSERT INTO policy_audits(
-              scope, policy_key, actor, old_json, new_json, reason, created_at
-            )
-            VALUES ('chat', 'chat:oc_legacy', 'test', NULL, '{}', 'seed', 'now');
-            CREATE INDEX idx_policy_audits_policy
-            ON policy_audits(policy_key, created_at);
-            """
-        )
+        conn.execute("CREATE TABLE tasks (id INTEGER PRIMARY KEY)")
 
     store = SQLiteStore(db_path)
-
-    result = store.delete_chat_product_policy(
-        "oc_legacy",
-        actor="test_operator",
-        reason="remove legacy override",
-    )
-
-    assert result["changed"] is True
-    with store.connect() as conn:
-        policy_audit_columns = {
-            row["name"]: row
-            for row in conn.execute("PRAGMA table_info(policy_audits)").fetchall()
-        }
-        audit = conn.execute(
-            """
-            SELECT new_json
-            FROM policy_audits
-            WHERE policy_key = 'chat:oc_legacy'
-            ORDER BY id DESC
-            LIMIT 1
-            """
-        ).fetchone()
-        migration = conn.execute(
-            """
-            SELECT 1
-            FROM schema_migrations
-            WHERE version = '0003_relax_policy_audit_delete_json'
-            """
-        ).fetchone()
-
-    assert policy_audit_columns["new_json"]["notnull"] == 0
-    assert audit["new_json"] is None
-    assert migration is not None
-
-
-def test_migration_backfills_existing_task_session_provider(tmp_path: Path) -> None:
-    db_path = tmp_path / "agent.sqlite3"
-    with sqlite3.connect(db_path) as conn:
-        conn.executescript(
-            """
-            CREATE TABLE schema_migrations (
-              version TEXT PRIMARY KEY,
-              applied_at TEXT NOT NULL
-            );
-            INSERT INTO schema_migrations(version, applied_at)
-            VALUES
-                  ('0001_foundation', 'now'),
-                  ('0002_add_task_agent_working_dir', 'now'),
-                  ('0003_relax_policy_audit_delete_json', 'now'),
-                  ('0005_add_approval_feedback_and_action_provenance', 'now');
-
-            CREATE TABLE tasks (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              short_id TEXT NOT NULL UNIQUE,
-              status TEXT NOT NULL,
-              agent_session_id TEXT,
-              agent_working_dir TEXT,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-            INSERT INTO tasks(
-              short_id, status, agent_session_id, created_at, updated_at
-            )
-            VALUES
-              ('t_with_session', 'watching', 'sid_1', 'now', 'now'),
-              ('t_without_session', 'watching', NULL, 'now', 'now');
-            """
-        )
-
-    store = SQLiteStore(db_path)
-    store.migrate()
+    with pytest.raises(sqlite3.OperationalError):
+        store.initialize()
 
     with store.connect() as conn:
-        rows = {
-            row["short_id"]: row["agent_session_provider"]
-            for row in conn.execute(
-                """
-                SELECT short_id, agent_session_provider
-                FROM tasks
-                ORDER BY short_id
-                """
-            ).fetchall()
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
         }
+        messages = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'messages'"
+        ).fetchone()
 
-    assert rows == {"t_with_session": "hermes", "t_without_session": None}
+    assert columns == {"id"}
+    assert messages is None
 
 
 def test_send_reply_guard_and_failed_retry_use_current_baseline(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    store.migrate()
+    store.initialize()
 
     with store.connect() as conn:
         conn.execute(
@@ -416,7 +291,7 @@ def test_send_reply_guard_and_failed_retry_use_current_baseline(tmp_path: Path) 
         task_id = conn.execute(
             "SELECT id FROM tasks WHERE short_id = ?", ("t_current",)
         ).fetchone()["id"]
-    store.migrate()
+    store.initialize()
 
     store.set_task_agent_session_id(task_id, "sid_current", backend_provider="hermes")
     assert (
@@ -463,7 +338,7 @@ def test_owner_escalation_closes_task_and_replaces_pending_automation(
     tmp_path: Path,
 ) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         conn.execute(
             """
@@ -548,7 +423,7 @@ def test_owner_escalation_rolls_back_when_notification_creation_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         conn.execute(
             """
@@ -617,7 +492,7 @@ def test_claim_creates_dispatch_attempt_and_retry_preserves_idempotency_key(
     tmp_path: Path,
 ) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         conn.execute(
             """
@@ -661,7 +536,7 @@ def test_claim_creates_dispatch_attempt_and_retry_preserves_idempotency_key(
 
 def test_claim_aware_finish_does_not_overwrite_operator_cancel(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         conn.execute(
             """
@@ -703,7 +578,7 @@ def test_claim_aware_finish_does_not_overwrite_operator_cancel(tmp_path: Path) -
 
 def test_state_schema_contract_accepts_all_enum_values(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    store.migrate()
+    store.initialize()
 
     with store.connect() as conn:
         for index, status in enumerate(StateSchemaContract.task_statuses):
@@ -881,7 +756,7 @@ def test_invalid_state_values_fail_db_check(
     tmp_path: Path, sql: str, params: tuple[object, ...]
 ) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    store.migrate()
+    store.initialize()
 
     with store.connect() as conn, pytest.raises(sqlite3.IntegrityError):
         conn.execute(sql, params)
@@ -898,7 +773,7 @@ def test_invalid_dispatch_attempt_values_fail_db_check(
     tmp_path: Path, column: str, value: str
 ) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    store.migrate()
+    store.initialize()
 
     with store.connect() as conn:
         conn.execute(
@@ -928,7 +803,7 @@ def test_send_reply_retry_does_not_revive_failed_action_when_same_text_was_sent(
     tmp_path: Path,
 ) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    store.migrate()
+    store.initialize()
 
     with store.connect() as conn:
         cursor = conn.execute(

@@ -73,7 +73,7 @@ class TrialRuntime:
             access_root.symlink_to(root, target_is_directory=True)
             clock = EvaluationClock(initial_time)
             store = SQLiteStore(access_root / "eval.sqlite3", clock=clock)
-            store.migrate()
+            store.initialize()
             store.import_product_policy_from_config(
                 loaded.config,
                 replace=True,

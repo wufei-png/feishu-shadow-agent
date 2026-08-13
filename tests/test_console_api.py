@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -37,35 +36,6 @@ lifecycle:
 
 def _store(tmp_path: Path) -> SQLiteStore:
     return SQLiteStore(tmp_path / "agent.sqlite3")
-
-
-def _seed_legacy_0001_store_without_agent_working_dir(store: SQLiteStore) -> None:
-    store.path.parent.mkdir(parents=True, exist_ok=True)
-    migration = resources.files("feishu_shadow_agent.store").joinpath(
-        "migrations/0001_foundation.sql"
-    )
-    with store.connect() as conn:
-        conn.executescript(migration.read_text(encoding="utf-8"))
-        conn.execute(
-            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-            ("0001_foundation", "now"),
-        )
-        conn.execute(
-            """
-            INSERT INTO tasks(short_id, status, chat_id, chat_type, root_message_id, task_label, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "t_legacy",
-                "watching",
-                "oc_legacy",
-                "p2p",
-                "om_legacy",
-                "legacy",
-                "now",
-                "now",
-            ),
-        )
 
 
 def _static_dir(tmp_path: Path) -> Path:
@@ -140,43 +110,6 @@ def test_console_command_defaults_to_loopback_and_prints_token_url(
     assert "http://127.0.0.1:8765/?token=fixed-token" in capsys.readouterr().out
 
 
-def test_console_command_migrates_legacy_store_before_starting_server(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys,
-) -> None:
-    config = _write_config(tmp_path)
-    store = _store(tmp_path)
-    _seed_legacy_0001_store_without_agent_working_dir(store)
-    called: dict[str, object] = {}
-
-    monkeypatch.setattr(
-        "feishu_shadow_agent.cli.console_static_ready", lambda static_dir: True
-    )
-    monkeypatch.setattr(
-        "feishu_shadow_agent.cli.generate_console_token", lambda: "fixed-token"
-    )
-    monkeypatch.setattr(
-        "feishu_shadow_agent.cli._run_console_server",
-        lambda app, *, host, port: called.update(
-            {"app": app, "host": host, "port": port}
-        ),
-    )
-
-    assert main(["console", "--config", str(config)]) == 0
-
-    assert called["host"] == "127.0.0.1"
-    assert "Operator Console:" in capsys.readouterr().out
-    with store.connect() as conn:
-        columns = {
-            row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
-        }
-        task = conn.execute("SELECT short_id, agent_working_dir FROM tasks").fetchone()
-    assert "agent_working_dir" in columns
-    assert task["short_id"] == "t_legacy"
-    assert task["agent_working_dir"] is None
-
-
 def test_dashboard_rejects_missing_and_invalid_token(tmp_path: Path) -> None:
     client = _client(tmp_path)
 
@@ -238,9 +171,7 @@ def test_feedback_api_validates_window_and_mode(tmp_path: Path) -> None:
     client = _client(tmp_path)
 
     bad_days = client.get("/api/feedback?days=0", headers=_auth())
-    bad_mode = client.get(
-        "/api/feedback?execution_mode=legacy_untrusted", headers=_auth()
-    )
+    bad_mode = client.get("/api/feedback?execution_mode=invalid", headers=_auth())
 
     assert bad_days.status_code == 400
     assert bad_days.json()["error"]["code"] == "validation_failed"
@@ -251,7 +182,7 @@ def test_feedback_api_validates_window_and_mode(tmp_path: Path) -> None:
 def test_dashboard_redacts_failed_approval_command_body(tmp_path: Path) -> None:
     client = _client(tmp_path)
     store = _store(tmp_path)
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         conn.execute(
             """
@@ -281,7 +212,7 @@ def test_dashboard_redacts_failed_approval_command_body(tmp_path: Path) -> None:
 def test_dashboard_redacts_health_warning_paths(tmp_path: Path) -> None:
     client = _client(tmp_path)
     store = _store(tmp_path)
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         conn.execute(
             """
@@ -375,7 +306,7 @@ def test_message_detail_reports_store_unavailable_separately_from_missing_messag
 
     ready_tmp = tmp_path / "ready"
     ready_tmp.mkdir()
-    _store(ready_tmp).migrate()
+    _store(ready_tmp).initialize()
     ready_client = _client(ready_tmp)
     missing = ready_client.get("/api/messages/om_missing/detail", headers=_auth())
 
@@ -388,7 +319,7 @@ def test_message_detail_reports_store_unavailable_separately_from_missing_messag
 def test_message_detail_api_is_service_backed_and_read_only(tmp_path: Path) -> None:
     client = _client(tmp_path)
     store = _store(tmp_path)
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         task_id = conn.execute(
             """
@@ -1257,7 +1188,7 @@ def _seed_task_with_message(
     task_short_id: str = "t_api",
     message_id: str = "om_1",
 ) -> int:
-    store.migrate()
+    store.initialize()
     with store.connect() as conn:
         task_id = conn.execute(
             """
