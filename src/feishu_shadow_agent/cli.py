@@ -431,6 +431,7 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         logger=logger,
         agent_working_dir=agent_working_dir,
         config_base_dir=loaded.base_dir,
+        dry_run=args.dry_run,
     )
     daemon = Daemon(
         store=store,

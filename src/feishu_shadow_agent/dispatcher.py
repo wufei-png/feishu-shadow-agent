@@ -105,13 +105,15 @@ class Dispatcher:
             },
         )
         for action in actions:
-            actual_allowed = (
+            mode_allows_actual = action.execution_mode == "production"
+            runtime_allows_actual = (
                 allow_send_reply_actual
                 if action.kind == "send_reply"
                 else allow_owner_notification_actual
                 if action.kind == "owner_notification"
                 else False
             )
+            actual_allowed = mode_allows_actual and runtime_allows_actual
             if actual_allowed:
                 claim = self.store.claim_action_for_dispatch(action.id, run_id=run_id)
                 if claim is None:
@@ -183,9 +185,13 @@ class Dispatcher:
             self.preview_action_record(
                 action,
                 run_id=run_id,
-                blocked_actual_reason=blocked_send_reply_reason
-                if action.kind == "send_reply"
-                else None,
+                blocked_actual_reason=(
+                    f"execution_mode_{action.execution_mode}"
+                    if not mode_allows_actual
+                    else blocked_send_reply_reason
+                    if action.kind == "send_reply"
+                    else None
+                ),
             )
             summary = _bump(summary, processed=1, previewed=1)
         return summary

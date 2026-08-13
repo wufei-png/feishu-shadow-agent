@@ -29,6 +29,7 @@ EXPECTED_TABLES = {
     "routing_audits",
     "agent_audits",
     "approval_commands",
+    "approval_feedback",
     "message_processing",
 }
 
@@ -144,6 +145,13 @@ def test_baseline_schema_includes_current_columns(tmp_path: Path) -> None:
             row["name"]
             for row in conn.execute("PRAGMA table_info(dispatch_attempts)").fetchall()
         }
+        action_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(actions)").fetchall()
+        }
+        feedback_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(approval_feedback)").fetchall()
+        }
         run_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(runs)").fetchall()
         }
@@ -176,6 +184,22 @@ def test_baseline_schema_includes_current_columns(tmp_path: Path) -> None:
     } <= task_columns
     assert "hermes_session_id" not in task_columns
     assert "expires_at" in approval_columns
+    assert "execution_mode" in action_columns
+    assert {
+        "approval_id",
+        "task_id",
+        "command_id",
+        "outcome",
+        "decision_reason",
+        "suggested_reply",
+        "final_reply",
+        "feedback_reason",
+        "note",
+        "actor",
+        "execution_mode",
+        "content_expired_at",
+        "created_at",
+    } <= feedback_columns
     assert "sender_name" in message_columns
     assert {
         "backend_provider",
@@ -230,9 +254,10 @@ def test_migration_relaxes_legacy_policy_audit_new_json_for_delete(
               applied_at TEXT NOT NULL
             );
             INSERT INTO schema_migrations(version, applied_at)
-            VALUES
-              ('0001_foundation', 'now'),
-              ('0002_add_task_agent_working_dir', 'now');
+                VALUES
+                  ('0001_foundation', 'now'),
+                  ('0002_add_task_agent_working_dir', 'now'),
+                  ('0005_add_approval_feedback_and_action_provenance', 'now');
 
             CREATE TABLE tasks (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -326,9 +351,10 @@ def test_migration_backfills_existing_task_session_provider(tmp_path: Path) -> N
             );
             INSERT INTO schema_migrations(version, applied_at)
             VALUES
-              ('0001_foundation', 'now'),
-              ('0002_add_task_agent_working_dir', 'now'),
-              ('0003_relax_policy_audit_delete_json', 'now');
+                  ('0001_foundation', 'now'),
+                  ('0002_add_task_agent_working_dir', 'now'),
+                  ('0003_relax_policy_audit_delete_json', 'now'),
+                  ('0005_add_approval_feedback_and_action_provenance', 'now');
 
             CREATE TABLE tasks (
               id INTEGER PRIMARY KEY AUTOINCREMENT,

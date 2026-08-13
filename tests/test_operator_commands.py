@@ -55,6 +55,7 @@ def _create_pending_reply_approval(
             "text": text,
             "identity": "user",
             "source": "approval_request",
+            "decision_reason": "commitment_or_authorization",
         },
         approval_timeout_hours=None,
     )
@@ -119,6 +120,118 @@ def test_operator_command_service_send_returns_stable_result_shape(
     payload = json.loads(action["payload_json"])
     assert payload["text"] == "operator final reply"
     assert payload["source"] == "owner_send"
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_outcome", "expected_final", "expected_status"),
+    [
+        ("approve", "suggestion_sent", "suggested reply", "watching"),
+        ("edit", "edited_sent", "edited reply", "watching"),
+        ("keep", "no_send_keep_watching", None, "watching"),
+        ("end", "no_send_end_task", None, "closed"),
+    ],
+)
+def test_approval_resolution_atomically_records_immutable_feedback(
+    tmp_path: Path,
+    operation: str,
+    expected_outcome: str,
+    expected_final: str | None,
+    expected_status: str,
+) -> None:
+    store = _store(tmp_path)
+    task_id = _insert_task(store, "t_feedback", "om_root")
+    approval_id = _create_pending_reply_approval(
+        store, task_id=task_id, text="suggested reply"
+    )
+    service = OperatorCommandService(
+        store, keep_watching_until_factory=lambda: "2026-08-14T00:00:00+08:00"
+    )
+
+    if operation == "approve":
+        result = service.approve(
+            approval_id,
+            actor="owner",
+            command_id="evt_approve",
+            note="looks good",
+        )
+    elif operation == "edit":
+        result = service.send(
+            approval_id,
+            "edited reply",
+            actor="owner",
+            command_id="evt_edit",
+            feedback_reason="tone_or_style",
+        )
+    else:
+        result = service.do_not_send(
+            approval_id,
+            keep_watching=operation == "keep",
+            actor="owner",
+            command_id=f"evt_{operation}",
+            feedback_reason="unnecessary_reply",
+        )
+
+    duplicate = service.approve(
+        approval_id,
+        actor="owner",
+        command_id=f"evt_{operation}",
+    )
+    with store.connect() as conn:
+        feedback = conn.execute("SELECT * FROM approval_feedback").fetchone()
+        task = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        count = conn.execute("SELECT COUNT(*) FROM approval_feedback").fetchone()[0]
+
+    assert result.status == "applied"
+    assert result.result["outcome"] == expected_outcome
+    assert duplicate.status == "no_change"
+    assert count == 1
+    assert feedback["outcome"] == expected_outcome
+    assert feedback["decision_reason"] == "commitment_or_authorization"
+    assert feedback["suggested_reply"] == "suggested reply"
+    assert feedback["final_reply"] == expected_final
+    assert feedback["execution_mode"] == "production"
+    assert task["status"] == expected_status
+
+
+def test_dry_run_approval_requires_new_production_approval_for_real_send(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    task_id = _insert_task(store, "t_mode", "om_root")
+    dry_approval = _create_pending_reply_approval(
+        store, task_id=task_id, text="same reply"
+    )
+    service = OperatorCommandService(store)
+
+    dry_result = service.approve(
+        dry_approval,
+        actor="owner",
+        command_id="evt_dry",
+        execution_mode="dry_run",
+    )
+    production_approval = _create_pending_reply_approval(
+        store, task_id=task_id, text="same reply"
+    )
+    production_result = service.approve(
+        production_approval,
+        actor="owner",
+        command_id="evt_prod",
+        execution_mode="production",
+    )
+
+    with store.connect() as conn:
+        modes = [
+            row["execution_mode"]
+            for row in conn.execute(
+                "SELECT execution_mode FROM actions WHERE kind = 'send_reply' ORDER BY id"
+            ).fetchall()
+        ]
+
+    assert dry_result.status == "applied"
+    assert production_result.status == "applied"
+    assert modes == ["dry_run", "production"]
 
 
 def test_operator_command_service_approval_command_id_replay_returns_no_change(

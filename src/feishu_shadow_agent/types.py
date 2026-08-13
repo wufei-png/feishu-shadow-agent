@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 from uuid import uuid4
 
 ChatType = Literal["group", "p2p"]
@@ -11,6 +11,20 @@ HealthSeverity = Literal["critical", "warning"]
 HealthStatus = Literal["ok", "warning", "failed"]
 SenderRole = Literal[
     "external_user_message", "owner_message", "bot_message", "agent_message"
+]
+ExecutionMode: TypeAlias = Literal["dry_run", "production", "legacy_untrusted"]
+ApprovalOutcome: TypeAlias = Literal[
+    "suggestion_sent",
+    "edited_sent",
+    "no_send_keep_watching",
+    "no_send_end_task",
+]
+FeedbackReason: TypeAlias = Literal[
+    "inaccurate_or_unsupported",
+    "incomplete_context",
+    "tone_or_style",
+    "unnecessary_reply",
+    "other",
 ]
 
 
@@ -266,6 +280,7 @@ class ActionRecord:
     status: str
     target_message_id: str | None
     dry_run: bool
+    execution_mode: ExecutionMode
     payload: dict[str, Any]
     result: dict[str, Any]
     created_at: str

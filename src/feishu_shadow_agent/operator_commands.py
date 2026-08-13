@@ -10,7 +10,13 @@ from pydantic import ValidationError
 from .config import AppConfig, ChatPolicyConfig, ReplyPolicyConfig
 from .operator_query import OperatorQueryService
 from .store.sqlite_store import SQLiteStore
-from .types import ActionRecord, new_run_id
+from .types import (
+    ActionRecord,
+    ApprovalOutcome,
+    ExecutionMode,
+    FeedbackReason,
+    new_run_id,
+)
 
 SUCCESS_STATUSES = {"applied", "no_change"}
 GLOBAL_POLICY_UPDATE_FIELDS = {
@@ -87,9 +93,20 @@ class ApprovalCommandService:
         actor: str,
         reason: str | None = None,
         command_id: str | None = None,
+        feedback_reason: FeedbackReason | None = None,
+        note: str | None = None,
+        execution_mode: ExecutionMode = "production",
     ) -> CommandResult:
         return self._apply(
-            "approve", target_id, actor=actor, reason=reason, command_id=command_id
+            "approve",
+            target_id,
+            actor=actor,
+            reason=reason,
+            command_id=command_id,
+            feedback_reason=feedback_reason,
+            note=note,
+            execution_mode=execution_mode,
+            requested_outcome="suggestion_sent",
         )
 
     def reject(
@@ -99,9 +116,27 @@ class ApprovalCommandService:
         actor: str,
         reason: str | None = None,
         command_id: str | None = None,
+        keep_watching: bool | None = None,
+        feedback_reason: FeedbackReason | None = None,
+        note: str | None = None,
+        execution_mode: ExecutionMode = "production",
     ) -> CommandResult:
         return self._apply(
-            "reject", target_id, actor=actor, reason=reason, command_id=command_id
+            "reject",
+            target_id,
+            actor=actor,
+            reason=reason,
+            command_id=command_id,
+            feedback_reason=feedback_reason,
+            note=note,
+            execution_mode=execution_mode,
+            requested_outcome=(
+                None
+                if keep_watching is None
+                else "no_send_keep_watching"
+                if keep_watching
+                else "no_send_end_task"
+            ),
         )
 
     def send(
@@ -112,6 +147,9 @@ class ApprovalCommandService:
         actor: str,
         reason: str | None = None,
         command_id: str | None = None,
+        feedback_reason: FeedbackReason | None = None,
+        note: str | None = None,
+        execution_mode: ExecutionMode = "production",
     ) -> CommandResult:
         return self._apply(
             "send",
@@ -120,6 +158,10 @@ class ApprovalCommandService:
             actor=actor,
             reason=reason,
             command_id=command_id,
+            feedback_reason=feedback_reason,
+            note=note,
+            execution_mode=execution_mode,
+            requested_outcome="edited_sent",
         )
 
     def _apply(
@@ -131,6 +173,10 @@ class ApprovalCommandService:
         reason: str | None,
         command_id: str | None,
         final_reply: str | None = None,
+        feedback_reason: FeedbackReason | None = None,
+        note: str | None = None,
+        execution_mode: ExecutionMode = "production",
+        requested_outcome: ApprovalOutcome | None = None,
     ) -> CommandResult:
         command_text = (
             f"/{verb} {target_id}"
@@ -148,6 +194,11 @@ class ApprovalCommandService:
                 if verb == "reject" and self.keep_watching_until_factory is not None
                 else None
             ),
+            actor=actor,
+            feedback_reason=feedback_reason,
+            note=note,
+            execution_mode=execution_mode,
+            requested_outcome=requested_outcome,
         )
         raw_status = str(raw.get("status", "failed"))
         result = _dict_result(raw.get("result"))
@@ -643,9 +694,18 @@ class OperatorCommandService:
         actor: str = "operator",
         reason: str | None = None,
         command_id: str | None = None,
+        feedback_reason: FeedbackReason | None = None,
+        note: str | None = None,
+        execution_mode: ExecutionMode = "production",
     ) -> CommandResult:
         return self.approvals.approve(
-            target_id, actor=actor, reason=reason, command_id=command_id
+            target_id,
+            actor=actor,
+            reason=reason,
+            command_id=command_id,
+            feedback_reason=feedback_reason,
+            note=note,
+            execution_mode=execution_mode,
         )
 
     def reject(
@@ -655,9 +715,20 @@ class OperatorCommandService:
         actor: str = "operator",
         reason: str | None = None,
         command_id: str | None = None,
+        keep_watching: bool | None = None,
+        feedback_reason: FeedbackReason | None = None,
+        note: str | None = None,
+        execution_mode: ExecutionMode = "production",
     ) -> CommandResult:
         return self.approvals.reject(
-            target_id, actor=actor, reason=reason, command_id=command_id
+            target_id,
+            actor=actor,
+            reason=reason,
+            command_id=command_id,
+            keep_watching=keep_watching,
+            feedback_reason=feedback_reason,
+            note=note,
+            execution_mode=execution_mode,
         )
 
     def send(
@@ -668,9 +739,42 @@ class OperatorCommandService:
         actor: str = "operator",
         reason: str | None = None,
         command_id: str | None = None,
+        feedback_reason: FeedbackReason | None = None,
+        note: str | None = None,
+        execution_mode: ExecutionMode = "production",
     ) -> CommandResult:
         return self.approvals.send(
-            task_id, final_reply, actor=actor, reason=reason, command_id=command_id
+            task_id,
+            final_reply,
+            actor=actor,
+            reason=reason,
+            command_id=command_id,
+            feedback_reason=feedback_reason,
+            note=note,
+            execution_mode=execution_mode,
+        )
+
+    def do_not_send(
+        self,
+        approval_id: str,
+        *,
+        keep_watching: bool,
+        actor: str = "operator",
+        reason: str | None = None,
+        command_id: str | None = None,
+        feedback_reason: FeedbackReason | None = None,
+        note: str | None = None,
+        execution_mode: ExecutionMode = "production",
+    ) -> CommandResult:
+        return self.reject(
+            approval_id,
+            actor=actor,
+            reason=reason,
+            command_id=command_id,
+            keep_watching=keep_watching,
+            feedback_reason=feedback_reason,
+            note=note,
+            execution_mode=execution_mode,
         )
 
     def inspect_dispatch_action(
@@ -978,6 +1082,7 @@ def _action_output(action: ActionRecord) -> dict[str, Any]:
         "status": action.status,
         "target_message_id": action.target_message_id,
         "dry_run": action.dry_run,
+        "execution_mode": action.execution_mode,
         "payload": action.payload,
         "result": action.result,
         "created_at": action.created_at,

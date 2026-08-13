@@ -42,6 +42,7 @@ from .routing import CandidateCollector, RoutingResult
 from .store.sqlite_store import SQLiteStore
 from .task_session_runner import TaskSessionRunner
 from .types import (
+    ExecutionMode,
     LifecycleStatePolicy,
     MessageProcessingStatus,
     NormalizedMessage,
@@ -106,9 +107,16 @@ class SendComposer:
 
 
 class ApprovalService:
-    def __init__(self, *, store: SQLiteStore, config: AppConfig):
+    def __init__(
+        self,
+        *,
+        store: SQLiteStore,
+        config: AppConfig,
+        execution_mode: ExecutionMode = "production",
+    ):
         self.store = store
         self.config = config
+        self.execution_mode = execution_mode
 
     def request_send_reply(
         self,
@@ -121,6 +129,7 @@ class ApprovalService:
         final_reply: str | None = None,
         approvable: bool = True,
         payload_extra: dict[str, Any] | None = None,
+        decision_reason: str | None = None,
     ) -> int:
         reply_text = proposed_reply if final_reply is None else final_reply
         payload_text = reply_text if approvable else ""
@@ -140,6 +149,8 @@ class ApprovalService:
             "source": "approval_request",
             "reason": reason,
             "approvable": approvable,
+            "decision_reason": decision_reason,
+            "execution_mode": self.execution_mode,
         }
         if payload_extra:
             payload.update(payload_extra)
@@ -155,6 +166,7 @@ class ApprovalService:
             "suggested_reply": payload_text,
             "approvable": approvable,
             "commands": commands,
+            "execution_mode": self.execution_mode,
         }
         if notification_message_id != reply_target_message_id:
             notify["reply_target_message_id"] = reply_target_message_id
@@ -164,6 +176,7 @@ class ApprovalService:
             payload=payload,
             notify_payload=notify,
             approval_timeout_hours=self.config.lifecycle.approval_timeout_hours,
+            execution_mode=self.execution_mode,
         )
 
     def notify_owner(
@@ -196,7 +209,9 @@ class ApprovalService:
             if any(value for value in source.values()):
                 data["source"] = source
         return self.store.create_owner_notification_action(
-            task_id=None if task is None else task.id, payload=data
+            task_id=None if task is None else task.id,
+            payload=data,
+            execution_mode=self.execution_mode,
         )
 
     def escalate_task_to_owner(
@@ -224,6 +239,7 @@ class ApprovalService:
             task_id=task.id,
             task_label=task_label,
             payload=data,
+            execution_mode=self.execution_mode,
         )
 
     def apply_command(self, *, message: NormalizedMessage) -> dict[str, Any] | None:
@@ -245,6 +261,8 @@ class ApprovalService:
                 keep_watching_until=_plus_minutes(
                     message.sent_at, self.config.lifecycle.watch_minutes
                 ),
+                actor="owner",
+                execution_mode=self.execution_mode,
             )
         if verb == "send" and target_id and final_reply is not None:
             return self.store.apply_approval_command(
@@ -256,12 +274,16 @@ class ApprovalService:
                 keep_watching_until=_plus_minutes(
                     message.sent_at, self.config.lifecycle.watch_minutes
                 ),
+                actor="owner",
+                execution_mode=self.execution_mode,
             )
         return self.store.apply_approval_command(
             message_id=message.message_id,
             command=command,
             verb="invalid",
             target_id="",
+            actor="owner",
+            execution_mode=self.execution_mode,
         )
 
 
@@ -279,6 +301,7 @@ class TaskProcessingService:
         config_base_dir: str | Path | None = None,
         preserve_context_store_path: bool = False,
         sleep_func: Callable[[float], None] = time.sleep,
+        dry_run: bool = False,
     ):
         self.store = store
         self.config = config
@@ -291,7 +314,10 @@ class TaskProcessingService:
         )
         self.logger = logger
         self.collector = CandidateCollector(store)
-        self.approvals = ApprovalService(store=store, config=config)
+        self.execution_mode: ExecutionMode = "dry_run" if dry_run else "production"
+        self.approvals = ApprovalService(
+            store=store, config=config, execution_mode=self.execution_mode
+        )
         self.composer = SendComposer(owner_open_id=config.owner.open_id)
         self.policy = PolicyResolver(store)
         self.agent_invoker = AgentInvoker(
@@ -1210,6 +1236,7 @@ class TaskProcessingService:
                     "stage": "task_session",
                     "statuses": resource_status_counts(resources),
                     "suggested_reply": output.proposed_reply,
+                    "decision_reason": output.decision_reason,
                     "message": (
                         "Task Session could not safely complete this P2P task without "
                         "unavailable message resources. Automated handling was closed; "
@@ -1284,6 +1311,7 @@ class TaskProcessingService:
                 final_reply=composed.text,
                 reason="invalid_reply_target_message_id",
                 approvable=_can_directly_approve(output.proposed_reply, composed),
+                decision_reason=output.decision_reason,
             )
             self._mark_processing_processed(
                 message=message,
@@ -1322,6 +1350,7 @@ class TaskProcessingService:
                     "message_id": message.message_id,
                     "task_short_id": task.short_id,
                     "watch_action": output.watch_action,
+                    "decision_reason": output.decision_reason,
                 },
             )
             return ProcessingResult("watch_only", task.id, reason="no_reply")
@@ -1404,6 +1433,7 @@ class TaskProcessingService:
                     "keep_watching_on_reject": True,
                     "postprocess": postprocess.metadata,
                 },
+                decision_reason=output.decision_reason,
             )
             self._mark_processing_processed(
                 message=message,
@@ -1441,6 +1471,7 @@ class TaskProcessingService:
                     "identity": gate["identity"],
                     "policy_source": gate["policy_source"],
                     "answerability": output.answerability,
+                    "decision_reason": output.decision_reason,
                 },
             )
             self.store.update_task_after_agent(
@@ -1462,6 +1493,7 @@ class TaskProcessingService:
                 payload_extra={"postprocess": postprocess.metadata}
                 if postprocess.applied
                 else None,
+                decision_reason=output.decision_reason,
             )
             self._mark_processing_processed(
                 message=message,
@@ -1481,6 +1513,7 @@ class TaskProcessingService:
             "identity": gate["identity"],
             "source": "auto_reply",
             "policy_source": gate["policy_source"],
+            "decision_reason": output.decision_reason,
         }
         if postprocess.applied:
             payload["postprocess"] = postprocess.metadata
@@ -1497,6 +1530,7 @@ class TaskProcessingService:
             task_id=task.id,
             target_message_id=reply_target_id,
             payload=payload,
+            execution_mode=self.execution_mode,
         )
         self._mark_processing_processed(
             message=message,

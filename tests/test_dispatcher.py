@@ -114,6 +114,39 @@ def test_dry_run_preview_keeps_action_pending(tmp_path: Path) -> None:
     assert [call["dry_run"] for call in fake.reply_calls] == [True]
 
 
+def test_dry_run_provenance_cannot_be_promoted_by_production_dispatch(
+    tmp_path: Path,
+) -> None:
+    store, dispatcher, fake = _dispatcher(tmp_path)
+    task_id = _insert_task(store)
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "preview only",
+            "identity": "user",
+        },
+        execution_mode="dry_run",
+    )
+    assert action_id is not None
+
+    summary = dispatcher.dispatch(
+        run_id="run_prod",
+        allow_send_reply_actual=True,
+        allow_owner_notification_actual=True,
+    )
+
+    action = store.get_action(action_id)
+    assert summary.previewed == 1
+    assert summary.sent == 0
+    assert [call["dry_run"] for call in fake.reply_calls] == [True]
+    assert action is not None
+    assert action.status == "pending"
+    assert action.execution_mode == "dry_run"
+    assert action.result["blocked_actual_reason"] == "execution_mode_dry_run"
+
+
 def test_actual_dispatch_dry_run_failure_marks_failed_without_send(
     tmp_path: Path,
 ) -> None:

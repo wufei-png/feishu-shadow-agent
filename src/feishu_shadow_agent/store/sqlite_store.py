@@ -15,11 +15,14 @@ from ..types import (
     ActionRecord,
     ActionStatus,
     ApprovalKind,
+    ApprovalOutcome,
     ApprovalStatus,
     DispatchAttemptRecord,
     DispatchAttemptStatus,
     DispatchClaim,
     DispatchErrorStage,
+    ExecutionMode,
+    FeedbackReason,
     HealthCheckResult,
     LifecycleStatePolicy,
     NormalizedMessage,
@@ -1020,6 +1023,7 @@ class SQLiteStore:
         task_id: int,
         payload: dict[str, Any],
         task_label: str | None = None,
+        execution_mode: ExecutionMode = "production",
     ) -> int | None:
         """End automated ownership and atomically queue the manual handoff."""
         self.migrate()
@@ -1082,7 +1086,11 @@ class SQLiteStore:
                 now=now,
             )
             return self._create_owner_notification_action_locked(
-                conn, task_id=task_id, payload=payload, now=now
+                conn,
+                task_id=task_id,
+                payload=payload,
+                execution_mode=execution_mode,
+                now=now,
             )
 
     def close_task_by_operator(self, task_id: int | str) -> dict[str, Any]:
@@ -1536,7 +1544,8 @@ class SQLiteStore:
                     FROM actions
                     WHERE status = 'pending'
                       AND kind IN ('send_reply', 'owner_notification')
-                    ORDER BY created_at, id
+                    ORDER BY CASE WHEN execution_mode = 'production' THEN 0 ELSE 1 END,
+                             created_at, id
                     LIMIT ?
                     """,
                     (limit,),
@@ -1548,7 +1557,8 @@ class SQLiteStore:
                     FROM actions
                     WHERE status = 'pending'
                       AND kind = ?
-                    ORDER BY created_at, id
+                    ORDER BY CASE WHEN execution_mode = 'production' THEN 0 ELSE 1 END,
+                             created_at, id
                     LIMIT ?
                     """,
                     (kind, limit),
@@ -1839,6 +1849,7 @@ class SQLiteStore:
                     task_id=int(row["task_id"]),
                     target_message_id=row["target_message_id"],
                     exclude_action_id=action_id,
+                    execution_mode=row["execution_mode"],
                 )
             ):
                 raise ValueError(
@@ -2354,6 +2365,7 @@ class SQLiteStore:
         target_message_id: str,
         payload: dict[str, Any],
         approval_id: int | None = None,
+        execution_mode: ExecutionMode = "production",
     ) -> int | None:
         self.migrate()
         now = self.clock()
@@ -2364,6 +2376,7 @@ class SQLiteStore:
                 target_message_id=target_message_id,
                 payload=payload,
                 approval_id=approval_id,
+                execution_mode=execution_mode,
                 now=now,
             )
 
@@ -2372,6 +2385,7 @@ class SQLiteStore:
         *,
         task_id: int | None,
         payload: dict[str, Any],
+        execution_mode: ExecutionMode = "production",
     ) -> int:
         self.migrate()
         now = self.clock()
@@ -2380,6 +2394,7 @@ class SQLiteStore:
                 conn,
                 task_id=task_id,
                 payload=payload,
+                execution_mode=execution_mode,
                 now=now,
             )
 
@@ -2391,6 +2406,7 @@ class SQLiteStore:
         payload: dict[str, Any],
         notify_payload: dict[str, Any] | None = None,
         approval_timeout_hours: int | None = 24,
+        execution_mode: ExecutionMode = "production",
     ) -> int:
         self.migrate()
         now = self.clock()
@@ -2430,6 +2446,7 @@ class SQLiteStore:
                         approval_short_id=short_id,
                         approval_payload=payload,
                     ),
+                    execution_mode=execution_mode,
                     now=now,
                 )
         return approval_id
@@ -2443,6 +2460,11 @@ class SQLiteStore:
         target_id: str,
         final_reply: str | None = None,
         keep_watching_until: str | None = None,
+        actor: str = "owner",
+        feedback_reason: FeedbackReason | None = None,
+        note: str | None = None,
+        execution_mode: ExecutionMode = "production",
+        requested_outcome: ApprovalOutcome | None = None,
     ) -> dict[str, Any]:
         self.migrate()
         now = self.clock()
@@ -2476,6 +2498,12 @@ class SQLiteStore:
                     final_reply=final_reply,
                     now=now,
                     keep_watching_until=keep_watching_until,
+                    command_id=message_id,
+                    actor=actor,
+                    feedback_reason=feedback_reason,
+                    note=note,
+                    execution_mode=execution_mode,
+                    requested_outcome=requested_outcome,
                 )
             except Exception as exc:
                 # State changes are rolled back, but the command itself is still
@@ -2550,8 +2578,43 @@ class SQLiteStore:
         final_reply: str | None,
         now: str,
         keep_watching_until: str | None,
+        command_id: str,
+        actor: str,
+        feedback_reason: FeedbackReason | None,
+        note: str | None,
+        execution_mode: ExecutionMode,
+        requested_outcome: ApprovalOutcome | None,
     ) -> dict[str, Any]:
+        if execution_mode not in {"dry_run", "production"}:
+            raise ValueError(
+                "approval commands require dry_run or production execution_mode"
+            )
+        if not actor.strip():
+            raise ValueError("approval command actor is required")
+        if feedback_reason not in {
+            None,
+            "inaccurate_or_unsupported",
+            "incomplete_context",
+            "tone_or_style",
+            "unnecessary_reply",
+            "other",
+        }:
+            raise ValueError(f"unsupported feedback_reason: {feedback_reason}")
+        if note is not None and len(note.strip()) > 500:
+            raise ValueError("feedback note must be at most 500 characters")
         if verb in {"approve", "reject"}:
+            allowed_outcomes = (
+                {"suggestion_sent"}
+                if verb == "approve"
+                else {"no_send_keep_watching", "no_send_end_task"}
+            )
+            if (
+                requested_outcome is not None
+                and requested_outcome not in allowed_outcomes
+            ):
+                raise ValueError(
+                    f"outcome {requested_outcome!r} is not valid for /{verb}"
+                )
             if target_id.startswith("t_"):
                 task = conn.execute(
                     "SELECT * FROM tasks WHERE short_id = ?",
@@ -2599,10 +2662,15 @@ class SQLiteStore:
                 (resolved_status, now, approval["id"]),
             )
             if verb == "reject":
-                if (
-                    payload.get("keep_watching_on_reject") is True
-                    and approval["task_id"] is not None
-                ):
+                keep_watching = (
+                    requested_outcome == "no_send_keep_watching"
+                    if requested_outcome is not None
+                    else payload.get("keep_watching_on_reject") is True
+                )
+                outcome: ApprovalOutcome = (
+                    "no_send_keep_watching" if keep_watching else "no_send_end_task"
+                )
+                if keep_watching and approval["task_id"] is not None:
                     cancelled_actions = (
                         self._cancel_pending_actions_for_approvals_locked(
                             conn,
@@ -2626,12 +2694,28 @@ class SQLiteStore:
                             int(approval["task_id"]),
                         ),
                     )
+                    self._record_approval_feedback_locked(
+                        conn,
+                        approval=approval,
+                        command_id=command_id,
+                        outcome=outcome,
+                        decision_reason=payload.get("decision_reason"),
+                        suggested_reply=_payload_send_text(payload)
+                        or approval["preview"],
+                        final_reply=None,
+                        feedback_reason=feedback_reason,
+                        note=note,
+                        actor=actor,
+                        execution_mode=execution_mode,
+                        now=now,
+                    )
                     return {
                         "approval_id": approval["short_id"],
                         "task_id": approval["task_id"],
                         "action_id": None,
                         "kept_watching": True,
                         "cancelled_actions": cancelled_actions,
+                        "outcome": outcome,
                     }
                 if approval["task_id"] is not None:
                     self._close_task_after_reject_locked(
@@ -2640,10 +2724,25 @@ class SQLiteStore:
                         rejected_approval_id=int(approval["id"]),
                         now=now,
                     )
+                self._record_approval_feedback_locked(
+                    conn,
+                    approval=approval,
+                    command_id=command_id,
+                    outcome=outcome,
+                    decision_reason=payload.get("decision_reason"),
+                    suggested_reply=_payload_send_text(payload) or approval["preview"],
+                    final_reply=None,
+                    feedback_reason=feedback_reason,
+                    note=note,
+                    actor=actor,
+                    execution_mode=execution_mode,
+                    now=now,
+                )
                 return {
                     "approval_id": approval["short_id"],
                     "task_id": approval["task_id"],
                     "action_id": None,
+                    "outcome": outcome,
                 }
             if payload.get("approvable") is False:
                 raise ValueError("approval requires /send final reply")
@@ -2661,6 +2760,7 @@ class SQLiteStore:
                 target_message_id=target_message_id,
                 payload=payload | {"approved_by": "owner"},
                 approval_id=int(approval["id"]),
+                execution_mode=execution_mode,
                 now=now,
             )
             if action_id is None:
@@ -2670,19 +2770,53 @@ class SQLiteStore:
             self._mark_task_watching_after_send_locked(
                 conn, task_id=int(approval["task_id"]), now=now
             )
+            outcome = "suggestion_sent"
+            self._record_approval_feedback_locked(
+                conn,
+                approval=approval,
+                command_id=command_id,
+                outcome=outcome,
+                decision_reason=payload.get("decision_reason"),
+                suggested_reply=_payload_send_text(payload) or approval["preview"],
+                final_reply=_payload_send_text(payload),
+                feedback_reason=feedback_reason,
+                note=note,
+                actor=actor,
+                execution_mode=execution_mode,
+                now=now,
+            )
             return {
                 "approval_id": approval["short_id"],
                 "task_id": approval["task_id"],
                 "action_id": action_id,
+                "outcome": outcome,
             }
 
         if verb == "send":
-            if not target_id.startswith("t_"):
-                raise ValueError("/send requires a task id")
-            task = conn.execute(
-                "SELECT * FROM tasks WHERE short_id = ?",
-                (target_id,),
-            ).fetchone()
+            if requested_outcome not in {None, "edited_sent"}:
+                raise ValueError(
+                    f"outcome {requested_outcome!r} is not valid for /send"
+                )
+            concrete_approval = None
+            if target_id.startswith("a_"):
+                concrete_approval = self._resolve_pending_approval_locked(
+                    conn, target_id
+                )
+                if concrete_approval is None:
+                    raise ValueError(f"pending approval not found: {target_id}")
+                if concrete_approval["task_id"] is None:
+                    raise ValueError("approval is not attached to a task")
+                task = conn.execute(
+                    "SELECT * FROM tasks WHERE id = ?",
+                    (concrete_approval["task_id"],),
+                ).fetchone()
+            elif target_id.startswith("t_"):
+                task = conn.execute(
+                    "SELECT * FROM tasks WHERE short_id = ?",
+                    (target_id,),
+                ).fetchone()
+            else:
+                raise ValueError("/send requires a task or approval id")
             if task is None:
                 raise ValueError(f"task not found: {target_id}")
             if not _task_is_watching(task):
@@ -2690,8 +2824,12 @@ class SQLiteStore:
             reply_text = final_reply or ""
             if not reply_text.strip():
                 raise ValueError("/send requires final reply text")
-            pending = self._list_pending_send_reply_approvals_locked(
-                conn, task_id=int(task["id"])
+            pending = (
+                [concrete_approval]
+                if concrete_approval is not None
+                else self._list_pending_send_reply_approvals_locked(
+                    conn, task_id=int(task["id"])
+                )
             )
             if len(pending) > 1:
                 return self._create_approval_command_conflict_notification_locked(
@@ -2726,6 +2864,11 @@ class SQLiteStore:
                 "identity": "user",
                 "source": "owner_send",
             }
+            original_payload = (
+                json.loads(pending[0]["payload_json"] or "{}")
+                if len(pending) == 1
+                else {}
+            )
             if approval_id:
                 conn.execute(
                     """
@@ -2766,6 +2909,7 @@ class SQLiteStore:
                 target_message_id=target_message_id,
                 payload=payload,
                 approval_id=approval_id,
+                execution_mode=execution_mode,
                 now=now,
             )
             if action_id is None:
@@ -2775,13 +2919,75 @@ class SQLiteStore:
             self._mark_task_watching_after_send_locked(
                 conn, task_id=int(task["id"]), now=now
             )
+            approval = conn.execute(
+                "SELECT * FROM approvals WHERE id = ?", (approval_id,)
+            ).fetchone()
+            if approval is None:
+                raise RuntimeError("approved reply disappeared before feedback capture")
+            outcome = "edited_sent"
+            self._record_approval_feedback_locked(
+                conn,
+                approval=approval,
+                command_id=command_id,
+                outcome=outcome,
+                decision_reason=original_payload.get("decision_reason"),
+                suggested_reply=_payload_send_text(original_payload)
+                or approval["preview"],
+                final_reply=reply_text,
+                feedback_reason=feedback_reason,
+                note=note,
+                actor=actor,
+                execution_mode=execution_mode,
+                now=now,
+            )
             return {
                 "approval_id": approval_short_id,
                 "task_id": task["id"],
                 "action_id": action_id,
+                "outcome": outcome,
             }
 
         raise ValueError(f"unsupported command: {verb}")
+
+    def _record_approval_feedback_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        approval: sqlite3.Row,
+        command_id: str,
+        outcome: ApprovalOutcome,
+        decision_reason: Any,
+        suggested_reply: Any,
+        final_reply: Any,
+        feedback_reason: FeedbackReason | None,
+        note: str | None,
+        actor: str,
+        execution_mode: ExecutionMode,
+        now: str,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO approval_feedback(
+              approval_id, task_id, command_id, outcome, decision_reason,
+              suggested_reply, final_reply, feedback_reason, note, actor,
+              execution_mode, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(approval["id"]),
+                None if approval["task_id"] is None else int(approval["task_id"]),
+                command_id,
+                outcome,
+                decision_reason if isinstance(decision_reason, str) else None,
+                suggested_reply if isinstance(suggested_reply, str) else None,
+                final_reply if isinstance(final_reply, str) else None,
+                feedback_reason,
+                note.strip() if isinstance(note, str) and note.strip() else None,
+                actor,
+                execution_mode,
+                now,
+            ),
+        )
 
     def _keep_watching_reject_task_id_locked(
         self,
@@ -3036,6 +3242,7 @@ class SQLiteStore:
         target_message_id: str,
         payload: dict[str, Any],
         approval_id: int | None,
+        execution_mode: ExecutionMode,
         now: str,
     ) -> int | None:
         # A sent action for the same task/target/text is terminal idempotency.
@@ -3053,6 +3260,7 @@ class SQLiteStore:
             task_id=task_id,
             target_message_id=target_message_id,
             payload=payload,
+            execution_mode=execution_mode,
         )
         if failed is not None:
             if _has_active_send_reply_action(
@@ -3060,6 +3268,7 @@ class SQLiteStore:
                 task_id=task_id,
                 target_message_id=target_message_id,
                 exclude_action_id=int(failed["id"]),
+                execution_mode=execution_mode,
             ):
                 return None
             _revive_failed_send_reply_action(
@@ -3069,18 +3278,21 @@ class SQLiteStore:
                 target_message_id=target_message_id,
                 payload=payload,
                 approval_id=approval_id,
+                execution_mode=execution_mode,
                 now=now,
             )
             return int(failed["id"])
 
-        idempotency_key = _action_idempotency_key(task_id, target_message_id, payload)
+        idempotency_key = _action_idempotency_key(
+            task_id, target_message_id, payload, execution_mode=execution_mode
+        )
         try:
             cursor = conn.execute(
                 """
                 INSERT INTO actions(
                   idempotency_key, task_id, approval_id, kind, status, target_message_id,
-                  dry_run, payload_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  dry_run, execution_mode, payload_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     idempotency_key,
@@ -3090,6 +3302,7 @@ class SQLiteStore:
                     ActionStatus.PENDING.value,
                     target_message_id,
                     1,
+                    execution_mode,
                     json.dumps(payload, ensure_ascii=False, default=str),
                     now,
                     now,
@@ -3111,6 +3324,7 @@ class SQLiteStore:
                 task_id=task_id,
                 target_message_id=target_message_id,
                 exclude_action_id=int(row["id"]),
+                execution_mode=execution_mode,
             ):
                 return None
             _revive_failed_send_reply_action(
@@ -3120,6 +3334,7 @@ class SQLiteStore:
                 target_message_id=target_message_id,
                 payload=payload,
                 approval_id=approval_id,
+                execution_mode=execution_mode,
                 now=now,
             )
             return int(row["id"])
@@ -3132,25 +3347,32 @@ class SQLiteStore:
         task_id: int | None,
         payload: dict[str, Any],
         approval_id: int | None = None,
+        execution_mode: ExecutionMode = "production",
         now: str,
     ) -> int:
         dedupe_key = payload.get("dedupe_key")
-        seed = (
+        seed_value = (
             str(dedupe_key)
             if isinstance(dedupe_key, str) and dedupe_key
             else json.dumps(
-                {"task_id": task_id, "payload": payload},
+                {
+                    "task_id": task_id,
+                    "payload": payload,
+                    "execution_mode": execution_mode,
+                },
                 ensure_ascii=False,
                 sort_keys=True,
                 default=str,
             )
         )
+        seed = f"{execution_mode}:{seed_value}"
         idempotency_key = f"owner-{sha256(seed.encode('utf-8')).hexdigest()[:16]}"
         cursor = conn.execute(
             """
             INSERT OR IGNORE INTO actions(
-              idempotency_key, task_id, approval_id, kind, status, dry_run, payload_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+              idempotency_key, task_id, approval_id, kind, status, dry_run,
+              execution_mode, payload_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 idempotency_key,
@@ -3159,6 +3381,7 @@ class SQLiteStore:
                 ActionKind.OWNER_NOTIFICATION.value,
                 ActionStatus.PENDING.value,
                 1,
+                execution_mode,
                 json.dumps(payload, ensure_ascii=False, default=str),
                 now,
                 now,
@@ -3181,6 +3404,7 @@ class SQLiteStore:
                 SET status = ?,
                     approval_id = COALESCE(?, approval_id),
                     dry_run = ?,
+                    execution_mode = ?,
                     payload_json = ?,
                     result_json = NULL,
                     updated_at = ?
@@ -3190,6 +3414,7 @@ class SQLiteStore:
                     ActionStatus.PENDING.value,
                     approval_id,
                     1,
+                    execution_mode,
                     json.dumps(payload, ensure_ascii=False, default=str),
                     now,
                     row["id"],
@@ -3764,6 +3989,7 @@ def _action_from_row(row: sqlite3.Row) -> ActionRecord:
         status=row["status"],
         target_message_id=row["target_message_id"],
         dry_run=bool(row["dry_run"]),
+        execution_mode=row["execution_mode"],
         payload=_loads_json_object(row["payload_json"]),
         result=_loads_json_object(row["result_json"]),
         created_at=row["created_at"],
@@ -3798,6 +4024,7 @@ def _action_record_dict(action: ActionRecord) -> dict[str, Any]:
         "status": action.status,
         "target_message_id": action.target_message_id,
         "dry_run": action.dry_run,
+        "execution_mode": action.execution_mode,
         "payload": action.payload,
         "result": action.result,
         "created_at": action.created_at,
@@ -4064,7 +4291,11 @@ def _minus_seconds(value: str, seconds: int) -> str:
 
 
 def _action_idempotency_key(
-    task_id: int, target_message_id: str, payload: dict[str, Any]
+    task_id: int,
+    target_message_id: str,
+    payload: dict[str, Any],
+    *,
+    execution_mode: ExecutionMode,
 ) -> str:
     seed = json.dumps(
         {
@@ -4072,6 +4303,7 @@ def _action_idempotency_key(
             "target_message_id": target_message_id,
             "text": payload.get("text") or payload.get("composed_text") or "",
             "source": payload.get("source") or "",
+            "execution_mode": execution_mode,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -4086,6 +4318,7 @@ def _find_failed_send_reply_action_for_payload(
     task_id: int,
     target_message_id: str,
     payload: dict[str, Any],
+    execution_mode: ExecutionMode,
 ) -> sqlite3.Row | None:
     text = _payload_send_text(payload)
     if not text:
@@ -4098,9 +4331,10 @@ def _find_failed_send_reply_action_for_payload(
           AND target_message_id = ?
           AND kind = 'send_reply'
           AND status = 'failed'
+          AND execution_mode = ?
         ORDER BY updated_at DESC, id DESC
         """,
-        (task_id, target_message_id),
+        (task_id, target_message_id, execution_mode),
     ).fetchall()
     for row in rows:
         if _payload_send_text(_loads_json_object(row["payload_json"])) == text:
@@ -4202,6 +4436,7 @@ def _has_active_send_reply_action(
     task_id: int,
     target_message_id: str,
     exclude_action_id: int,
+    execution_mode: ExecutionMode,
 ) -> bool:
     row = conn.execute(
         """
@@ -4211,10 +4446,11 @@ def _has_active_send_reply_action(
           AND target_message_id = ?
           AND kind = 'send_reply'
           AND status IN ('pending', 'sending', 'failed_needs_review')
+          AND execution_mode = ?
           AND id != ?
         LIMIT 1
         """,
-        (task_id, target_message_id, exclude_action_id),
+        (task_id, target_message_id, execution_mode, exclude_action_id),
     ).fetchone()
     return row is not None
 
@@ -4227,6 +4463,7 @@ def _revive_failed_send_reply_action(
     target_message_id: str,
     payload: dict[str, Any],
     approval_id: int | None,
+    execution_mode: ExecutionMode,
     now: str,
 ) -> None:
     conn.execute(
@@ -4237,6 +4474,7 @@ def _revive_failed_send_reply_action(
             status = ?,
             target_message_id = ?,
             dry_run = ?,
+            execution_mode = ?,
             payload_json = ?,
             result_json = NULL,
             updated_at = ?
@@ -4248,6 +4486,7 @@ def _revive_failed_send_reply_action(
             "pending",
             target_message_id,
             1,
+            execution_mode,
             json.dumps(payload, ensure_ascii=False, default=str),
             now,
             action_id,

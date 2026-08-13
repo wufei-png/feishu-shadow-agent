@@ -271,6 +271,7 @@ def _service(
     hermes: FakeHermes | None = None,
     store: SQLiteStore | None = None,
     config_base_dir: Path | None = None,
+    dry_run: bool = False,
 ) -> tuple[SQLiteStore, IngestionService, FakeHermes]:
     store = store or SQLiteStore(tmp_path / "agent.sqlite3")
     fake_hermes = hermes or FakeHermes()
@@ -288,6 +289,7 @@ def _service(
         agent_working_dir=agent_working_dir,
         config_base_dir=base_dir,
         agent_retry_delays_seconds=(0.0, 0.0),
+        dry_run=dry_run,
     )
     service = IngestionService(
         store=store,
@@ -346,6 +348,33 @@ def test_gate_passed_p2p_creates_pending_send_and_persists_session(
     assert action["status"] == "pending"
     assert payload["identity"] == "user"
     assert approvals == 0
+
+
+def test_dry_run_processing_marks_auto_reply_action_as_preview_only(
+    tmp_path: Path,
+) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
+    store, service, _ = _service(tmp_path, hermes=hermes, dry_run=True)
+
+    service.process_raw_message(
+        _message(
+            "om_1",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+        ),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_dry",
+    )
+
+    with store.connect() as conn:
+        action = conn.execute(
+            "SELECT execution_mode FROM actions WHERE kind = 'send_reply'"
+        ).fetchone()
+
+    assert action["execution_mode"] == "dry_run"
 
 
 def test_p2p_resource_only_message_waits_for_text_context(tmp_path: Path) -> None:
