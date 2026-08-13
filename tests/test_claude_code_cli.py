@@ -134,7 +134,7 @@ def test_claude_code_falls_back_to_result_json_string() -> None:
             argv=argv,
             exit_code=0,
             stdout=_result_envelope(
-                '{"answerability":"no_reply","proposed_reply":"","reply_target_message_id":null,"watch_action":"close"}'
+                '{"answerability":"no_reply","decision_reason":"no_response_needed","proposed_reply":"","reply_target_message_id":null,"watch_action":"close"}'
             ),
         )
 

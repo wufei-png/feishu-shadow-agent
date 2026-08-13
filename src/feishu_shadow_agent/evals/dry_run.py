@@ -33,6 +33,7 @@ class DryRunBackend:
     ) -> AgentRunResult:
         data: dict[str, Any] = {
             "answerability": "no_reply",
+            "decision_reason": "no_response_needed",
             "proposed_reply": "",
             "reply_target_message_id": None,
             "watch_action": "keep_watching",

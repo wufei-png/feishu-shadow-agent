@@ -179,6 +179,7 @@ class FakeAgentBackend:
             json_data={
                 "task_label": "label",
                 "answerability": "auto_reply",
+                "decision_reason": None,
                 "proposed_reply": "reply text",
                 "reply_target_message_id": target,
                 "watch_action": "keep_watching",

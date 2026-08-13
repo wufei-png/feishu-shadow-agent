@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from ..decision import Answerability, DecisionReason, validate_decision_reason
+
 MessageSource = Literal["group_at_me", "active_watch", "p2p"]
 TaskStatus = Literal["watching", "closed", "closed_by_owner", "human_taken_over"]
 RouterRoute = Literal[
@@ -14,7 +16,6 @@ RouterRoute = Literal[
     "ambiguous",
     "human_taken_over",
 ]
-Answerability = Literal["auto_reply", "needs_owner", "no_reply"]
 WatchAction = Literal["keep_watching", "close"]
 IngressDecisionValue = Literal["kept", "dropped"]
 
@@ -162,6 +163,7 @@ class RouterLabels(EvalModel):
 class DraftTaskSessionLabels(EvalModel):
     reference_answer: str | None = None
     answerability: Answerability | None = None
+    decision_reason: DecisionReason | None = None
     watch_action: WatchAction | None = None
     expected_skills: list[str] = Field(default_factory=list)
 
@@ -170,11 +172,18 @@ class DraftTaskSessionLabels(EvalModel):
     def validate_expected_skills(cls, value: list[str]) -> list[str]:
         return _validate_skill_names(value)
 
+    @model_validator(mode="after")
+    def validate_reason(self) -> DraftTaskSessionLabels:
+        if self.answerability is not None and self.decision_reason is not None:
+            validate_decision_reason(self.answerability, self.decision_reason)
+        return self
+
 
 class TaskSessionLabels(EvalModel):
     schema_version: Literal["task_session_labels_v1"] = "task_session_labels_v1"
     reference_answer: str | None = None
     answerability: Answerability
+    decision_reason: DecisionReason | None = None
     watch_action: WatchAction
     expected_skills: list[str] = Field(default_factory=list)
 
@@ -186,17 +195,33 @@ class TaskSessionLabels(EvalModel):
     @model_validator(mode="after")
     def validate_reference_answer(self) -> TaskSessionLabels:
         _validate_reference(self.answerability, self.reference_answer)
+        if self.decision_reason is not None:
+            validate_decision_reason(self.answerability, self.decision_reason)
         return self
 
 
 class DraftFullChainTaskSessionLabels(EvalModel):
     answerability: Answerability | None = None
+    decision_reason: DecisionReason | None = None
     watch_action: WatchAction | None = None
+
+    @model_validator(mode="after")
+    def validate_reason(self) -> DraftFullChainTaskSessionLabels:
+        if self.answerability is not None and self.decision_reason is not None:
+            validate_decision_reason(self.answerability, self.decision_reason)
+        return self
 
 
 class FullChainTaskSessionLabels(EvalModel):
     answerability: Answerability
+    decision_reason: DecisionReason | None = None
     watch_action: WatchAction
+
+    @model_validator(mode="after")
+    def validate_reason(self) -> FullChainTaskSessionLabels:
+        if self.decision_reason is not None:
+            validate_decision_reason(self.answerability, self.decision_reason)
+        return self
 
 
 class DraftFullChainRouterLabels(EvalModel):

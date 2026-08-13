@@ -182,6 +182,7 @@ def test_codex_cli_invokes_explicit_skills_once_for_new_task_session(
             payload = {
                 "task_label": "task",
                 "answerability": "no_reply",
+                "decision_reason": "no_response_needed",
                 "proposed_reply": "",
                 "reply_target_message_id": None,
                 "watch_action": "close",
@@ -236,6 +237,7 @@ def test_codex_cli_applies_silent_instruction_only_to_task_sessions() -> None:
             payload = {
                 "task_label": "task",
                 "answerability": "no_reply",
+                "decision_reason": "no_response_needed",
                 "proposed_reply": "",
                 "reply_target_message_id": None,
                 "watch_action": "close",
@@ -243,6 +245,7 @@ def test_codex_cli_applies_silent_instruction_only_to_task_sessions() -> None:
         else:
             payload = {
                 "answerability": "no_reply",
+                "decision_reason": "no_response_needed",
                 "proposed_reply": "",
                 "reply_target_message_id": None,
                 "watch_action": "close",
@@ -285,6 +288,7 @@ def test_codex_cli_shows_non_native_paths_only_in_new_task_session(
             {
                 "task_label": "task",
                 "answerability": "no_reply",
+                "decision_reason": "no_response_needed",
                 "proposed_reply": "",
                 "reply_target_message_id": None,
                 "watch_action": "close",

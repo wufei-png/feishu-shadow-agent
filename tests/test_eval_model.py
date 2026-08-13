@@ -25,6 +25,7 @@ class NoSessionBackend:
             session_id=None,
             json_data={
                 "answerability": "no_reply",
+                "decision_reason": "no_response_needed",
                 "proposed_reply": "",
                 "reply_target_message_id": None,
                 "watch_action": "keep_watching",
@@ -61,6 +62,7 @@ class StatefulNoReplyBackend(NoSessionBackend):
         self.session_ids.append(session_id)
         payload: dict[str, Any] = {
             "answerability": "no_reply",
+            "decision_reason": "no_response_needed",
             "proposed_reply": "",
             "reply_target_message_id": None,
             "watch_action": "keep_watching",
@@ -81,6 +83,7 @@ class AutoReplyBackend(StatefulNoReplyBackend):
         self.session_ids.append(session_id)
         payload: dict[str, Any] = {
             "answerability": "auto_reply",
+            "decision_reason": None,
             "proposed_reply": "事实 A",
             "reply_target_message_id": "om_1",
             "watch_action": "keep_watching",
@@ -120,6 +123,7 @@ class MismatchedDecisionBackend(StatefulNoReplyBackend):
             session_id=session_id or "session-1",
             json_data={
                 "answerability": "auto_reply",
+                "decision_reason": "sufficient_evidence_low_risk",
                 "proposed_reply": (
                     "已只读核对当前 Deployment 已包含建议参数，新 Pod 连续运行且无重启，"
                     "历史修复已经实施，无需再次申请修改。"

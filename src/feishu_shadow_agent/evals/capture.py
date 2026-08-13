@@ -157,6 +157,7 @@ class CaptureService:
                 "labels": {
                     "reference_answer": None,
                     "answerability": None,
+                    "decision_reason": None,
                     "watch_action": None,
                     "expected_skills": [],
                 },

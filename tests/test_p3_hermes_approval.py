@@ -247,13 +247,21 @@ def _session_output(
 ) -> dict[str, Any]:
     base = {
         "answerability": "auto_reply",
+        "decision_reason": None,
         "proposed_reply": "reply text",
         "reply_target_message_id": "om_1",
         "watch_action": "keep_watching",
     }
     if include_task_label:
         base["task_label"] = "label"
-    return base | overrides
+    merged = base | overrides
+    if "decision_reason" not in overrides:
+        merged["decision_reason"] = {
+            "auto_reply": None,
+            "needs_owner": "insufficient_evidence",
+            "no_reply": "no_response_needed",
+        }[merged["answerability"]]
+    return merged
 
 
 def _service(

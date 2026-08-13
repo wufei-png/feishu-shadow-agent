@@ -62,6 +62,7 @@ def test_eval_task_session_dry_run_draft_case(tmp_path: Path, capsys) -> None:
             "labels": {
                 "reference_answer": None,
                 "answerability": None,
+                "decision_reason": None,
                 "watch_action": None,
             },
         },

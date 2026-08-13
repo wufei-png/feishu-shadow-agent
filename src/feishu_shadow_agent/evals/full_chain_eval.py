@@ -412,7 +412,7 @@ def _score_structure(
                     }
                 )
             if router_matches and expected_session is not None:
-                for field in ("answerability", "watch_action"):
+                for field in ("answerability", "decision_reason", "watch_action"):
                     expected = getattr(expected_session, field)
                     if expected is not None and raw.get(field) != expected:
                         mismatches.append(

@@ -25,6 +25,7 @@ class HermesNoReplyBackend:
         self.session_ids.append(session_id)
         payload: dict[str, Any] = {
             "answerability": "no_reply",
+            "decision_reason": "no_response_needed",
             "proposed_reply": "",
             "reply_target_message_id": None,
             "watch_action": "keep_watching",
@@ -705,6 +706,7 @@ def _golden_resume_case(tmp_path: Path, config_path: Path) -> Path:
         {
             "schema_version": "task_session_labels_v1",
             "answerability": "no_reply",
+            "decision_reason": "no_response_needed",
             "watch_action": "keep_watching",
             "expected_skills": ["docmate"],
         },

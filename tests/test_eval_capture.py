@@ -130,6 +130,7 @@ def test_task_session_promotion_preserves_expected_skills(tmp_path: Path) -> Non
     review = read_yaml(review_path)
     review["labels"] = {
         "answerability": "no_reply",
+        "decision_reason": "no_response_needed",
         "watch_action": "keep_watching",
         "expected_skills": ["docmate"],
     }

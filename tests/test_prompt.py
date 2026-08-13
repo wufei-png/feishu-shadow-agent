@@ -285,6 +285,7 @@ def test_followup_task_session_prompt_omits_task_label_and_rejects_extra_label()
             {
                 "task_label": "should not be accepted",
                 "answerability": "no_reply",
+                "decision_reason": "no_response_needed",
                 "proposed_reply": "",
                 "reply_target_message_id": None,
                 "watch_action": "keep_watching",
@@ -324,24 +325,28 @@ def test_task_session_prompt_uses_current_chat_type_when_task_value_is_missing()
     [
         {
             "answerability": "auto_reply",
+            "decision_reason": None,
             "proposed_reply": "reply",
             "reply_target_message_id": "om_1",
             "watch_action": "keep_watching",
         },
         {
             "answerability": "needs_owner",
+            "decision_reason": "insufficient_evidence",
             "proposed_reply": "draft for owner review",
             "reply_target_message_id": "om_1",
             "watch_action": "keep_watching",
         },
         {
             "answerability": "no_reply",
+            "decision_reason": "already_resolved",
             "proposed_reply": "",
             "reply_target_message_id": None,
             "watch_action": "close",
         },
         {
             "answerability": "no_reply",
+            "decision_reason": "duplicate_or_stale",
             "proposed_reply": "   ",
             "reply_target_message_id": None,
             "watch_action": "keep_watching",
@@ -362,6 +367,7 @@ def test_task_session_output_accepts_consumed_field_combinations(
         (
             {
                 "answerability": "no_reply",
+                "decision_reason": "no_response_needed",
                 "proposed_reply": "reply should not be consumed",
                 "reply_target_message_id": None,
                 "watch_action": "keep_watching",
@@ -371,6 +377,7 @@ def test_task_session_output_accepts_consumed_field_combinations(
         (
             {
                 "answerability": "no_reply",
+                "decision_reason": "no_response_needed",
                 "proposed_reply": "",
                 "reply_target_message_id": "om_1",
                 "watch_action": "keep_watching",
@@ -380,6 +387,7 @@ def test_task_session_output_accepts_consumed_field_combinations(
         (
             {
                 "answerability": "auto_reply",
+                "decision_reason": None,
                 "proposed_reply": "",
                 "reply_target_message_id": "om_1",
                 "watch_action": "keep_watching",
@@ -389,6 +397,7 @@ def test_task_session_output_accepts_consumed_field_combinations(
         (
             {
                 "answerability": "auto_reply",
+                "decision_reason": "sufficient_evidence_low_risk",
                 "proposed_reply": "reply",
                 "reply_target_message_id": None,
                 "watch_action": "keep_watching",
@@ -398,6 +407,7 @@ def test_task_session_output_accepts_consumed_field_combinations(
         (
             {
                 "answerability": "needs_owner",
+                "decision_reason": "insufficient_evidence",
                 "proposed_reply": "   ",
                 "reply_target_message_id": "om_1",
                 "watch_action": "keep_watching",
@@ -407,6 +417,7 @@ def test_task_session_output_accepts_consumed_field_combinations(
         (
             {
                 "answerability": "needs_owner",
+                "decision_reason": "human_judgment_required",
                 "proposed_reply": "draft for owner review",
                 "reply_target_message_id": "   ",
                 "watch_action": "keep_watching",
@@ -421,6 +432,32 @@ def test_task_session_output_rejects_unconsumed_field_combinations(
 ) -> None:
     with pytest.raises(ValidationError, match=error_match):
         InitialTaskSessionOutput.model_validate(payload | {"task_label": "label"})
+
+
+@pytest.mark.parametrize(
+    ("answerability", "decision_reason"),
+    [
+        ("needs_owner", None),
+        ("no_reply", None),
+        ("needs_owner", "already_resolved"),
+        ("no_reply", "insufficient_evidence"),
+        ("auto_reply", "no_response_needed"),
+    ],
+)
+def test_task_session_output_rejects_invalid_decision_reason_combination(
+    answerability: str, decision_reason: str | None
+) -> None:
+    payload = {
+        "answerability": answerability,
+        "decision_reason": decision_reason,
+        "proposed_reply": "" if answerability == "no_reply" else "reply",
+        "reply_target_message_id": None if answerability == "no_reply" else "om_1",
+        "watch_action": "keep_watching",
+        "task_label": "label",
+    }
+
+    with pytest.raises(ValidationError, match="decision_reason"):
+        InitialTaskSessionOutput.model_validate(payload)
 
 
 def test_reply_postprocess_prompt_omits_metadata_only_guidance_summary() -> None:

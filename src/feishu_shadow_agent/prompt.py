@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .decision import Answerability, DecisionReason, validate_decision_reason
 from .types import NormalizedMessage, TaskRecord
 
 ROUTER_INSTRUCTION = (
@@ -85,11 +86,17 @@ class TaskRouterOutput(StrictModel):
 
 
 class BaseTaskSessionOutput(StrictModel):
-    answerability: Literal["auto_reply", "needs_owner", "no_reply"] = Field(
+    answerability: Answerability = Field(
         description=(
             "Whether the daemon may reply automatically, needs owner review, or should not reply. Use auto_reply "
             "only for sufficient evidence and low-risk replies; use needs_owner for uncertainty, commitments, "
             "privacy-sensitive content, writes or permission expansion, or unclear human responsibility."
+        )
+    )
+    decision_reason: DecisionReason | None = Field(
+        description=(
+            "Primary reason for the answerability decision. Required for needs_owner and no_reply. "
+            "For auto_reply it may be null; when present it must be sufficient_evidence_low_risk."
         )
     )
     proposed_reply: str = Field(
@@ -113,6 +120,7 @@ class BaseTaskSessionOutput(StrictModel):
 
     @model_validator(mode="after")
     def validate_reply_fields_for_answerability(self) -> BaseTaskSessionOutput:
+        validate_decision_reason(self.answerability, self.decision_reason)
         proposed_reply = self.proposed_reply.strip()
         reply_target = (
             None
@@ -348,6 +356,11 @@ def _task_session_output_contract(output_model: type[BaseModel]) -> str:
         "- `answerability`: `auto_reply` only for sufficient low-risk evidence; "
         "`needs_owner` for uncertainty, commitments, privacy, writes or permission expansion, "
         "or unclear human responsibility; `no_reply` when no external reply is needed.",
+        "- `decision_reason`: for `needs_owner`, one of `insufficient_evidence`, "
+        "`commitment_or_authorization`, `sensitive_or_high_impact`, `write_or_permission`, or "
+        "`human_judgment_required`; for `no_reply`, one of `no_response_needed`, "
+        "`already_resolved`, or `duplicate_or_stale`; for `auto_reply`, null or "
+        "`sufficient_evidence_low_risk`.",
         "- `proposed_reply`: non-empty plain reply text for `auto_reply` or `needs_owner`; "
         "empty for `no_reply`.",
         "- `reply_target_message_id`: one allowed Reply Context target for `auto_reply` or "

@@ -229,6 +229,7 @@ def _score_structure(
         raise EvalError("cannot score missing task-session output")
     mismatches: list[dict[str, Any]] = []
     expected_answerability = getattr(labels, "answerability", None)
+    expected_decision_reason = getattr(labels, "decision_reason", None)
     expected_watch = getattr(labels, "watch_action", None)
     if (
         expected_answerability is not None
@@ -247,6 +248,17 @@ def _score_structure(
                 "field": "watch_action",
                 "expected": expected_watch,
                 "actual": output.watch_action,
+            }
+        )
+    if (
+        expected_decision_reason is not None
+        and output.decision_reason != expected_decision_reason
+    ):
+        mismatches.append(
+            {
+                "field": "decision_reason",
+                "expected": expected_decision_reason,
+                "actual": output.decision_reason,
             }
         )
     if (
@@ -273,7 +285,9 @@ def _score_structure(
             }
         )
     checked = labels is not None and (
-        expected_answerability is not None or expected_watch is not None
+        expected_answerability is not None
+        or expected_decision_reason is not None
+        or expected_watch is not None
     )
     return {
         "checked": checked,
