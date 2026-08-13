@@ -123,6 +123,189 @@ def _insert_approval(
     return int(cursor.lastrowid)
 
 
+def _insert_feedback(
+    store: SQLiteStore,
+    *,
+    task_id: int,
+    suffix: str,
+    outcome: str,
+    decision_reason: str,
+    created_at: str,
+    suggested_reply: str | None = "suggested reply",
+    final_reply: str | None = None,
+    feedback_reason: str | None = None,
+    execution_mode: str = "production",
+    content_expired_at: str | None = None,
+) -> None:
+    approval_id = _insert_approval(
+        store,
+        task_id=task_id,
+        short_id=f"a_{suffix}",
+        payload={
+            "reply_target_message_id": "om_root",
+            "text": suggested_reply or "",
+            "decision_reason": decision_reason,
+        },
+    )
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE approvals SET status = 'approved', resolved_at = ? WHERE id = ?",
+            (created_at, approval_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO approval_feedback(
+              approval_id, task_id, command_id, outcome, decision_reason,
+              suggested_reply, final_reply, feedback_reason, note, actor,
+              execution_mode, content_expired_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                approval_id,
+                task_id,
+                f"cmd_{suffix}",
+                outcome,
+                decision_reason,
+                suggested_reply,
+                final_reply,
+                feedback_reason,
+                "note" if content_expired_at is None else None,
+                "ou_owner",
+                execution_mode,
+                content_expired_at,
+                created_at,
+            ),
+        )
+
+
+def test_feedback_overview_has_7_and_30_day_metrics_and_reply_diff(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    task_id = _insert_task(store, "t_feedback")
+    _insert_feedback(
+        store,
+        task_id=task_id,
+        suffix="exact",
+        outcome="suggestion_sent",
+        decision_reason="commitment_or_authorization",
+        created_at="2026-08-12T10:00:00+08:00",
+        final_reply="suggested reply",
+    )
+    _insert_feedback(
+        store,
+        task_id=task_id,
+        suffix="edited",
+        outcome="edited_sent",
+        decision_reason="human_judgment_required",
+        created_at="2026-08-11T10:00:00+08:00",
+        suggested_reply="I can Friday",
+        final_reply="I can do it Friday",
+        feedback_reason="tone_or_style",
+    )
+    _insert_feedback(
+        store,
+        task_id=task_id,
+        suffix="nosend",
+        outcome="no_send_keep_watching",
+        decision_reason="insufficient_evidence",
+        created_at="2026-08-10T10:00:00+08:00",
+        final_reply=None,
+    )
+    _insert_feedback(
+        store,
+        task_id=task_id,
+        suffix="older",
+        outcome="edited_sent",
+        decision_reason="commitment_or_authorization",
+        created_at="2026-08-01T10:00:00+08:00",
+        suggested_reply=None,
+        final_reply=None,
+        content_expired_at="2026-08-12T00:00:00+08:00",
+    )
+    _insert_feedback(
+        store,
+        task_id=task_id,
+        suffix="dry",
+        outcome="no_send_end_task",
+        decision_reason="write_or_permission",
+        created_at="2026-08-12T11:00:00+08:00",
+        execution_mode="dry_run",
+    )
+    query = OperatorQueryService(store, now=lambda: "2026-08-13T12:00:00+08:00")
+
+    overview = query.feedback_overview()
+
+    seven, thirty = overview["windows"]
+    assert overview["execution_mode"] == "production"
+    assert seven["days"] == 7
+    assert seven["total"] == 3
+    assert seven["sent_without_edit_rate"] == 0.5
+    assert seven["edit_rate_among_sends"] == 0.5
+    assert seven["no_send_rate"] == 0.3333
+    assert seven["changed_reply_count"] == 1
+    assert thirty["days"] == 30
+    assert thirty["total"] == 4
+    assert thirty["content_expired_count"] == 1
+    assert {item["value"] for item in thirty["by_decision_reason"]} == {
+        "commitment_or_authorization",
+        "human_judgment_required",
+        "insufficient_evidence",
+    }
+    edited = next(
+        item for item in overview["recent"] if item["approval_id"] == "a_edited"
+    )
+    assert edited["reply_comparison"]["status"] == "changed"
+    assert edited["reply_comparison"]["suggested_reply"] == "I can Friday"
+    assert edited["reply_comparison"]["final_reply"] == "I can do it Friday"
+    assert {part["op"] for part in edited["reply_comparison"]["diff"]} >= {
+        "equal",
+        "insert",
+    }
+    older = next(
+        item for item in overview["recent"] if item["approval_id"] == "a_older"
+    )
+    assert older["reply_comparison"] == {
+        "status": "expired",
+        "suggested_reply": None,
+        "final_reply": None,
+        "diff": [],
+    }
+
+
+def test_feedback_query_can_explicitly_include_dry_run(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    task_id = _insert_task(store, "t_feedback_modes")
+    _insert_feedback(
+        store,
+        task_id=task_id,
+        suffix="prod",
+        outcome="suggestion_sent",
+        decision_reason="commitment_or_authorization",
+        created_at="2026-08-12T10:00:00+08:00",
+        final_reply="suggested reply",
+    )
+    _insert_feedback(
+        store,
+        task_id=task_id,
+        suffix="dry_mode",
+        outcome="no_send_end_task",
+        decision_reason="write_or_permission",
+        created_at="2026-08-12T11:00:00+08:00",
+        execution_mode="dry_run",
+    )
+    query = OperatorQueryService(store, now=lambda: "2026-08-13T12:00:00+08:00")
+
+    production = query.list_feedback(execution_mode="production")
+    combined = query.list_feedback(execution_mode="all")
+
+    assert [item["execution_mode"] for item in production] == ["production"]
+    assert {item["execution_mode"] for item in combined} == {
+        "production",
+        "dry_run",
+    }
+
+
 def test_dashboard_snapshot_includes_policy_status_and_omits_policy_audits(
     tmp_path: Path,
 ) -> None:

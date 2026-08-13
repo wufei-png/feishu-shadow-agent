@@ -222,6 +222,32 @@ def test_dashboard_returns_operator_query_dto_with_valid_token(tmp_path: Path) -
     assert "policy_audits" not in payload
 
 
+def test_feedback_overview_api_defaults_to_production_windows(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+
+    response = client.get("/api/feedback/overview", headers=_auth())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["execution_mode"] == "production"
+    assert [window["days"] for window in payload["windows"]] == [7, 30]
+    assert payload["recent"] == []
+
+
+def test_feedback_api_validates_window_and_mode(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+
+    bad_days = client.get("/api/feedback?days=0", headers=_auth())
+    bad_mode = client.get(
+        "/api/feedback?execution_mode=legacy_untrusted", headers=_auth()
+    )
+
+    assert bad_days.status_code == 400
+    assert bad_days.json()["error"]["code"] == "validation_failed"
+    assert bad_mode.status_code == 400
+    assert bad_mode.json()["error"]["code"] == "validation_failed"
+
+
 def test_dashboard_redacts_failed_approval_command_body(tmp_path: Path) -> None:
     client = _client(tmp_path)
     store = _store(tmp_path)

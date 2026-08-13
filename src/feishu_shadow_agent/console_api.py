@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import (
     APIRouter,
@@ -354,6 +354,30 @@ def create_console_app(
         limit: Annotated[int, Query(ge=1, le=100)] = 20,
     ) -> dict[str, Any]:
         return query_service().health_issues(limit=limit)
+
+    @api.get("/feedback/overview")
+    def feedback_overview(
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        execution_mode: Literal["production", "dry_run", "all"] = "production",
+    ) -> dict[str, Any]:
+        return query_service().feedback_overview(
+            execution_mode=execution_mode,
+            recent_limit=limit,
+        )
+
+    @api.get("/feedback")
+    def feedback(
+        days: Annotated[int, Query(ge=1, le=3650)] = 30,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        offset: Annotated[int, Query(ge=0)] = 0,
+        execution_mode: Literal["production", "dry_run", "all"] = "production",
+    ) -> list[dict[str, Any]]:
+        return query_service().list_feedback(
+            days=days,
+            limit=limit,
+            offset=offset,
+            execution_mode=execution_mode,
+        )
 
     @api.get("/messages/{message_id}/detail")
     def message_detail(message_id: str) -> dict[str, Any]:

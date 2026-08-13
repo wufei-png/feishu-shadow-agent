@@ -22,6 +22,7 @@ from .operator_queries.common import (
     _ReadStoreUnavailable,
     _task_summary_dto,
 )
+from .operator_queries.feedback import FeedbackExecutionMode, FeedbackQuery
 from .operator_queries.health import (
     _RUN_RUNTIME_COLUMNS,
     HealthQuery,
@@ -71,6 +72,7 @@ class OperatorQueryService:
             policy_status=self._policy_query.policy_status,
             validate_policy_store=self._policy_query.validate_policy_store,
         )
+        self._feedback_query = FeedbackQuery(connect=self._connect, now=self._now)
         self.policy_resolver = self._policy_query.policy_resolver
 
     def dashboard_snapshot(
@@ -156,6 +158,34 @@ class OperatorQueryService:
             limit=limit,
             stale_after_seconds=stale_after_seconds,
             daemon_stale_after_seconds=daemon_stale_after_seconds,
+        )
+
+    def feedback_overview(
+        self,
+        *,
+        execution_mode: FeedbackExecutionMode = "production",
+        recent_limit: int = 50,
+    ) -> dict[str, Any]:
+        return self._feedback_query.overview(
+            windows=(7, 30),
+            recent_days=30,
+            recent_limit=recent_limit,
+            execution_mode=execution_mode,
+        )
+
+    def list_feedback(
+        self,
+        *,
+        days: int = 30,
+        limit: int = 50,
+        offset: int = 0,
+        execution_mode: FeedbackExecutionMode = "production",
+    ) -> list[dict[str, Any]]:
+        return self._feedback_query.list_feedback(
+            days=days,
+            limit=limit,
+            offset=offset,
+            execution_mode=execution_mode,
         )
 
     def list_approvals(
