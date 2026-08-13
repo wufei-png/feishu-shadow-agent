@@ -846,7 +846,10 @@ def _handle_reply_style_refresh(args: argparse.Namespace) -> int:
         base_dir=loaded.base_dir,
         feishu_client=client,
         agent_backend=backend,
-        agent_invoker=AgentInvoker(logger=logger),
+        agent_invoker=AgentInvoker(
+            logger=logger,
+            max_attempts=loaded.config.agent_backend.max_attempts,
+        ),
     )
     result = refresher.refresh(dry_run=args.dry_run, run_id=new_run_id("reply_style"))
     print(yaml.safe_dump(result.as_dict(), allow_unicode=True, sort_keys=False), end="")

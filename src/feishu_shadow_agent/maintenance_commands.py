@@ -149,7 +149,10 @@ class MaintenanceCommandService:
             base_dir=self.loaded_config.base_dir,
             feishu_client=self._feishu_client(),
             agent_backend=self._agent_backend(),
-            agent_invoker=AgentInvoker(logger=self.logger),
+            agent_invoker=AgentInvoker(
+                logger=self.logger,
+                max_attempts=self.loaded_config.config.agent_backend.max_attempts,
+            ),
         ).refresh(dry_run=dry_run, run_id=run_id)
         changed = result.wrote_profile
         return CommandResult(

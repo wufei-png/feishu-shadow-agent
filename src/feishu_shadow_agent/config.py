@@ -339,6 +339,11 @@ class AgentBackendConfig(StrictModel):
         default="hermes",
         description="Agent backend provider. Config accepts hermes, codex, or claude_code.",
     )
+    max_attempts: int = Field(
+        default=3,
+        ge=1,
+        description="Maximum attempts for one retry-enabled Agent call, shared by all tool permission profiles.",
+    )
     working_dir: str | None = Field(
         default=None,
         description="Agent subprocess working directory; null uses the config file directory.",

@@ -69,6 +69,7 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `interactive_cards.app_secret_env` | string | `FEISHU_APP_SECRET` | 保存飞书应用密钥的环境变量名；必须与 `app_id_env` 不同。 |
 | `interactive_cards.startup_timeout_seconds` | int `> 0` | `10` | daemon 启动时等待卡片回调长连接变为健康的最长秒数；超时后继续以文本兜底运行。 |
 | `agent_backend.provider` | `hermes`/`codex`/`claude_code` | `hermes` | Agent backend provider。被选中的 provider 必须覆盖 task router、task session、reply postprocess 和 owner style refresh。 |
+| `agent_backend.max_attempts` | int `>= 1` | `3` | 单次 Agent 调用的最大尝试次数。Router、Task Session、reply postprocess 和 owner style refresh 共用；`read_only` 与 `full_access` 不分叉。`full_access` 重试可能重复 Agent 工具副作用，系统不提供额外的副作用幂等兼容层。 |
 | `agent_backend.working_dir` | string/null | `null` | Agent 子进程运行目录；`null` 表示 `config.yaml` 所在目录。相对路径基于配置文件目录解析。新 task 创建时会把解析后的绝对路径固化到 `tasks.agent_working_dir`；后续 follow-up/reopen 继续使用 task 内记录的目录，不随配置漂移。无 task 的 router 使用当前配置解析结果。 |
 | `agent_backend.config_scope` | `isolated`/`native` | `isolated` | 是否加载普通用户级配置；不等同于清除 credentials、managed policy 或 auth state。各 provider 映射见“Agent Backend 上下文语义”。 |
 | `agent_backend.auto_context` | `disabled`/`enabled` | `disabled` | 是否加载 CLI 自带规则、memory、默认 skill 等隐式上下文。不同 CLI 的实际含义不同，见“Agent Backend 上下文语义”。 |

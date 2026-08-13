@@ -250,8 +250,10 @@ def test_settings_catalog_and_runtime_routes_are_readonly_product_maps(
     keys = {entry["key"] for entry in catalog["entries"]}
     assert "policy.global.p2p_auto_reply" in keys
     assert "lifecycle.approval_timeout_hours" in keys
+    assert "agent_backend.max_attempts" in keys
     assert "debug.save_full_agent_io" in keys
     assert runtime["values"]["lifecycle.approval_timeout_hours"] == 12
+    assert runtime["values"]["agent_backend.max_attempts"] == 3
     assert runtime["values"]["policy.status.initialized"] is False
     assert runtime["policy_status"]["policy_import_diff"]["status"] == "differs"
 

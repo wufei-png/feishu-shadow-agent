@@ -14,6 +14,13 @@
           "title": "Provider",
           "type": "string"
         },
+        "max_attempts": {
+          "default": 3,
+          "description": "Maximum attempts for one retry-enabled Agent call, shared by all tool permission profiles.",
+          "minimum": 1,
+          "title": "Max Attempts",
+          "type": "integer"
+        },
         "working_dir": {
           "anyOf": [
             {

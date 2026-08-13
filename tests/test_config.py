@@ -35,6 +35,7 @@ def test_load_minimal_config() -> None:
     assert loaded.config.interactive_cards.enabled is False
     assert loaded.config.interactive_cards.app_id_env == "FEISHU_APP_ID"
     assert loaded.config.agent_backend.provider == "hermes"
+    assert loaded.config.agent_backend.max_attempts == 3
     assert loaded.config.agent_backend.working_dir is None
     assert loaded.config.agent_backend.config_scope == "isolated"
     assert loaded.config.agent_backend.auto_context == "disabled"
@@ -59,6 +60,38 @@ def test_agent_backend_timeouts_default_to_unlimited(tmp_path: Path) -> None:
     assert loaded.config.agent_backend.hermes.timeout_seconds is None
     assert loaded.config.agent_backend.codex.timeout_seconds is None
     assert loaded.config.agent_backend.claude_code.timeout_seconds is None
+
+
+@pytest.mark.parametrize("tool_permissions", ["read_only", "full_access"])
+def test_agent_max_attempts_is_shared_by_tool_permission_profiles(
+    tmp_path: Path, tool_permissions: str
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+owner:
+  open_id: ou_owner
+agent_backend:
+  max_attempts: 5
+tool_permissions: {tool_permissions}
+""",
+        encoding="utf-8",
+    )
+
+    loaded = ConfigService().load(config_path)
+
+    assert loaded.config.agent_backend.max_attempts == 5
+
+
+def test_agent_max_attempts_must_be_positive(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "owner:\n  open_id: ou_owner\nagent_backend:\n  max_attempts: 0\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="max_attempts"):
+        ConfigService().load(config_path)
 
 
 @pytest.mark.parametrize(

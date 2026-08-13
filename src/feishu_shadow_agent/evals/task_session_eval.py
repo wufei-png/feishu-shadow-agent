@@ -42,7 +42,10 @@ def run_task_session_trial(
     runner = TaskSessionRunner(
         store=runtime.store,
         agent_backend=backend,
-        agent_invoker=AgentInvoker(logger=runtime.logger),
+        agent_invoker=AgentInvoker(
+            logger=runtime.logger,
+            max_attempts=loaded.config.agent_backend.max_attempts,
+        ),
         context_access=ContextAccessBuilder(
             store=runtime.store,
             config=loaded.config,

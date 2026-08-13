@@ -14,7 +14,6 @@ from pydantic import ValidationError
 
 from .agent_backend import AgentBackend
 from .agent_invocation import (
-    AGENT_MAX_ATTEMPTS,
     AgentAttemptOutcome,
     AgentInvoker,
     agent_result_error,
@@ -296,7 +295,7 @@ class TaskProcessingService:
         config: AppConfig,
         agent_backend: AgentBackend,
         logger: JSONLLogger,
-        agent_max_attempts: int = AGENT_MAX_ATTEMPTS,
+        agent_max_attempts: int | None = None,
         agent_retry_delays_seconds: tuple[float, ...] = (1.0, 3.0),
         agent_working_dir: str | Path | None = None,
         config_base_dir: str | Path | None = None,
@@ -323,7 +322,11 @@ class TaskProcessingService:
         self.policy = PolicyResolver(store)
         self.agent_invoker = AgentInvoker(
             logger=logger,
-            max_attempts=agent_max_attempts,
+            max_attempts=(
+                config.agent_backend.max_attempts
+                if agent_max_attempts is None
+                else agent_max_attempts
+            ),
             retry_delays_seconds=agent_retry_delays_seconds,
             sleep_func=sleep_func,
         )

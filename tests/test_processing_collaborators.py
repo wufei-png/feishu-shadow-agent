@@ -7,9 +7,10 @@ import pytest
 
 from feishu_shadow_agent.agent_backend import AgentRunResult
 from feishu_shadow_agent.agent_invocation import AgentInvoker
-from feishu_shadow_agent.config import AppConfig, OwnerConfig
+from feishu_shadow_agent.config import AgentBackendConfig, AppConfig, OwnerConfig
 from feishu_shadow_agent.context_access import ContextAccessBuilder
 from feishu_shadow_agent.jsonl import JSONLLogger
+from feishu_shadow_agent.processing import TaskProcessingService
 from feishu_shadow_agent.resource_preflight import (
     ResourcePreflightResult,
     is_p2p_resource_unavailable,
@@ -105,6 +106,25 @@ def test_agent_invoker_retries_transient_result_but_not_terminal_result(
     assert (
         terminal.last_error is not None and "permission denied" in terminal.last_error
     )
+
+
+@pytest.mark.parametrize("tool_permissions", ["read_only", "full_access"])
+def test_task_processing_uses_shared_configured_agent_attempts(
+    tmp_path: Path, tool_permissions: str
+) -> None:
+    config = AppConfig(
+        owner=OwnerConfig(open_id="ou_owner", name="Owner"),
+        agent_backend=AgentBackendConfig(max_attempts=5),
+        tool_permissions=tool_permissions,  # type: ignore[arg-type]
+    )
+    processor = TaskProcessingService(
+        store=SQLiteStore(tmp_path / "agent.sqlite3"),
+        config=config,
+        agent_backend=None,  # type: ignore[arg-type]
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+    )
+
+    assert processor.agent_invoker.max_attempts == 5
 
 
 def test_context_access_builder_preserves_router_and_task_scope_cards(
