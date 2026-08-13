@@ -13,22 +13,29 @@ concurrency:
 
 jobs:
   backend:
-    name: Backend quality and tests (${{ matrix.timezone }})
+    name: Backend quality and tests (Python ${{ matrix.python }}, ${{ matrix.timezone }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        timezone:
-          - UTC
-          - Asia/Shanghai
-          - America/Los_Angeles
+        include:
+          - python: "3.11"
+            timezone: UTC
+          - python: "3.11"
+            timezone: Asia/Shanghai
+          - python: "3.11"
+            timezone: America/Los_Angeles
+          - python: "3.12"
+            timezone: UTC
+          - python: "3.13"
+            timezone: UTC
     env:
       TZ: ${{ matrix.timezone }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python }}
           cache: pip
       - name: Install project and optional card SDK
         run: python -m pip install -e ".[dev,cards]"
@@ -40,25 +47,28 @@ jobs:
         run: python -m pyright --pythonpath "$(command -v python)"
       - name: Full test suite
         run: python -m pytest -q
-      - name: Current schema check
-        run: python -m pytest -q tests/test_store_schema.py
-      - name: Evaluation smoke check
-        run: >-
-          python -m pytest -q
-          tests/test_eval_cli.py::test_eval_task_session_dry_run_draft_case
 
   frontend:
     name: Operator Console build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/operator-console/package-lock.json
       - name: Install frontend dependencies
         run: npm --prefix frontend/operator-console ci
+      - name: Audit frontend dependencies
+        run: >-
+          npm --prefix frontend/operator-console audit
+          --audit-level=high
+          --registry=https://registry.npmjs.org
+      - name: Lint Operator Console
+        run: npm --prefix frontend/operator-console run lint
+      - name: Test Operator Console
+        run: npm --prefix frontend/operator-console test
       - name: Build bundled Operator Console
         run: npm --prefix frontend/operator-console run build
       - name: Verify bundled assets are current
@@ -68,8 +78,8 @@ jobs:
     name: Build and inspect package
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
           cache: pip
@@ -94,7 +104,7 @@ jobs:
                   path = f"feishu_shadow_agent/console_static/assets/{asset}"
                   assert path in names, f"missing {path}"
           PY
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: python-distributions
           path: dist/*
@@ -104,8 +114,8 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
           cache: pip
@@ -116,3 +126,23 @@ jobs:
           python -m pytest -q
           --cov=feishu_shadow_agent
           --cov-report=term-missing
+
+  dependency-audit:
+    name: Python dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Upgrade packaging tools
+        run: python -m pip install --upgrade pip setuptools
+      - name: Install Python dependencies
+        run: python -m pip install -e ".[dev,cards]"
+      - name: Audit Python dependencies
+        run: >-
+          python -m pip_audit
+          --local
+          --skip-editable
+          --progress-spinner off

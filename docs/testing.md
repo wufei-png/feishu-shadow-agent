@@ -33,9 +33,11 @@ python -m pytest -q
 python -m ruff check .
 python -m ruff format --check .
 python -m pyright --pythonpath "$(command -v python)"
+python -m pip install --upgrade pip setuptools
+python -m pip_audit --local --skip-editable --progress-spinner off
 ```
 
-Pyright 以 strict 模式只覆盖本轮纳入基线的新模块；全仓既有类型债务不作为新功能的阻断项。CI 中 Ruff、全量 pytest、前端 build、migration、包构建/静态资源检查和 eval smoke 都是阻断项，coverage 仅报告、不阻断。
+Pyright 以 strict 模式只覆盖已经纳入基线的模块；全仓既有类型债务不作为新功能的阻断项。CI 用 Python 3.11 在 UTC、Asia/Shanghai 和 America/Los_Angeles 跑全量测试，并在 UTC 补测 Python 3.12/3.13。Ruff、Pyright、全量 pytest、前端 lint/unit/build、Python/npm dependency audit 和包构建/静态资源检查都是阻断项；coverage 仅报告、不阻断。全量 pytest 已包含 schema 和 eval smoke 测试，不再重复执行子集。
 
 如需验证 git hook 行为，或提交前跑同一套 Ruff autofix/format hooks：
 
@@ -66,6 +68,7 @@ npm --prefix frontend/operator-console run lint
 npm --prefix frontend/operator-console test
 npm --prefix frontend/operator-console run typecheck
 npm --prefix frontend/operator-console run build
+npm --prefix frontend/operator-console audit --audit-level=high --registry=https://registry.npmjs.org
 ```
 
 Operator Console 发布产物验证：
@@ -79,6 +82,8 @@ npm --prefix frontend/operator-console run build
 python -m pytest -q
 python -m ruff check .
 python -m ruff format --check .
+python -m pip install --upgrade pip setuptools
+python -m pip_audit --local --skip-editable --progress-spinner off
 python -m build
 python3.11 -m venv /tmp/feishu-shadow-agent-release-check
 /tmp/feishu-shadow-agent-release-check/bin/python -m pip install dist/*.whl
