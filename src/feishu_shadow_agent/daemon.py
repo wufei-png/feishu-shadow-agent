@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import signal
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -56,6 +58,21 @@ class Daemon:
         self._last_runtime_health_at: float | None = None
         self._runtime_health_ok = True
         self.sleep_func = sleep_func
+        self._lifecycle_condition = threading.Condition()
+        self._wakeup_generation = 0
+        self._stop_requested = False
+
+    def wake(self) -> None:
+        """Wake the daemon loop so queued operator actions dispatch promptly."""
+        with self._lifecycle_condition:
+            self._wakeup_generation += 1
+            self._lifecycle_condition.notify_all()
+
+    def request_stop(self) -> None:
+        with self._lifecycle_condition:
+            self._stop_requested = True
+            self._wakeup_generation += 1
+            self._lifecycle_condition.notify_all()
 
     def run_startup_health(self) -> tuple[bool, list[HealthCheckResult]]:
         results = self.health_suite.run(send_test=False)
@@ -262,6 +279,7 @@ class Daemon:
         self.store.record_run_start(
             run_id=run_id, dry_run=self.dry_run, **self.run_metadata
         )
+        previous_signal_handlers = self._install_signal_handlers()
         try:
             self.logger.debug(
                 "daemon_startup_health_started",
@@ -288,13 +306,72 @@ class Daemon:
                     "send_owner_notifications": self.send_owner_notifications,
                 },
             )
-            while True:
+            observed_wakeup = self._current_wakeup_generation()
+            while not self._stop_is_requested():
                 self.run_one_tick(run_id=run_id)
-                self.sleep_func(self.tick_interval_seconds)
+                observed_wakeup = self._wait_for_next_tick(observed_wakeup)
         except KeyboardInterrupt:
             self.logger.emit("info", "daemon_interrupted", run_id=run_id)
-            self.store.record_run_finish(run_id=run_id, status="interrupted")
+            self.store.record_run_finish(run_id=run_id, status="stopped")
             return 0
+        except Exception as exc:
+            self.logger.emit(
+                "error",
+                "daemon_crashed",
+                run_id=run_id,
+                data={"error": str(exc), "error_type": type(exc).__name__},
+            )
+            self.store.record_run_finish(run_id=run_id, status="crashed")
+            raise
+        else:
+            self.logger.emit("info", "daemon_stopped", run_id=run_id)
+            self.store.record_run_finish(run_id=run_id, status="stopped")
+            return 0
+        finally:
+            self._restore_signal_handlers(previous_signal_handlers)
+
+    def _current_wakeup_generation(self) -> int:
+        with self._lifecycle_condition:
+            return self._wakeup_generation
+
+    def _stop_is_requested(self) -> bool:
+        with self._lifecycle_condition:
+            return self._stop_requested
+
+    def _wait_for_next_tick(self, observed_wakeup: int) -> int:
+        if self.sleep_func is not time.sleep:
+            self.sleep_func(self.tick_interval_seconds)
+            return self._current_wakeup_generation()
+        with self._lifecycle_condition:
+            self._lifecycle_condition.wait_for(
+                lambda: (
+                    self._stop_requested or self._wakeup_generation != observed_wakeup
+                ),
+                timeout=self.tick_interval_seconds,
+            )
+            return self._wakeup_generation
+
+    def _install_signal_handlers(self) -> dict[int, Any]:
+        if threading.current_thread() is not threading.main_thread():
+            return {}
+        previous: dict[int, Any] = {}
+
+        def request_controlled_stop(_signum: int, _frame: Any) -> None:
+            self.request_stop()
+
+        try:
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                previous[signum] = signal.getsignal(signum)
+                signal.signal(signum, request_controlled_stop)
+        except ValueError:
+            self._restore_signal_handlers(previous)
+            return {}
+        return previous
+
+    @staticmethod
+    def _restore_signal_handlers(previous: dict[int, Any]) -> None:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
 
     def _runtime_health_ok_for_tick(self, *, run_id: str) -> bool:
         interval = self._runtime_health_check_interval()
@@ -420,7 +497,12 @@ class Daemon:
         return StageResult(
             "retention",
             ok=True,
-            processed=summary.raw_messages_pruned + summary.resources_expired,
+            processed=(
+                summary.raw_messages_pruned
+                + summary.resources_expired
+                + summary.feedback_content_expired
+                + summary.feedback_metadata_deleted
+            ),
         )
 
 

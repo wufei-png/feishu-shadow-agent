@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import signal
+import threading
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 from feishu_shadow_agent.agent_backend import AgentRunResult
@@ -405,9 +408,112 @@ def test_keyboard_interrupt_finishes_run(tmp_path: Path) -> None:
             "SELECT status, git_commit, git_dirty FROM runs WHERE run_id = ?",
             ("run_1",),
         ).fetchone()
-    assert row["status"] == "interrupted"
+    assert row["status"] == "stopped"
     assert row["git_commit"] == "abc123"
     assert row["git_dirty"] == 1
+
+
+def test_unhandled_exception_marks_daemon_crashed(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    logger = JSONLLogger(tmp_path / "agent.jsonl")
+    suite = FakeHealthSuite(
+        [HealthCheckResult("config_schema", "critical", "ok", "ok")]
+    )
+
+    def crash(_seconds: float) -> None:
+        raise RuntimeError("loop exploded")
+
+    daemon = Daemon(
+        store=store,
+        logger=logger,
+        health_suite=suite,  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=True,
+        sleep_func=crash,
+    )
+
+    with pytest.raises(RuntimeError, match="loop exploded"):
+        daemon.run_forever()
+
+    with store.connect() as conn:
+        run = conn.execute(
+            "SELECT status, finished_at FROM runs WHERE run_id = ?", ("run_1",)
+        ).fetchone()
+    assert run["status"] == "crashed"
+    assert run["finished_at"] is not None
+    assert "daemon_crashed" in (tmp_path / "agent.jsonl").read_text(encoding="utf-8")
+
+
+def test_wake_runs_next_tick_without_waiting_for_poll_interval(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    logger = JSONLLogger(tmp_path / "agent.jsonl")
+    suite = FakeHealthSuite(
+        [HealthCheckResult("config_schema", "critical", "ok", "ok")]
+    )
+    first_tick = threading.Event()
+    results: list[int] = []
+
+    class WakeableDaemon(Daemon):
+        tick_count = 0
+
+        def run_one_tick(self, *, run_id: str) -> list[Any]:
+            self.tick_count += 1
+            if self.tick_count == 1:
+                first_tick.set()
+            else:
+                self.request_stop()
+            return []
+
+    daemon = WakeableDaemon(
+        store=store,
+        logger=logger,
+        health_suite=suite,  # type: ignore[arg-type]
+        tick_interval_seconds=30,
+        dry_run=True,
+    )
+    thread = threading.Thread(target=lambda: results.append(daemon.run_forever()))
+    thread.start()
+    assert first_tick.wait(timeout=1)
+
+    daemon.wake()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert daemon.tick_count == 2
+    assert results == [0]
+    with store.connect() as conn:
+        status = conn.execute(
+            "SELECT status FROM runs WHERE run_id = ?", ("run_1",)
+        ).fetchone()["status"]
+    assert status == "stopped"
+
+
+def test_sigint_and_sigterm_handlers_request_controlled_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registered: dict[int, Any] = {}
+    previous_handler = object()
+    monkeypatch.setattr(signal, "getsignal", lambda _signum: previous_handler)
+    monkeypatch.setattr(
+        signal,
+        "signal",
+        lambda signum, handler: registered.__setitem__(signum, handler),
+    )
+    daemon = Daemon(
+        store=SQLiteStore(tmp_path / "agent.sqlite3"),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        health_suite=FakeHealthSuite([]),  # type: ignore[arg-type]
+        tick_interval_seconds=30,
+        dry_run=True,
+    )
+
+    previous = daemon._install_signal_handlers()
+    registered[signal.SIGTERM](signal.SIGTERM, None)
+
+    assert set(previous) == {signal.SIGINT, signal.SIGTERM}
+    assert daemon._stop_is_requested() is True
 
 
 def test_runtime_critical_health_failure_blocks_ingestion_and_all_sends(
