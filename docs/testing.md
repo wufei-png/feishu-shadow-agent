@@ -125,7 +125,8 @@ git diff --check
 - `tests/test_lark_cli.py`：`lark-cli` 命令构造、JSON 解析、dry-run banner、资源下载身份。
 - `tests/test_p2_ingestion_routing.py`：消息 normalize、入口拉取、checkpoint、任务归属、资源下载限额。
 - `tests/test_p3_hermes_approval.py`：Agent 输出 schema、answerability/decision-reason 组合、reply gate、审批队列、`/approve`、`/reject`、`/send`。
-- `tests/test_card_actions.py`：四种审批操作的 Card JSON、approval 绑定、owner 校验、event-id 幂等、原子 command/feedback、daemon wake-up、连接健康与文本兜底。
+- `tests/test_card_actions.py`：统一发送输入、两种不发送操作、旧动作兼容、approval 绑定、owner 校验、event-id 幂等、原子 command/feedback、结果态更新、daemon wake-up、连接健康与文本兜底。
+- `tests/test_lark_channel_compat.py`：官方 Channel SDK 的隔离 event loop、交互回调帧分发兼容层；只使用本地 fake frame，不访问飞书。
 - `tests/test_daemon.py`：tick 顺序、heartbeat、运行中 health fail-closed、approval inbox 失败保护、dispatch 行为。
 - `tests/test_dispatcher.py`：dry-run、真实发送、dispatch attempt、读回验证、stale sending 恢复。
 - `tests/test_store_schema.py`：SQLite current schema bootstrap、busy timeout、约束、状态 enum 契约、幂等动作；项目不升级或兼容旧 schema。
@@ -156,7 +157,7 @@ git diff --check
 - 安装 `cards` extra，并在飞书应用中启用卡片交互回调能力。
 - 设置 `interactive_cards.enabled: true`，YAML 只填写 `app_id_env` / `app_secret_env` 的环境变量名。
 - 在 daemon 的 shell 中导出对应应用 ID 和密钥；不要把真实值写入配置或仓库。
-- 确认官方 SDK 长连接能接收 `card.action.trigger`。连接未健康时 daemon 应继续运行，并发送包含文本命令的 owner notification。
+- 项目内置 SDK 兼容层会隔离官方 SDK 的 WebSocket event loop，并恢复交互回调帧分发；连接未健康时 daemon 应继续运行，并发送包含文本命令的 owner notification。
 
 Product Policy Store 初始化是显式 operator 动作，不会由 daemon 启动自动同步。首次运行 `doctor` 或 daemon 前先导入：
 
@@ -259,7 +260,19 @@ python -m feishu_shadow_agent daemon --config config.yaml
 /reject <a_or_t_id>
 ```
 
-启用且连接健康时，还应验证卡片四条路径：直接发送建议、编辑后发送、不发送并继续关注、不发送并结束任务。重复提交同一个 callback event 不得产生第二条 command 或 feedback；非 owner 操作必须被拒绝。处理后在 Feedback 页面确认 outcome、decision reason 和原始/最终回复差异。文本命令在卡片关闭、断连或 SDK 不可用时仍应可用。
+启用且连接健康时，还应验证审批交互的四条路径：不修改“实际回复”直接发送、修改后发送、不发送并继续关注、不发送并结束任务。重复提交同一个 callback event 不得产生第二条 command 或 feedback；非 owner 操作必须被拒绝。处理后原消息应更新为结果态，Feedback 页面确认 outcome、decision reason 和原始/最终回复差异。文本命令在交互入口关闭、断连或 SDK 不可用时仍应可用。
+
+注意：`console` 命令只启动 Operator Console HTTP 服务，不启动实时回调连接；需要验证点击闭环时必须启动 `daemon`，并确认 Health 中的 callback 状态为 `healthy`。
+
+如需运行项目提供的真实交互回调集成入口，先确保同一数据库中存在待处理 approval，并停止其他占用同一应用长连接的 daemon，再显式指定具体 approval：
+
+```bash
+FEISHU_SHADOW_AGENT_REAL_E2E=1 \
+FEISHU_SHADOW_AGENT_REAL_E2E_APPROVAL_ID=a_xxx \
+./.venv/bin/python -m pytest -q tests/test_real_card_actions.py -s
+```
+
+该测试会通过项目的 `LarkCliClient` 向配置 owner 发送真实消息，启动项目回调连接并等待人工点击；默认跳过，未设置开关或 approval ID 时不会触网。点击后会校验本地 feedback 已落库；下游 `send_reply` action 的实际发送仍需由运行中的 production daemon dispatch。
 
 `status` 通过只读 OperatorQueryService 输出 daemon liveness、Product Policy 状态、pending approvals、active tasks、dispatch actions 和最近错误；`replay` 只读取本地状态并预览相关 dispatch。两者都不推进审批过期。超过 `expires_at` 但尚未被显式推进的 approval 仍显示为 `pending`，并通过 `is_overdue`、`overdue_seconds` 和 `recommended_action: expire` 提示 operator。
 

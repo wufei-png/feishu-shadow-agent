@@ -12,15 +12,21 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Literal, Protocol, cast
 
-from .approval_cards import CARD_ACTION_PROTOCOL
+from .approval_cards import (
+    CARD_ACTION_PROTOCOL,
+    build_approval_result_card,
+    submitted_matches_suggested_reply,
+)
 from .config import AppConfig
 from .jsonl import JSONLLogger
+from .lark_channel_compat import create_channel
 from .operator_commands import CommandResult, OperatorCommandService
 from .store.sqlite_store import SQLiteStore
 from .time_utils import format_instant, utc_now
 from .types import ExecutionMode, FeedbackReason
 
 CardActionName = Literal[
+    "send",
     "send_suggestion",
     "edit_send",
     "no_send_keep_watching",
@@ -28,6 +34,7 @@ CardActionName = Literal[
 ]
 ConnectionStatus = Literal["disabled", "starting", "healthy", "unhealthy", "stopped"]
 VALID_CARD_ACTIONS = {
+    "send",
     "send_suggestion",
     "edit_send",
     "no_send_keep_watching",
@@ -49,6 +56,10 @@ class ChannelClient(Protocol):
 
     async def disconnect(self) -> None: ...
 
+    async def update_card(self, message_id: str, card: dict[str, Any]) -> Any: ...
+
+    def schedule(self, coro: Any) -> Any: ...
+
 
 ChannelFactory = Callable[[str, str], ChannelClient]
 
@@ -59,6 +70,7 @@ class CardActionRequest:
     operator_open_id: str
     approval_id: str
     action: CardActionName
+    message_id: str | None = None
     final_reply: str | None = None
     feedback_reason: FeedbackReason | None = None
     note: str | None = None
@@ -86,12 +98,17 @@ class CardActionProcessor:
         self.logger = logger
         self.wake = wake
         self.execution_mode = execution_mode
+        self.store = store
         self.commands = OperatorCommandService(
             store,
             keep_watching_until_factory=lambda: format_instant(
                 utc_now() + timedelta(minutes=config.lifecycle.watch_minutes)
             ),
         )
+        self._channel: ChannelClient | None = None
+
+    def bind_channel(self, channel: ChannelClient) -> None:
+        self._channel = channel
 
     def handle(self, event: Any) -> CardActionOutcome:
         try:
@@ -115,7 +132,12 @@ class CardActionProcessor:
                 "forbidden", "error", "仅配置的 owner 可以操作此卡片。"
             )
 
-        result = self._apply(request)
+        suggested_reply = _pending_suggested_reply(self.store, request.approval_id)
+        result = self._apply(request, suggested_reply=suggested_reply)
+        if result.status in {"applied", "no_change"}:
+            self._schedule_result_card_update(
+                request, result, suggested_reply=suggested_reply
+            )
         outcome = CardActionOutcome(
             status=result.status,
             toast_type="success"
@@ -141,7 +163,9 @@ class CardActionProcessor:
             self.wake()
         return outcome
 
-    def _apply(self, request: CardActionRequest) -> CommandResult:
+    def _apply(
+        self, request: CardActionRequest, *, suggested_reply: str = ""
+    ) -> CommandResult:
         common: dict[str, Any] = {
             "actor": request.operator_open_id,
             "command_id": f"card:{request.event_id}",
@@ -149,9 +173,12 @@ class CardActionProcessor:
             "note": request.note,
             "execution_mode": self.execution_mode,
         }
-        if request.action == "send_suggestion":
+        if request.action == "send_suggestion" or (
+            request.action in {"send", "edit_send"}
+            and submitted_matches_suggested_reply(request.final_reply, suggested_reply)
+        ):
             return self.commands.approve(request.approval_id, **common)
-        if request.action == "edit_send":
+        if request.action in {"send", "edit_send"}:
             return self.commands.send(
                 request.approval_id, request.final_reply or "", **common
             )
@@ -159,6 +186,67 @@ class CardActionProcessor:
             request.approval_id,
             keep_watching=request.action == "no_send_keep_watching",
             **common,
+        )
+
+    def _schedule_result_card_update(
+        self,
+        request: CardActionRequest,
+        result: CommandResult,
+        *,
+        suggested_reply: str = "",
+    ) -> None:
+        if self._channel is None or not request.message_id:
+            return
+        outcome = str(result.result.get("outcome") or "")
+        final_reply = None
+        if request.action in {"send", "send_suggestion", "edit_send"}:
+            if outcome == "suggestion_sent" and suggested_reply:
+                final_reply = suggested_reply
+            else:
+                final_reply = request.final_reply
+        card = build_approval_result_card(
+            outcome=outcome,
+            final_reply=final_reply,
+        )
+        coroutine = self._update_result_card(
+            request.message_id,
+            request.approval_id,
+            card,
+        )
+        try:
+            schedule = getattr(self._channel, "schedule", None)
+            if callable(schedule):
+                schedule(coroutine)
+                return
+            asyncio.get_running_loop().create_task(coroutine)
+        except Exception as exc:
+            coroutine.close()
+            self._log_card_update_failure(request.message_id, request.approval_id, exc)
+
+    async def _update_result_card(
+        self,
+        message_id: str,
+        approval_id: str,
+        card: dict[str, Any],
+    ) -> None:
+        try:
+            assert self._channel is not None
+            response = await self._channel.update_card(message_id, card)
+            if getattr(response, "success", True) is False:
+                raise RuntimeError(str(getattr(response, "error", response)))
+        except Exception as exc:
+            self._log_card_update_failure(message_id, approval_id, exc)
+
+    def _log_card_update_failure(
+        self, message_id: str, approval_id: str, exc: object
+    ) -> None:
+        self.logger.warning(
+            "card_action_result_update_failed",
+            data={
+                "message_id": message_id,
+                "approval_id": approval_id,
+                "error": str(exc),
+            },
         )
 
 
@@ -228,6 +316,7 @@ class FeishuCardActionConnection:
                 "interactive card credential environment variables are unset"
             )
         channel = self.channel_factory(self.app_id, self.app_secret)
+        self.processor.bind_channel(channel)
         channel.on("cardAction", self.processor.handle)
         channel.on("reconnecting", lambda: self._set_status("unhealthy"))
         channel.on("reconnected", lambda: self._set_status("healthy"))
@@ -304,6 +393,8 @@ def parse_card_action(event: Any) -> CardActionRequest:
     form_value = getattr(action, "form_value", None)
     form = cast(dict[str, object], form_value) if isinstance(form_value, dict) else {}
     final_reply = _optional_text(form.get("final_reply"))
+    if action_name == "send" and not final_reply:
+        raise ValueError("发送需要填写回复内容")
     if action_name == "edit_send" and not final_reply:
         raise ValueError("编辑后发送需要填写回复内容")
     feedback_reason_value = _optional_text(form.get("feedback_reason"))
@@ -318,6 +409,7 @@ def parse_card_action(event: Any) -> CardActionRequest:
         operator_open_id=operator_open_id,
         approval_id=approval_id,
         action=cast(CardActionName, action_name),
+        message_id=_optional_text(getattr(event, "message_id", None)),
         final_reply=final_reply,
         feedback_reason=cast(FeedbackReason | None, feedback_reason_value),
         note=note,
@@ -356,6 +448,24 @@ def _optional_text(value: Any) -> str | None:
     return stripped or None
 
 
+def _pending_suggested_reply(store: SQLiteStore, approval_id: str) -> str:
+    with store.connect() as conn:
+        row = conn.execute(
+            """
+            SELECT payload_json FROM approvals
+            WHERE short_id = ? AND status = 'pending'
+            """,
+            (approval_id,),
+        ).fetchone()
+    if row is None:
+        return ""
+    payload = json.loads(row["payload_json"] or "{}")
+    if not isinstance(payload, dict):
+        return ""
+    value = payload.get("text") or payload.get("composed_text") or ""
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _command_error(result: CommandResult) -> str:
     error = result.result.get("error")
     return str(error) if error else "操作未能入队，请查看文本命令或控制台。"
@@ -363,12 +473,8 @@ def _command_error(result: CommandResult) -> str:
 
 def _create_channel(app_id: str, app_secret: str) -> ChannelClient:
     try:
-        from lark_channel import FeishuChannel
+        return cast(ChannelClient, create_channel(app_id, app_secret))
     except ImportError as exc:
         raise RuntimeError(
             "interactive cards require installation with the 'cards' extra"
         ) from exc
-    return cast(
-        ChannelClient,
-        FeishuChannel(app_id=app_id, app_secret=app_secret, transport="ws"),
-    )

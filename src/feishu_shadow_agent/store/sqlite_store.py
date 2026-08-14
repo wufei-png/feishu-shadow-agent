@@ -3077,7 +3077,7 @@ class SQLiteStore:
             }
 
         if verb == "send":
-            if requested_outcome not in {None, "edited_sent"}:
+            if requested_outcome not in {None, "suggestion_sent", "edited_sent"}:
                 raise ValueError(
                     f"outcome {requested_outcome!r} is not valid for /send"
                 )
@@ -3124,6 +3124,12 @@ class SQLiteStore:
                     pending=pending,
                     now=now,
                 )
+            original_payload = (
+                json.loads(pending[0]["payload_json"] or "{}")
+                if len(pending) == 1
+                else {}
+            )
+            suggested_reply = _payload_send_text(original_payload)
             target_message_id: Any
             approval_id: int
             approval_short_id: str
@@ -3148,11 +3154,6 @@ class SQLiteStore:
                 "identity": "user",
                 "source": "owner_send",
             }
-            original_payload = (
-                json.loads(pending[0]["payload_json"] or "{}")
-                if len(pending) == 1
-                else {}
-            )
             if approval_id:
                 conn.execute(
                     """
@@ -3208,7 +3209,11 @@ class SQLiteStore:
             ).fetchone()
             if approval is None:
                 raise RuntimeError("approved reply disappeared before feedback capture")
-            outcome = "edited_sent"
+            outcome: ApprovalOutcome = (
+                "suggestion_sent"
+                if suggested_reply and reply_text == suggested_reply
+                else "edited_sent"
+            )
             self._record_approval_feedback_locked(
                 conn,
                 approval=approval,

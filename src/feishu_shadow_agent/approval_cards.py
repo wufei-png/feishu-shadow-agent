@@ -5,6 +5,7 @@ from typing import Any, cast
 from .types import FeedbackReason
 
 CARD_ACTION_PROTOCOL = "feishu_shadow_agent.approval.v1"
+CARD_REPLY_MAX_LENGTH = 1000
 FEEDBACK_REASON_OPTIONS: tuple[tuple[FeedbackReason, str], ...] = (
     ("inaccurate_or_unsupported", "不准确或缺少依据"),
     ("incomplete_context", "上下文不完整"),
@@ -36,12 +37,9 @@ def build_approval_card(payload: dict[str, Any]) -> dict[str, Any]:
 
     buttons: list[dict[str, Any]] = []
     if approvable:
-        buttons.append(
-            _button("发送建议", "send_suggestion", approval_id, style="primary")
-        )
+        buttons.append(_button("发送", "send", approval_id, style="primary"))
     buttons.extend(
         [
-            _button("编辑后发送", "edit_send", approval_id),
             _button("不发送，继续观察", "no_send_keep_watching", approval_id),
             _button(
                 "不发送，结束任务",
@@ -78,16 +76,16 @@ def build_approval_card(payload: dict[str, Any]) -> dict[str, Any]:
                             "name": "final_reply",
                             "label": {
                                 "tag": "plain_text",
-                                "content": "编辑后回复",
+                                "content": "实际回复",
                             },
                             "placeholder": {
                                 "tag": "plain_text",
-                                "content": "仅“编辑后发送”要求非空",
+                                "content": "可直接发送，也可以先修改内容",
                             },
-                            "default_value": _bounded(suggested, 1000),
+                            "default_value": card_form_reply_value(suggested),
                             "input_type": "multiline_text",
                             "rows": 4,
-                            "max_length": 1000,
+                            "max_length": CARD_REPLY_MAX_LENGTH,
                             "required": False,
                         },
                         {
@@ -135,10 +133,73 @@ def build_approval_card(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def build_approval_result_card(
+    *,
+    outcome: str,
+    final_reply: str | None = None,
+    warning: str | None = None,
+) -> dict[str, Any]:
+    """Build the immutable result state shown after an approval action."""
+
+    states: dict[str, tuple[str, str]] = {
+        "suggestion_sent": ("回复已发送", "已发送建议回复。"),
+        "edited_sent": ("回复已发送", "已发送修改后的回复。"),
+        "no_send_keep_watching": ("继续观察", "本次不发送，任务继续观察。"),
+        "no_send_end_task": ("任务已结束", "本次不发送，任务已结束。"),
+    }
+    title, summary = states.get(outcome, ("审批已处理", "审批操作已处理。"))
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "div",
+            "text": {"tag": "plain_text", "content": summary},
+        }
+    ]
+    if final_reply:
+        elements.extend(
+            [
+                {"tag": "hr"},
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": f"实际回复：\n{_bounded(final_reply, 1000)}",
+                    },
+                },
+            ]
+        )
+    if warning:
+        elements.extend(
+            [
+                {"tag": "hr"},
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": f"提示：{_bounded(warning, 500)}",
+                    },
+                },
+            ]
+        )
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "template": "green"
+            if outcome in {"suggestion_sent", "edited_sent"}
+            else "blue"
+            if outcome == "no_send_keep_watching"
+            else "grey",
+        },
+        "body": {"elements": elements},
+    }
+
+
 def _button(
     label: str, action: str, approval_id: str, *, style: str = "default"
 ) -> dict[str, Any]:
     button_names = {
+        "send": "btn_send",
         "send_suggestion": "btn_send",
         "edit_send": "btn_edit",
         "no_send_keep_watching": "btn_keep",
@@ -195,3 +256,21 @@ def _string(value: Any) -> str:
 
 def _bounded(value: str, limit: int) -> str:
     return value if len(value) <= limit else f"{value[: limit - 3]}..."
+
+
+def card_form_reply_value(suggested: str) -> str:
+    """Value shown in the editable reply box; Feishu caps this input at 1000."""
+
+    return _bounded(suggested, CARD_REPLY_MAX_LENGTH)
+
+
+def submitted_matches_suggested_reply(submitted: str | None, suggested: str) -> bool:
+    """True when the form value is the stored suggestion or its truncated default."""
+
+    submitted_text = submitted.strip() if isinstance(submitted, str) else ""
+    suggested_text = suggested.strip() if isinstance(suggested, str) else ""
+    if not submitted_text or not suggested_text:
+        return False
+    return submitted_text == suggested_text or submitted_text == card_form_reply_value(
+        suggested_text
+    )

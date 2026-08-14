@@ -126,6 +126,7 @@ def test_operator_command_service_send_returns_stable_result_shape(
     ("operation", "expected_outcome", "expected_final", "expected_status"),
     [
         ("approve", "suggestion_sent", "suggested reply", "watching"),
+        ("same", "suggestion_sent", "suggested reply", "watching"),
         ("edit", "edited_sent", "edited reply", "watching"),
         ("keep", "no_send_keep_watching", None, "watching"),
         ("end", "no_send_end_task", None, "closed"),
@@ -153,6 +154,13 @@ def test_approval_resolution_atomically_records_immutable_feedback(
             actor="owner",
             command_id="evt_approve",
             note="looks good",
+        )
+    elif operation == "same":
+        result = service.send(
+            approval_id,
+            "suggested reply",
+            actor="owner",
+            command_id="evt_same",
         )
     elif operation == "edit":
         result = service.send(

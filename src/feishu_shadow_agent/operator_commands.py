@@ -162,7 +162,9 @@ class ApprovalCommandService:
             feedback_reason=feedback_reason,
             note=note,
             execution_mode=execution_mode,
-            requested_outcome="edited_sent",
+            # The store compares the final text with the pending suggestion so
+            # an unchanged send is recorded as suggestion_sent.
+            requested_outcome=None,
         )
 
     def apply_text(
@@ -199,7 +201,7 @@ class ApprovalCommandService:
             requested_outcome=(
                 "suggestion_sent"
                 if verb == "approve" and valid
-                else "edited_sent"
+                else None
                 if verb == "send" and valid
                 else None
             ),

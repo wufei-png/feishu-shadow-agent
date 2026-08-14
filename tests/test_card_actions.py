@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 from feishu_shadow_agent.approval_cards import (
     CARD_ACTION_PROTOCOL,
+    CARD_REPLY_MAX_LENGTH,
     build_approval_card,
+    build_approval_result_card,
+    card_form_reply_value,
 )
 from feishu_shadow_agent.card_actions import (
     CardActionProcessor,
@@ -18,7 +23,9 @@ from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 
 
-def _store_with_approval(tmp_path: Path) -> tuple[SQLiteStore, str]:
+def _store_with_approval(
+    tmp_path: Path, *, text: str = "suggested reply"
+) -> tuple[SQLiteStore, str]:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.initialize()
     with store.connect() as conn:
@@ -32,10 +39,10 @@ def _store_with_approval(tmp_path: Path) -> tuple[SQLiteStore, str]:
         )
     approval_pk = store.create_send_reply_approval(
         task_id=task_id,
-        preview="suggested reply",
+        preview=text,
         payload={
             "reply_target_message_id": "om_root",
-            "text": "suggested reply",
+            "text": text,
             "identity": "user",
             "decision_reason": "commitment_or_authorization",
         },
@@ -51,7 +58,7 @@ def _store_with_approval(tmp_path: Path) -> tuple[SQLiteStore, str]:
 def _event(
     approval_id: str,
     *,
-    action: str = "edit_send",
+    action: str = "send",
     operator: str = "ou_owner",
     event_id: str = "evt_1",
     form: dict[str, Any] | None = None,
@@ -94,13 +101,43 @@ def test_approval_card_binds_concrete_approval_and_form_fields() -> None:
     }
     buttons = [column["elements"][0] for column in form["elements"][-1]["columns"]]
     assert {button["value"]["action"] for button in buttons} == {
-        "send_suggestion",
-        "edit_send",
+        "send",
         "no_send_keep_watching",
         "no_send_end_task",
     }
+    reply_input = next(
+        item for item in form["elements"] if item.get("name") == "final_reply"
+    )
+    assert reply_input["label"]["content"] == "实际回复"
+    assert reply_input["default_value"] == "Yes, by Friday."
+    assert reply_input["required"] is False
+    assert reply_input["max_length"] == CARD_REPLY_MAX_LENGTH
     assert all(button["value"]["approval_id"] == "a_1" for button in buttons)
     assert all(button["action_type"] == "form_submit" for button in buttons)
+
+
+def test_approval_card_keeps_long_suggestion_in_details_but_caps_form_default() -> None:
+    suggested = "prefix " + ("字" * 1200)
+    card = build_approval_card(
+        {
+            "type": "approval_required",
+            "task_id": "t_1",
+            "approval_id": "a_1",
+            "reason": "commitment_or_authorization",
+            "suggested_reply": suggested,
+            "approvable": True,
+        }
+    )
+    details = card["body"]["elements"][0]["text"]["content"]
+    reply_input = next(
+        item
+        for item in card["body"]["elements"][2]["elements"]
+        if item.get("name") == "final_reply"
+    )
+
+    assert suggested in details
+    assert reply_input["default_value"] == card_form_reply_value(suggested)
+    assert len(reply_input["default_value"]) == CARD_REPLY_MAX_LENGTH
 
 
 def test_card_action_is_owner_only_idempotent_and_wakes_dispatch(
@@ -164,9 +201,36 @@ def test_card_action_parser_requires_final_reply_and_uses_event_id() -> None:
     try:
         parse_card_action(invalid)
     except ValueError as exc:
-        assert "需要填写回复内容" in str(exc)
+        assert "发送需要填写回复内容" in str(exc)
     else:
         raise AssertionError("empty edited reply should be rejected")
+
+    keep = parse_card_action(_event("a_1", action="no_send_keep_watching", form={}))
+    end = parse_card_action(_event("a_1", action="no_send_end_task", form={}))
+    assert keep.final_reply is None
+    assert end.final_reply is None
+
+
+def test_card_action_parser_keeps_legacy_send_actions_compatible() -> None:
+    suggestion = parse_card_action(_event("a_1", action="send_suggestion", form={}))
+    edited = parse_card_action(
+        _event("a_1", action="edit_send", form={"final_reply": "reply"})
+    )
+
+    assert suggestion.action == "send_suggestion"
+    assert edited.action == "edit_send"
+
+
+def test_result_card_has_no_action_controls() -> None:
+    card = build_approval_result_card(
+        outcome="edited_sent", final_reply="updated reply"
+    )
+
+    assert card["header"]["title"]["content"] == "回复已发送"
+    assert all(element.get("tag") != "form" for element in card["body"]["elements"])
+    assert card["body"]["elements"][-1]["text"]["content"] == (
+        "实际回复：\nupdated reply"
+    )
 
 
 class FakeChannel:
@@ -174,6 +238,7 @@ class FakeChannel:
         self.handlers: dict[str, Any] = {}
         self.connected = False
         self.disconnected = False
+        self.updated_cards: list[tuple[str, dict[str, Any]]] = []
 
     def on(self, name: str, handler: Any) -> Any:
         self.handlers[name] = handler
@@ -184,6 +249,97 @@ class FakeChannel:
 
     async def disconnect(self) -> None:
         self.disconnected = True
+
+    async def update_card(self, message_id: str, card: dict[str, Any]) -> Any:
+        self.updated_cards.append((message_id, card))
+        return SimpleNamespace(success=True)
+
+    def schedule(self, coro: Any) -> Any:
+        return asyncio.run(coro)
+
+
+def test_unified_send_updates_original_card_after_persisting_result(
+    tmp_path: Path,
+) -> None:
+    store, approval_id = _store_with_approval(tmp_path)
+    channel = FakeChannel()
+    processor = CardActionProcessor(
+        store=store,
+        config=AppConfig(owner=OwnerConfig(open_id="ou_owner")),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        wake=lambda: None,
+        execution_mode="production",
+    )
+    processor.bind_channel(channel)
+
+    result = processor.handle(
+        _event(approval_id, form={"final_reply": "suggested reply"})
+    )
+
+    assert result.status == "applied"
+    assert len(channel.updated_cards) == 1
+    message_id, card = channel.updated_cards[0]
+    assert message_id == "om_card"
+    assert card["header"]["title"]["content"] == "回复已发送"
+    assert all(item.get("tag") != "form" for item in card["body"]["elements"])
+    with store.connect() as conn:
+        assert (
+            conn.execute("SELECT outcome FROM approval_feedback").fetchone()["outcome"]
+            == "suggestion_sent"
+        )
+
+
+def test_unchanged_truncated_form_send_uses_full_stored_suggestion(
+    tmp_path: Path,
+) -> None:
+    suggested = "full suggestion " + ("字" * 1200)
+    store, approval_id = _store_with_approval(tmp_path, text=suggested)
+    displayed = card_form_reply_value(suggested)
+    assert displayed != suggested
+    processor = CardActionProcessor(
+        store=store,
+        config=AppConfig(owner=OwnerConfig(open_id="ou_owner")),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        wake=lambda: None,
+        execution_mode="production",
+    )
+
+    result = processor.handle(_event(approval_id, form={"final_reply": displayed}))
+
+    assert result.status == "applied"
+    with store.connect() as conn:
+        feedback = conn.execute(
+            "SELECT outcome, final_reply FROM approval_feedback"
+        ).fetchone()
+        action = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'send_reply'"
+        ).fetchone()
+    payload = json.loads(action["payload_json"])
+    assert feedback["outcome"] == "suggestion_sent"
+    assert feedback["final_reply"] == suggested
+    assert payload["text"] == suggested
+
+
+def test_no_send_accepts_empty_reply_and_keeps_watching(tmp_path: Path) -> None:
+    store, approval_id = _store_with_approval(tmp_path)
+    processor = CardActionProcessor(
+        store=store,
+        config=AppConfig(owner=OwnerConfig(open_id="ou_owner")),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        wake=lambda: None,
+        execution_mode="production",
+    )
+
+    result = processor.handle(
+        _event(approval_id, action="no_send_keep_watching", form={})
+    )
+
+    assert result.status == "applied"
+    with store.connect() as conn:
+        feedback = conn.execute("SELECT outcome FROM approval_feedback").fetchone()
+        task = conn.execute("SELECT status FROM tasks").fetchone()
+    assert feedback["outcome"] == "no_send_keep_watching"
+    assert task["status"] == "watching"
 
 
 def test_card_connection_tracks_health_and_disconnects(tmp_path: Path) -> None:
