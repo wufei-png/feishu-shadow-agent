@@ -7,57 +7,54 @@
 
 ## 1. 本地测试
 
-创建环境并安装开发依赖：
+安装 uv 0.12.4，并从锁文件创建包含开发依赖的环境：
 
 ```bash
-python3.11 -m venv .venv
-. .venv/bin/activate
-python -m pip install -e ".[dev]"
+uv sync --locked
 ```
 
 交互式审批卡片测试需要额外安装官方回调 SDK：
 
 ```bash
-python -m pip install -e ".[dev,cards]"
+uv sync --locked --extra cards
 ```
 
 运行完整单元测试：
 
 ```bash
-python -m pytest -q
+uv run --locked pytest -q
 ```
 
-运行 Ruff lint 和格式检查：
+运行后端静态检查和依赖审计：
 
 ```bash
-python -m ruff check .
-python -m ruff format --check .
-python -m pyright --pythonpath "$(command -v python)"
-python -m pip install --upgrade pip setuptools
-python -m pip_audit --local --skip-editable --progress-spinner off
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked --extra cards pyright
+uv run --locked pip-audit --local --skip-editable --progress-spinner off
 ```
 
-Pyright 以 strict 模式只覆盖已经纳入基线的模块；全仓既有类型债务不作为新功能的阻断项。CI 用 Python 3.11 在 UTC、Asia/Shanghai 和 America/Los_Angeles 跑全量测试，并在 UTC 补测 Python 3.12/3.13。Ruff、Pyright、全量 pytest、前端 lint/unit/build、Python/npm dependency audit 和包构建/静态资源检查都是阻断项；coverage 仅报告、不阻断。全量 pytest 已包含 schema 和 eval smoke 测试，不再重复执行子集。
+Pyright 覆盖 `src` 和 `tests`：生产源码使用 strict，测试使用 standard。CI 单独在 Python 3.11 运行 Ruff 和 Pyright，并用 Python 3.11 在 UTC、Asia/Shanghai 和 America/Los_Angeles 跑全量测试，在 UTC 补测 Python 3.12/3.13。Ruff、Pyright、全量 pytest、前端 lint/unit/build、Python/npm dependency audit 和包构建/静态资源检查都是阻断项；coverage 仅报告、不阻断。全量 pytest 已包含 schema 和 eval smoke 测试，不再重复执行子集。
 
 如需验证 git hook 行为，或提交前跑同一套 Ruff autofix/format hooks：
 
 ```bash
-pre-commit run --all-files
+uv run --locked pre-commit run --all-files
 ```
 
 按模块收窄测试：
 
 ```bash
-python -m pytest -q tests/test_config.py tests/test_lark_cli.py
-python -m pytest -q tests/test_card_actions.py
-python -m pytest -q tests/test_p2_ingestion_routing.py tests/test_p3_hermes_approval.py
-python -m pytest -q tests/test_daemon.py tests/test_dispatcher.py tests/test_cli.py
-python -m pytest -q tests/test_store_schema.py tests/test_retention.py
-python -m pytest -q tests/test_product_policy_store.py
-python -m pytest -q tests/test_policy_runtime.py
-python -m pytest -q tests/test_operator_query.py tests/test_operator_commands.py
-python -m pytest -q tests/test_console_api.py tests/test_operator_query.py
-python -m pytest -q tests/test_reply_style.py
+uv run --locked pytest -q tests/test_config.py tests/test_lark_cli.py
+uv run --locked pytest -q tests/test_card_actions.py
+uv run --locked pytest -q tests/test_p2_ingestion_routing.py tests/test_p3_hermes_approval.py
+uv run --locked pytest -q tests/test_daemon.py tests/test_dispatcher.py tests/test_cli.py
+uv run --locked pytest -q tests/test_store_schema.py tests/test_retention.py
+uv run --locked pytest -q tests/test_product_policy_store.py
+uv run --locked pytest -q tests/test_policy_runtime.py
+uv run --locked pytest -q tests/test_operator_query.py tests/test_operator_commands.py
+uv run --locked pytest -q tests/test_console_api.py tests/test_operator_query.py
+uv run --locked pytest -q tests/test_reply_style.py
 ```
 
 Operator Console 前端验证：
@@ -79,12 +76,12 @@ npm --prefix frontend/operator-console ci
 npm --prefix frontend/operator-console run lint
 npm --prefix frontend/operator-console test
 npm --prefix frontend/operator-console run build
-python -m pytest -q
-python -m ruff check .
-python -m ruff format --check .
-python -m pip install --upgrade pip setuptools
-python -m pip_audit --local --skip-editable --progress-spinner off
-python -m build
+uv run --locked pytest -q
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked --extra cards pyright
+uv run --locked pip-audit --local --skip-editable --progress-spinner off
+uv run --locked python -m build
 python3.11 -m venv /tmp/feishu-shadow-agent-release-check
 /tmp/feishu-shadow-agent-release-check/bin/python -m pip install dist/*.whl
 /tmp/feishu-shadow-agent-release-check/bin/python -m feishu_shadow_agent console --help
@@ -113,7 +110,7 @@ P18 的本地浏览器视觉 QA 记录见 `docs/plans/p18-operator-console-healt
 提交前做基础格式卫生检查：
 
 ```bash
-pre-commit run --all-files
+uv run --locked pre-commit run --all-files
 git diff --check
 ```
 

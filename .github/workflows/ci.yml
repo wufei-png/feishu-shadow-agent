@@ -12,8 +12,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  quality:
+    name: Backend static quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.4"
+          python-version: "3.11"
+          enable-cache: true
+      - name: Install locked project environment
+        run: uv sync --locked --extra cards
+      - name: Ruff lint
+        run: uv run --locked ruff check .
+      - name: Ruff format
+        run: uv run --locked ruff format --check .
+      - name: Pyright
+        run: uv run --locked pyright
+
   backend:
-    name: Backend quality and tests (Python ${{ matrix.python }}, ${{ matrix.timezone }})
+    name: Backend tests (Python ${{ matrix.python }}, ${{ matrix.timezone }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -33,20 +53,16 @@ jobs:
       TZ: ${{ matrix.timezone }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
+          version: "0.12.4"
           python-version: ${{ matrix.python }}
-          cache: pip
-      - name: Install project and optional card SDK
-        run: python -m pip install -e ".[dev,cards]"
-      - name: Ruff lint
-        run: python -m ruff check .
-      - name: Ruff format
-        run: python -m ruff format --check .
-      - name: Strict type checks for new modules
-        run: python -m pyright --pythonpath "$(command -v python)"
+          enable-cache: true
+      - name: Install locked project environment
+        run: uv sync --locked --extra cards
       - name: Full test suite
-        run: python -m pytest -q
+        run: uv run --locked pytest -q
 
   frontend:
     name: Operator Console build
@@ -79,17 +95,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
+          version: "0.12.4"
           python-version: "3.11"
-          cache: pip
-      - name: Install build dependencies
-        run: python -m pip install -e ".[dev]"
+          enable-cache: true
+      - name: Install locked project environment
+        run: uv sync --locked
       - name: Build distributions
-        run: python -m build
+        run: uv run --locked python -m build
       - name: Inspect wheel assets
         run: |
-          python - <<'PY'
+          uv run --locked python - <<'PY'
           import zipfile
           from pathlib import Path
 
@@ -115,15 +133,17 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
+          version: "0.12.4"
           python-version: "3.11"
-          cache: pip
-      - name: Install project
-        run: python -m pip install -e ".[dev,cards]"
+          enable-cache: true
+      - name: Install locked project environment
+        run: uv sync --locked --extra cards
       - name: Report coverage
         run: >-
-          python -m pytest -q
+          uv run --locked pytest -q
           --cov=feishu_shadow_agent
           --cov-report=term-missing
 
@@ -132,17 +152,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
+          version: "0.12.4"
           python-version: "3.11"
-          cache: pip
-      - name: Upgrade packaging tools
-        run: python -m pip install --upgrade pip setuptools
-      - name: Install Python dependencies
-        run: python -m pip install -e ".[dev,cards]"
+          enable-cache: true
+      - name: Install locked project environment
+        run: uv sync --locked --extra cards
       - name: Audit Python dependencies
         run: >-
-          python -m pip_audit
+          uv run --locked pip-audit
           --local
           --skip-editable
           --progress-spinner off

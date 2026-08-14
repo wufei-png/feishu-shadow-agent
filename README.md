@@ -19,19 +19,18 @@ Feishu Shadow Agent 是一个本机运行的飞书个人办公影子助手。它
 
 ## 快速启动
 
-要求 Python 3.11+，并确保本机已经可以使用 `lark-cli`，以及配置所选择的 Hermes、Codex 或 Claude Code CLI。
+要求 Python 3.11+、uv 0.12.4，并确保本机已经可以使用 `lark-cli`，以及配置所选择的 Hermes、Codex 或 Claude Code CLI。
 
 ```bash
-python3.11 -m venv .venv
+uv sync --locked
 . .venv/bin/activate
-python -m pip install -e ".[dev]"
 cp config.example.yaml config.yaml
 ```
 
 如需启用交互式审批卡片，同时安装可选的官方回调 SDK：
 
 ```bash
-python -m pip install -e ".[dev,cards]"
+uv sync --locked --extra cards
 ```
 
 编辑 `config.yaml`，至少确认：
@@ -93,10 +92,11 @@ python -m feishu_shadow_agent console --config config.yaml
 本地单元测试不会真实访问飞书或 Agent backend：
 
 ```bash
-python -m pytest -q
-python -m ruff check .
-python -m ruff format --check .
-pre-commit run --all-files
+uv run --locked pytest -q
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked --extra cards pyright
+uv run --locked pre-commit run --all-files
 ```
 
 端到端测试需要真实 `lark-cli`、飞书 user/bot 授权、owner open_id、测试群或测试 P2P 会话，以及可用的所选 Agent CLI。交互式卡片还需要安装 `cards` extra、配置应用凭证环境变量并启用飞书卡片回调长连接。完整步骤见 [测试方式](docs/testing.md)。
@@ -110,7 +110,7 @@ npm --prefix frontend/operator-console ci
 npm --prefix frontend/operator-console run lint
 npm --prefix frontend/operator-console test
 npm --prefix frontend/operator-console run build
-python -m build
+uv run --locked python -m build
 ```
 
 GitHub Release 应附加同一次构建生成的 source distribution 和 wheel；当前不发布 GitHub Pages，也不构建 Electron、Tauri 或 PyInstaller 二进制。

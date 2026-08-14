@@ -6,15 +6,13 @@ Source code lives under `src/feishu_shadow_agent/`. Core daemon orchestration is
 
 ## Build, Test, and Development Commands
 
-Create a local environment and install dev dependencies:
+Install uv 0.12.4, then create the locked local environment with development dependencies and the optional card SDK:
 
 ```bash
-python3.11 -m venv .venv
-. .venv/bin/activate
-python -m pip install -e ".[dev]"
+uv sync --locked --extra cards
 ```
 
-Run all local tests with `python -m pytest -q`. Run Ruff checks with `python -m ruff check .` and `python -m ruff format --check .`; use `pre-commit run --all-files` to exercise the same Ruff lint-autofix and formatter hooks as git commits. Frontend Operator Console changes must pass `npm --prefix frontend/operator-console run build`, which also refreshes the bundled static assets under `src/feishu_shadow_agent/console_static/`. Release or packaging changes should also run `python -m build` and inspect the wheel for `feishu_shadow_agent/console_static/index.html` plus referenced assets. Run `git diff --check` before handing off changes to catch whitespace issues. For local operation, copy `config.example.yaml` to `config.yaml`, run `python -m feishu_shadow_agent policy import-config --config config.yaml`, then run `python -m feishu_shadow_agent doctor --config config.yaml` before starting `python -m feishu_shadow_agent daemon --config config.yaml --dry-run`.
+Run all local tests with `uv run --locked pytest -q`. Run static checks with `uv run --locked ruff check .`, `uv run --locked ruff format --check .`, and `uv run --locked --extra cards pyright`; use `uv run --locked pre-commit run --all-files` to exercise the same Ruff lint-autofix, formatter, and repo-wide Pyright hooks as git commits. Frontend Operator Console changes must pass `npm --prefix frontend/operator-console run build`, which also refreshes the bundled static assets under `src/feishu_shadow_agent/console_static/`. Release or packaging changes should also run `uv run --locked python -m build` and inspect the wheel for `feishu_shadow_agent/console_static/index.html` plus referenced assets. Run `git diff --check` before handing off changes to catch whitespace issues. For local operation, copy `config.example.yaml` to `config.yaml`, run `uv run --locked python -m feishu_shadow_agent policy import-config --config config.yaml`, then run `uv run --locked python -m feishu_shadow_agent doctor --config config.yaml` before starting `uv run --locked python -m feishu_shadow_agent daemon --config config.yaml --dry-run`.
 
 ## Coding Style & Naming Conventions
 
