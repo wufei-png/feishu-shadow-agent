@@ -1232,7 +1232,8 @@ def _insert_task(store: SQLiteStore) -> int:
             """,
             ("t_1", "watching", "oc_1", "om_target", "label", "now", "now", "p2p"),
         )
-    return int(cursor.lastrowid)
+    assert cursor.lastrowid is not None
+    return cursor.lastrowid
 
 
 def _raw_message(

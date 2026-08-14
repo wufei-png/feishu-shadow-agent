@@ -96,7 +96,9 @@ class TaskSessionScenario(EvalModel):
     message_ids: list[str] | None = None
     setup_message_ids: list[str] | None = None
     target_message_id: str | None = None
-    resources: list[ResourceFixture] = Field(default_factory=list)
+    resources: list[ResourceFixture] = Field(
+        default_factory=lambda: list[ResourceFixture]()
+    )
 
     @model_validator(mode="after")
     def validate_mode_fields(self) -> TaskSessionScenario:
@@ -128,9 +130,13 @@ class FullChainMessage(EvalModel):
 class FullChainScenario(EvalModel):
     schema_version: Literal["eval_case_v1"] = "eval_case_v1"
     case_type: Literal["full-chain"] = "full-chain"
-    setup: list[FullChainMessage] = Field(default_factory=list)
+    setup: list[FullChainMessage] = Field(
+        default_factory=lambda: list[FullChainMessage]()
+    )
     target: FullChainMessage
-    resources: list[ResourceFixture] = Field(default_factory=list)
+    resources: list[ResourceFixture] = Field(
+        default_factory=lambda: list[ResourceFixture]()
+    )
 
     @model_validator(mode="after")
     def validate_unique_messages(self) -> FullChainScenario:

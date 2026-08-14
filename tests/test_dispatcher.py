@@ -88,7 +88,8 @@ def _insert_task(store: SQLiteStore) -> int:
             """,
             ("t_1", "watching", "oc_1", "om_target", "label", "now", "now", "group"),
         )
-    return int(cursor.lastrowid)
+    assert cursor.lastrowid is not None
+    return cursor.lastrowid
 
 
 def _attempts(store: SQLiteStore, action_id: int):
@@ -190,6 +191,7 @@ def test_actual_dispatch_dry_run_failure_marks_failed_without_send(
     assert len(attempts) == 1
     assert attempts[0].status == "failed"
     assert attempts[0].error_stage == "dry_run"
+    assert attempts[0].dry_run_result is not None
     assert attempts[0].dry_run_result["ok"] is False
 
 
@@ -404,6 +406,7 @@ def test_actual_dispatch_send_timeout_needs_review(tmp_path: Path) -> None:
     assert action.status == "failed_needs_review"
     attempts = _attempts(store, action_id)
     assert attempts[0].status == "uncertain"
+    assert attempts[0].send_result is not None
     assert attempts[0].send_result["timed_out"] is True
 
 
@@ -507,7 +510,9 @@ def test_actual_dispatch_records_sent_id_and_associates_readback(
     attempts = _attempts(store, action_id)
     assert attempts[0].status == "readback_ok"
     assert attempts[0].sent_message_id == "om_sent"
+    assert attempts[0].send_result is not None
     assert attempts[0].send_result["ok"] is True
+    assert attempts[0].readback_result is not None
     assert attempts[0].readback_result["ok"] is True
     with store.connect() as conn:
         message = conn.execute(

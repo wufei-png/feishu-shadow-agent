@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pydantic import ValidationError
 
-from .agent_backend import AgentBackend, AgentRunResult
+from .agent_backend import AgentRunResult, TaskSessionBackend
 from .agent_invocation import AgentAttemptOutcome, AgentInvoker
 from .context_access import ContextAccessBuilder
 from .prompt import (
@@ -49,7 +49,7 @@ class TaskSessionRunner:
         self,
         *,
         store: SQLiteStore,
-        agent_backend: AgentBackend,
+        agent_backend: TaskSessionBackend,
         agent_invoker: AgentInvoker,
         context_access: ContextAccessBuilder,
     ):
@@ -193,8 +193,11 @@ class TaskSessionRunner:
                 result=result,
                 output=None,
             )
+        response_data: object = getattr(result, "json_data", None)
         try:
-            output = plan.output_model.model_validate(result.json_data)
+            output = plan.output_model.model_validate(
+                cast(dict[str, Any], response_data)
+            )
         except ValidationError as exc:
             return TaskSessionRunResult(
                 plan=plan,

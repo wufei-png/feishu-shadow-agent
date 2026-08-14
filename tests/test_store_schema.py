@@ -51,7 +51,7 @@ def test_schema_initialize_is_idempotent_and_creates_current_tables(
         ).fetchall()
         application_id = conn.execute("PRAGMA application_id").fetchone()[0]
         schema_version = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert EXPECTED_TABLES <= {row["name"] for row in rows}
+    assert {row["name"] for row in rows} >= EXPECTED_TABLES
     assert "schema_migrations" not in {row["name"] for row in rows}
     assert application_id == SQLITE_APPLICATION_ID
     assert schema_version == SQLITE_SCHEMA_VERSION
@@ -849,7 +849,8 @@ def test_send_reply_retry_does_not_revive_failed_action_when_same_text_was_sent(
             """,
             ("t_sent", "watching", "oc_1", "om_1", "label", "now", "now"),
         )
-        task_id = int(cursor.lastrowid)
+        assert cursor.lastrowid is not None
+        task_id = cursor.lastrowid
         conn.execute(
             """
             INSERT INTO actions(

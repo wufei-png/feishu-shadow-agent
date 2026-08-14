@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ..config import AppConfig, ChatPolicyConfig, ReplyPolicyConfig
 from ..time_utils import normalize_instant, parse_instant_or_none, shift_instant
@@ -29,6 +29,7 @@ from ..types import (
     NormalizedMessage,
     ResourceRef,
     RouteDecision,
+    RouteName,
     RunTickStatus,
     TaskRecord,
     TaskStatus,
@@ -690,7 +691,8 @@ class SQLiteStore:
         placeholders = ",".join("?" for _ in ids)
         with self.connect() as conn:
             rows = conn.execute(
-                f"SELECT * FROM messages WHERE message_id IN ({placeholders}) ORDER BY julianday(sent_at), message_id",
+                # `placeholders` is generated from IDs and values remain bound.
+                f"SELECT * FROM messages WHERE message_id IN ({placeholders}) ORDER BY julianday(sent_at), message_id",  # noqa: S608
                 ids,
             ).fetchall()
         by_id = {row["message_id"]: row for row in rows}
@@ -1058,13 +1060,17 @@ class SQLiteStore:
             for name, table, set_sql, set_params, where_sql, where_params in specs:
                 if dry_run:
                     row = conn.execute(
-                        f"SELECT COUNT(*) AS count FROM {table} WHERE {where_sql}",
+                        # Table and clauses come from the fixed retention spec;
+                        # all data values remain bound parameters.
+                        f"SELECT COUNT(*) AS count FROM {table} WHERE {where_sql}",  # noqa: S608
                         where_params,
                     ).fetchone()
                     counts[name] = int(row["count"])
                     continue
                 cursor = conn.execute(
-                    f"UPDATE {table} SET {set_sql} WHERE {where_sql}",
+                    # Table and clauses come from the fixed retention spec;
+                    # all data values remain bound parameters.
+                    f"UPDATE {table} SET {set_sql} WHERE {where_sql}",  # noqa: S608
                     (*set_params, *where_params),
                 )
                 counts[name] = int(cursor.rowcount)
@@ -1185,13 +1191,15 @@ class SQLiteStore:
         placeholders = ",".join("?" for _ in ids)
         with self.connect() as conn:
             cursor = conn.execute(
+                # `placeholders` is generated from integer IDs; values remain
+                # bound parameters.
                 f"""
                 UPDATE resources
                 SET download_status = 'expired',
                     path = NULL,
                     updated_at = ?
                 WHERE id IN ({placeholders})
-                """,
+                """,  # noqa: S608
                 [self.clock(), *ids],
             )
         return int(cursor.rowcount)
@@ -1241,7 +1249,7 @@ class SQLiteStore:
             )
             task = self._get_task_by_id(conn, task_id)
             decision = RouteDecision(
-                "new_task",
+                RouteName.NEW_TASK,
                 target_task_id=task.id,
                 target_task_short_id=task.short_id,
                 reason=reason,
@@ -1278,7 +1286,7 @@ class SQLiteStore:
         self.initialize()
         now = self.clock()
         decision = RouteDecision(
-            "attach_task",
+            RouteName.ATTACH_TASK,
             target_task_id=task.id,
             target_task_short_id=task.short_id,
             reason=reason,
@@ -1442,7 +1450,7 @@ class SQLiteStore:
         self.initialize()
         now = self.clock()
         decision = RouteDecision(
-            "human_taken_over",
+            RouteName.HUMAN_TAKEN_OVER,
             target_task_id=task.id,
             target_task_short_id=task.short_id,
             reason="owner_message_related_to_active_task",
@@ -1629,6 +1637,8 @@ class SQLiteStore:
         params.append(limit)
         with self.connect() as conn:
             rows = conn.execute(
+                # `where_related` is assembled from fixed predicates and all
+                # message values remain bound parameters.
                 f"""
                 SELECT *
                 FROM tasks t
@@ -1638,7 +1648,7 @@ class SQLiteStore:
                   AND ({where_related})
                 ORDER BY t.updated_at DESC, t.id DESC
                 LIMIT ?
-                """,
+                """,  # noqa: S608
                 params,
             ).fetchall()
         return [_task_from_row(row) for row in rows]
@@ -1699,7 +1709,7 @@ class SQLiteStore:
         self.initialize()
         now = self.clock()
         decision = RouteDecision(
-            "ignore",
+            RouteName.IGNORE,
             target_task_id=task.id,
             target_task_short_id=task.short_id,
             reason="self_message",
@@ -1892,7 +1902,7 @@ class SQLiteStore:
             ).fetchone()
             attempt = conn.execute(
                 "SELECT * FROM dispatch_attempts WHERE id = ?",
-                (int(attempt_cursor.lastrowid),),
+                (_cursor_lastrowid(attempt_cursor),),
             ).fetchone()
         if row is None or attempt is None:
             return None
@@ -1954,7 +1964,9 @@ class SQLiteStore:
         params.append(attempt_id)
         with self.connect() as conn:
             conn.execute(
-                f"UPDATE dispatch_attempts SET {', '.join(assignments)} WHERE id = ?",
+                # Assignment names are selected from fixed state transitions;
+                # data values remain bound parameters.
+                f"UPDATE dispatch_attempts SET {', '.join(assignments)} WHERE id = ?",  # noqa: S608
                 params,
             )
             row = conn.execute(
@@ -2031,7 +2043,7 @@ class SQLiteStore:
             for row in rows:
                 action_id = int(row["id"])
                 latest = _latest_dispatch_attempt_locked(conn, action_id=action_id)
-                if _attempt_proves_readback(latest):
+                if latest is not None and _attempt_proves_readback(latest):
                     result = _stale_sent_result(row, latest)
                     conn.execute(
                         """
@@ -2195,7 +2207,10 @@ class SQLiteStore:
         if not sent_message_id:
             raise ValueError("sent_message_id is required")
         readback = result.get("readback")
-        if not isinstance(readback, dict) or readback.get("ok") is not True:
+        if not isinstance(readback, dict):
+            raise ValueError("readback evidence is required before marking sent")
+        readback = cast(dict[str, Any], readback)
+        if readback.get("ok") is not True:
             raise ValueError("readback evidence is required before marking sent")
         now = self.clock()
         with self.connect() as conn:
@@ -2452,12 +2467,13 @@ class SQLiteStore:
         placeholders = ",".join("?" for _ in ids)
         with self.connect() as conn:
             rows = conn.execute(
+                # `placeholders` is generated from integer task IDs.
                 f"""
                 SELECT task_id, COUNT(*) AS message_count
                 FROM task_messages
                 WHERE task_id IN ({placeholders})
                 GROUP BY task_id
-                """,
+                """,  # noqa: S608
                 ids,
             ).fetchall()
         counts = {int(row["task_id"]): int(row["message_count"]) for row in rows}
@@ -2520,12 +2536,14 @@ class SQLiteStore:
         placeholders = ",".join("?" for _ in ids)
         with self.connect() as conn:
             return conn.execute(
+                # `placeholders` is generated from message IDs and values stay
+                # bound parameters.
                 f"""
                 SELECT *
                 FROM resources
                 WHERE message_id IN ({placeholders})
                 ORDER BY message_id, id
-                """,
+                """,  # noqa: S608
                 ids,
             ).fetchall()
 
@@ -2589,7 +2607,9 @@ class SQLiteStore:
         params.append(task_id)
         with self.connect() as conn:
             conn.execute(
-                f"UPDATE tasks SET {', '.join(assignments)} WHERE id = ?",
+                # Assignment names are selected from fixed task state fields;
+                # data values remain bound parameters.
+                f"UPDATE tasks SET {', '.join(assignments)} WHERE id = ?",  # noqa: S608
                 params,
             )
 
@@ -2719,7 +2739,7 @@ class SQLiteStore:
                     expires_at,
                 ),
             )
-            approval_id = int(cursor.lastrowid)
+            approval_id = _cursor_lastrowid(cursor)
             if notify_payload is not None:
                 self._create_owner_notification_action_locked(
                     conn,
@@ -2789,7 +2809,10 @@ class SQLiteStore:
                     execution_mode=execution_mode,
                     requested_outcome=requested_outcome,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
+                # Approval handlers are isolated inside the transaction so the
+                # command is recorded even for an implementation-specific
+                # handler failure.
                 # State changes are rolled back, but the command itself is still
                 # recorded below so status/replay can explain failed approvals.
                 conn.execute("ROLLBACK TO SAVEPOINT approval_command")
@@ -3125,7 +3148,7 @@ class SQLiteStore:
                     now=now,
                 )
             original_payload = (
-                json.loads(pending[0]["payload_json"] or "{}")
+                _loads_json_object(pending[0]["payload_json"])
                 if len(pending) == 1
                 else {}
             )
@@ -3134,7 +3157,7 @@ class SQLiteStore:
             approval_id: int
             approval_short_id: str
             if len(pending) == 1:
-                previous_payload = json.loads(pending[0]["payload_json"] or "{}")
+                previous_payload = _loads_json_object(pending[0]["payload_json"])
                 target_message_id = previous_payload.get(
                     "reply_target_message_id"
                 ) or previous_payload.get("target_message_id")
@@ -3187,7 +3210,7 @@ class SQLiteStore:
                         now,
                     ),
                 )
-                approval_id = int(cursor.lastrowid)
+                approval_id = _cursor_lastrowid(cursor)
             action_id = self._create_send_reply_action_locked(
                 conn,
                 task_id=int(task["id"]),
@@ -3328,13 +3351,14 @@ class SQLiteStore:
             return 0
         placeholders = ",".join("?" for _ in ids)
         cursor = conn.execute(
+            # `placeholders` is generated from integer approval IDs.
             f"""
             UPDATE actions
             SET status = ?, updated_at = ?
             WHERE approval_id IN ({placeholders})
               AND kind IN (?, ?)
               AND status = ?
-            """,
+            """,  # noqa: S608
             [
                 ActionStatus.CANCELLED.value,
                 now,
@@ -3463,7 +3487,7 @@ class SQLiteStore:
                 "SELECT * FROM messages WHERE message_id = ?",
                 (task["root_message_id"],),
             ).fetchone()
-        payload = {
+        payload: dict[str, Any] = {
             "type": "approval_command_conflict",
             "task_id": task_short_id,
             "reason": "multiple_pending_approvals",
@@ -3627,7 +3651,7 @@ class SQLiteStore:
                 now=now,
             )
             return int(row["id"])
-        return int(cursor.lastrowid)
+        return _cursor_lastrowid(cursor)
 
     def _create_owner_notification_action_locked(
         self,
@@ -3677,7 +3701,7 @@ class SQLiteStore:
             ),
         )
         if cursor.rowcount == 1:
-            return int(cursor.lastrowid)
+            return _cursor_lastrowid(cursor)
         row = conn.execute(
             "SELECT id, status FROM actions WHERE idempotency_key = ? AND kind = 'owner_notification'",
             (idempotency_key,),
@@ -3845,7 +3869,7 @@ class SQLiteStore:
                 now,
             ),
         )
-        return int(cursor.lastrowid)
+        return _cursor_lastrowid(cursor)
 
     def _get_task_by_id(self, conn: sqlite3.Connection, task_id: int) -> TaskRecord:
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
@@ -3909,7 +3933,7 @@ class SQLiteStore:
                 _truncate(message.text),
             ),
         )
-        task_id = int(cursor.lastrowid)
+        task_id = _cursor_lastrowid(cursor)
         self._add_task_message(conn, task_id, message.message_id, "root", now)
         self._add_watch_keys(conn, task_id, _watch_keys_for_message(message), now)
         return task_id
@@ -4190,7 +4214,8 @@ class SQLiteStore:
             raise ValueError("unsupported short id table")
         base = f"{prefix}_{sha256(seed.encode('utf-8')).hexdigest()[:8]}"
         existing = conn.execute(
-            f"SELECT short_id FROM {table} WHERE short_id = ?",
+            # `table` is checked against the fixed tasks/approvals allowlist.
+            f"SELECT short_id FROM {table} WHERE short_id = ?",  # noqa: S608
             (base,),
         ).fetchone()
         if existing is None:
@@ -4198,7 +4223,8 @@ class SQLiteStore:
         for suffix in range(2, 100):
             candidate = f"{base}_{suffix}"
             existing = conn.execute(
-                f"SELECT short_id FROM {table} WHERE short_id = ?",
+                # `table` is checked against the fixed tasks/approvals allowlist.
+                f"SELECT short_id FROM {table} WHERE short_id = ?",  # noqa: S608
                 (candidate,),
             ).fetchone()
             if existing is None:
@@ -4415,7 +4441,8 @@ def _row_dict(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, Any] | None
         return None
     if isinstance(row, dict):
         return dict(row)
-    return {key: row[key] for key in row.keys()}
+    keys = row.keys()
+    return {key: row[key] for key in keys}
 
 
 def _json_row_dict(row: sqlite3.Row | dict[str, Any], *columns: str) -> dict[str, Any]:
@@ -4478,44 +4505,16 @@ def _loads_json(value: Any) -> Any:
         return value
 
 
+def _cursor_lastrowid(cursor: sqlite3.Cursor) -> int:
+    lastrowid = cursor.lastrowid
+    if lastrowid is None:
+        raise RuntimeError("SQLite insert did not return a row id")
+    return int(lastrowid)
+
+
 def _loads_json_object(value: Any) -> dict[str, Any]:
     loaded = _loads_json(value)
-    return loaded if isinstance(loaded, dict) else {}
-
-
-def _daemon_liveness(
-    last_run: dict[str, Any] | None,
-    *,
-    now: str,
-    stale_after_seconds: int,
-) -> dict[str, Any]:
-    base: dict[str, Any] = {"stale_after_seconds": stale_after_seconds}
-    if last_run is None:
-        return base | {"status": "not_started", "stale": False}
-    run_status = last_run.get("status")
-    heartbeat = last_run.get("last_heartbeat_at")
-    base |= {
-        "run_id": last_run.get("run_id"),
-        "run_status": run_status,
-        "last_heartbeat_at": heartbeat,
-    }
-    if run_status != "running":
-        return base | {"status": "stopped", "stale": False}
-    heartbeat_dt = _parse_datetime_or_none(heartbeat)
-    now_dt = _parse_datetime_or_none(now)
-    if heartbeat_dt is None or now_dt is None:
-        return base | {
-            "status": "stale",
-            "stale": True,
-            "reason": "missing_or_invalid_heartbeat",
-        }
-    age_seconds = max(0, int((now_dt - heartbeat_dt).total_seconds()))
-    stale = age_seconds > stale_after_seconds
-    return base | {
-        "status": "stale" if stale else "live",
-        "stale": stale,
-        "heartbeat_age_seconds": age_seconds,
-    }
+    return cast(dict[str, Any], loaded) if isinstance(loaded, dict) else {}
 
 
 def _parse_datetime_or_none(value: Any) -> datetime | None:
@@ -4698,7 +4697,7 @@ def _result_warnings(result: dict[str, Any]) -> list[str]:
     warnings = result.get("warnings")
     if not isinstance(warnings, list):
         return []
-    return [str(warning) for warning in warnings]
+    return [str(warning) for warning in cast(list[Any], warnings)]
 
 
 def _has_active_send_reply_action(
@@ -4779,7 +4778,7 @@ def _approval_notification_payload(
     payload = dict(notify_payload)
     task_short_id = payload.get("task_id")
     if isinstance(task_short_id, str) and task_short_id:
-        commands = []
+        commands: list[str] = []
         if approval_payload.get("approvable") is not False:
             commands.append(f"/approve {approval_short_id}")
         commands.extend(
@@ -4886,22 +4885,25 @@ def _action_result_refs_message(result_json: str | None, message_id: str) -> boo
         return False
     if _message_ref_matches(result, {"sent_message_id", "sentMessageId"}, message_id):
         return True
-    if isinstance(result, dict) and isinstance(result.get("data"), dict):
+    result_dict = cast(dict[str, Any], result) if isinstance(result, dict) else None
+    if result_dict is not None and isinstance(result_dict.get("data"), dict):
         return _message_ref_matches(
-            result["data"], {"message_id", "messageId"}, message_id
+            cast(dict[str, Any], result_dict["data"]),
+            {"message_id", "messageId"},
+            message_id,
         )
     return False
 
 
 def _message_ref_matches(value: Any, keys: set[str], message_id: str) -> bool:
     if isinstance(value, dict):
-        for key, child in value.items():
+        for key, child in cast(dict[str, Any], value).items():
             if key in keys and child == message_id:
                 return True
             if _message_ref_matches(child, keys, message_id):
                 return True
     elif isinstance(value, list):
-        for child in value:
+        for child in cast(list[Any], value):
             if _message_ref_matches(child, keys, message_id):
                 return True
     return False

@@ -50,6 +50,9 @@ class EvalResourceClient:
     def owner_message(self, **kwargs: Any) -> NoReturn:
         return self._network_forbidden("owner_message")
 
+    def owner_card(self, **kwargs: Any) -> NoReturn:
+        return self._network_forbidden("owner_card")
+
     def reply_message(self, **kwargs: Any) -> NoReturn:
         return self._network_forbidden("reply_message")
 

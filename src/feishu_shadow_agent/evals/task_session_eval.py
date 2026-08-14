@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from ..agent_backend import AgentBackend
 from ..agent_invocation import AgentInvoker
@@ -112,7 +112,10 @@ def run_task_session_trial(
     reference = getattr(case.labels, "reference_answer", None)
     if structure["passed"] is not False and reference:
         output = target_run.output
-        assert output is not None
+        if output is None:
+            raise EvalError(
+                "task-session target output is required for semantic judging"
+            )
         judge = run_semantic_judge(
             backend=backend,
             reference_answer=reference,
@@ -167,6 +170,10 @@ def _run_turn(
             loaded.config.agent_backend.working_dir, loaded.base_dir
         ),
     )
+    json_data = result.result.json_data if result.result is not None else None
+    response_data = (
+        cast(dict[str, Any], json_data) if isinstance(json_data, dict) else None
+    )
     runtime.store.record_agent_audit(
         backend_provider=str(backend.provider),
         request_type="task_session",
@@ -176,9 +183,7 @@ def _run_turn(
         else result.result.session_id or plan.session_id,
         input_message_ids=plan.prompt_message_ids,
         input_resource_ids=[row["file_key"] for row in resources],
-        response=None
-        if result.result is None or not isinstance(result.result.json_data, dict)
-        else result.result.json_data,
+        response=response_data,
         error=result.outcome.last_error
         if result.result is None
         else result.result.error,
@@ -306,7 +311,8 @@ def _judge_context(
     target_message_id: str,
 ) -> dict[str, Any]:
     scenario = case.scenario
-    assert isinstance(scenario, TaskSessionScenario)
+    if not isinstance(scenario, TaskSessionScenario):
+        raise EvalError("task-session judge context requires TaskSessionScenario")
     if scenario.mode == "initial":
         return {
             "task_messages": [

@@ -5,7 +5,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 from ..policy import ProductPolicyInvalidError, ProductPolicyMissingError
@@ -17,13 +17,13 @@ from ..store.sqlite_store import (
 from ..time_utils import shift_instant
 from ..types import ActionStatus
 from .common import (
-    _action_dto,
-    _coerce_limit,
-    _has_core_schema,
-    _json_row_dict,
-    _parse_datetime_or_none,
-    _ReadStoreUnavailable,
-    _row_dict,
+    ReadStoreUnavailable,
+    action_dto,
+    coerce_limit,
+    has_core_schema,
+    json_row_dict,
+    parse_datetime_or_none,
+    row_dict,
 )
 
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![\w:])/(?:[^\s'\"`]+)")
@@ -99,16 +99,18 @@ class HealthQuery:
         try:
             with self._connect() as conn:
                 last_run = conn.execute(
-                    f"SELECT {_RUN_RUNTIME_COLUMNS} FROM runs ORDER BY started_at DESC LIMIT 1"
+                    # This selects a module-level constant column list.
+                    f"SELECT {_RUN_RUNTIME_COLUMNS} FROM runs ORDER BY started_at DESC LIMIT 1"  # noqa: S608
                 ).fetchone()
                 daemon_run = conn.execute(
+                    # This selects a module-level constant column list.
                     f"""
                     SELECT {_RUN_RUNTIME_COLUMNS}
                     FROM runs
                     WHERE last_tick_started_at IS NOT NULL
                     ORDER BY last_tick_started_at DESC, started_at DESC
                     LIMIT 1
-                    """
+                    """,  # noqa: S608
                 ).fetchone()
                 failed_commands = conn.execute(
                     """
@@ -118,11 +120,11 @@ class HealthQuery:
                     ORDER BY updated_at DESC, id DESC
                     LIMIT ?
                     """,
-                    (_coerce_limit(limit),),
+                    (coerce_limit(limit),),
                 ).fetchall()
                 health_rows = conn.execute(
                     LATEST_NON_OK_HEALTH_CHECKS_SQL,
-                    (_coerce_limit(limit),),
+                    (coerce_limit(limit),),
                 ).fetchall()
                 failed_dispatch_rows = conn.execute(
                     """
@@ -177,16 +179,16 @@ class HealthQuery:
             )
             policy_status = self._policy_status()
             failed_dispatch_actions = [
-                _action_dto(row, include_payload=False) for row in failed_dispatch_rows
+                action_dto(row, include_payload=False) for row in failed_dispatch_rows
             ]
             stale_sending_actions = [
-                _action_dto(row, include_payload=False) for row in stale_rows
+                action_dto(row, include_payload=False) for row in stale_rows
             ]
             recent_failed_commands = [
                 _approval_command_summary(row) for row in failed_commands
             ]
             recent_failed_dispatch_actions = failed_dispatch_actions[
-                : _coerce_limit(limit)
+                : coerce_limit(limit)
             ]
 
             runtime |= {
@@ -231,10 +233,14 @@ class HealthQuery:
             issue = _health_check_issue(row)
             if issue is not None:
                 issues.append(issue)
-        for action in failed_dispatch_actions:
-            issues.append(_dispatch_action_issue(action, detected_at=now))
-        for action in stale_sending_actions:
-            issues.append(_stale_sending_issue(action, detected_at=now))
+        issues.extend(
+            _dispatch_action_issue(action, detected_at=now)
+            for action in failed_dispatch_actions
+        )
+        issues.extend(
+            _stale_sending_issue(action, detected_at=now)
+            for action in stale_sending_actions
+        )
 
         issues.sort(
             key=lambda issue: (
@@ -247,7 +253,7 @@ class HealthQuery:
         return _health_response(
             generated_at=now,
             runtime=runtime,
-            issues=issues[: _coerce_limit(limit)],
+            issues=issues[: coerce_limit(limit)],
             open_issue_count=open_issue_count,
             recent_failed_commands=recent_failed_commands,
             recent_failed_dispatch_actions=recent_failed_dispatch_actions,
@@ -264,9 +270,9 @@ class HealthQuery:
                     ORDER BY updated_at DESC, id DESC
                     LIMIT ?
                     """,
-                    (_coerce_limit(limit),),
+                    (coerce_limit(limit),),
                 ).fetchall()
-        except _ReadStoreUnavailable:
+        except ReadStoreUnavailable:
             return []
         return [_approval_command_summary(row) for row in rows]
 
@@ -275,9 +281,9 @@ class HealthQuery:
             with self._connect() as conn:
                 rows = conn.execute(
                     LATEST_NON_OK_HEALTH_CHECKS_SQL,
-                    (_coerce_limit(limit),),
+                    (coerce_limit(limit),),
                 ).fetchall()
-        except _ReadStoreUnavailable:
+        except ReadStoreUnavailable:
             return []
         return [_health_warning_dto(row) for row in rows]
 
@@ -297,11 +303,11 @@ class HealthQuery:
                     ORDER BY a.updated_at, a.id
                     LIMIT ?
                     """,
-                    (cutoff, _coerce_limit(limit)),
+                    (cutoff, coerce_limit(limit)),
                 ).fetchall()
-        except _ReadStoreUnavailable:
+        except ReadStoreUnavailable:
             return []
-        return [_action_dto(row, include_payload=False) for row in rows]
+        return [action_dto(row, include_payload=False) for row in rows]
 
     def _store_status(self) -> dict[str, Any]:
         if not self.store.path.exists():
@@ -311,7 +317,7 @@ class HealthQuery:
                 "schema_initialized": False,
             }
         try:
-            conn = sqlite3.connect(_store_read_uri(self.store.path), uri=True)
+            conn = sqlite3.connect(store_read_uri(self.store.path), uri=True)
         except sqlite3.OperationalError:
             return {
                 "status": "unreadable",
@@ -321,7 +327,7 @@ class HealthQuery:
         try:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA query_only = ON")
-            schema_initialized = _has_core_schema(conn)
+            schema_initialized = has_core_schema(conn)
         except sqlite3.DatabaseError:
             conn.close()
             return {
@@ -351,6 +357,22 @@ class HealthQuery:
             detected_at=detected_at,
         )
 
+    def failed_approval_commands(self, *, limit: int) -> list[dict[str, Any]]:
+        return self._failed_approval_commands(limit=limit)
+
+    def recent_health_warnings(self, *, limit: int) -> list[dict[str, Any]]:
+        return self._recent_health_warnings(limit=limit)
+
+    def stale_sending_actions(
+        self, *, stale_after_seconds: int, limit: int
+    ) -> list[dict[str, Any]]:
+        return self._stale_sending_actions(
+            stale_after_seconds=stale_after_seconds, limit=limit
+        )
+
+    def store_status(self) -> dict[str, Any]:
+        return self._store_status()
+
 
 def _recent_errors(
     failed_commands: list[dict[str, Any]],
@@ -367,15 +389,15 @@ def _recent_errors(
                 "updated_at": summary["updated_at"],
             }
         )
-    for action in failed_actions:
-        errors.append(
-            {
-                "type": "dispatch_action",
-                "status": action["status"],
-                "message": f"{action['kind']} action {action['action_id']}",
-                "updated_at": action["updated_at"],
-            }
-        )
+    errors.extend(
+        {
+            "type": "dispatch_action",
+            "status": action["status"],
+            "message": f"{action['kind']} action {action['action_id']}",
+            "updated_at": action["updated_at"],
+        }
+        for action in failed_actions
+    )
     return sorted(errors, key=lambda item: str(item["updated_at"]), reverse=True)
 
 
@@ -479,7 +501,7 @@ def _daemon_health_issue(
 
 
 def _health_check_issue(row: sqlite3.Row) -> dict[str, Any] | None:
-    data = _row_dict(row)
+    data = row_dict(row)
     check_name = str(data.get("check_name") or "runtime")
     status = str(data.get("status") or "warning")
     severity = _health_check_severity(str(data.get("severity") or "warning"), status)
@@ -498,7 +520,7 @@ def _health_check_issue(row: sqlite3.Row) -> dict[str, Any] | None:
 
 
 def _health_warning_dto(row: sqlite3.Row) -> dict[str, Any]:
-    data = _row_dict(row)
+    data = row_dict(row)
     data["message"] = _safe_detail(
         str(data.get("message") or ""),
         fallback="Runtime health check reported a non-ok status.",
@@ -508,15 +530,14 @@ def _health_warning_dto(row: sqlite3.Row) -> dict[str, Any]:
 
 def _approval_command_summary(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     if isinstance(row, sqlite3.Row):
-        data = _json_row_dict(row, "result_json")
+        data = json_row_dict(row, "result_json")
     else:
         data = dict(row)
     if "label" in data and "result_summary" in data:
         return data
     verb, target_id = _parse_approval_command(str(data.get("command") or ""))
-    result = (
-        data.get("result_json") if isinstance(data.get("result_json"), dict) else {}
-    )
+    raw_result = data.get("result_json")
+    result = cast(dict[str, Any], raw_result) if isinstance(raw_result, dict) else {}
     summary: dict[str, Any] = {
         "message_id": data.get("message_id"),
         "verb": verb,
@@ -557,7 +578,7 @@ def _approval_command_result_summary(result: dict[str, Any]) -> dict[str, Any]:
             summary[key] = result[key]
     pending_ids = result.get("pending_approval_ids")
     if isinstance(pending_ids, list):
-        summary["pending_approval_count"] = len(pending_ids)
+        summary["pending_approval_count"] = len(cast(list[object], pending_ids))
     return summary
 
 
@@ -681,8 +702,8 @@ def _daemon_liveness(
     }
     if run_status != "running":
         return base | {"status": "stopped", "stale": False}
-    heartbeat_dt = _parse_datetime_or_none(heartbeat)
-    now_dt = _parse_datetime_or_none(now)
+    heartbeat_dt = parse_datetime_or_none(heartbeat)
+    now_dt = parse_datetime_or_none(now)
     if heartbeat_dt is None or now_dt is None:
         return base | {
             "status": "stale",
@@ -744,3 +765,11 @@ def _policy_health_issue(
 
 def _minus_seconds(value: str, seconds: int) -> str:
     return shift_instant(value, delta=-timedelta(seconds=seconds))
+
+
+# Public read-only helpers used by the operator DTO boundary.
+RUN_RUNTIME_COLUMNS = _RUN_RUNTIME_COLUMNS
+recent_errors = _recent_errors
+run_runtime_summary = _run_runtime_summary
+daemon_liveness = _daemon_liveness
+store_read_uri = _store_read_uri

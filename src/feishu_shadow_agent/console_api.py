@@ -1,9 +1,11 @@
+# pyright: reportUnusedFunction=false
+
 from __future__ import annotations
 
 import re
 from datetime import timedelta
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, NoReturn, cast
 
 from fastapi import (
     APIRouter,
@@ -20,6 +22,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
+from starlette.middleware.base import RequestResponseEndpoint
 
 from .config import LoadedConfig
 from .console_security import (
@@ -199,7 +202,9 @@ def create_console_app(
     resolved_static_dir = static_dir or default_console_static_dir()
 
     @app.middleware("http")
-    async def validate_host_header(request: Request, call_next):
+    async def validate_host_header(
+        request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
         if not host_header_allowed(request.headers.get("host"), host=host, port=port):
             response = _error_response(
                 403,
@@ -213,7 +218,7 @@ def create_console_app(
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
         if isinstance(exc.detail, dict) and "code" in exc.detail:
-            detail = exc.detail
+            detail = cast(dict[str, Any], exc.detail)
             return _error_response(
                 exc.status_code,
                 str(detail["code"]),
@@ -640,7 +645,9 @@ def create_console_app(
         )
         try:
             service = command_service(needs_readback_marker=True)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
+            # Console commands cross store/config/runtime boundaries; return a
+            # structured error instead of allowing one request to crash the API.
             return _command_error_result(
                 command="dispatch.mark_sent",
                 actor=LOCAL_CONSOLE_ACTOR,
@@ -835,7 +842,7 @@ def _index_path(static_dir: Path) -> Path:
 
 def _raise_api_error(
     status_code: int, code: str, message: str, *, details: dict[str, Any] | None = None
-) -> None:
+) -> NoReturn:
     raise HTTPException(
         status_code=status_code,
         detail={
@@ -907,7 +914,7 @@ def _add_console_security_headers(response: Response) -> Response:
 
 
 def _details_dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
+    return cast(dict[str, Any], value) if isinstance(value, dict) else {}
 
 
 def _status_code_name(status_code: int) -> str:

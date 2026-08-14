@@ -141,6 +141,7 @@ def test_hermes_cli_parses_json_and_session_id() -> None:
 
     assert result.ok
     assert result.session_id == "20260622_abc"
+    assert isinstance(result.json_data, dict)
     assert result.json_data["route"] == "ignore"
 
 

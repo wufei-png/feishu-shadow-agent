@@ -29,14 +29,14 @@ def _store_with_approval(
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.initialize()
     with store.connect() as conn:
-        task_id = int(
-            conn.execute(
-                """
-                INSERT INTO tasks(short_id, status, chat_id, root_message_id, task_label, created_at, updated_at, chat_type)
-                VALUES ('t_card', 'watching', 'oc_1', 'om_root', 'label', 'now', 'now', 'p2p')
-                """
-            ).lastrowid
+        cursor = conn.execute(
+            """
+            INSERT INTO tasks(short_id, status, chat_id, root_message_id, task_label, created_at, updated_at, chat_type)
+            VALUES ('t_card', 'watching', 'oc_1', 'om_root', 'label', 'now', 'now', 'p2p')
+            """
         )
+        assert cursor.lastrowid is not None
+        task_id = cursor.lastrowid
     approval_pk = store.create_send_reply_approval(
         task_id=task_id,
         preview=text,
@@ -244,7 +244,11 @@ class FakeChannel:
         self.handlers[name] = handler
         return lambda: None
 
-    async def connect_until_ready(self, *, timeout: float | None = 30.0) -> None:
+    async def connect_until_ready(
+        self,
+        *,
+        timeout: float | None = 30.0,  # noqa: ASYNC109
+    ) -> None:
         self.connected = True
 
     async def disconnect(self) -> None:

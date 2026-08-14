@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel
 
@@ -27,9 +27,9 @@ from .prompt import (
     TaskRouterOutput,
 )
 
-ClaudeCodeRunner = Callable[
-    [list[str], int | None, str | None, Path | None], AgentRunResult
-]
+# Test and embedding callers may provide a runner with a narrower timeout
+# contract; the subprocess adapter itself accepts the provider's optional value.
+ClaudeCodeRunner = Callable[..., AgentRunResult]
 
 READ_ONLY_TOOLS = ("Read", "Grep", "Glob", "LS", "WebFetch", "WebSearch")
 EMPTY_MCP_CONFIG = '{"mcpServers":{}}'
@@ -243,7 +243,9 @@ def _run_subprocess(
 ) -> AgentRunResult:
     started = time.monotonic()
     try:
-        completed = subprocess.run(
+        # argv is assembled by the configured Claude adapter and shell=False
+        # prevents shell interpretation of model/config values.
+        completed = subprocess.run(  # noqa: S603
             list(argv),
             input=stdin,
             cwd=cwd,
@@ -256,8 +258,8 @@ def _run_subprocess(
         return AgentRunResult(
             argv=list(argv),
             exit_code=None,
-            stdout=exc.stdout or "",
-            stderr=exc.stderr or "",
+            stdout=_subprocess_text(exc.stdout),
+            stderr=_subprocess_text(exc.stderr),
             error=f"command timed out after {timeout_seconds}s",
             timed_out=True,
             latency_ms=_latency_ms(started),
@@ -299,12 +301,14 @@ def _parse_structured_output(stdout: str) -> _ParsedClaudeOutput:
         return _ParsedClaudeOutput(error=f"stdout was not valid JSON: {exc}")
     if not isinstance(envelope, dict):
         return _ParsedClaudeOutput(error="stdout JSON was not an object")
+    envelope = cast(dict[str, Any], envelope)
     session_id = _session_id_from_envelope(envelope)
     if envelope.get("is_error") is True:
         errors = envelope.get("errors")
         if isinstance(errors, list) and errors:
             return _ParsedClaudeOutput(
-                session_id=session_id, error="; ".join(str(item) for item in errors)
+                session_id=session_id,
+                error="; ".join(str(item) for item in cast(list[Any], errors)),
             )
         return _ParsedClaudeOutput(
             session_id=session_id,
@@ -312,10 +316,14 @@ def _parse_structured_output(stdout: str) -> _ParsedClaudeOutput:
         )
     structured = envelope.get("structured_output")
     if isinstance(structured, dict):
-        return _ParsedClaudeOutput(json_data=structured, session_id=session_id)
+        return _ParsedClaudeOutput(
+            json_data=cast(dict[str, Any], structured), session_id=session_id
+        )
     result = envelope.get("result")
     if isinstance(result, dict):
-        return _ParsedClaudeOutput(json_data=result, session_id=session_id)
+        return _ParsedClaudeOutput(
+            json_data=cast(dict[str, Any], result), session_id=session_id
+        )
     if isinstance(result, str) and result.strip():
         try:
             parsed = json.loads(result)
@@ -325,7 +333,9 @@ def _parse_structured_output(stdout: str) -> _ParsedClaudeOutput:
                 error=f"result was not valid JSON: {exc}",
             )
         if isinstance(parsed, dict):
-            return _ParsedClaudeOutput(json_data=parsed, session_id=session_id)
+            return _ParsedClaudeOutput(
+                json_data=cast(dict[str, Any], parsed), session_id=session_id
+            )
         return _ParsedClaudeOutput(
             session_id=session_id,
             error="result JSON was not an object",
@@ -343,7 +353,7 @@ def _parse_session_id(stdout: str) -> str | None:
         return None
     if not isinstance(envelope, dict):
         return None
-    return _session_id_from_envelope(envelope)
+    return _session_id_from_envelope(cast(dict[str, Any], envelope))
 
 
 def _session_id_from_envelope(envelope: dict[str, Any]) -> str | None:
@@ -370,3 +380,9 @@ def _with_claude_code_provider(
 
 def _latency_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
+
+
+def _subprocess_text(value: str | bytes | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value or ""

@@ -12,9 +12,10 @@ from .paths import resolve_agent_skill_path
 
 def create_agent_backend(config: AppConfig, *, base_dir: str | Path) -> AgentBackend:
     backend = config.agent_backend
+    resolved_base_dir = Path(base_dir)
     explicit_context_paths = list(backend.explicit_context.paths)
     hermes_skill_paths = [
-        resolve_agent_skill_path(skill, base_dir)
+        resolve_agent_skill_path(skill, resolved_base_dir)
         for skill in backend.hermes.skill_paths
     ]
     if backend.provider == "hermes":

@@ -6,11 +6,11 @@ import logging as std_logging
 import os
 import sys
 import threading
-from collections.abc import Collection, Iterator
-from contextlib import ExitStack, contextmanager
+from collections.abc import Collection, Generator
+from contextlib import ExitStack, contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from .time_utils import parse_instant
@@ -242,7 +242,7 @@ class _CoordinatedFileHandler(std_logging.FileHandler):
 
 
 @contextmanager
-def _exclusive_log_lock(path: Path) -> Iterator[None]:
+def _exclusive_log_lock(path: Path) -> Generator[None, None, None]:
     lock_path = path.with_name(f".{path.name}.lock")
     flags = os.O_CREAT | os.O_RDWR
     flags |= getattr(os, "O_CLOEXEC", 0)
@@ -288,7 +288,10 @@ class _TextFormatter(std_logging.Formatter):
             parts.append(f"task_id={task_id}")
         data = getattr(record, "data", {}) or {}
         if isinstance(data, dict):
-            parts.extend(f"{key}={_text_value(value)}" for key, value in data.items())
+            data_map = cast(dict[str, Any], data)
+            parts.extend(
+                f"{key}={_text_value(value)}" for key, value in data_map.items()
+            )
         else:
             parts.append(f"data={_text_value(data)}")
         return " ".join(parts)
@@ -400,10 +403,8 @@ def _fsync_directory(path: Path) -> None:
     except OSError:
         return
     try:
-        try:
+        with suppress(OSError):
             os.fsync(directory_fd)
-        except OSError:
-            pass
     finally:
         os.close(directory_fd)
 
@@ -420,11 +421,14 @@ def _scrub_jsonl_line(
         payload = json.loads(line)
         if not isinstance(payload, dict):
             raise ValueError("log line is not an object")
-        if payload.get("event") == "retention_unparseable_line_pruned" and payload.get(
-            "data"
-        ) == {"retention_pruned": True}:
+        payload_map = cast(dict[str, Any], payload)
+        if payload_map.get(
+            "event"
+        ) == "retention_unparseable_line_pruned" and payload_map.get("data") == {
+            "retention_pruned": True
+        }:
             return line, False
-        timestamp = parse_instant(str(payload.get("ts", "")))
+        timestamp = parse_instant(str(payload_map.get("ts", "")))
     except (json.JSONDecodeError, ValueError):
         replacement = {
             "ts": None,
@@ -437,30 +441,32 @@ def _scrub_jsonl_line(
         return json.dumps(replacement, ensure_ascii=False) + "\n", True
     if timestamp > cutoff:
         return line, False
-    task_id = payload.get("task_id")
+    task_id = payload_map.get("task_id")
     if task_id is not None and str(task_id) in protected_task_ids:
         return line, False
-    data = payload.get("data")
-    if (
-        isinstance(data, dict)
-        and data.get("message_id") is not None
-        and str(data["message_id"]) in protected_message_ids
-    ):
-        return line, False
-    if isinstance(data, dict) and any(
-        data.get(key) is not None and str(data[key]) in protected
-        for key, protected in (
-            ("action_id", protected_action_ids),
-            ("approval_id", protected_approval_ids),
-        )
-    ):
-        return line, False
-    minimal = {
-        key: payload.get(key) for key in ("ts", "level", "run_id", "task_id", "event")
+    data = payload_map.get("data")
+    if isinstance(data, dict):
+        data_map = cast(dict[str, Any], data)
+        if (
+            data_map.get("message_id") is not None
+            and str(data_map["message_id"]) in protected_message_ids
+        ):
+            return line, False
+        if any(
+            data_map.get(key) is not None and str(data_map[key]) in protected
+            for key, protected in (
+                ("action_id", protected_action_ids),
+                ("approval_id", protected_approval_ids),
+            )
+        ):
+            return line, False
+    minimal: dict[str, Any] = {
+        key: payload_map.get(key)
+        for key in ("ts", "level", "run_id", "task_id", "event")
     }
     minimal["data"] = {"retention_pruned": True}
     replacement = json.dumps(minimal, ensure_ascii=False, default=_json_default) + "\n"
-    if payload == minimal:
+    if payload_map == minimal:
         return line, False
     return replacement, True
 

@@ -149,11 +149,7 @@ class PolicyResolver:
             raise ProductPolicyMissingError(
                 "Product Policy Store global policy is not initialized; run `policy import-config`."
             )
-        if (
-            not isinstance(policy, dict)
-            or "reply_policy" not in policy
-            or "default_chat_policy" not in policy
-        ):
+        if "reply_policy" not in policy or "default_chat_policy" not in policy:
             raise ProductPolicyInvalidError(
                 "Product Policy Store global policy is missing required fields."
             )

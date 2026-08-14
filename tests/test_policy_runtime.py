@@ -15,6 +15,7 @@ from feishu_shadow_agent.config import (
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.policy import PolicyResolver, ProductPolicyMissingError
 from feishu_shadow_agent.processing import ComposedReply, TaskProcessingService
+from feishu_shadow_agent.prompt import BaseTaskSessionOutput
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import NormalizedMessage, ResourceRef, TaskRecord
 
@@ -222,11 +223,13 @@ def test_runtime_services_ignore_yaml_policy_after_db_import(tmp_path: Path) -> 
     gate = service._reply_gate(
         task=_task(chat_id="ou_chat", chat_type="p2p"),
         message=_message(chat_id="ou_chat", chat_type="p2p"),
-        output=type(
-            "Output",
-            (),
-            {"answerability": "auto_reply", "proposed_reply": "reply"},
-        )(),
+        output=BaseTaskSessionOutput(
+            answerability="auto_reply",
+            decision_reason=None,
+            proposed_reply="reply",
+            reply_target_message_id="om_ou_chat",
+            watch_action="keep_watching",
+        ),
         composed=ComposedReply(text="reply", had_forbidden_mentions=False),
     )
 

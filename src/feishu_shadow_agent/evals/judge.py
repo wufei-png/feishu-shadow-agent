@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ..agent_backend import AgentBackend
+from ..agent_backend import StructuredOutputBackend
 from .artifacts import EvalError, text_sha256
 from .schemas import SemanticJudgeOutput
 
@@ -31,7 +31,7 @@ class SemanticJudgeResult:
 
 def run_semantic_judge(
     *,
-    backend: AgentBackend,
+    backend: StructuredOutputBackend,
     reference_answer: str,
     candidate_answer: str,
     visible_context: dict[str, Any],

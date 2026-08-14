@@ -14,6 +14,7 @@ from ..routing import (
     RoutingResult,
 )
 from ..time_utils import shift_instant
+from ..types import RouteName
 from .artifacts import EvalError
 from .cases import LoadedEvalCase, message_sent_at
 from .runtime import TrialRuntime, seed_router_scenario
@@ -102,8 +103,9 @@ def run_router_trial(
 
     state = runtime.state_summary()
     actual_alias = id_to_alias.get(result.decision.target_task_id or -1)
+    route = result.decision.route.value
     actual = {
-        "route": result.decision.route,
+        "route": route,
         "task_key": actual_alias,
         "reason": result.decision.reason,
         "matched_by": result.decision.matched_by,
@@ -152,7 +154,7 @@ def _latest_routing_result(runtime: TrialRuntime) -> RoutingResult:
     task = runtime.store.get_task_by_id(task_id) if task_id is not None else None
     return RoutingResult(
         decision=RouteDecision(
-            route=row["route"],
+            route=RouteName(str(row["route"])),
             target_task_id=task_id,
             target_task_short_id=None if task is None else task.short_id,
             reason=row.get("route_reason"),

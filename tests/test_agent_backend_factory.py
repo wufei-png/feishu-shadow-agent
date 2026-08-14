@@ -5,7 +5,7 @@ from pathlib import Path
 from feishu_shadow_agent.agent_backend_factory import create_agent_backend
 from feishu_shadow_agent.claude_code import ClaudeCodeCliClient
 from feishu_shadow_agent.codex import CodexCliClient
-from feishu_shadow_agent.config import AppConfig, OwnerConfig
+from feishu_shadow_agent.config import AgentBackendConfig, AppConfig, OwnerConfig
 from feishu_shadow_agent.hermes import HermesCliClient
 
 
@@ -14,12 +14,14 @@ def test_backend_factory_builds_selected_hermes_backend_with_resolved_skills(
 ) -> None:
     config = AppConfig(
         owner=OwnerConfig(open_id="ou_owner"),
-        agent_backend={
-            "hermes": {
-                "path": "/bin/hermes",
-                "skill_paths": ["skills/support/SKILL.md"],
-            },
-        },
+        agent_backend=AgentBackendConfig.model_validate(
+            {
+                "hermes": {
+                    "path": "/bin/hermes",
+                    "skill_paths": ["skills/support/SKILL.md"],
+                },
+            }
+        ),
     )
 
     backend = create_agent_backend(config, base_dir=tmp_path)
@@ -37,7 +39,9 @@ def test_backend_factory_builds_selected_hermes_backend_with_resolved_skills(
 def test_backend_factory_builds_selected_codex_backend() -> None:
     config = AppConfig(
         owner=OwnerConfig(open_id="ou_owner"),
-        agent_backend={"provider": "codex", "codex": {"path": "/bin/codex"}},
+        agent_backend=AgentBackendConfig.model_validate(
+            {"provider": "codex", "codex": {"path": "/bin/codex"}}
+        ),
     )
 
     backend = create_agent_backend(config, base_dir=Path("/tmp"))
@@ -59,11 +63,13 @@ def test_backend_factory_configures_native_names_and_explicit_paths_for_codex(
     context_path = tmp_path / "skills" / "support"
     config = AppConfig(
         owner=OwnerConfig(open_id="ou_owner"),
-        agent_backend={
-            "provider": "codex",
-            "explicit_context": {"paths": [str(context_path)]},
-            "codex": {"path": "/bin/codex", "skills": ["docmate"]},
-        },
+        agent_backend=AgentBackendConfig.model_validate(
+            {
+                "provider": "codex",
+                "explicit_context": {"paths": [str(context_path)]},
+                "codex": {"path": "/bin/codex", "skills": ["docmate"]},
+            }
+        ),
     )
 
     backend = create_agent_backend(config, base_dir=tmp_path)
@@ -76,10 +82,12 @@ def test_backend_factory_configures_native_names_and_explicit_paths_for_codex(
 def test_backend_factory_builds_selected_claude_code_backend() -> None:
     config = AppConfig(
         owner=OwnerConfig(open_id="ou_owner"),
-        agent_backend={
-            "provider": "claude_code",
-            "claude_code": {"path": "/bin/claude"},
-        },
+        agent_backend=AgentBackendConfig.model_validate(
+            {
+                "provider": "claude_code",
+                "claude_code": {"path": "/bin/claude"},
+            }
+        ),
     )
 
     backend = create_agent_backend(config, base_dir=Path("/tmp"))

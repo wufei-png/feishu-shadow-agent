@@ -3,7 +3,7 @@ from __future__ import annotations
 import secrets
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pydantic import ValidationError
 
@@ -164,14 +164,20 @@ class PromotionService:
         raws = read_jsonl(source / "raw_messages.jsonl")
         if any(not isinstance(row, dict) for row in raws):
             raise EvalError("ingress raw_messages.jsonl contains a non-object row")
-        raw_ids = [message_id_from_raw(row) for row in raws]
+        raw_ids = [message_id_from_raw(cast(dict[str, Any], row)) for row in raws]
         if not all(raw_ids) or len(raw_ids) != len(set(raw_ids)):
             raise EvalError(
                 "ingress raw_messages.jsonl contains missing or duplicate message ids"
             )
+        timeline_value = timeline.get("messages", [])
+        timeline_rows = (
+            cast(list[object], timeline_value)
+            if isinstance(timeline_value, list)
+            else []
+        )
         timeline_ids = {
-            str(row.get("message_id"))
-            for row in timeline.get("messages", [])
+            str(cast(dict[str, Any], row).get("message_id"))
+            for row in timeline_rows
             if isinstance(row, dict)
         }
         if timeline_ids != set(raw_ids):
@@ -195,7 +201,7 @@ def _raw_by_id(path: Path) -> dict[str, dict[str, Any]]:
     for row in rows:
         if not isinstance(row, dict):
             raise EvalError(f"{path} contains a non-object row")
-        message_id = message_id_from_raw(row)
+        message_id = message_id_from_raw(cast(dict[str, Any], row))
         if not message_id:
             raise EvalError(f"{path} contains a message without message_id")
         if message_id in result:
@@ -221,7 +227,8 @@ def _provenance_source(eval_type: str, source: Path) -> dict[str, str]:
 def _validate_source_owner(source: Path, loaded: LoadedConfig) -> None:
     config = read_yaml(source / "config.yaml")
     owner = config.get("owner")
-    owner_open_id = owner.get("open_id") if isinstance(owner, dict) else None
+    owner_map = cast(dict[str, Any], owner) if isinstance(owner, dict) else None
+    owner_open_id = owner_map.get("open_id") if owner_map is not None else None
     if owner_open_id != loaded.config.owner.open_id:
         raise EvalError(
             "promotion source owner.open_id must match Evaluation Run Config"

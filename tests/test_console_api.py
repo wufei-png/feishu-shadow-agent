@@ -406,6 +406,7 @@ def test_message_detail_api_is_service_backed_and_read_only(tmp_path: Path) -> N
                 None,
             ),
         )
+    assert task_id is not None
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_1",
@@ -990,7 +991,9 @@ def test_policy_routes_use_command_facade_and_settings_runtime_read_model(
     assert runtime_payload["values"]["policy.global.p2p_auto_reply"] is False
     assert runtime_payload["chat_policies"][0]["chat_id"] == "oc_console"
     assert runtime_payload["policy_audit_history"][0]["scope"] == "chat"
-    assert store.get_chat_product_policy("oc_console")["auto_reply"] is True
+    chat_policy = store.get_chat_product_policy("oc_console")
+    assert chat_policy is not None
+    assert chat_policy["auto_reply"] is True
 
 
 def test_policy_preview_routes_return_deterministic_impact_without_audit(
@@ -1252,6 +1255,7 @@ def _seed_task_with_message(
             "INSERT INTO task_messages(task_id, message_id, role, created_at) VALUES (?, ?, ?, ?)",
             (task_id, message_id, "root", "2026-06-22T10:00:00+08:00"),
         )
+    assert task_id is not None
     return int(task_id)
 
 

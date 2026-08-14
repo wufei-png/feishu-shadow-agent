@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -37,7 +37,9 @@ def test_parse_instant_rejects_non_instant_values(value: str) -> None:
 
 def test_format_instant_rejects_naive_datetime() -> None:
     with pytest.raises(ValueError):
-        format_instant(datetime(2026, 8, 14, 12, 30, 45))
+        format_instant(
+            datetime(2026, 8, 14, 12, 30, 45, tzinfo=UTC).replace(tzinfo=None)
+        )
 
 
 def test_normalize_instant_preserves_subsecond_ordering() -> None:
@@ -63,7 +65,8 @@ def test_feishu_local_timestamp_normalization_ignores_process_timezone(
         "from feishu_shadow_agent.ingestion import normalize_message_sent_at; "
         "print(normalize_message_sent_at('2026-08-14 12:30'))"
     )
-    completed = subprocess.run(
+    # The test launches the current interpreter with a fixed inline snippet.
+    completed = subprocess.run(  # noqa: S603
         [sys.executable, "-c", code],
         env={**os.environ, "TZ": process_timezone},
         capture_output=True,

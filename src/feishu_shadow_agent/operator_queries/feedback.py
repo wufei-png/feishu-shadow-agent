@@ -60,6 +60,8 @@ class FeedbackQuery:
         try:
             with self._connect() as conn:
                 summary = conn.execute(
+                    # The mode fragment comes from a fixed allowlist and all
+                    # feedback values remain bound parameters.
                     f"""
                     SELECT
                       COUNT(*) AS total,
@@ -79,7 +81,7 @@ class FeedbackQuery:
                     FROM approval_feedback
                     WHERE julianday(created_at) >= julianday(?)
                     {mode_sql}
-                    """,
+                    """,  # noqa: S608
                     [since, *mode_params],
                 ).fetchone()
                 outcome_rows = _group_counts(
@@ -165,7 +167,7 @@ class FeedbackQuery:
                     {mode_sql.replace("execution_mode", "f.execution_mode")}
                     ORDER BY julianday(f.created_at) DESC, f.id DESC
                     LIMIT ? OFFSET ?
-                    """,
+                    """,  # noqa: S608
                     [since, *mode_params, _limit(limit), _offset(offset)],
                 ).fetchall()
         except OperatorQueryUnavailable:
@@ -188,6 +190,8 @@ def _group_counts(
     if column not in {"outcome", "decision_reason", "feedback_reason"}:
         raise ValueError("unsupported feedback grouping")
     return conn.execute(
+        # `column` and `mode_sql` are constrained by internal allowlists; data
+        # values are still passed through SQLite parameters.
         f"""
         SELECT COALESCE({column}, 'unclassified') AS value, COUNT(*) AS count
         FROM approval_feedback
@@ -195,7 +199,7 @@ def _group_counts(
         {mode_sql}
         GROUP BY COALESCE({column}, 'unclassified')
         ORDER BY count DESC, value
-        """,
+        """,  # noqa: S608
         [since, *mode_params],
     ).fetchall()
 

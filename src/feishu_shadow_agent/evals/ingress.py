@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
-from typing import Any
+from collections.abc import Iterable, Mapping
+from typing import Any, cast
 
 from pydantic import ValidationError
 
@@ -25,7 +25,7 @@ class GroupIngressEvaluator:
         self,
         raw_messages: list[dict[str, Any]],
         *,
-        sources_by_message: dict[str, Iterable[str]],
+        sources_by_message: Mapping[str, Iterable[str]],
         owner: dict[str, Any],
         chat: dict[str, Any],
     ) -> dict[str, Any]:
@@ -172,7 +172,7 @@ def validate_ingress_review_labels(
         review = IngressReviewLabels.model_validate(labels)
     except ValidationError as exc:
         raise EvalError(f"invalid ingress review labels: {exc}") from exc
-    rows = review.model_dump(mode="json")["labels"]
+    rows = cast(list[dict[str, Any]], review.model_dump(mode="json")["labels"])
     messages = timeline_messages(timeline)
     if review.source_run != timeline.get("run_id"):
         raise EvalError("ingress review source_run does not match timeline run_id")
@@ -182,8 +182,6 @@ def validate_ingress_review_labels(
     seen: set[str] = set()
     normalized: list[dict[str, Any]] = []
     for row in rows:
-        if not isinstance(row, dict):
-            raise EvalError("each ingress label must be a mapping")
         message_id = str(row.get("message_id") or "")
         if message_id not in expected_set:
             raise EvalError(f"label message_id not found in timeline: {message_id}")
@@ -234,17 +232,17 @@ def compare_ingress_golden(
     label_rows = labels.get("labels")
     if not isinstance(label_rows, list):
         raise EvalError("labels.yaml must contain labels list")
+    label_rows = cast(list[Any], label_rows)
+    label_maps = [
+        cast(dict[str, Any], row) for row in label_rows if isinstance(row, dict)
+    ]
     label_ids = [
-        str(row.get("message_id"))
-        for row in label_rows
-        if isinstance(row, dict) and row.get("message_id")
+        str(row.get("message_id")) for row in label_maps if row.get("message_id")
     ]
     if len(label_ids) != len(label_rows) or len(label_ids) != len(set(label_ids)):
         raise EvalError("golden labels must contain each message_id exactly once")
-    expected_by_id = {
-        str(row.get("message_id")): row
-        for row in label_rows
-        if isinstance(row, dict) and row.get("message_id")
+    expected_by_id: dict[str, dict[str, Any]] = {
+        str(row.get("message_id")): row for row in label_maps if row.get("message_id")
     }
     messages = timeline_messages(timeline)
     if set(expected_by_id) != {str(message["message_id"]) for message in messages}:
@@ -311,15 +309,16 @@ def compare_ingress_golden(
 def timeline_messages(timeline: dict[str, Any]) -> list[dict[str, Any]]:
     messages = timeline.get("messages")
     if not isinstance(messages, list) or any(
-        not isinstance(item, dict) for item in messages
+        not isinstance(item, dict) for item in cast(list[Any], messages)
     ):
         raise EvalError("ingress_timeline.yaml must contain only message mappings")
-    message_ids = [str(item.get("message_id") or "") for item in messages]
+    message_rows = cast(list[dict[str, Any]], messages)
+    message_ids = [str(item.get("message_id") or "") for item in message_rows]
     if not all(message_ids):
         raise EvalError("ingress timeline contains a message without message_id")
     if len(message_ids) != len(set(message_ids)):
         raise EvalError("ingress timeline contains duplicate message_id values")
-    return messages
+    return message_rows
 
 
 def _timeline_row(

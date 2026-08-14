@@ -9,6 +9,7 @@ from .types import (
     LifecycleStatePolicy,
     NormalizedMessage,
     RouteDecision,
+    RouteName,
     TaskCandidate,
     TaskRecord,
 )
@@ -127,11 +128,13 @@ class MessageRouter:
                         if decision.route in TASK_SESSION_ROUTES and task is None:
                             return self._audit(
                                 message,
-                                RouteDecision("ignore", reason="duplicate_message"),
+                                RouteDecision(
+                                    RouteName.IGNORE, reason="duplicate_message"
+                                ),
                             )
                         return RoutingResult(decision=decision, task=task)
             return self._audit(
-                message, RouteDecision("ignore", reason="duplicate_message")
+                message, RouteDecision(RouteName.IGNORE, reason="duplicate_message")
             )
 
         sent_action_task = self.store.find_task_for_sent_action_message(
@@ -148,19 +151,21 @@ class MessageRouter:
             return RoutingResult(decision=decision, task=sent_action_task)
 
         if message.is_self_message:
-            return self._audit(message, RouteDecision("ignore", reason="self_message"))
+            return self._audit(
+                message, RouteDecision(RouteName.IGNORE, reason="self_message")
+            )
 
         if message.sender_role == "owner_message":
             return self._route_owner_message(message, now=now)
 
         if message.at_all:
             return self._audit(
-                message, RouteDecision("ignore", reason="at_all_suppressed")
+                message, RouteDecision(RouteName.IGNORE, reason="at_all_suppressed")
             )
 
         if source == "group_at_me" and not message.direct_mention:
             return self._audit(
-                message, RouteDecision("ignore", reason="non_direct_mention")
+                message, RouteDecision(RouteName.IGNORE, reason="non_direct_mention")
             )
 
         candidates = self.collector.collect(message, now=now)
@@ -197,7 +202,7 @@ class MessageRouter:
                 return self._audit(
                     message,
                     RouteDecision(
-                        "ambiguous",
+                        RouteName.AMBIGUOUS,
                         reason="closed_recall_router_placeholder",
                         candidates_count=len(historical),
                         router_called=False,
@@ -214,19 +219,21 @@ class MessageRouter:
             return self._audit(
                 message,
                 RouteDecision(
-                    "ignore", reason="active_watch_no_candidate", candidates_count=0
+                    RouteName.IGNORE,
+                    reason="active_watch_no_candidate",
+                    candidates_count=0,
                 ),
             )
 
         if not candidates and source in TRIGGER_SOURCES:
             return self._audit(
-                message, RouteDecision("ignore", reason="missing_chat_id")
+                message, RouteDecision(RouteName.IGNORE, reason="missing_chat_id")
             )
 
         return self._audit(
             message,
             RouteDecision(
-                "ambiguous",
+                RouteName.AMBIGUOUS,
                 reason="router_placeholder",
                 candidates_count=len(candidates),
                 router_called=False,
@@ -240,7 +247,9 @@ class MessageRouter:
         if task is None:
             return self._audit(
                 message,
-                RouteDecision("ignore", reason="owner_message_not_task_intervention"),
+                RouteDecision(
+                    RouteName.IGNORE, reason="owner_message_not_task_intervention"
+                ),
             )
         decision = self.store.close_task_for_owner_takeover_and_audit(
             task,

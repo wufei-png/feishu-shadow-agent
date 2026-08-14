@@ -4,15 +4,15 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
 from ..agent_backend import AgentBackend
 from ..config import LoadedConfig
-from ..feishu.lark_cli import LarkCliClient
 from ..paths import resolve_relative_path
 from ..time_utils import format_instant, parse_instant, utc_now, utc_now_iso
+from ..types import LarkCliResult, MessagePage
 from .artifacts import (
     EvalError,
     copy_config_or_raise,
@@ -41,12 +41,18 @@ from .schemas import EvalProvenance, IngressGoldenLabels, IngressScenario
 BackendFactory = Callable[[LoadedConfig], AgentBackend]
 
 
+class IngressLarkClient(Protocol):
+    list_chat_messages: Callable[..., MessagePage]
+    search_messages: Callable[..., MessagePage]
+    version: Callable[..., LarkCliResult]
+
+
 class IngressEvalService:
     def __init__(
         self,
         *,
         loaded: LoadedConfig,
-        lark_client: LarkCliClient,
+        lark_client: IngressLarkClient,
         backend_factory: BackendFactory,
     ) -> None:
         self.loaded = loaded
@@ -251,7 +257,11 @@ class IngressEvalService:
             **comparison,
         }
         write_yaml(run_dir / "report.yaml", report)
-        return run_dir, 0 if report["summary"]["passed"] else 1
+        summary = comparison.get("summary")
+        if not isinstance(summary, dict):
+            raise EvalError("ingress golden comparison did not contain a summary")
+        summary_map = cast(dict[str, Any], summary)
+        return run_dir, 0 if bool(summary_map.get("passed")) else 1
 
     def _drain_chat(
         self, *, chat_id: str, start: str, end: str
@@ -313,7 +323,8 @@ def _load_snapshot(
         raise EvalError(f"ingress snapshot directory does not exist: {directory}")
     baseline = read_yaml(directory / "config.yaml")
     owner = baseline.get("owner")
-    owner_open_id = owner.get("open_id") if isinstance(owner, dict) else None
+    owner_map = cast(dict[str, Any], owner) if isinstance(owner, dict) else None
+    owner_open_id = owner_map.get("open_id") if owner_map is not None else None
     if owner_open_id != run_config.config.owner.open_id:
         raise EvalError(
             "snapshot config owner.open_id must match Evaluation Run Config owner.open_id"
@@ -331,6 +342,7 @@ def _load_snapshot(
     chat = timeline.get("chat")
     if not isinstance(chat, dict):
         raise EvalError("ingress snapshot timeline is missing chat metadata")
+    chat_map = cast(dict[str, Any], chat)
     timeline_rows = timeline_messages(timeline)
     timeline_ids = [str(row.get("message_id") or "") for row in timeline_rows]
     raw_ids = [message_id_from_raw(row) for row in rows]
@@ -344,8 +356,12 @@ def _load_snapshot(
         raise EvalError("snapshot timeline must exactly cover raw_messages.jsonl")
     for row in timeline_rows:
         sources = row.get("sources")
-        if not isinstance(sources, list) or any(
-            source not in {"group_at_me", "active_watch"} for source in sources
+        if not isinstance(sources, list):
+            raise EvalError("snapshot timeline contains invalid acquisition sources")
+        source_values = cast(list[object], sources)
+        if not all(
+            isinstance(source, str) and source in {"group_at_me", "active_watch"}
+            for source in source_values
         ):
             raise EvalError("snapshot timeline contains invalid acquisition sources")
     group_at_ids = {
@@ -353,7 +369,7 @@ def _load_snapshot(
         for row in timeline_rows
         if "group_at_me" in (row.get("sources") or [])
     }
-    return list(rows), scenario, chat, group_at_ids
+    return list(rows), scenario, chat_map, group_at_ids
 
 
 def _sources_by_message(
@@ -419,8 +435,7 @@ def _active_task_fixtures(
             )
             fixture["watch_keys"].append(str(row["key"]))
     finally:
-        if connection is not None:
-            connection.close()
+        connection.close()
     return {
         f"task_{index}": fixture
         for index, fixture in enumerate(fixtures.values(), start=1)
@@ -458,7 +473,8 @@ def _raw_chat_id(raw: dict[str, Any]) -> str | None:
         return value
     chat = raw.get("chat")
     if isinstance(chat, dict):
-        value = chat.get("chat_id") or chat.get("chatId") or chat.get("id")
+        chat_map = cast(dict[str, Any], chat)
+        value = chat_map.get("chat_id") or chat_map.get("chatId") or chat_map.get("id")
         return value if isinstance(value, str) and value else None
     return None
 

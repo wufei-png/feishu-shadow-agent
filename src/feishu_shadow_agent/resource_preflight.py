@@ -93,7 +93,9 @@ class ResourcePreflight:
                 try:
                     retry_error = None
                     self.retry_func(message, run_id)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
+                    # Retry callbacks are pluggable resource handlers; capture
+                    # any callback failure and continue the bounded retry loop.
                     retry_error = f"{type(exc).__name__}: {exc}"
                     last_error = retry_error
                     self.logger.warning(

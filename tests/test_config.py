@@ -276,7 +276,7 @@ agent_backend:
         encoding="utf-8",
     )
 
-    with pytest.raises(ConfigError, match="agent_backend.hermes"):
+    with pytest.raises(ConfigError, match=r"agent_backend\.hermes"):
         ConfigService().load(config_path)
 
 
@@ -413,7 +413,7 @@ reply_postprocess:
     )
 
     with pytest.raises(
-        ConfigError, match="owner_style.enabled or humanizer_zh.enabled"
+        ConfigError, match=r"owner_style\.enabled or humanizer_zh\.enabled"
     ):
         ConfigService().load(config_path)
 
@@ -452,7 +452,7 @@ reply_postprocess:
         encoding="utf-8",
     )
 
-    with pytest.raises(ConfigError, match="humanizer_zh.enabled requires skill_path"):
+    with pytest.raises(ConfigError, match=r"humanizer_zh\.enabled requires skill_path"):
         ConfigService().load(config_path)
 
 
@@ -592,7 +592,7 @@ agent_backend:
         encoding="utf-8",
     )
 
-    with pytest.raises(ConfigError, match="codex.skills"):
+    with pytest.raises(ConfigError, match=r"codex\.skills"):
         ConfigService().load(config_path)
 
 
@@ -612,7 +612,7 @@ agent_backend:
             encoding="utf-8",
         )
 
-        with pytest.raises(ConfigError, match="explicit_context.paths"):
+        with pytest.raises(ConfigError, match=r"explicit_context\.paths"):
             ConfigService().load(config_path)
 
 

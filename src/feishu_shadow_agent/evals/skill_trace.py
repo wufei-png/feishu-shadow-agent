@@ -8,7 +8,7 @@ import subprocess
 import time
 from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ..agent_backend import AgentRunResult
 
@@ -120,7 +120,8 @@ def _export_session(
     ]
     started = time.monotonic()
     try:
-        completed = subprocess.run(
+        # The skill probe uses a structured argv list and shell=False.
+        completed = subprocess.run(  # noqa: S603
             argv,
             capture_output=True,
             text=True,
@@ -160,7 +161,7 @@ def _parse_export(stdout: str) -> list[dict[str, Any]]:
         row = json.loads(line)
         if not isinstance(row, dict):
             raise ValueError("session export rows must be objects")
-        rows.append(row)
+        rows.append(cast(dict[str, Any], row))
     if not rows:
         raise ValueError("session export was empty")
     return rows
@@ -194,12 +195,13 @@ def _summarize_codex_sessions(
         payload = row.get("payload")
         if not isinstance(payload, dict):
             continue
+        payload_map = cast(dict[str, Any], payload)
         if row_type == "session_meta":
-            providers.append(payload.get("model_provider"))
+            providers.append(payload_map.get("model_provider"))
         elif row_type == "turn_context":
-            models.append(payload.get("model"))
+            models.append(payload_map.get("model"))
         elif row_type == "response_item":
-            _collect_codex_skill_names(payload, runtime_loaded_skills)
+            _collect_codex_skill_names(payload_map, runtime_loaded_skills)
     trace = _trace_with_runtime_skills(
         {},
         status="available",
@@ -220,8 +222,14 @@ def _collect_codex_skill_names(
 ) -> None:
     if payload.get("type") != "message" or payload.get("role") != "user":
         return
-    for item in payload.get("content") or []:
-        if not isinstance(item, dict) or item.get("type") != "input_text":
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return
+    for raw_item in cast(list[object], content):
+        if not isinstance(raw_item, dict):
+            continue
+        item = cast(dict[str, Any], raw_item)
+        if item.get("type") != "input_text":
             continue
         text = item.get("text")
         if not isinstance(text, str):
@@ -246,10 +254,17 @@ def _summarize_sessions(
     skill_view_calls = 0
     tool_calls: list[tuple[str, dict[str, Any]]] = []
     for session in sessions:
-        for message in session.get("messages") or []:
-            if not isinstance(message, dict):
+        messages = session.get("messages")
+        if not isinstance(messages, list):
+            continue
+        for raw_message in cast(list[object], messages):
+            if not isinstance(raw_message, dict):
                 continue
-            for call in message.get("tool_calls") or []:
+            message = cast(dict[str, Any], raw_message)
+            raw_calls = message.get("tool_calls")
+            if not isinstance(raw_calls, list):
+                continue
+            for call in cast(list[object], raw_calls):
                 parsed = _parse_tool_call(call)
                 if parsed is None:
                     continue
@@ -314,21 +329,23 @@ def _trace_with_runtime_skills(
 def _parse_tool_call(call: Any) -> tuple[str, dict[str, Any]] | None:
     if not isinstance(call, dict):
         return None
-    function = call.get("function")
+    call_map = cast(dict[str, Any], call)
+    function = call_map.get("function")
     if not isinstance(function, dict):
         return None
-    name = function.get("name")
+    function_map = cast(dict[str, Any], function)
+    name = function_map.get("name")
     if not isinstance(name, str) or not name:
         return None
-    raw_arguments = function.get("arguments")
+    raw_arguments = function_map.get("arguments")
     if isinstance(raw_arguments, dict):
-        arguments = raw_arguments
+        arguments = cast(dict[str, Any], raw_arguments)
     elif isinstance(raw_arguments, str):
         try:
             parsed = json.loads(raw_arguments)
         except json.JSONDecodeError:
             parsed = {}
-        arguments = parsed if isinstance(parsed, dict) else {}
+        arguments = cast(dict[str, Any], parsed) if isinstance(parsed, dict) else {}
     else:
         arguments = {}
     return name.rsplit(".", 1)[-1], arguments
@@ -371,9 +388,14 @@ def _load_repositories(catalog_paths: Sequence[Path]) -> list[tuple[str, Path]]:
             continue
         if not isinstance(data, dict):
             continue
-        for item in data.get("repos") or []:
-            if not isinstance(item, dict):
+        data_map = cast(dict[str, Any], data)
+        repos = data_map.get("repos")
+        if not isinstance(repos, list):
+            continue
+        for raw_item in cast(list[object], repos):
+            if not isinstance(raw_item, dict):
                 continue
+            item = cast(dict[str, Any], raw_item)
             name = item.get("name")
             path = item.get("path")
             safe_name = _safe_trace_name(name) if isinstance(name, str) else None
@@ -385,10 +407,11 @@ def _load_repositories(catalog_paths: Sequence[Path]) -> list[tuple[str, Path]]:
 
 def _path_argument_values(value: Any, *, key: str | None = None) -> Iterable[str]:
     if isinstance(value, dict):
-        for child_key, child in value.items():
+        mapping = cast(dict[str, Any], value)
+        for child_key, child in mapping.items():
             yield from _path_argument_values(child, key=str(child_key))
     elif isinstance(value, list):
-        for child in value:
+        for child in cast(list[object], value):
             yield from _path_argument_values(child, key=key)
     elif isinstance(value, str) and key in PATH_ARGUMENT_NAMES:
         yield value

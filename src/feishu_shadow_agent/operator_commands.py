@@ -4,7 +4,7 @@ import copy
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
@@ -55,11 +55,13 @@ class CommandResult:
     actor: str
     target: dict[str, Any]
     changed: bool
-    result: dict[str, Any] = field(default_factory=dict)
-    warnings: list[str] = field(default_factory=list)
-    next_actions: list[dict[str, Any]] = field(default_factory=list)
+    result: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
+    warnings: list[str] = field(default_factory=lambda: list[str]())
+    next_actions: list[dict[str, Any]] = field(
+        default_factory=lambda: list[dict[str, Any]]()
+    )
     reason: str | None = None
-    extra: dict[str, Any] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
 
     def as_dict(self) -> dict[str, Any]:
         data = {
@@ -198,13 +200,9 @@ class ApprovalCommandService:
             reason=None,
             command_id=command_id,
             execution_mode=execution_mode,
-            requested_outcome=(
-                "suggestion_sent"
-                if verb == "approve" and valid
-                else None
-                if verb == "send" and valid
-                else None
-            ),
+            requested_outcome="suggestion_sent"
+            if verb == "approve" and valid
+            else None,
             command_text=normalized,
             keep_watching_until=keep_watching_until,
         )
@@ -1135,7 +1133,7 @@ def _error_result(
 
 
 def _dict_result(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, dict) else {}
+    return cast(dict[str, Any], value) if isinstance(value, dict) else {}
 
 
 def _action_output(action: ActionRecord) -> dict[str, Any]:
@@ -1173,7 +1171,8 @@ def _dispatch_next_actions(action_id: int | None) -> list[dict[str, Any]]:
 def _task_next_actions(task: Any) -> list[dict[str, Any]]:
     if not isinstance(task, dict):
         return []
-    task_id = task.get("task_id")
+    task_data = cast(dict[str, Any], task)
+    task_id = task_data.get("task_id")
     if not task_id:
         return []
     return [{"command": "status", "target": {"type": "task", "id": task_id}}]
@@ -1183,9 +1182,19 @@ def _mark_sent_warnings(raw: dict[str, Any]) -> list[str]:
     result = raw.get("result")
     if not isinstance(result, dict):
         return []
-    warnings = result.get("warnings")
-    return [str(warning) for warning in warnings] if isinstance(warnings, list) else []
+    warnings = cast(dict[str, Any], result).get("warnings")
+    return (
+        [str(warning) for warning in cast(list[Any], warnings)]
+        if isinstance(warnings, list)
+        else []
+    )
 
 
 def _int_or_none(value: Any) -> int | None:
     return value if isinstance(value, int) else None
+
+
+# Public policy merge helpers used by the read-only preview boundary.
+policy_changes = _policy_changes
+merged_global_policy = _merged_global_policy
+merged_chat_policy = _merged_chat_policy

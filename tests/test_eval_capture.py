@@ -38,7 +38,7 @@ class FakeLarkClient:
     def version(self):
         return LarkCliResult(argv=["lark-cli", "version"], exit_code=0, stdout="1.0")
 
-    def download_resource(self, **kwargs):
+    def download_resource(self, **kwargs) -> LarkCliResult:
         raise AssertionError("test messages have no resources")
 
 

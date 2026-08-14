@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 from pydantic import BaseModel
 
@@ -83,7 +85,7 @@ class TracedAgentBackend:
         getter = getattr(self.backend, "requested_skill_names", None)
         if not callable(getter):
             return []
-        return list(getter())
+        return list(cast(Callable[[], list[str]], getter)())
 
     def write_prompts(self, directory: Path) -> None:
         if not self._prompts:

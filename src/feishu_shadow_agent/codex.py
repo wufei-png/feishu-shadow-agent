@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -8,7 +9,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel
 
@@ -33,7 +34,9 @@ from .prompt import (
     TaskRouterOutput,
 )
 
-CodexRunner = Callable[[list[str], int | None, str | None, Path | None], AgentRunResult]
+# Test and embedding callers may provide a runner with a narrower timeout
+# contract; the subprocess adapter itself accepts the provider's optional value.
+CodexRunner = Callable[..., AgentRunResult]
 
 TASK_SESSION_DEVELOPER_INSTRUCTIONS = (
     "This is a non-interactive structured Task Session. Use tools silently and do "
@@ -311,7 +314,9 @@ def _run_subprocess(
 ) -> AgentRunResult:
     started = time.monotonic()
     try:
-        completed = subprocess.run(
+        # argv is assembled by the configured Codex adapter and shell=False
+        # prevents shell interpretation of model/config values.
+        completed = subprocess.run(  # noqa: S603
             list(argv),
             input=stdin,
             cwd=cwd,
@@ -380,8 +385,11 @@ def _parse_last_agent_message(stdout: str) -> str | None:
         item = event.get("item")
         if not isinstance(item, dict):
             continue
-        if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
-            text = item["text"]
+        item_map = cast(dict[str, Any], item)
+        if item_map.get("type") == "agent_message" and isinstance(
+            item_map.get("text"), str
+        ):
+            text = item_map["text"]
     return text
 
 
@@ -396,7 +404,7 @@ def _jsonl_events(stdout: str) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             continue
         if isinstance(event, dict):
-            events.append(event)
+            events.append(cast(dict[str, Any], event))
     return events
 
 
@@ -435,10 +443,8 @@ def _empty_temp_path() -> Path:
 
 
 def _unlink_quietly(path: Path) -> None:
-    try:
+    with contextlib.suppress(FileNotFoundError):
         path.unlink()
-    except FileNotFoundError:
-        pass
 
 
 def _latency_ms(started: float) -> int:

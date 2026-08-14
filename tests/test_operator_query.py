@@ -58,7 +58,8 @@ def _insert_task(
                 "2026-06-22T08:00:00+08:00",
             ),
         )
-    return int(cursor.lastrowid)
+    assert cursor.lastrowid is not None
+    return cursor.lastrowid
 
 
 def _insert_message(
@@ -120,7 +121,8 @@ def _insert_approval(
                 expires_at,
             ),
         )
-    return int(cursor.lastrowid)
+    assert cursor.lastrowid is not None
+    return cursor.lastrowid
 
 
 def _insert_feedback(

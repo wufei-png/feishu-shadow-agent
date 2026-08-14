@@ -52,7 +52,8 @@ def _insert_task(store: SQLiteStore, short_id: str, root_message_id: str) -> int
                 "p2p",
             ),
         )
-    return int(cursor.lastrowid)
+    assert cursor.lastrowid is not None
+    return cursor.lastrowid
 
 
 def _insert_message(store: SQLiteStore, message_id: str) -> None:
@@ -525,7 +526,9 @@ reply_policy:
     assert "risk_level" not in output
     assert "confirmation_required" not in output
     assert output["audit_count"] == 1
-    assert store.get_product_policy()["reply_policy"]["p2p_auto_reply"] is True
+    product_policy = store.get_product_policy()
+    assert product_policy is not None
+    assert product_policy["reply_policy"]["p2p_auto_reply"] is True
     audit = store.list_policy_audits(limit=1)[0]
     assert audit["actor"] == "local_cli"
     assert audit["reason"] == "enable p2p trial"
@@ -575,7 +578,9 @@ chats:
     assert "risk_level" not in output
     assert "confirmation_required" not in output
     assert output["audit_count"] == 1
-    assert store.get_chat_product_policy("oc_policy")["auto_reply"] is False
+    chat_policy = store.get_chat_product_policy("oc_policy")
+    assert chat_policy is not None
+    assert chat_policy["auto_reply"] is False
     audit = store.list_policy_audits(limit=1)[0]
     assert audit["actor"] == "local_cli"
     assert audit["reason"] == "pause chat"
@@ -672,7 +677,9 @@ chats:
     assert output["warnings"] == []
     assert "risk_level" not in output
     assert "confirmation_required" not in output
-    assert store.get_chat_product_policy("oc_policy")["bot_joined"] is True
+    chat_policy = store.get_chat_product_policy("oc_policy")
+    assert chat_policy is not None
+    assert chat_policy["bot_joined"] is True
 
 
 def test_replay_explains_current_state_without_real_db_mutation(
@@ -778,7 +785,8 @@ def test_maintenance_expire_approvals_expires_overdue_and_reports_count(
                 "2000-01-01T00:00:00+00:00",
             ),
         )
-        approval_id = int(cursor.lastrowid)
+        assert cursor.lastrowid is not None
+        approval_id = cursor.lastrowid
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_expire",
@@ -1162,6 +1170,7 @@ def test_dispatch_mark_sent_requires_readback_evidence(
     assert action.result["readback"]["text"] == "reply"
     assert attempts[-1].status == "readback_ok"
     assert attempts[-1].error_stage is None
+    assert attempts[-1].readback_result is not None
     assert attempts[-1].readback_result["ok"] is True
 
 

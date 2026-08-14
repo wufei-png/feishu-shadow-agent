@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from ..time_utils import parse_instant_or_none
 from ..types import ActionStatus, ApprovalStatus, TaskStatus
@@ -102,7 +102,7 @@ def _approval_available_commands(
         return []
     if overdue_seconds > 0:
         return ["maintenance expire-approvals"]
-    commands = []
+    commands: list[str] = []
     if payload.get("approvable") is not False:
         commands.append(f"approve {approval_id}")
     commands.append(f"reject {approval_id}")
@@ -193,9 +193,9 @@ def _agent_response_summary(response: dict[str, Any]) -> dict[str, Any]:
         elif isinstance(value, (bool, int, float)) or value is None:
             summary[key] = value
         elif isinstance(value, list):
-            summary[key] = f"{len(value)} item(s)"
+            summary[key] = f"{len(cast(list[object], value))} item(s)"
         elif isinstance(value, dict):
-            summary[key] = f"{len(value)} field(s)"
+            summary[key] = f"{len(cast(dict[object, object], value))} field(s)"
     return summary
 
 
@@ -243,7 +243,7 @@ def _attempt_dto(row: sqlite3.Row) -> dict[str, Any]:
 def _readback_summary(attempts: list[dict[str, Any]]) -> dict[str, Any]:
     latest = attempts[-1] if attempts else None
     readback = latest.get("readback_result") if latest else None
-    readback_data = readback if isinstance(readback, dict) else {}
+    readback_data = cast(dict[str, Any], readback) if isinstance(readback, dict) else {}
     return {
         "attempt_count": len(attempts),
         "latest_status": None if latest is None else latest["status"],
@@ -263,7 +263,7 @@ def _summary_recommended_actions(
     failed_needs_review_action_count: int,
     failed_action_count: int,
 ) -> list[str]:
-    recommendations = []
+    recommendations: list[str] = []
     if status == TaskStatus.WATCHING.value:
         recommendations.append(f"task close --task-id {task_id}")
     elif status in {
@@ -324,10 +324,11 @@ def _sqlite_like_contains(value: str) -> str:
 
 
 def _row_dict(row: sqlite3.Row) -> dict[str, Any]:
-    return {key: row[key] for key in row.keys()}
+    keys = row.keys()
+    return {key: row[key] for key in keys}
 
 
-def _json_row_dict(row: sqlite3.Row, *columns: str) -> dict[str, Any]:
+def json_row_dict(row: sqlite3.Row, *columns: str) -> dict[str, Any]:
     data = _row_dict(row)
     for column in columns:
         if column in data:
@@ -348,12 +349,12 @@ def _loads_json(value: Any) -> Any:
 
 def _loads_json_object(value: Any) -> dict[str, Any]:
     loaded = _loads_json(value)
-    return loaded if isinstance(loaded, dict) else {}
+    return cast(dict[str, Any], loaded) if isinstance(loaded, dict) else {}
 
 
 def _loads_json_list(value: Any) -> list[Any]:
     loaded = _loads_json(value)
-    return loaded if isinstance(loaded, list) else []
+    return cast(list[Any], loaded) if isinstance(loaded, list) else []
 
 
 def _parse_datetime_or_none(value: Any) -> datetime | None:
@@ -367,7 +368,29 @@ def _has_core_schema(conn: sqlite3.Connection) -> bool:
         FROM sqlite_master
         WHERE type = 'table'
           AND name IN ({})
-        """.format(",".join("?" for _ in _CORE_TABLES)),
+        """.format(  # noqa: S608
+            ",".join("?" for _ in _CORE_TABLES)
+        ),
         tuple(sorted(_CORE_TABLES)),
     ).fetchall()
-    return {row["name"] for row in rows} == _CORE_TABLES
+    table_names: set[str] = {str(row["name"]) for row in rows}
+    return frozenset(table_names) == _CORE_TABLES
+
+
+# Public read-only query helpers used by the operator DTO boundary.
+ReadStoreUnavailable = _ReadStoreUnavailable
+approval_dto = _approval_dto
+task_summary_dto = _task_summary_dto
+message_dto = _message_dto
+agent_audit_dto = _agent_audit_dto
+action_dto = _action_dto
+attempt_dto = _attempt_dto
+readback_summary = _readback_summary
+dispatch_recommended_actions = _dispatch_recommended_actions
+coerce_limit = _coerce_limit
+coerce_offset = _coerce_offset
+sqlite_like_contains = _sqlite_like_contains
+has_core_schema = _has_core_schema
+parse_datetime_or_none = _parse_datetime_or_none
+row_dict = _row_dict
+loads_json_object = _loads_json_object

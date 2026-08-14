@@ -58,3 +58,44 @@ class AgentBackend(Protocol):
     def owner_style_refresh(
         self, prompt: str, *, cwd: str | Path | None = None
     ) -> AgentRunResult: ...
+
+
+class TaskSessionBackend(Protocol):
+    """Backend surface needed by routing and task-session execution."""
+
+    provider: AgentBackendProvider | str
+
+    def task_router(
+        self, prompt: str, *, cwd: str | Path | None = None
+    ) -> AgentRunResult: ...
+
+    def task_session(
+        self,
+        prompt: str,
+        *,
+        session_id: str | None = None,
+        cwd: str | Path | None = None,
+    ) -> AgentRunResult: ...
+
+
+class ReplyPostprocessBackend(Protocol):
+    def reply_postprocess(
+        self, prompt: str, *, cwd: str | Path | None = None
+    ) -> AgentRunResult: ...
+
+
+class OwnerStyleBackend(Protocol):
+    def owner_style_refresh(
+        self, prompt: str, *, cwd: str | Path | None = None
+    ) -> AgentRunResult: ...
+
+
+class StructuredOutputBackend(Protocol):
+    def structured_output(
+        self,
+        prompt: str,
+        *,
+        output_model: type[BaseModel],
+        session_id: str | None = None,
+        cwd: str | Path | None = None,
+    ) -> AgentRunResult: ...

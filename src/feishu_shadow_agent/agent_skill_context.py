@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 
@@ -69,5 +69,6 @@ def _frontmatter_name(content: str) -> str | None:
         return None
     if not isinstance(metadata, dict):
         return None
-    name = metadata.get("name")
+    metadata_map = cast(dict[str, Any], metadata)
+    name = metadata_map.get("name")
     return name.strip() if isinstance(name, str) and name.strip() else None

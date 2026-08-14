@@ -5,16 +5,16 @@ import os
 import re
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Protocol, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from .config import AppConfig
-from .feishu.client import FeishuClient
 from .jsonl import JSONLLogger
 from .message_eligibility import MessageEligibilityPolicy
 from .paths import resolve_agent_working_dir
@@ -30,13 +30,64 @@ from .time_utils import (
     shift_instant,
 )
 from .types import (
+    LarkCliResult,
     MessagePage,
     NormalizedMessage,
     ResourceRef,
     ResourceStatus,
     RouteDecision,
+    RouteName,
+    SenderRole,
     utc_now_iso,
 )
+
+
+class IngestionFeishuClient(Protocol):
+    def auth_status(self, *, verify: bool = True) -> LarkCliResult: ...
+
+    def search_messages(
+        self,
+        *,
+        chat_type: str,
+        is_at_me: bool,
+        start: str | None,
+        end: str | None,
+        page_token: str | None = None,
+        query: str = "",
+        page_size: int = 50,
+    ) -> MessagePage: ...
+
+    def list_chat_messages(
+        self,
+        *,
+        chat_id: str,
+        start: str | None,
+        end: str | None,
+        page_token: str | None = None,
+        page_size: int = 50,
+        order: str = "asc",
+    ) -> MessagePage: ...
+
+    def list_p2p_messages(
+        self,
+        *,
+        user_id: str,
+        start: str | None,
+        end: str | None,
+        page_token: str | None = None,
+        page_size: int = 50,
+    ) -> MessagePage: ...
+
+    def list_thread_messages(
+        self,
+        *,
+        thread_id: str,
+        page_token: str | None = None,
+        page_size: int = 50,
+    ) -> MessagePage: ...
+
+    download_resource: Callable[..., LarkCliResult]
+
 
 PAGE_SIZE = 50
 FEISHU_MESSAGE_TIMEZONE = ZoneInfo("Asia/Shanghai")
@@ -96,10 +147,19 @@ class MessageNormalizer:
         if not message_id:
             raise ValueError("message is missing message_id")
         content = _content(raw)
-        sender = raw.get("sender") if isinstance(raw.get("sender"), dict) else {}
+        sender_value = raw.get("sender")
+        sender = (
+            cast(dict[str, Any], sender_value) if isinstance(sender_value, dict) else {}
+        )
         sender_id = _first_string(
             raw, "sender_id", "senderId", "open_id", "openId"
         ) or _first_string(sender, "sender_id", "senderId", "open_id", "openId", "id")
+        profile_value = sender.get("profile")
+        profile = (
+            cast(dict[str, Any], profile_value)
+            if isinstance(profile_value, dict)
+            else {}
+        )
         sender_name = (
             _first_string(
                 raw, "sender_name", "senderName", "user_name", "userName", "name"
@@ -108,9 +168,7 @@ class MessageNormalizer:
                 sender, "sender_name", "senderName", "user_name", "userName", "name"
             )
             or _first_string(
-                sender.get("profile")
-                if isinstance(sender.get("profile"), dict)
-                else {},
+                profile,
                 "name",
                 "display_name",
                 "displayName",
@@ -120,7 +178,8 @@ class MessageNormalizer:
         sender_type = _first_string(raw, "sender_type", "senderType") or _first_string(
             sender, "sender_type", "senderType", "type"
         )
-        chat = raw.get("chat") if isinstance(raw.get("chat"), dict) else {}
+        chat_value = raw.get("chat")
+        chat = cast(dict[str, Any], chat_value) if isinstance(chat_value, dict) else {}
         chat_id = _first_string(raw, "chat_id", "chatId") or _first_string(
             chat, "chat_id", "chatId", "id"
         )
@@ -132,7 +191,11 @@ class MessageNormalizer:
         )
         thread_id = _thread_id(raw)
         reply_to_value = raw.get("reply_to") or raw.get("replyTo")
-        reply_to = reply_to_value if isinstance(reply_to_value, dict) else {}
+        reply_to = (
+            cast(dict[str, Any], reply_to_value)
+            if isinstance(reply_to_value, dict)
+            else {}
+        )
         reply_to_message_id = _first_string(
             raw,
             "reply_to_message_id",
@@ -180,7 +243,7 @@ class MessageNormalizer:
 
     def _sender_role(
         self, *, sender_id: str | None, sender_type: str | None, raw: dict[str, Any]
-    ) -> str:
+    ) -> SenderRole:
         lowered_type = (sender_type or "").lower()
         if raw.get("sent_by_agent") is True or raw.get("agent_message") is True:
             return "agent_message"
@@ -196,7 +259,7 @@ class ResourceProcessor:
         self,
         *,
         store: SQLiteStore,
-        feishu_client: FeishuClient,
+        feishu_client: IngestionFeishuClient,
         config: AppConfig,
         logger: JSONLLogger,
         config_base_dir: str | Path | None = None,
@@ -353,7 +416,9 @@ class ResourceProcessor:
                     resource_type=resource.resource_type,
                     output=temporary_output,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
+                # Feishu resource clients can expose transport-specific
+                # exceptions; mark this resource failed and continue ingestion.
                 self.quota.delete_downloaded_file(temporary_path)
                 self.store.upsert_resource(
                     resource,
@@ -708,7 +773,7 @@ class IngestionService:
         self,
         *,
         store: SQLiteStore,
-        feishu_client: FeishuClient,
+        feishu_client: IngestionFeishuClient,
         config: AppConfig,
         logger: JSONLLogger,
         router: MessageRouter | None = None,
@@ -1082,7 +1147,9 @@ class IngestionService:
         if enforce_eligibility:
             eligibility = self.eligibility.decide(message, sources=[source])
             if not eligibility.eligible:
-                decision = RouteDecision("ignore", reason=eligibility.reason_code)
+                decision = RouteDecision(
+                    RouteName.IGNORE, reason=eligibility.reason_code
+                )
                 self.store.record_routing_audit(
                     message_id=message.message_id, decision=decision
                 )
@@ -1290,13 +1357,17 @@ class IngestionService:
 def _content(raw: dict[str, Any]) -> dict[str, Any]:
     value = raw.get("content")
     if isinstance(value, dict):
-        return value
+        return cast(dict[str, Any], value)
     if isinstance(value, str):
         try:
             parsed = json.loads(value)
         except json.JSONDecodeError:
             return {"text": value}
-        return parsed if isinstance(parsed, dict) else {"text": value}
+        return (
+            cast(dict[str, Any], parsed)
+            if isinstance(parsed, dict)
+            else {"text": value}
+        )
     return {}
 
 
@@ -1321,12 +1392,14 @@ def _mentions(raw: dict[str, Any], content: dict[str, Any]) -> list[str]:
         content.get("ats"),
     ):
         if isinstance(source, list):
-            for item in source:
+            for raw_item in cast(list[object], source):
+                item = raw_item
                 if isinstance(item, str):
                     _append_unique(mentions, item)
                 elif isinstance(item, dict):
+                    item_map = cast(dict[str, Any], item)
                     value = _first_string(
-                        item, "open_id", "openId", "user_id", "userId", "id"
+                        item_map, "open_id", "openId", "user_id", "userId", "id"
                     )
                     if value:
                         _append_unique(mentions, value)
@@ -1366,15 +1439,16 @@ def _resources(
     resources: dict[tuple[str, str], ResourceRef] = {}
     for node in _walk([raw, content]):
         if isinstance(node, dict):
-            image_key = _first_string(node, "image_key", "imageKey")
+            node_map = cast(dict[str, Any], node)
+            image_key = _first_string(node_map, "image_key", "imageKey")
             if image_key:
                 resources[("image", image_key)] = ResourceRef(
-                    message_id, image_key, "image", node
+                    message_id, image_key, "image", node_map
                 )
-            file_key = _first_string(node, "file_key", "fileKey")
+            file_key = _first_string(node_map, "file_key", "fileKey")
             if file_key:
                 resources[("file", file_key)] = ResourceRef(
-                    message_id, file_key, "file", node
+                    message_id, file_key, "file", node_map
                 )
         elif isinstance(node, str):
             for image_key in IMAGE_KEY_PATTERN.findall(node):
@@ -1403,10 +1477,11 @@ def _resources(
 def _walk(value: Any) -> list[Any]:
     items = [value]
     if isinstance(value, dict):
-        for child in value.values():
+        mapping = cast(dict[str, Any], value)
+        for child in mapping.values():
             items.extend(_walk(child))
     elif isinstance(value, list):
-        for child in value:
+        for child in cast(list[object], value):
             items.extend(_walk(child))
     return items
 
@@ -1414,20 +1489,22 @@ def _walk(value: Any) -> list[Any]:
 def _thread_id(raw: dict[str, Any]) -> str | None:
     value = raw.get("thread_id") or raw.get("threadId") or raw.get("thread")
     if isinstance(value, dict):
-        return _first_string(value, "id", "thread_id", "threadId")
+        return _first_string(cast(dict[str, Any], value), "id", "thread_id", "threadId")
     return str(value) if value else None
 
 
 def _bot_open_id_from_auth(auth_json: Any) -> str | None:
     if not isinstance(auth_json, dict):
         return None
-    identities = auth_json.get("identities")
+    auth_map = cast(dict[str, Any], auth_json)
+    identities = auth_map.get("identities")
     if not isinstance(identities, dict):
         return None
-    bot = identities.get("bot")
+    identities_map = cast(dict[str, Any], identities)
+    bot = identities_map.get("bot")
     if not isinstance(bot, dict):
         return None
-    return _first_string(bot, "openId", "open_id", "openID", "id")
+    return _first_string(cast(dict[str, Any], bot), "openId", "open_id", "openID", "id")
 
 
 def _first_string(source: dict[str, Any], *keys: str) -> str | None:
@@ -1542,12 +1619,10 @@ def _publish_download(temporary_path: Path, final_path: Path) -> None:
     except OSError:
         return
     try:
-        try:
-            os.fsync(directory_fd)
-        except OSError:
+        with suppress(OSError):
             # Some filesystems do not support directory fsync; the atomic
             # replace has still completed and the validated file is usable.
-            pass
+            os.fsync(directory_fd)
     finally:
         os.close(directory_fd)
 
@@ -1558,9 +1633,12 @@ def _normalized_download_result(
     temporary_output: str,
     final_output: str,
 ) -> Any:
-    if not isinstance(result, dict) or result.get("output") != temporary_output:
+    if not isinstance(result, dict):
         return result
-    return result | {"output": final_output}
+    result_map = cast(dict[str, Any], result)
+    if result_map.get("output") != temporary_output:
+        return result_map
+    return result_map | {"output": final_output}
 
 
 def _bot_invisible_error(result: Any) -> bool:

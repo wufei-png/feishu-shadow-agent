@@ -3,13 +3,18 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from feishu_shadow_agent.agent_backend import AgentRunResult
 from feishu_shadow_agent.codex import (
     TASK_SESSION_DEVELOPER_INSTRUCTIONS,
     CodexCliClient,
 )
-from feishu_shadow_agent.config import CodexConfig, ReplyPostprocessConfig
+from feishu_shadow_agent.config import (
+    CodexConfig,
+    ReplyPostprocessConfig,
+    ReplyPostprocessOwnerStyleConfig,
+)
 from feishu_shadow_agent.prompt import TaskRouterOutput
 
 
@@ -109,7 +114,7 @@ def test_codex_cli_builds_resume_command_for_followup_session() -> None:
 
 
 def test_codex_cli_parses_last_message_json_and_thread_id() -> None:
-    seen: dict[str, object] = {}
+    seen: dict[str, Any] = {}
 
     def runner(
         argv: list[str], timeout: int, stdin: str | None, cwd: Path | None
@@ -136,6 +141,7 @@ def test_codex_cli_parses_last_message_json_and_thread_id() -> None:
     assert seen["stdin"] == "prompt"
     assert set(seen["required"]) == {"route", "target_task_id", "reason"}
     assert result.session_id == "thread_1"
+    assert isinstance(result.json_data, dict)
     assert result.json_data["route"] == "ignore"
     assert result.backend_provider == "codex"
 
@@ -160,6 +166,7 @@ def test_codex_cli_falls_back_to_agent_message_event() -> None:
     result = client.task_session("prompt", session_id="thread_1")
 
     assert result.ok
+    assert isinstance(result.json_data, dict)
     assert result.json_data["answerability"] == "no_reply"
 
 
@@ -371,7 +378,9 @@ def test_reply_postprocess_uses_read_only_policy_and_postprocess_model() -> None
         config=CodexConfig(path="/bin/codex", model="main-model"),
         tool_permissions="full_access",
         reply_postprocess=ReplyPostprocessConfig(
-            max_turns=5, model="style-model", owner_style={"enabled": True}
+            max_turns=5,
+            model="style-model",
+            owner_style=ReplyPostprocessOwnerStyleConfig(enabled=True),
         ),
         runner=runner,
     )

@@ -4,7 +4,7 @@ import json
 import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ..types import LarkCliResult, MessagePage
 
@@ -555,7 +555,8 @@ def _run_subprocess(
     argv: list[str], timeout_seconds: int, *, cwd: Path | None = None
 ) -> LarkCliResult:
     try:
-        completed = subprocess.run(
+        # lark-cli receives a structured argv list and shell=False.
+        completed = subprocess.run(  # noqa: S603
             argv,
             cwd=cwd,
             capture_output=True,
@@ -567,8 +568,8 @@ def _run_subprocess(
         return LarkCliResult(
             argv=argv,
             exit_code=None,
-            stdout=exc.stdout or "",
-            stderr=exc.stderr or "",
+            stdout=_decode_command_output(exc.stdout),
+            stderr=_decode_command_output(exc.stderr),
             error=f"command timed out after {timeout_seconds}s",
             timed_out=True,
         )
@@ -630,23 +631,32 @@ def _message_page_from_result(result: LarkCliResult) -> MessagePage:
 
 def _extract_message_page(data: Any) -> MessagePage:
     source = data
-    if isinstance(source, dict) and isinstance(source.get("data"), dict):
-        source = source["data"]
+    if isinstance(source, dict):
+        source_map = cast(dict[str, Any], source)
+        nested = source_map.get("data")
+        if isinstance(nested, dict):
+            source = cast(dict[str, Any], nested)
     if isinstance(source, list):
         return MessagePage(
-            items=[item for item in source if isinstance(item, dict)], raw=data
+            items=[
+                cast(dict[str, Any], item)
+                for item in cast(list[object], source)
+                if isinstance(item, dict)
+            ],
+            raw=data,
         )
     if not isinstance(source, dict):
         return MessagePage(items=[], raw=data)
 
-    items = _extract_items(source)
+    source_map = cast(dict[str, Any], source)
+    items = _extract_items(source_map)
     next_page_token = _string_or_none(
-        source.get("page_token")
-        or source.get("next_page_token")
-        or source.get("next_page")
-        or source.get("nextPageToken")
+        source_map.get("page_token")
+        or source_map.get("next_page_token")
+        or source_map.get("next_page")
+        or source_map.get("nextPageToken")
     )
-    has_more = _truthy(source.get("has_more")) or bool(next_page_token)
+    has_more = _truthy(source_map.get("has_more")) or bool(next_page_token)
     return MessagePage(
         items=items, next_page_token=next_page_token, has_more=has_more, raw=data
     )
@@ -656,10 +666,27 @@ def _extract_items(source: dict[str, Any]) -> list[dict[str, Any]]:
     for key in ("items", "messages", "message_list"):
         value = source.get(key)
         if isinstance(value, list):
-            return [item for item in value if isinstance(item, dict)]
-    if isinstance(source.get("data"), list):
-        return [item for item in source["data"] if isinstance(item, dict)]
+            return [
+                cast(dict[str, Any], item)
+                for item in cast(list[object], value)
+                if isinstance(item, dict)
+            ]
+    data = source.get("data")
+    if isinstance(data, list):
+        return [
+            cast(dict[str, Any], item)
+            for item in cast(list[object], data)
+            if isinstance(item, dict)
+        ]
     return []
+
+
+def _decode_command_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value
 
 
 def _string_or_none(value: Any) -> str | None:

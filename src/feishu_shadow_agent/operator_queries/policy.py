@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from ..config import AppConfig, ChatPolicyConfig
 from ..policy import (
@@ -13,11 +13,11 @@ from ..policy import (
 from ..settings_catalog import CONFIG_VALUE_PATHS
 from ..store.sqlite_store import PRODUCT_POLICY_KEY
 from .common import (
-    _coerce_limit,
-    _coerce_offset,
-    _loads_json_object,
-    _ReadStoreUnavailable,
-    _row_dict,
+    ReadStoreUnavailable,
+    coerce_limit,
+    coerce_offset,
+    loads_json_object,
+    row_dict,
 )
 
 
@@ -45,7 +45,7 @@ class PolicyQuery:
                     "SELECT COUNT(*) AS count FROM chat_policies"
                 ).fetchone()
                 diff = self._policy_import_diff(conn)
-        except _ReadStoreUnavailable:
+        except ReadStoreUnavailable:
             return {
                 "initialized": False,
                 "global_policy_updated_at": None,
@@ -104,7 +104,7 @@ class PolicyQuery:
         policy_key: str | None = None,
         since: str | None = None,
     ) -> list[dict[str, Any]]:
-        where = []
+        where: list[str] = []
         params: list[Any] = []
         if scope is not None:
             where.append("scope = ?")
@@ -116,25 +116,42 @@ class PolicyQuery:
             where.append("created_at >= ?")
             params.append(since)
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
-        params.extend([_coerce_limit(limit), _coerce_offset(offset)])
+        params.extend([coerce_limit(limit), coerce_offset(offset)])
         try:
             with self._connect() as conn:
                 rows = conn.execute(
+                    # `where_sql` is assembled only from fixed field/operator
+                    # fragments and all policy values are bound below.
                     f"""
                     SELECT id, scope, policy_key, actor, reason, created_at, old_json, new_json
                     FROM policy_audits
                     {where_sql}
                     ORDER BY id DESC
                     LIMIT ? OFFSET ?
-                    """,
+                    """,  # noqa: S608
                     params,
                 ).fetchall()
-        except _ReadStoreUnavailable:
+        except ReadStoreUnavailable:
             return []
         return [_policy_audit_dto(row) for row in rows]
 
     def validate_policy_store(self) -> None:
         self.policy_resolver.resolve_chat_policy(None, None)
+
+    def get_product_policy(self) -> dict[str, Any] | None:
+        return self._get_product_policy()
+
+    def get_chat_product_policy(self, chat_id: str) -> dict[str, Any] | None:
+        return self._get_chat_product_policy(chat_id)
+
+    def list_chat_product_policies(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        return self._list_chat_product_policies(limit=limit)
+
+    def policy_import_diff(self, conn: sqlite3.Connection) -> dict[str, Any]:
+        return self._policy_import_diff(conn)
+
+    def missing_store_policy_import_diff(self) -> dict[str, Any]:
+        return self._missing_store_policy_import_diff()
 
     def _get_product_policy(self) -> dict[str, Any] | None:
         try:
@@ -143,9 +160,9 @@ class PolicyQuery:
                     "SELECT policy_json FROM product_policies WHERE key = ?",
                     (PRODUCT_POLICY_KEY,),
                 ).fetchone()
-        except _ReadStoreUnavailable:
+        except ReadStoreUnavailable:
             return None
-        return None if row is None else _loads_json_object(row["policy_json"])
+        return None if row is None else loads_json_object(row["policy_json"])
 
     def _get_chat_product_policy(self, chat_id: str) -> dict[str, Any] | None:
         try:
@@ -159,7 +176,7 @@ class PolicyQuery:
                     """,
                     (chat_id,),
                 ).fetchone()
-        except _ReadStoreUnavailable:
+        except ReadStoreUnavailable:
             return None
         return None if row is None else _chat_policy_from_row(row)
 
@@ -174,9 +191,9 @@ class PolicyQuery:
                     ORDER BY chat_id
                     LIMIT ?
                     """,
-                    (_coerce_limit(limit),),
+                    (coerce_limit(limit),),
                 ).fetchall()
-        except _ReadStoreUnavailable:
+        except ReadStoreUnavailable:
             return []
         return [_chat_policy_runtime_dto(row) for row in rows]
 
@@ -195,7 +212,7 @@ class PolicyQuery:
         changed_global = False
         if global_row is not None:
             changed_global = (
-                _loads_json_object(global_row["policy_json"]) != source_global
+                loads_json_object(global_row["policy_json"]) != source_global
             )
 
         missing_chats: list[str] = []
@@ -266,14 +283,14 @@ class _ReadOnlyProductPolicyRepository:
         self.query = query
 
     def get_product_policy(self) -> dict[str, Any] | None:
-        return self.query._get_product_policy()
+        return self.query.get_product_policy()
 
     def get_chat_product_policy(self, chat_id: str) -> dict[str, Any] | None:
-        return self.query._get_chat_product_policy(chat_id)
+        return self.query.get_chat_product_policy(chat_id)
 
 
 def _policy_audit_dto(row: sqlite3.Row) -> dict[str, Any]:
-    data = _row_dict(row)
+    data = row_dict(row)
     return {
         "id": data["id"],
         "scope": data["scope"],
@@ -281,8 +298,8 @@ def _policy_audit_dto(row: sqlite3.Row) -> dict[str, Any]:
         "actor": data["actor"],
         "reason": data["reason"],
         "created_at": data["created_at"],
-        "old_summary": _policy_summary(_loads_json_object(data["old_json"])),
-        "new_summary": _policy_summary(_loads_json_object(data["new_json"])),
+        "old_summary": _policy_summary(loads_json_object(data["old_json"])),
+        "new_summary": _policy_summary(loads_json_object(data["new_json"])),
     }
 
 
@@ -396,7 +413,8 @@ def _config_path_value(config: AppConfig, path: str) -> Any:
     current: Any = config
     for part in path.split("."):
         if isinstance(current, dict):
-            current = current.get(part)
+            current_map = cast(dict[str, Any], current)
+            current = current_map.get(part)
         else:
             current = getattr(current, part)
     return current
@@ -406,4 +424,4 @@ def _nested_dict(value: dict[str, Any] | None, key: str) -> dict[str, Any]:
     if value is None:
         return {}
     nested = value.get(key)
-    return nested if isinstance(nested, dict) else {}
+    return cast(dict[str, Any], nested) if isinstance(nested, dict) else {}

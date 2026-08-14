@@ -268,7 +268,7 @@ def submitted_matches_suggested_reply(submitted: str | None, suggested: str) -> 
     """True when the form value is the stored suggestion or its truncated default."""
 
     submitted_text = submitted.strip() if isinstance(submitted, str) else ""
-    suggested_text = suggested.strip() if isinstance(suggested, str) else ""
+    suggested_text = suggested.strip()
     if not submitted_text or not suggested_text:
         return False
     return submitted_text == suggested_text or submitted_text == card_form_reply_value(

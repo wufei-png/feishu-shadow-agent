@@ -52,7 +52,12 @@ VALID_FEEDBACK_REASONS = {
 class ChannelClient(Protocol):
     def on(self, name: str, handler: Callable[..., Any]) -> Callable[[], Any]: ...
 
-    async def connect_until_ready(self, *, timeout: float | None = 30.0) -> None: ...
+    # SDK compatibility contract exposes a timeout parameter.
+    async def connect_until_ready(
+        self,
+        *,
+        timeout: float | None = 30.0,  # noqa: ASYNC109
+    ) -> None: ...
 
     async def disconnect(self) -> None: ...
 
@@ -219,7 +224,9 @@ class CardActionProcessor:
                 schedule(coroutine)
                 return
             asyncio.get_running_loop().create_task(coroutine)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
+            # Scheduling crosses the optional SDK/event-loop boundary; preserve
+            # the callback failure as an observable card-update warning.
             coroutine.close()
             self._log_card_update_failure(request.message_id, request.approval_id, exc)
 
@@ -229,12 +236,19 @@ class CardActionProcessor:
         approval_id: str,
         card: dict[str, Any],
     ) -> None:
+        channel = self._channel
+        if channel is None:
+            self._log_card_update_failure(
+                message_id, approval_id, RuntimeError("card channel is not bound")
+            )
+            return
         try:
-            assert self._channel is not None
-            response = await self._channel.update_card(message_id, card)
+            response = await channel.update_card(message_id, card)
             if getattr(response, "success", True) is False:
                 raise RuntimeError(str(getattr(response, "error", response)))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
+            # The optional SDK can expose transport-specific exception types;
+            # this callback must never take down the card connection thread.
             self._log_card_update_failure(message_id, approval_id, exc)
 
     def _log_card_update_failure(
@@ -300,7 +314,9 @@ class FeishuCardActionConnection:
     def _thread_main(self) -> None:
         try:
             asyncio.run(self._run())
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
+            # The connection runs on a daemon thread; record any SDK/runtime
+            # failure and keep the process alive for operator diagnostics.
             self._set_status("unhealthy", str(exc))
             self.logger.emit(
                 "error",
@@ -326,8 +342,7 @@ class FeishuCardActionConnection:
             self._set_status("healthy")
             self._startup_event.set()
             self.logger.emit("info", "card_action_connection_ready")
-            while not self._stop_event.is_set():
-                await asyncio.sleep(0.1)
+            await asyncio.to_thread(self._stop_event.wait)
         finally:
             await channel.disconnect()
 
@@ -462,7 +477,8 @@ def _pending_suggested_reply(store: SQLiteStore, approval_id: str) -> str:
     payload = json.loads(row["payload_json"] or "{}")
     if not isinstance(payload, dict):
         return ""
-    value = payload.get("text") or payload.get("composed_text") or ""
+    payload_map = cast(dict[str, Any], payload)
+    value = payload_map.get("text") or payload_map.get("composed_text") or ""
     return value.strip() if isinstance(value, str) else ""
 
 

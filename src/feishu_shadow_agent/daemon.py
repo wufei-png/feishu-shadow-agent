@@ -5,14 +5,14 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .card_actions import FeishuCardActionConnection
 from .config import AppConfig
 from .dispatcher import Dispatcher
 from .feishu.client import FeishuClient
 from .health import HealthSuite, has_critical_failure, summarize_results
-from .ingestion import IngestionService, StageResult
+from .ingestion import IngestionFeishuClient, IngestionService, StageResult
 from .jsonl import JSONLLogger
 from .processing import TaskProcessingService
 from .retention import (
@@ -34,7 +34,7 @@ class Daemon:
         tick_interval_seconds: int,
         dry_run: bool,
         app_config: AppConfig | None = None,
-        feishu_client: FeishuClient | None = None,
+        feishu_client: IngestionFeishuClient | None = None,
         task_processor: TaskProcessingService | None = None,
         send_owner_notifications: bool = False,
         run_metadata: dict[str, Any] | None = None,
@@ -154,7 +154,9 @@ class Daemon:
             for stage in stages:
                 try:
                     result = stage(run_id=run_id)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
+                    # Each daemon stage is an isolation boundary: record the
+                    # failure and continue health/retention processing.
                     result = StageResult(_stage_name(stage), ok=False, error=str(exc))
                     if result.name == "approval_inbox":
                         self.store.record_health_results(
@@ -222,7 +224,7 @@ class Daemon:
                 )
             dispatcher = Dispatcher(
                 store=self.store,
-                feishu_client=self.feishu_client,
+                feishu_client=cast(FeishuClient, self.feishu_client),
                 config=self.app_config,
                 logger=self.logger,
                 interactive_cards_available=(
@@ -464,7 +466,9 @@ class Daemon:
     def _runtime_product_policy_ok_for_tick(self, *, run_id: str) -> bool:
         try:
             probe = self.store.product_policy_initialization_probe()
-        except Exception as exc:  # pragma: no cover - platform-specific detail
+        except Exception as exc:  # noqa: BLE001  # pragma: no cover - platform-specific detail
+            # Store implementations can fail with platform-specific errors;
+            # convert them into a health result for the current tick.
             result = HealthCheckResult(
                 "product_policy_initialized",
                 "critical",
@@ -519,7 +523,9 @@ class Daemon:
                 logger=self.logger,
             ).prune(run_id=run_id)
             record_daemon_retention_checkpoint(self.store, summary=summary)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
+            # Retention is an independent daemon stage; surface failures while
+            # preserving the daemon loop and its subsequent health checkpoint.
             self.logger.emit(
                 "error",
                 "daemon_stage_failed",

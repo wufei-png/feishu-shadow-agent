@@ -202,10 +202,12 @@ def test_direct_policy_updates_persist_actor_reason_and_audit(tmp_path: Path) ->
 
     assert global_result["changed"] is True
     assert chat_result["changed"] is True
-    assert (
-        store.get_product_policy()["reply_policy"]["unknown_group_auto_reply"] is True
-    )
-    assert store.get_chat_product_policy("oc_direct")["auto_reply"] is False
+    product_policy = store.get_product_policy()
+    assert product_policy is not None
+    assert product_policy["reply_policy"]["unknown_group_auto_reply"] is True
+    chat_policy = store.get_chat_product_policy("oc_direct")
+    assert chat_policy is not None
+    assert chat_policy["auto_reply"] is False
     audits = store.list_policy_audits(limit=2)
     assert [audit["actor"] for audit in audits] == ["test_operator", "test_operator"]
     assert [audit["reason"] for audit in audits] == [

@@ -8,11 +8,11 @@ from dataclasses import dataclass
 from datetime import timedelta
 from html import escape
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
-from .agent_backend import AgentBackend
+from .agent_backend import ReplyPostprocessBackend, TaskSessionBackend
 from .agent_invocation import (
     AgentAttemptOutcome,
     AgentInvoker,
@@ -25,7 +25,6 @@ from .jsonl import JSONLLogger
 from .operator_commands import OperatorCommandService
 from .policy import PolicyResolver
 from .prompt import (
-    BaseTaskSessionOutput,
     InitialTaskSessionOutput,
     TaskRouterOutput,
     build_router_prompt,
@@ -48,7 +47,9 @@ from .types import (
     MessageProcessingStatus,
     NormalizedMessage,
     RouteDecision,
+    RouteName,
     TaskRecord,
+    utc_now_iso,
 )
 
 AGENT_AT_SPAN_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE | re.DOTALL)
@@ -70,6 +71,14 @@ class ProcessingResult:
 class ComposedReply:
     text: str
     had_forbidden_mentions: bool
+
+
+class ReplyGateOutput(Protocol):
+    @property
+    def answerability(self) -> str: ...
+
+    @property
+    def proposed_reply(self) -> str: ...
 
 
 class SendComposer:
@@ -118,7 +127,7 @@ class ApprovalService:
     ):
         self.store = store
         self.config = config
-        self.execution_mode = execution_mode
+        self.execution_mode: ExecutionMode = execution_mode
         self.operator_commands = OperatorCommandService(store)
 
     def request_send_reply(
@@ -252,7 +261,7 @@ class ApprovalService:
             actor="owner",
             execution_mode=self.execution_mode,
             keep_watching_until=_plus_minutes(
-                message.sent_at, self.config.lifecycle.watch_minutes
+                message.sent_at or utc_now_iso(), self.config.lifecycle.watch_minutes
             ),
         )
         return None if result is None else result.as_dict()
@@ -264,7 +273,7 @@ class TaskProcessingService:
         *,
         store: SQLiteStore,
         config: AppConfig,
-        agent_backend: AgentBackend,
+        agent_backend: TaskSessionBackend,
         logger: JSONLLogger,
         agent_max_attempts: int | None = None,
         agent_retry_delays_seconds: tuple[float, ...] = (1.0, 3.0),
@@ -321,7 +330,7 @@ class TaskProcessingService:
         self.reply_postprocessor = ReplyPostprocessor(
             config=config,
             base_dir=self.config_base_dir,
-            agent_backend=agent_backend,
+            agent_backend=cast(ReplyPostprocessBackend, agent_backend),
             agent_invoker=self.agent_invoker,
         )
 
@@ -596,6 +605,7 @@ class TaskProcessingService:
             message_id=message.message_id,
         )
         result = outcome.result
+        router_response = _json_mapping(None if result is None else result.json_data)
         self.store.record_agent_audit(
             backend_provider=self.agent_backend.provider,
             request_type="router",
@@ -603,16 +613,14 @@ class TaskProcessingService:
             agent_session_id=None if result is None else result.session_id,
             input_message_ids=[message.message_id],
             input_resource_ids=[resource.file_key for resource in message.resources],
-            response=result.json_data
-            if result is not None and isinstance(result.json_data, dict)
-            else None,
+            response=router_response,
             error=outcome.last_error if result is None else result.error,
             latency_ms=None if result is None else result.latency_ms,
             prompt={"text": prompt} if self.config.debug.save_full_agent_io else None,
             tool_permissions_profile=self.config.tool_permissions,
         )
         candidates_count = len(active_candidates) + len(historical)
-        if result is None or not result.ok or not isinstance(result.json_data, dict):
+        if result is None or not result.ok or router_response is None:
             last_error = outcome.last_error or (
                 None if result is None else agent_result_error(result)
             )
@@ -653,7 +661,7 @@ class TaskProcessingService:
                 reason="task_router_failed",
             )
         try:
-            output = TaskRouterOutput.model_validate(result.json_data)
+            output = TaskRouterOutput.model_validate(router_response)
         except ValidationError as exc:
             last_error = str(exc)
             self.logger.error(
@@ -705,7 +713,7 @@ class TaskProcessingService:
             self.store.record_routing_audit(
                 message_id=message.message_id,
                 decision=RouteDecision(
-                    "ambiguous",
+                    RouteName.AMBIGUOUS,
                     reason=output.reason or "task_router_ambiguous",
                     candidates_count=candidates_count,
                     router_called=True,
@@ -759,7 +767,7 @@ class TaskProcessingService:
             self.store.record_routing_audit(
                 message_id=message.message_id,
                 decision=RouteDecision(
-                    "ignore",
+                    RouteName.IGNORE,
                     reason=output.reason or "task_router_ignore",
                     candidates_count=len(active_candidates) + len(historical),
                     router_called=True,
@@ -875,7 +883,7 @@ class TaskProcessingService:
                 target.id, message, watch_until=watch_until
             )
             decision = RouteDecision(
-                output.route,
+                RouteName(output.route),
                 target_task_id=target.id,
                 target_task_short_id=target.short_id,
                 reason=output.reason or "task_router",
@@ -1085,6 +1093,7 @@ class TaskProcessingService:
         )
         outcome = session_run.outcome
         result = outcome.result
+        session_response = _json_mapping(None if result is None else result.json_data)
         self.store.record_agent_audit(
             backend_provider=self.agent_backend.provider,
             request_type="task_session",
@@ -1094,9 +1103,7 @@ class TaskProcessingService:
             else result.session_id or session_plan.session_id,
             input_message_ids=session_plan.prompt_message_ids,
             input_resource_ids=[row["file_key"] for row in resources],
-            response=result.json_data
-            if result is not None and isinstance(result.json_data, dict)
-            else None,
+            response=session_response,
             error=outcome.last_error if result is None else result.error,
             latency_ms=None if result is None else result.latency_ms,
             prompt={"text": session_run.prompt}
@@ -1104,7 +1111,7 @@ class TaskProcessingService:
             else None,
             tool_permissions_profile=self.config.tool_permissions,
         )
-        if result is None or not result.ok or not isinstance(result.json_data, dict):
+        if result is None or not result.ok or session_response is None:
             last_error = outcome.last_error or (
                 None if result is None else agent_result_error(result)
             )
@@ -1352,9 +1359,9 @@ class TaskProcessingService:
                 else audit_result.session_id,
                 input_message_ids=postprocess.audit["input_message_ids"],
                 input_resource_ids=[],
-                response=audit_result.json_data
-                if audit_result is not None and isinstance(audit_result.json_data, dict)
-                else None,
+                response=_json_mapping(
+                    None if audit_result is None else audit_result.json_data
+                ),
                 error=_postprocess_audit_error(
                     postprocess=postprocess,
                     backend_error=audit_outcome.last_error
@@ -1569,7 +1576,7 @@ class TaskProcessingService:
         *,
         task: TaskRecord,
         message: NormalizedMessage,
-        output: BaseTaskSessionOutput,
+        output: ReplyGateOutput,
         composed: ComposedReply,
         proposed_reply: str | None = None,
     ) -> dict[str, Any]:
@@ -1659,7 +1666,7 @@ class TaskProcessingService:
         self.store.record_routing_audit(
             message_id=message.message_id,
             decision=RouteDecision(
-                "ambiguous",
+                RouteName.AMBIGUOUS,
                 reason=reason,
                 candidates_count=candidates_count,
                 router_called=True,
@@ -1751,10 +1758,17 @@ def _message_app_link(message: Any | None) -> str | None:
         raw = json.loads(raw_json)
     except (TypeError, ValueError):
         return None
-    value = raw.get("message_app_link") if isinstance(raw, dict) else None
+    raw_map = cast(dict[str, Any], raw) if isinstance(raw, dict) else None
+    value = raw_map.get("message_app_link") if raw_map is not None else None
     if isinstance(value, str) and value.startswith("https://applink.feishu.cn/"):
         return value
     return None
+
+
+def _json_mapping(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return cast(dict[str, Any], value)
 
 
 def _row_value(row: Any | None, key: str) -> Any | None:

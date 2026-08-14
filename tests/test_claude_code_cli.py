@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from feishu_shadow_agent.agent_backend import AgentRunResult
 from feishu_shadow_agent.claude_code import ClaudeCodeCliClient
-from feishu_shadow_agent.config import ClaudeCodeConfig, ReplyPostprocessConfig
+from feishu_shadow_agent.config import (
+    ClaudeCodeConfig,
+    ReplyPostprocessConfig,
+    ReplyPostprocessOwnerStyleConfig,
+)
 
 
 def _result_envelope(
@@ -93,7 +98,7 @@ def test_claude_code_builds_resume_command_for_followup_session() -> None:
 
 
 def test_claude_code_parses_structured_output_and_session_id() -> None:
-    seen: dict[str, object] = {}
+    seen: dict[str, Any] = {}
 
     def runner(
         argv: list[str], timeout: int, stdin: str | None, cwd: Path | None
@@ -122,6 +127,7 @@ def test_claude_code_parses_structured_output_and_session_id() -> None:
     assert seen["stdin"] == "prompt"
     assert set(seen["required"]) == {"route", "target_task_id", "reason"}
     assert result.session_id == "session_1"
+    assert isinstance(result.json_data, dict)
     assert result.json_data["route"] == "ignore"
     assert result.backend_provider == "claude_code"
 
@@ -145,6 +151,7 @@ def test_claude_code_falls_back_to_result_json_string() -> None:
     )
 
     assert result.ok
+    assert isinstance(result.json_data, dict)
     assert result.json_data["answerability"] == "no_reply"
 
 
@@ -184,7 +191,9 @@ def test_reply_postprocess_uses_read_only_policy_and_postprocess_model() -> None
         config=ClaudeCodeConfig(path="/bin/claude", model="main-model"),
         tool_permissions="full_access",
         reply_postprocess=ReplyPostprocessConfig(
-            max_turns=5, model="style-model", owner_style={"enabled": True}
+            max_turns=5,
+            model="style-model",
+            owner_style=ReplyPostprocessOwnerStyleConfig(enabled=True),
         ),
         runner=runner,
     )

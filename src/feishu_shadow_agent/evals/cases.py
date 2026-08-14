@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from itertools import pairwise
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar, cast
 
 from pydantic import ValidationError
 
@@ -24,6 +25,7 @@ from .schemas import (
     ResourceFixture,
     ReviewEnvelope,
     RouterScenario,
+    Scenario,
     TaskSessionScenario,
     draft_labels_model,
     golden_labels_model,
@@ -88,9 +90,7 @@ def load_eval_case(
                 golden_labels_model(case_type), read_yaml(labels_path), labels_path
             )
             provenance = _validate(
-                EvalProvenance,
-                read_yaml(provenance_path),
-                provenance_path,
+                EvalProvenance, read_yaml(provenance_path), provenance_path
             )
             if provenance.source.kind != "capture":
                 raise EvalError("model golden provenance source must be capture")
@@ -106,6 +106,7 @@ def load_eval_case(
     for row in rows:
         if not isinstance(row, dict):
             raise EvalError(f"{messages_path} rows must be JSON objects")
+        row = cast(dict[str, Any], row)
         message_id = message_id_from_raw(row)
         if not message_id:
             raise EvalError(f"{messages_path} contains a message without message_id")
@@ -127,6 +128,7 @@ def load_eval_case(
     )
     _validate_scenario_time_order(scenario, raw_messages)
     _validate_resources(directory, scenario, raw_messages)
+    scenario = cast(Scenario, scenario)
     return LoadedEvalCase(
         directory=directory,
         case_type=case_type,
@@ -182,7 +184,10 @@ def message_sent_at(raw: dict[str, Any]) -> str:
         value = raw.get(key)
         if isinstance(value, str) and value:
             normalized = normalize_message_sent_at(value)
-            assert normalized is not None
+            if normalized is None:
+                raise EvalError(
+                    f"message {message_id_from_raw(raw)} has invalid sent_at"
+                )
             _parse_aware_datetime(normalized)
             return normalized
     raise EvalError(f"message {message_id_from_raw(raw)} is missing sent_at")
@@ -191,7 +196,9 @@ def message_sent_at(raw: dict[str, Any]) -> str:
 def _validate_owner(*, config_path: Path, run_config: LoadedConfig) -> None:
     raw = read_yaml(config_path)
     owner = raw.get("owner")
-    baseline_owner = owner.get("open_id") if isinstance(owner, dict) else None
+    baseline_owner = (
+        cast(dict[str, Any], owner).get("open_id") if isinstance(owner, dict) else None
+    )
     if baseline_owner != run_config.config.owner.open_id:
         raise EvalError(
             "case config owner.open_id must match Evaluation Run Config owner.open_id"
@@ -312,7 +319,10 @@ def _validate_resources(
         )
 
 
-def _validate(model: type[EvalModel], data: Any, path: Path) -> EvalModel:
+ModelT = TypeVar("ModelT", bound=EvalModel)
+
+
+def _validate(model: type[ModelT], data: Any, path: Path) -> ModelT:
     try:
         return model.model_validate(data)
     except ValidationError as exc:
@@ -331,18 +341,13 @@ def _parse_aware_datetime(value: str, *, field: str = "message sent_at") -> date
 
 
 def _require_strictly_increasing(values: list[datetime], field: str) -> None:
-    if any(
-        current >= following
-        for current, following in zip(values, values[1:], strict=False)
-    ):
+    if any(current >= following for current, following in pairwise(values)):
         raise EvalError(f"{field} must be strictly increasing by sent_at")
 
 
 def _require_increasing_message_order(raws: list[dict[str, Any]], field: str) -> None:
     keys = [(_message_datetime(raw), _message_position(raw)) for raw in raws]
-    if any(
-        current >= following for current, following in zip(keys, keys[1:], strict=False)
-    ):
+    if any(current >= following for current, following in pairwise(keys)):
         raise EvalError(f"{field} must follow sent_at and message_position order")
 
 
@@ -365,7 +370,9 @@ def _safe_path_part(value: str) -> str:
 def _baseline_owner(config_path: Path) -> str:
     raw = read_yaml(config_path)
     owner = raw.get("owner")
-    value = owner.get("open_id") if isinstance(owner, dict) else None
+    value = (
+        cast(dict[str, Any], owner).get("open_id") if isinstance(owner, dict) else None
+    )
     if not isinstance(value, str) or not value:
         raise EvalError(f"case config is missing owner.open_id: {config_path}")
     return value

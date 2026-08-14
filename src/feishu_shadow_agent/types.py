@@ -193,7 +193,7 @@ class HealthCheckResult:
     severity: HealthSeverity
     status: HealthStatus
     message: str = ""
-    details: dict[str, Any] = field(default_factory=dict)
+    details: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
 
     @property
     def is_critical_failure(self) -> bool:
@@ -228,7 +228,7 @@ class ResourceRef:
     message_id: str
     file_key: str
     resource_type: Literal["image", "file"]
-    raw: dict[str, Any] = field(default_factory=dict)
+    raw: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
 
 
 @dataclass(frozen=True)
@@ -246,9 +246,9 @@ class NormalizedMessage:
     text: str
     direct_mention: bool
     at_all: bool
-    mentions: list[str] = field(default_factory=list)
-    resources: list[ResourceRef] = field(default_factory=list)
-    raw: dict[str, Any] = field(default_factory=dict)
+    mentions: list[str] = field(default_factory=lambda: list[str]())
+    resources: list[ResourceRef] = field(default_factory=lambda: list[ResourceRef]())
+    raw: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
 
     @property
     def is_self_message(self) -> bool:

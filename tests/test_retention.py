@@ -461,6 +461,7 @@ def test_retention_scrubs_jsonl_and_text_log_payloads_atomically(
             """,
             (active_task_id, OLD),
         )
+        assert approval.lastrowid is not None
         conn.execute(
             """
             INSERT INTO actions(
@@ -469,7 +470,7 @@ def test_retention_scrubs_jsonl_and_text_log_payloads_atomically(
             ) VALUES ('action_active', ?, ?, 'send_reply', 'pending',
                       0, 'production', '{}', ?, ?)
             """,
-            (active_task_id, int(approval.lastrowid), OLD, OLD),
+            (active_task_id, approval.lastrowid, OLD, OLD),
         )
     logger = JSONLLogger(jsonl_path, text_path=text_path)
     service = RetentionService(
@@ -604,7 +605,8 @@ def _insert_task(
                 None if status == "watching" else OLD,
             ),
         )
-    return int(cursor.lastrowid)
+    assert cursor.lastrowid is not None
+    return cursor.lastrowid
 
 
 def _insert_pending_approval(store: SQLiteStore, task_id: int) -> None:
@@ -639,6 +641,7 @@ def _insert_feedback(store: SQLiteStore, suffix: str, *, created_at: str) -> Non
                 created_at,
             ),
         )
+        assert approval.lastrowid is not None
         conn.execute(
             """
             INSERT INTO approval_feedback(
@@ -648,7 +651,7 @@ def _insert_feedback(store: SQLiteStore, suffix: str, *, created_at: str) -> Non
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                int(approval.lastrowid),
+                approval.lastrowid,
                 task_id,
                 f"cmd_{suffix}",
                 "edited_sent",
@@ -719,7 +722,8 @@ def _insert_sensitive_chain(
                 created_at if status == "closed" else None,
             ),
         )
-        task_id = int(task.lastrowid)
+        assert task.lastrowid is not None
+        task_id = task.lastrowid
         conn.execute(
             "INSERT INTO task_messages(task_id, message_id, role, created_at) VALUES (?, ?, ?, ?)",
             (task_id, message_id, "trigger", created_at),
@@ -744,7 +748,8 @@ def _insert_sensitive_chain(
                 created_at,
             ),
         )
-        approval_id = int(approval.lastrowid)
+        assert approval.lastrowid is not None
+        approval_id = approval.lastrowid
         action = conn.execute(
             """
             INSERT INTO actions(
@@ -764,6 +769,7 @@ def _insert_sensitive_chain(
                 created_at,
             ),
         )
+        assert action.lastrowid is not None
         conn.execute(
             """
             INSERT INTO dispatch_attempts(
@@ -772,7 +778,7 @@ def _insert_sensitive_chain(
             ) VALUES (?, ?, 'readback_ok', ?, ?, ?, ?, ?)
             """,
             (
-                int(action.lastrowid),
+                action.lastrowid,
                 f"claim_{suffix}",
                 json.dumps({"secret": suffix}),
                 json.dumps({"secret": suffix}),

@@ -7,6 +7,7 @@ import sys
 from collections.abc import Sequence
 from datetime import timedelta
 from pathlib import Path
+from typing import Any, TypedDict
 
 import yaml
 
@@ -445,7 +446,7 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         feishu_client=client,
         task_processor=task_processor,
         send_owner_notifications=args.send_owner_notifications,
-        run_metadata=_git_info(Path.cwd()),
+        run_metadata=dict(_git_info(Path.cwd())),
         config_base_dir=loaded.base_dir,
     )
     if loaded.config.interactive_cards.enabled:
@@ -1012,7 +1013,12 @@ def _load_runtime(
     return loaded, SQLiteStore(sqlite_path), logger
 
 
-def _git_info(cwd: Path) -> dict[str, object]:
+class GitInfo(TypedDict):
+    git_commit: str | None
+    git_dirty: bool
+
+
+def _git_info(cwd: Path) -> GitInfo:
     commit = _git_output(["git", "rev-parse", "--short", "HEAD"], cwd)
     dirty_output = _git_output(["git", "status", "--porcelain"], cwd)
     return {
@@ -1023,7 +1029,9 @@ def _git_info(cwd: Path) -> dict[str, object]:
 
 def _git_output(argv: list[str], cwd: Path) -> str | None:
     try:
-        completed = subprocess.run(
+        # Git arguments are fixed by this diagnostic helper and shell=False is
+        # used, so repository content is never interpreted as shell syntax.
+        completed = subprocess.run(  # noqa: S603
             argv,
             cwd=cwd,
             capture_output=True,
@@ -1042,7 +1050,7 @@ def _watch_until_from_now(minutes: int) -> str:
     return shift_instant(utc_now_iso(), delta=timedelta(minutes=minutes))
 
 
-def _run_console_server(app: object, *, host: str, port: int) -> None:
+def _run_console_server(app: Any, *, host: str, port: int) -> None:
     import uvicorn
 
     uvicorn.run(app, host=host, port=port)

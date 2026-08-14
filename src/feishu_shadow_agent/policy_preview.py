@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Any
+from typing import Any, cast
 
 from pydantic import ValidationError
 
@@ -9,9 +9,9 @@ from .config import ChatPolicyConfig
 from .operator_commands import (
     CHAT_POLICY_UPDATE_FIELDS,
     GLOBAL_POLICY_UPDATE_FIELDS,
-    _merged_chat_policy,
-    _merged_global_policy,
-    _policy_changes,
+    merged_chat_policy,
+    merged_global_policy,
+    policy_changes,
 )
 from .policy import (
     PolicyResolver,
@@ -67,7 +67,7 @@ class PolicyPreviewService:
                 "global Product Policy is not initialized; run `policy import-config` first"
             )
         try:
-            new_policy = _merged_global_policy(old_policy, normalized_changes)
+            new_policy = merged_global_policy(old_policy, normalized_changes)
         except (TypeError, ValidationError, ValueError) as exc:
             raise PolicyPreviewValidationError(str(exc)) from exc
 
@@ -111,7 +111,7 @@ class PolicyPreviewService:
             **ChatPolicyConfig().model_dump(mode="json"),
         }
         try:
-            new_policy = _merged_chat_policy(base_policy, normalized_changes)
+            new_policy = merged_chat_policy(base_policy, normalized_changes)
         except (TypeError, ValidationError, ValueError) as exc:
             raise PolicyPreviewValidationError(str(exc)) from exc
 
@@ -205,7 +205,7 @@ def _normalized_changes(
     changes: dict[str, Any], *, allowed_fields: set[str]
 ) -> dict[str, Any]:
     try:
-        normalized = _policy_changes(changes, allowed_fields=allowed_fields)
+        normalized = policy_changes(changes, allowed_fields=allowed_fields)
     except ValueError as exc:
         raise PolicyPreviewValidationError(str(exc)) from exc
     if not normalized:
@@ -288,8 +288,10 @@ def _chat_field_changes(
 
 def _global_field_value(policy: dict[str, Any], field: str) -> Any:
     if field in {"p2p_auto_reply", "unknown_group_auto_reply"}:
-        return (policy.get("reply_policy") or {}).get(field)
-    return (policy.get("default_chat_policy") or {}).get(field)
+        reply_policy = cast(dict[str, Any], policy.get("reply_policy") or {})
+        return reply_policy.get(field)
+    default_chat_policy = cast(dict[str, Any], policy.get("default_chat_policy") or {})
+    return default_chat_policy.get(field)
 
 
 def _field_change(field: str, before: Any, after: Any) -> dict[str, Any]:
@@ -301,8 +303,10 @@ def _effective_group_changes(
 ) -> list[dict[str, Any]]:
     changes: list[dict[str, Any]] = []
     for subject in ("p2p", "unknown_group", "default_chat"):
-        for change in _effective_changes(before[subject], after[subject]):
-            changes.append({"subject": subject, **change})
+        changes.extend(
+            {"subject": subject, **change}
+            for change in _effective_changes(before[subject], after[subject])
+        )
     return changes
 
 

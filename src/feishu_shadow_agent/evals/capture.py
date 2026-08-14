@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 
 from ..config import LoadedConfig
-from ..feishu.lark_cli import LarkCliClient
 from ..ingestion import MessageNormalizer, normalize_message_sent_at
 from ..paths import resolve_relative_path
 from ..time_utils import format_instant, parse_instant_or_none, utc_now
-from ..types import NormalizedMessage
+from ..types import LarkCliResult, MessagePage, NormalizedMessage
 from .artifacts import (
     EvalError,
     copy_config_or_raise,
@@ -30,8 +30,16 @@ from .cases import message_sent_at, resource_fixture_path
 from .schemas import ResourceFixture
 
 
+class CaptureLarkClient(Protocol):
+    get_messages: Callable[..., MessagePage]
+    search_messages: Callable[..., MessagePage]
+    list_chat_messages: Callable[..., MessagePage]
+    version: Callable[..., LarkCliResult]
+    download_resource: Callable[..., LarkCliResult]
+
+
 class CaptureService:
-    def __init__(self, *, loaded: LoadedConfig, lark_client: LarkCliClient) -> None:
+    def __init__(self, *, loaded: LoadedConfig, lark_client: CaptureLarkClient) -> None:
         self.loaded = loaded
         self.lark_client = lark_client
         self.normalizer = MessageNormalizer(owner_open_id=loaded.config.owner.open_id)
@@ -219,6 +227,8 @@ class CaptureService:
         if not chat_id:
             return [seed]
         sent_at = _raw_sent_at(seed)
+        if sent_at is None:
+            return [seed]
         parsed = _parse_datetime(sent_at)
         if parsed is None:
             return [seed]
@@ -269,7 +279,9 @@ class CaptureService:
         elif watch_keys:
             watch_placeholders = ",".join("?" for _ in watch_keys)
             active_condition = (
-                "t.status = 'watching' "
+                # Only generated `?` placeholders are interpolated; all values
+                # remain SQLite parameters.
+                "t.status = 'watching' "  # noqa: S608
                 "AND (t.watch_until IS NULL OR "
                 "julianday(t.watch_until) > julianday(?)) "
                 "AND EXISTS ("
@@ -295,6 +307,8 @@ class CaptureService:
             connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
             connection.row_factory = sqlite3.Row
             task_rows = connection.execute(
+                # The condition fragments contain only fixed SQL and generated
+                # placeholders; user values remain parameterized below.
                 f"""
                 SELECT DISTINCT t.id, t.status, t.task_label
                 FROM tasks t
@@ -305,7 +319,7 @@ class CaptureService:
                     {linked_condition}
                   )
                 ORDER BY t.id
-                """,
+                """,  # noqa: S608
                 params,
             ).fetchall()
             target_route = connection.execute(
@@ -353,9 +367,10 @@ class CaptureService:
                         raw = json.loads(row["raw_json"])
                     except (TypeError, json.JSONDecodeError):
                         continue
-                    if not isinstance(raw, dict) or message_id_from_raw(raw) != str(
-                        row["message_id"]
-                    ):
+                    if not isinstance(raw, dict):
+                        continue
+                    raw = cast(dict[str, Any], raw)
+                    if message_id_from_raw(raw) != str(row["message_id"]):
                         continue
                     message_ids.append(str(row["message_id"]))
                     task_raw_messages.append(raw)
@@ -376,8 +391,7 @@ class CaptureService:
                     "message_ids": message_ids,
                 }
         finally:
-            if connection is not None:
-                connection.close()
+            connection.close()
         return fixtures, raw_messages
 
     def _capture_resources(
@@ -564,7 +578,8 @@ def _raw_chat_id(raw: dict[str, Any]) -> str | None:
         return value
     chat = raw.get("chat")
     if isinstance(chat, dict):
-        value = chat.get("chat_id") or chat.get("chatId") or chat.get("id")
+        chat_map = cast(dict[str, Any], chat)
+        value = chat_map.get("chat_id") or chat_map.get("chatId") or chat_map.get("id")
         return value if isinstance(value, str) and value else None
     return None
 
@@ -581,8 +596,9 @@ def _raw_sender_name(raw: dict[str, Any]) -> str | None:
     for source in (raw, raw.get("sender")):
         if not isinstance(source, dict):
             continue
+        source_map = cast(dict[str, Any], source)
         for key in ("sender_name", "senderName", "user_name", "userName", "name", "id"):
-            value = source.get(key)
+            value = source_map.get(key)
             if isinstance(value, str) and value:
                 return value
     return None
@@ -595,14 +611,16 @@ def _raw_text(raw: dict[str, Any]) -> str:
             return value
     content = raw.get("content")
     if isinstance(content, dict):
-        return str(content.get("text") or content.get("title") or "")
+        content_map = cast(dict[str, Any], content)
+        return str(content_map.get("text") or content_map.get("title") or "")
     if isinstance(content, str):
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError:
             return content
         if isinstance(parsed, dict):
-            return str(parsed.get("text") or parsed.get("title") or "")
+            parsed_map = cast(dict[str, Any], parsed)
+            return str(parsed_map.get("text") or parsed_map.get("title") or "")
     return ""
 
 

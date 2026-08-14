@@ -24,7 +24,9 @@ from .config import (
     ToolPermissionsProfile,
 )
 
-HermesRunner = Callable[[list[str], int | None], AgentRunResult]
+# Test and embedding callers may provide a runner with a narrower timeout
+# contract; the subprocess adapter itself accepts the provider's optional value.
+HermesRunner = Callable[..., AgentRunResult]
 SESSION_ID_RE = re.compile(r"session_id:\s*([^\s]+)")
 
 
@@ -240,7 +242,8 @@ def _run_subprocess(
 ) -> AgentRunResult:
     started = time.monotonic()
     try:
-        completed = subprocess.run(
+        # Hermes receives a structured argv list and shell=False.
+        completed = subprocess.run(  # noqa: S603
             list(argv),
             cwd=cwd,
             capture_output=True,
@@ -252,8 +255,8 @@ def _run_subprocess(
         return AgentRunResult(
             argv=list(argv),
             exit_code=None,
-            stdout=exc.stdout or "",
-            stderr=exc.stderr or "",
+            stdout=_decode_command_output(exc.stdout),
+            stderr=_decode_command_output(exc.stderr),
             error=f"command timed out after {timeout_seconds}s",
             timed_out=True,
             latency_ms=_latency_ms(started),
@@ -289,6 +292,14 @@ def _run_subprocess(
         latency_ms=_latency_ms(started),
         backend_provider="hermes",
     )
+
+
+def _decode_command_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value
 
 
 def _parse_session_id(stderr: str) -> str | None:

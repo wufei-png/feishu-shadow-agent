@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 from ..agent_backend import AgentBackend
 from ..config import LoadedConfig
@@ -227,7 +227,7 @@ def _message_trace(
         "task_session_plan": task_session_plan,
         "raw_reply": None
         if not isinstance(raw_model, dict)
-        else raw_model.get("proposed_reply"),
+        else cast(dict[str, Any], raw_model).get("proposed_reply"),
         "effective_reply": effective_reply,
         "new_actions": new_actions,
         "new_approvals": new_approvals,
@@ -284,12 +284,12 @@ def _effective_reply(
     for action in reversed(actions):
         payload = action.get("payload")
         if action.get("kind") == "send_reply" and isinstance(payload, dict):
-            text = payload.get("text")
+            text = cast(dict[str, Any], payload).get("text")
             return text if isinstance(text, str) else None
     for approval in reversed(approvals):
         payload = approval.get("payload")
         if approval.get("kind") == "send_reply" and isinstance(payload, dict):
-            text = payload.get("text")
+            text = cast(dict[str, Any], payload).get("text")
             return text if isinstance(text, str) else None
     return None
 
@@ -380,6 +380,7 @@ def _score_structure(
                 }
             )
         else:
+            raw = cast(dict[str, Any], raw)
             reply_target = raw.get("reply_target_message_id")
             task = _target_task(state, trace, aliases)
             allowed_targets = [target_message_id]

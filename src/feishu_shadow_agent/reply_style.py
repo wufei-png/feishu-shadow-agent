@@ -3,22 +3,33 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
-from .agent_backend import AgentBackend
+from .agent_backend import OwnerStyleBackend
 from .agent_invocation import AgentInvoker, agent_result_error, truncate_error
 from .config import AppConfig
-from .feishu.client import FeishuClient
 from .ingestion import MessageNormalizer
 from .paths import resolve_agent_working_dir, resolve_relative_path
 from .prompt import OwnerStyleRefreshOutput, build_owner_style_refresh_prompt
 from .time_utils import shift_instant
-from .types import utc_now_iso
+from .types import MessagePage, utc_now_iso
+
+
+class ReplyStyleFeishuClient(Protocol):
+    def search_owner_messages(
+        self,
+        *,
+        sender: str,
+        start: str | None,
+        end: str | None,
+    ) -> MessagePage: ...
+
 
 MAX_SAMPLE_CHARS = 1000
 LINK_ONLY_RE = re.compile(r"^(?:https?://|www\.)\S+$", re.IGNORECASE)
@@ -67,8 +78,8 @@ class ReplyStyleRefresher:
         *,
         config: AppConfig,
         base_dir: str | Path,
-        feishu_client: FeishuClient,
-        agent_backend: AgentBackend,
+        feishu_client: ReplyStyleFeishuClient,
+        agent_backend: OwnerStyleBackend,
         agent_invoker: AgentInvoker,
     ):
         self.config = config
@@ -147,8 +158,11 @@ class ReplyStyleRefresher:
                 stats=stats,
                 error=truncate_error(error),
             )
+        response_data: object = getattr(result, "json_data", None)
         try:
-            output = OwnerStyleRefreshOutput.model_validate(result.json_data)
+            output = OwnerStyleRefreshOutput.model_validate(
+                cast(dict[str, Any], response_data)
+            )
         except ValidationError as exc:
             return ReplyStyleRefreshResult(
                 status="failed",
@@ -204,7 +218,7 @@ class ReplyStyleRefresher:
         for raw in raws:
             try:
                 message = self.normalizer.normalize(raw)
-            except Exception:
+            except ValueError:
                 continue
             text = " ".join(message.text.split())
             if not _keep_sample(text):
@@ -256,10 +270,9 @@ def _atomic_write_text(path: Path, text: str) -> None:
             handle.write(text)
         os.replace(temp_name, path)
     except Exception:
-        try:
+        # Cleanup must cover encoding and other non-OS write failures too.
+        with suppress(FileNotFoundError):
             os.unlink(temp_name)
-        except FileNotFoundError:
-            pass
         raise
 
 

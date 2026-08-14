@@ -39,14 +39,20 @@ class RetentionSummary:
     resource_cutoff: str
     feedback_content_cutoff: str
     raw_messages_pruned: int = 0
-    content_candidates: dict[str, int] = field(default_factory=dict)
-    content_scrubbed: dict[str, int] = field(default_factory=dict)
-    log_content_candidates: dict[str, int] = field(default_factory=dict)
-    log_content_scrubbed: dict[str, int] = field(default_factory=dict)
+    content_candidates: dict[str, int] = field(default_factory=lambda: dict[str, int]())
+    content_scrubbed: dict[str, int] = field(default_factory=lambda: dict[str, int]())
+    log_content_candidates: dict[str, int] = field(
+        default_factory=lambda: dict[str, int]()
+    )
+    log_content_scrubbed: dict[str, int] = field(
+        default_factory=lambda: dict[str, int]()
+    )
     resources_candidates: int = 0
     resources_deleted: int = 0
     resources_expired: int = 0
-    resources_skipped: list[RetentionSkippedResource] = field(default_factory=list)
+    resources_skipped: list[RetentionSkippedResource] = field(
+        default_factory=lambda: list[RetentionSkippedResource]()
+    )
     feedback_content_candidates: int = 0
     feedback_content_expired: int = 0
 

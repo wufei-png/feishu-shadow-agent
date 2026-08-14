@@ -41,7 +41,8 @@ def _insert_task(store: SQLiteStore, short_id: str, root_message_id: str) -> int
                 "p2p",
             ),
         )
-    return int(cursor.lastrowid)
+    assert cursor.lastrowid is not None
+    return cursor.lastrowid
 
 
 def _create_pending_reply_approval(
@@ -528,7 +529,9 @@ def test_global_policy_expansion_applies_directly_with_audit(tmp_path: Path) -> 
     assert "risk_level" not in output
     assert "confirmation_required" not in output
     assert output["audit_count"] == 1
-    assert store.get_product_policy()["reply_policy"]["p2p_auto_reply"] is True
+    product_policy = store.get_product_policy()
+    assert product_policy is not None
+    assert product_policy["reply_policy"]["p2p_auto_reply"] is True
     audit = store.list_policy_audits(limit=1)[0]
     assert audit["actor"] == "test_operator"
     assert audit["reason"] == "enable p2p"
@@ -569,7 +572,9 @@ def test_chat_policy_expansion_and_narrowing_updates_are_structured(
     assert expansion_output["new_policy"]["auto_reply"] is True
     assert "risk_level" not in expansion_output
     assert "confirmation_required" not in expansion_output
-    assert store.get_chat_product_policy("oc_policy")["auto_reply"] is True
+    chat_policy = store.get_chat_product_policy("oc_policy")
+    assert chat_policy is not None
+    assert chat_policy["auto_reply"] is True
 
     narrowing = service.update_chat_policy(
         "oc_policy",
@@ -585,7 +590,9 @@ def test_chat_policy_expansion_and_narrowing_updates_are_structured(
     assert "risk_level" not in output
     assert "confirmation_required" not in output
     assert output["audit_count"] == 1
-    assert store.get_chat_product_policy("oc_policy")["resource_download"] is False
+    chat_policy = store.get_chat_product_policy("oc_policy")
+    assert chat_policy is not None
+    assert chat_policy["resource_download"] is False
     audit = store.list_policy_audits(limit=1)[0]
     assert audit["actor"] == "test_operator"
     assert audit["reason"] == "narrow resources"
@@ -687,6 +694,7 @@ def test_chat_policy_update_normalizes_chat_id_before_lookup(tmp_path: Path) -> 
     assert command_exit_code(result) == 0
     assert result.as_dict()["target"] == {"type": "chat_policy", "chat_id": "oc_policy"}
     policy = store.get_chat_product_policy("oc_policy")
+    assert policy is not None
     assert policy["name"] == "Policy group"
     assert policy["auto_reply"] is True
     assert policy["bot_joined"] is True
@@ -739,8 +747,9 @@ def test_chat_policy_effective_capability_expansion_applies_directly(
     assert bot_preferred.status == "applied"
     assert bot_preferred.warnings == []
     assert bot_preferred.as_dict()["audit_count"] == 1
-    assert store.get_chat_product_policy("oc_bot_joined")["bot_joined"] is True
-    assert (
-        store.get_chat_product_policy("oc_bot_preferred")["reply_identity"]
-        == "bot_preferred"
-    )
+    bot_joined_policy = store.get_chat_product_policy("oc_bot_joined")
+    assert bot_joined_policy is not None
+    assert bot_joined_policy["bot_joined"] is True
+    assert (store.get_chat_product_policy("oc_bot_preferred") or {})[
+        "reply_identity"
+    ] == "bot_preferred"

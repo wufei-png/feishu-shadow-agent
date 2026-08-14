@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ..agent_backend import AgentBackend
 from ..config import ConfigService, LoadedConfig
@@ -146,7 +146,7 @@ class ModelEvalService:
                 }
             write_yaml(case_output / "report.yaml", report)
             if isinstance(report.get("prompt_hashes"), dict):
-                case_prompt_hashes.append(report["prompt_hashes"])
+                case_prompt_hashes.append(cast(dict[str, str], report["prompt_hashes"]))
             results.append(
                 {
                     "case": str(case_dir),
@@ -208,6 +208,7 @@ class ModelEvalService:
             evidence_dir = run_dir / "trials" / f"{trial_number:03d}"
             runtime: TrialRuntime | None = None
             traced_backend: TracedAgentBackend | None = None
+            trial: dict[str, Any] = {}
             try:
                 runtime = TrialRuntime.create(
                     loaded=self.loaded,
@@ -387,9 +388,14 @@ def _aggregate_trials(
         semantic = trial.get("semantic")
         if not isinstance(semantic, dict):
             continue
-        for difference in semantic.get("differences") or []:
-            if not isinstance(difference, dict):
+        semantic_map = cast(dict[str, Any], semantic)
+        raw_differences = semantic_map.get("differences")
+        if not isinstance(raw_differences, list):
+            continue
+        for raw_difference in cast(list[object], raw_differences):
+            if not isinstance(raw_difference, dict):
                 continue
+            difference = cast(dict[str, Any], raw_difference)
             difference_type = str(difference.get("type") or "")
             if difference_type:
                 differences[difference_type] = differences.get(difference_type, 0) + 1
@@ -416,8 +422,8 @@ def _aggregate_trials(
 
 
 def _aggregate_skill_traces(trials: list[dict[str, Any]]) -> dict[str, Any] | None:
-    traces = [row.get("skill_trace") for row in trials]
-    traces = [row for row in traces if isinstance(row, dict)]
+    raw_traces = [row.get("skill_trace") for row in trials]
+    traces = [cast(dict[str, Any], row) for row in raw_traces if isinstance(row, dict)]
     if not traces:
         return None
     status_counts: dict[str, int] = {}
@@ -427,8 +433,8 @@ def _aggregate_skill_traces(trials: list[dict[str, Any]]) -> dict[str, Any] | No
         status_counts[status] = status_counts.get(status, 0) + 1
         if status != "available":
             continue
-        expected_skills = set(trace.get("expected_skills") or [])
-        runtime_loaded_skills = set(trace.get("runtime_loaded_skills") or [])
+        expected_skills = _string_set(trace.get("expected_skills"))
+        runtime_loaded_skills = _string_set(trace.get("runtime_loaded_skills"))
         expected += len(expected_skills)
         loaded += len(runtime_loaded_skills)
         matched += len(expected_skills & runtime_loaded_skills)
@@ -444,6 +450,12 @@ def _aggregate_skill_traces(trials: list[dict[str, Any]]) -> dict[str, Any] | No
         "precision": None if loaded == 0 else round(matched / loaded, 4),
         "recall": None if expected == 0 else round(matched / expected, 4),
     }
+
+
+def _string_set(value: object) -> set[str]:
+    if not isinstance(value, (list, tuple, set)):
+        return set()
+    return {str(item) for item in cast(Iterable[object], value)}
 
 
 def _exit_code(report: dict[str, Any]) -> int:

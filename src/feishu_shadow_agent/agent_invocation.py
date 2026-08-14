@@ -65,7 +65,9 @@ class AgentInvoker:
             )
             try:
                 result = call()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
+                # A backend callback is an extensibility boundary; retry and
+                # report every backend failure without taking down ingestion.
                 last_error = f"{type(exc).__name__}: {exc}"
                 if attempt < self.max_attempts:
                     self.logger.warning(

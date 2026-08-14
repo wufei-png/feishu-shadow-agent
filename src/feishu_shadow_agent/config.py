@@ -4,7 +4,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import yaml
 from pydantic import (
@@ -641,9 +641,12 @@ class AppConfig(StrictModel):
     @model_validator(mode="before")
     @classmethod
     def migrate_legacy_hermes_config(cls, value: Any) -> Any:
-        if not isinstance(value, dict) or "hermes" not in value:
+        if not isinstance(value, dict):
             return value
-        migrated = dict(value)
+        raw_value = cast(dict[str, Any], value)
+        if "hermes" not in raw_value:
+            return raw_value
+        migrated = dict(raw_value)
         hermes = migrated.pop("hermes")
         if "agent_backend" not in migrated:
             migrated["agent_backend"] = {"provider": "hermes", "hermes": hermes}
@@ -653,7 +656,9 @@ class AppConfig(StrictModel):
             raise ValueError(
                 "top-level hermes is deprecated; configure agent_backend.hermes instead"
             )
-        migrated["agent_backend"] = dict(agent_backend) | {"hermes": hermes}
+        migrated["agent_backend"] = cast(dict[str, Any], agent_backend) | {
+            "hermes": hermes
+        }
         return migrated
 
 
@@ -696,8 +701,9 @@ class ConfigService:
             raw = {}
         if not isinstance(raw, dict):
             raise ConfigError("config root must be a mapping")
+        raw_mapping = cast(dict[str, Any], raw)
         try:
-            config = AppConfig.model_validate(raw)
+            config = AppConfig.model_validate(raw_mapping)
         except ValidationError as exc:
             raise ConfigError(str(exc)) from exc
         base_dir = path.resolve().parent
@@ -712,19 +718,22 @@ class ConfigService:
                 raise ConfigError(
                     "logging.jsonl_path and logging.text_path must resolve to different files"
                 )
-        return LoadedConfig(config=config, path=path, base_dir=base_dir, raw=raw)
+        return LoadedConfig(
+            config=config, path=path, base_dir=base_dir, raw=raw_mapping
+        )
 
     def redacted_dict(self, config: AppConfig) -> dict[str, Any]:
         data = config.model_dump(mode="json")
-        return self._redact_mapping(data)
+        return cast(dict[str, Any], self._redact_mapping(data))
 
     def json_schema_dict(self) -> dict[str, Any]:
         return AppConfig.model_json_schema()
 
-    def _redact_mapping(self, value: Any) -> Any:
+    def _redact_mapping(self, value: object) -> object:
         if isinstance(value, dict):
+            mapping = cast(dict[str, object], value)
             redacted: dict[str, Any] = {}
-            for key, child in value.items():
+            for key, child in mapping.items():
                 lowered = str(key).lower()
                 if lowered.endswith("_env"):
                     # *_env values are environment variable names, not secrets.
@@ -739,7 +748,7 @@ class ConfigService:
                     redacted[key] = self._redact_mapping(child)
             return redacted
         if isinstance(value, list):
-            return [self._redact_mapping(item) for item in value]
+            return [self._redact_mapping(item) for item in cast(list[object], value)]
         return value
 
 

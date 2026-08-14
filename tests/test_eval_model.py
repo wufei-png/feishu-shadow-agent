@@ -44,7 +44,7 @@ class NoSessionBackend:
         output_model: type[BaseModel],
         session_id=None,
         cwd=None,
-    ):
+    ) -> AgentRunResult:
         raise AssertionError("judge should not run")
 
     def reply_postprocess(self, prompt: str, *, cwd=None):
@@ -142,6 +142,7 @@ def test_dry_run_followup_does_not_infer_schema_from_untrusted_prompt_text() -> 
     )
 
     assert result.ok
+    assert isinstance(result.json_data, dict)
     assert "task_label" not in result.json_data
 
 

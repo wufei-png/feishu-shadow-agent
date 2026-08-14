@@ -9,27 +9,27 @@ from .config import AppConfig
 from .operator_queries.common import (
     OperatorQueryReadError,
     OperatorQueryUnavailable,
-    _action_dto,
-    _agent_audit_dto,
-    _approval_dto,
-    _attempt_dto,
-    _coerce_limit,
-    _coerce_offset,
-    _dispatch_recommended_actions,
-    _has_core_schema,
-    _message_dto,
-    _readback_summary,
-    _ReadStoreUnavailable,
-    _task_summary_dto,
+    ReadStoreUnavailable,
+    action_dto,
+    agent_audit_dto,
+    approval_dto,
+    attempt_dto,
+    coerce_limit,
+    coerce_offset,
+    dispatch_recommended_actions,
+    has_core_schema,
+    message_dto,
+    readback_summary,
+    task_summary_dto,
 )
 from .operator_queries.feedback import FeedbackExecutionMode, FeedbackQuery
 from .operator_queries.health import (
-    _RUN_RUNTIME_COLUMNS,
+    RUN_RUNTIME_COLUMNS,
     HealthQuery,
-    _daemon_liveness,
-    _recent_errors,
-    _run_runtime_summary,
-    _store_read_uri,
+    daemon_liveness,
+    recent_errors,
+    run_runtime_summary,
+    store_read_uri,
 )
 from .operator_queries.message_detail import MessageDetailQuery
 from .operator_queries.policy import PolicyQuery
@@ -86,18 +86,20 @@ class OperatorQueryService:
         try:
             with self._connect() as conn:
                 last_run = conn.execute(
-                    f"SELECT {_RUN_RUNTIME_COLUMNS} FROM runs ORDER BY started_at DESC LIMIT 1"
+                    # This selects a module-level constant column list.
+                    f"SELECT {RUN_RUNTIME_COLUMNS} FROM runs ORDER BY started_at DESC LIMIT 1"  # noqa: S608
                 ).fetchone()
                 daemon_run = conn.execute(
+                    # This selects a module-level constant column list.
                     f"""
-                    SELECT {_RUN_RUNTIME_COLUMNS}
+                    SELECT {RUN_RUNTIME_COLUMNS}
                     FROM runs
                     WHERE last_tick_started_at IS NOT NULL
                     ORDER BY last_tick_started_at DESC, started_at DESC
                     LIMIT 1
-                    """
+                    """,  # noqa: S608
                 ).fetchone()
-        except _ReadStoreUnavailable:
+        except ReadStoreUnavailable:
             last_run = None
             daemon_run = None
         failed_or_needs_review = self.list_dispatch_actions(
@@ -114,8 +116,8 @@ class OperatorQueryService:
             daemon_stale_after_seconds=daemon_stale_after_seconds,
         )["summary"]
         return {
-            "daemon_liveness": _daemon_liveness(
-                _run_runtime_summary(daemon_run) if daemon_run else None,
+            "daemon_liveness": daemon_liveness(
+                run_runtime_summary(daemon_run) if daemon_run else None,
                 now=now,
                 stale_after_seconds=daemon_stale_after_seconds,
             ),
@@ -133,8 +135,8 @@ class OperatorQueryService:
             "failed_or_needs_review_actions": failed_or_needs_review,
             "health_issue_summary": health_summary,
             "recent_health_warnings": self._recent_health_warnings(limit=limit),
-            "recent_errors": _recent_errors(failed_commands, failed_or_needs_review),
-            "last_run": _run_runtime_summary(last_run) if last_run else None,
+            "recent_errors": recent_errors(failed_commands, failed_or_needs_review),
+            "last_run": run_runtime_summary(last_run) if last_run else None,
             # Compatibility for current CLI users while status moves to the operator DTO boundary.
             "recent_expired_approvals": self.list_approvals(
                 status=ApprovalStatus.EXPIRED.value, limit=limit
@@ -196,7 +198,7 @@ class OperatorQueryService:
         limit: int = 20,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        where = []
+        where: list[str] = []
         params: list[Any] = []
         if status is not None:
             where.append("a.status = ?")
@@ -205,10 +207,12 @@ class OperatorQueryService:
             where.append("a.task_id = ?")
             params.append(task_id)
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
-        params.extend([_coerce_limit(limit), _coerce_offset(offset)])
+        params.extend([coerce_limit(limit), coerce_offset(offset)])
         try:
             with self._connect() as conn:
                 rows = conn.execute(
+                    # `where_sql` is assembled from fixed query fragments; all
+                    # caller values remain bound parameters.
                     f"""
                     SELECT a.id, a.short_id, a.task_id, t.short_id AS task_short_id, a.kind, a.status,
                            a.payload_json, a.preview, a.created_at, a.expires_at, a.resolved_at
@@ -217,33 +221,34 @@ class OperatorQueryService:
                     {where_sql}
                     ORDER BY a.created_at DESC, a.id DESC
                     LIMIT ? OFFSET ?
-                    """,
+                    """,  # noqa: S608
                     params,
                 ).fetchall()
-        except _ReadStoreUnavailable:
+        except ReadStoreUnavailable:
             return []
         now = self._now()
-        return [_approval_dto(row, now=now) for row in rows]
+        return [approval_dto(row, now=now) for row in rows]
 
     def approval_detail(self, approval_id: int | str) -> dict[str, Any] | None:
         where_sql, params = _id_lookup("a", approval_id)
         try:
             with self._connect() as conn:
                 row = conn.execute(
+                    # `_id_lookup` returns fixed SQL fragments and bound values.
                     f"""
                     SELECT a.id, a.short_id, a.task_id, t.short_id AS task_short_id, a.kind, a.status,
                            a.payload_json, a.preview, a.created_at, a.expires_at, a.resolved_at
                     FROM approvals a
                     LEFT JOIN tasks t ON t.id = a.task_id
                     WHERE {where_sql}
-                    """,
+                    """,  # noqa: S608
                     params,
                 ).fetchone()
-        except _ReadStoreUnavailable:
+        except ReadStoreUnavailable:
             return None
         if row is None:
             return None
-        return _approval_dto(row, now=self._now(), include_payload=True)
+        return approval_dto(row, now=self._now(), include_payload=True)
 
     def list_tasks(
         self,
@@ -255,7 +260,7 @@ class OperatorQueryService:
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         now = self._now()
-        where = []
+        where: list[str] = []
         params: list[Any] = []
         if status is not None:
             where.append("t.status = ?")
@@ -269,10 +274,12 @@ class OperatorQueryService:
             )
             params.append(now)
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
-        params.extend([_coerce_limit(limit), _coerce_offset(offset)])
+        params.extend([coerce_limit(limit), coerce_offset(offset)])
         try:
             with self._connect() as conn:
                 rows = conn.execute(
+                    # `where_sql` is assembled from fixed query fragments; all
+                    # caller values remain bound parameters.
                     f"""
                     SELECT t.id, t.short_id, t.status, t.chat_id, t.chat_type, t.thread_id,
                            t.root_message_id, t.task_label, t.watch_until, t.updated_at,
@@ -310,12 +317,12 @@ class OperatorQueryService:
                     GROUP BY t.id
                     ORDER BY t.updated_at DESC, t.id DESC
                     LIMIT ? OFFSET ?
-                    """,
+                    """,  # noqa: S608
                     [now, *params],
                 ).fetchall()
-        except _ReadStoreUnavailable:
+        except ReadStoreUnavailable:
             return []
-        return [_task_summary_dto(row) for row in rows]
+        return [task_summary_dto(row) for row in rows]
 
     def task_detail(
         self, task_id: int | str, *, limit: int = 20
@@ -324,13 +331,14 @@ class OperatorQueryService:
         try:
             with self._connect() as conn:
                 task = conn.execute(
+                    # `_id_lookup` returns fixed SQL fragments and bound values.
                     f"""
                     SELECT t.*, COUNT(tm.message_id) AS message_count
                     FROM tasks t
                     LEFT JOIN task_messages tm ON tm.task_id = t.id
                     WHERE {where_sql}
                     GROUP BY t.id
-                    """,
+                    """,  # noqa: S608
                     params,
                 ).fetchone()
                 if task is None:
@@ -344,7 +352,7 @@ class OperatorQueryService:
                     ORDER BY tm.created_at DESC, m.message_id DESC
                     LIMIT ?
                     """,
-                    (int(task["id"]), _coerce_limit(limit)),
+                    (int(task["id"]), coerce_limit(limit)),
                 ).fetchall()
                 agent_audit_rows = conn.execute(
                     """
@@ -356,11 +364,11 @@ class OperatorQueryService:
                     ORDER BY created_at DESC, id DESC
                     LIMIT ?
                     """,
-                    (int(task["id"]), _coerce_limit(limit)),
+                    (int(task["id"]), coerce_limit(limit)),
                 ).fetchall()
-        except _ReadStoreUnavailable:
+        except ReadStoreUnavailable:
             return None
-        task_summary = _task_summary_dto(task)
+        task_summary = task_summary_dto(task)
         pending_approvals = self.list_approvals(
             status=ApprovalStatus.PENDING.value,
             task_id=int(task["id"]),
@@ -369,10 +377,10 @@ class OperatorQueryService:
         actions = self.list_dispatch_actions(task_id=int(task["id"]), limit=limit)
         return {
             **task_summary,
-            "recent_messages": [_message_dto(row) for row in reversed(messages)],
+            "recent_messages": [message_dto(row) for row in reversed(messages)],
             "pending_approvals": pending_approvals,
             "actions": actions,
-            "agent_audits": [_agent_audit_dto(row) for row in agent_audit_rows],
+            "agent_audits": [agent_audit_dto(row) for row in agent_audit_rows],
             "effective_policy": self.effective_policy_summary(
                 task["chat_id"], task["chat_type"]
             ),
@@ -392,7 +400,7 @@ class OperatorQueryService:
         limit: int = 20,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        where = []
+        where: list[str] = []
         params: list[Any] = []
         if statuses is not None:
             status_values = tuple(statuses)
@@ -403,10 +411,12 @@ class OperatorQueryService:
             where.append("a.task_id = ?")
             params.append(task_id)
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
-        params.extend([_coerce_limit(limit), _coerce_offset(offset)])
+        params.extend([coerce_limit(limit), coerce_offset(offset)])
         try:
             with self._connect() as conn:
                 rows = conn.execute(
+                    # `where_sql` is assembled from fixed query fragments; all
+                    # caller values remain bound parameters.
                     f"""
                     SELECT a.*, t.short_id AS task_short_id
                     FROM actions a
@@ -414,12 +424,12 @@ class OperatorQueryService:
                     {where_sql}
                     ORDER BY a.updated_at DESC, a.id DESC
                     LIMIT ? OFFSET ?
-                    """,
+                    """,  # noqa: S608
                     params,
                 ).fetchall()
-        except _ReadStoreUnavailable:
+        except ReadStoreUnavailable:
             return []
-        return [_action_dto(row, include_payload=False) for row in rows]
+        return [action_dto(row, include_payload=False) for row in rows]
 
     def dispatch_action_detail(self, action_id: int) -> dict[str, Any] | None:
         try:
@@ -444,15 +454,15 @@ class OperatorQueryService:
                     """,
                     (action_id,),
                 ).fetchall()
-        except _ReadStoreUnavailable:
+        except ReadStoreUnavailable:
             return None
-        attempt_dtos = [_attempt_dto(row) for row in attempts]
-        action_dto = _action_dto(action, include_payload=True)
+        attempt_dtos = [attempt_dto(row) for row in attempts]
+        action_data = action_dto(action, include_payload=True)
         return {
-            "action": action_dto,
+            "action": action_data,
             "attempts": attempt_dtos,
-            "readback_summary": _readback_summary(attempt_dtos),
-            "recommended_actions": _dispatch_recommended_actions(action_dto),
+            "readback_summary": readback_summary(attempt_dtos),
+            "recommended_actions": dispatch_recommended_actions(action_data),
         }
 
     def message_detail(self, message_id: str) -> dict[str, Any] | None:
@@ -494,33 +504,33 @@ class OperatorQueryService:
         )
 
     def _failed_approval_commands(self, *, limit: int) -> list[dict[str, Any]]:
-        return self._health_query._failed_approval_commands(limit=limit)
+        return self._health_query.failed_approval_commands(limit=limit)
 
     def _recent_health_warnings(self, *, limit: int) -> list[dict[str, Any]]:
-        return self._health_query._recent_health_warnings(limit=limit)
+        return self._health_query.recent_health_warnings(limit=limit)
 
     def _stale_sending_actions(
         self, *, stale_after_seconds: int, limit: int
     ) -> list[dict[str, Any]]:
-        return self._health_query._stale_sending_actions(
+        return self._health_query.stale_sending_actions(
             stale_after_seconds=stale_after_seconds,
             limit=limit,
         )
 
     def _get_product_policy(self) -> dict[str, Any] | None:
-        return self._policy_query._get_product_policy()
+        return self._policy_query.get_product_policy()
 
     def _get_chat_product_policy(self, chat_id: str) -> dict[str, Any] | None:
-        return self._policy_query._get_chat_product_policy(chat_id)
+        return self._policy_query.get_chat_product_policy(chat_id)
 
     def _list_chat_product_policies(self, *, limit: int = 100) -> list[dict[str, Any]]:
-        return self._policy_query._list_chat_product_policies(limit=limit)
+        return self._policy_query.list_chat_product_policies(limit=limit)
 
     def _policy_import_diff(self, conn: sqlite3.Connection) -> dict[str, Any]:
-        return self._policy_query._policy_import_diff(conn)
+        return self._policy_query.policy_import_diff(conn)
 
     def _missing_store_policy_import_diff(self) -> dict[str, Any]:
-        return self._policy_query._missing_store_policy_import_diff()
+        return self._policy_query.missing_store_policy_import_diff()
 
     def _policy_health_issue(
         self, policy_status: dict[str, Any], *, detected_at: str
@@ -532,21 +542,21 @@ class OperatorQueryService:
 
     def _connect(self) -> sqlite3.Connection:
         if not self.store.path.exists():
-            raise _ReadStoreUnavailable("SQLite store does not exist.")
-        uri = _store_read_uri(self.store.path)
+            raise ReadStoreUnavailable("SQLite store does not exist.")
+        uri = store_read_uri(self.store.path)
         try:
             conn = sqlite3.connect(uri, uri=True)
         except sqlite3.OperationalError as exc:
-            raise _ReadStoreUnavailable(str(exc)) from exc
+            raise ReadStoreUnavailable(str(exc)) from exc
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only = ON")
-        if not _has_core_schema(conn):
+        if not has_core_schema(conn):
             conn.close()
-            raise _ReadStoreUnavailable("SQLite store schema is not initialized.")
+            raise ReadStoreUnavailable("SQLite store schema is not initialized.")
         return conn
 
     def _store_status(self) -> dict[str, Any]:
-        return self._health_query._store_status()
+        return self._health_query.store_status()
 
 
 def _task_recommended_actions(
@@ -556,7 +566,7 @@ def _task_recommended_actions(
     status: str | None = None,
     task_id: str | None = None,
 ) -> list[str]:
-    recommendations = []
+    recommendations: list[str] = []
     if task_id:
         if status == TaskStatus.WATCHING.value:
             recommendations.append(f"task close --task-id {task_id}")

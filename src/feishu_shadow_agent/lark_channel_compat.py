@@ -12,10 +12,55 @@ from __future__ import annotations
 import asyncio
 import importlib
 import threading
+from collections.abc import Callable
 from http import HTTPStatus
-from typing import Any
+from typing import Any, Protocol, cast
 
 _SDK_PATCH_LOCK = threading.RLock()
+
+
+class _Channel(Protocol):
+    def on(self, name: str, handler: Any) -> Any: ...
+
+    async def connect_until_ready(
+        self,
+        *,
+        timeout: float | None = 30.0,  # noqa: ASYNC109
+    ) -> None: ...
+
+    async def disconnect(self) -> None: ...
+
+    async def update_card(self, message_id: str, card: dict[str, Any]) -> Any: ...
+
+    def schedule(self, coro: Any) -> Any: ...
+
+
+class _ChannelModule(Protocol):
+    WSClient: type[Any]
+    FeishuChannel: Callable[..., _Channel]
+
+
+class _WsModule(Protocol):
+    loop: asyncio.AbstractEventLoop | None
+    _get_by_key: Callable[[Any, Any], Any]
+    HEADER_MESSAGE_ID: Any
+    HEADER_TRACE_ID: Any
+    HEADER_SUM: Any
+    HEADER_SEQ: Any
+    HEADER_TYPE: Any
+    HEADER_BIZ_RT: Any
+    MessageType: Any
+    logger: Any
+    time: Any
+    Response: Any
+    base64: Any
+    JSON: Any
+    UTF_8: str
+
+
+def _sdk_attr(obj: Any, name: str) -> Any:
+    """Read a private member from the untyped optional SDK boundary."""
+    return getattr(obj, name)
 
 
 def create_channel(app_id: str, app_secret: str) -> CompatibleFeishuChannel:
@@ -26,8 +71,11 @@ class CompatibleFeishuChannel:
     """Small delegating facade that isolates SDK lifecycle quirks."""
 
     def __init__(self, *, app_id: str, app_secret: str) -> None:
-        ws_module = importlib.import_module("lark_channel.ws.client")
-        channel_module = importlib.import_module("lark_channel.channel.channel")
+        ws_module = cast(_WsModule, importlib.import_module("lark_channel.ws.client"))
+        channel_module = cast(
+            _ChannelModule,
+            importlib.import_module("lark_channel.channel.channel"),
+        )
         base_ws_client = channel_module.WSClient
 
         self._ws_module = ws_module
@@ -50,7 +98,12 @@ class CompatibleFeishuChannel:
     def on(self, name: str, handler: Any) -> Any:
         return self._channel.on(name, handler)
 
-    async def connect_until_ready(self, *, timeout: float | None = 30.0) -> None:
+    # SDK compatibility contract exposes a timeout parameter.
+    async def connect_until_ready(
+        self,
+        *,
+        timeout: float | None = 30.0,  # noqa: ASYNC109
+    ) -> None:
         # FeishuChannel.start() looks up WSClient from its module at execution
         # time. Keep the replacement installed only for that construction.
         with _SDK_PATCH_LOCK:
@@ -90,37 +143,56 @@ class CompatibleFeishuChannel:
         return getattr(self._channel, name)
 
 
-def _build_card_compatible_ws_client(base_cls: type, ws_module: Any) -> type:
+def _build_card_compatible_ws_client(
+    base_cls: type[Any], ws_module: _WsModule
+) -> type[Any]:
     """Create a version-local WS client with the missing CARD dispatch branch."""
 
-    class CardCompatibleWSClient(base_cls):
+    # lark-channel-sdk is optional and untyped; this is the single dynamic
+    # subclass boundary where preserving the SDK's inheritance semantics is
+    # preferable to rebuilding the class with type().
+    class CardCompatibleWSClient(  # pyright: ignore[reportUntypedBaseClass]
+        base_cls
+    ):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             # The SDK constructs this object in an executor thread. Setting the
             # loop there prevents asyncio primitives from binding to a missing
             # executor-thread loop or to the caller's running loop.
             asyncio.set_event_loop(ws_module.loop)
-            super().__init__(*args, **kwargs)
+            super().__init__(  # pyright: ignore[reportUnknownMemberType]
+                *args, **kwargs
+            )
 
         async def _handle_data_frame(self, frame: Any) -> None:
             # This mirrors lark-channel-sdk's implementation, with CARD treated
             # like EVENT so the registered dispatcher can parse the payload and
             # the platform receives the normal acknowledgement frame.
             hs = frame.headers
-            msg_id = ws_module._get_by_key(hs, ws_module.HEADER_MESSAGE_ID)
-            trace_id = ws_module._get_by_key(hs, ws_module.HEADER_TRACE_ID)
-            sum_ = ws_module._get_by_key(hs, ws_module.HEADER_SUM)
-            seq = ws_module._get_by_key(hs, ws_module.HEADER_SEQ)
-            type_ = ws_module._get_by_key(hs, ws_module.HEADER_TYPE)
+            get_by_key = cast(
+                Callable[[Any, Any], Any],
+                _sdk_attr(cast(Any, ws_module), "_get_by_key"),
+            )
+            msg_id = get_by_key(hs, ws_module.HEADER_MESSAGE_ID)
+            trace_id = get_by_key(hs, ws_module.HEADER_TRACE_ID)
+            sum_ = get_by_key(hs, ws_module.HEADER_SUM)
+            seq = get_by_key(hs, ws_module.HEADER_SEQ)
+            type_ = get_by_key(hs, ws_module.HEADER_TYPE)
 
             payload = frame.payload
-            if int(sum_) > 1:
-                payload = self._combine(msg_id, int(sum_), int(seq), payload)
+            sum_value = int(sum_)
+            seq_value = int(seq)
+            if sum_value > 1:
+                combine = cast(
+                    Callable[[Any, Any, Any, bytes], bytes | None],
+                    _sdk_attr(cast(Any, self), "_combine"),
+                )
+                payload = combine(msg_id, sum_value, seq_value, payload)
                 if payload is None:
                     return
 
             message_type = ws_module.MessageType(type_)
             ws_module.logger.debug(
-                self._fmt_log(
+                cast(Callable[..., str], _sdk_attr(cast(Any, self), "_fmt_log"))(
                     "receive message, message_type: {}, message_id: {}, "
                     "trace_id: {}, payload_len: {}",
                     message_type.value,
@@ -138,9 +210,10 @@ def _build_card_compatible_ws_client(base_cls: type, ws_module: Any) -> type:
 
             response = ws_module.Response(code=HTTPStatus.OK)
             try:
-                start = int(round(ws_module.time.time() * 1000))
-                result = self._event_handler._do_without_validation(payload)
-                end = int(round(ws_module.time.time() * 1000))
+                start = round(ws_module.time.time() * 1000)
+                event_handler = _sdk_attr(cast(Any, self), "_event_handler")
+                result = event_handler._do_without_validation(payload)
+                end = round(ws_module.time.time() * 1000)
                 header = hs.add()
                 header.key = ws_module.HEADER_BIZ_RT
                 header.value = str(end - start)
@@ -148,9 +221,11 @@ def _build_card_compatible_ws_client(base_cls: type, ws_module: Any) -> type:
                     response.data = ws_module.base64.b64encode(
                         ws_module.JSON.marshal(result).encode(ws_module.UTF_8)
                     )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
+                # Keep the SDK's frame acknowledgement alive even when the
+                # optional handler raises an implementation-specific error.
                 ws_module.logger.error(
-                    self._fmt_log(
+                    cast(Callable[..., str], _sdk_attr(cast(Any, self), "_fmt_log"))(
                         "handle message failed, message_type: {}, message_id: {}, "
                         "trace_id: {}, err: {}",
                         message_type.value,
@@ -162,7 +237,11 @@ def _build_card_compatible_ws_client(base_cls: type, ws_module: Any) -> type:
                 response = ws_module.Response(code=HTTPStatus.INTERNAL_SERVER_ERROR)
 
             frame.payload = ws_module.JSON.marshal(response).encode(ws_module.UTF_8)
-            await self._write_message(frame.SerializeToString())
+            write_message = cast(
+                Callable[[bytes], Any],
+                _sdk_attr(cast(Any, self), "_write_message"),
+            )
+            await write_message(frame.SerializeToString())
 
     CardCompatibleWSClient.__name__ = "CardCompatibleWSClient"
     CardCompatibleWSClient.__qualname__ = "CardCompatibleWSClient"

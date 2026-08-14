@@ -8,16 +8,16 @@ from typing import Any
 
 from ..types import ActionStatus, ApprovalStatus
 from .common import (
-    _action_dto,
-    _agent_audit_dto,
-    _approval_dto,
-    _attempt_dto,
-    _coerce_limit,
-    _loads_json_object,
-    _readback_summary,
-    _row_dict,
-    _sqlite_like_contains,
-    _task_summary_dto,
+    action_dto,
+    agent_audit_dto,
+    approval_dto,
+    attempt_dto,
+    coerce_limit,
+    loads_json_object,
+    readback_summary,
+    row_dict,
+    sqlite_like_contains,
+    task_summary_dto,
 )
 
 
@@ -91,8 +91,8 @@ class MessageDetailQuery:
                 LIMIT ?
                 """,
                 (
-                    _sqlite_like_contains(json.dumps(message_id, ensure_ascii=False)),
-                    _coerce_limit(50),
+                    sqlite_like_contains(json.dumps(message_id, ensure_ascii=False)),
+                    coerce_limit(50),
                 ),
             ).fetchall()
             task_rows = conn.execute(
@@ -120,9 +120,9 @@ class MessageDetailQuery:
             )
 
         approval_dtos = [
-            _approval_dto(row, now=now, include_payload=False) for row in approvals
+            approval_dto(row, now=now, include_payload=False) for row in approvals
         ]
-        action_dtos = [_action_dto(row, include_payload=False) for row in actions]
+        action_dtos = [action_dto(row, include_payload=False) for row in actions]
         recorded_dispatch_outcomes = [
             _recorded_dispatch_outcome(
                 action, attempts_by_action.get(int(action["id"]), [])
@@ -132,7 +132,7 @@ class MessageDetailQuery:
         return {
             "message": _message_detail_dto(message),
             "task_ids": task_ids,
-            "task_summaries": [_task_summary_dto(row) for row in task_rows],
+            "task_summaries": [task_summary_dto(row) for row in task_rows],
             "routing_audits": [_routing_audit_dto(row) for row in routing_audits],
             "processing": [_message_processing_dto(row) for row in processing_rows],
             "resources": [
@@ -140,7 +140,7 @@ class MessageDetailQuery:
             ],
             "agent_audits": [
                 audit
-                for audit in (_agent_audit_dto(row) for row in agent_audit_rows)
+                for audit in (agent_audit_dto(row) for row in agent_audit_rows)
                 if message_id in audit["input_message_ids"]
             ],
             "approvals": approval_dtos,
@@ -159,6 +159,7 @@ def _fetch_approvals_for_tasks(
         return []
     placeholders = ",".join("?" for _ in task_ids)
     return conn.execute(
+        # `placeholders` is generated solely from the integer ID list.
         f"""
         SELECT a.id, a.short_id, a.task_id, t.short_id AS task_short_id, a.kind, a.status,
                a.payload_json, a.preview, a.created_at, a.expires_at, a.resolved_at
@@ -166,7 +167,7 @@ def _fetch_approvals_for_tasks(
         LEFT JOIN tasks t ON t.id = a.task_id
         WHERE a.task_id IN ({placeholders})
         ORDER BY a.created_at DESC, a.id DESC
-        """,
+        """,  # noqa: S608
         task_ids,
     ).fetchall()
 
@@ -184,13 +185,15 @@ def _fetch_actions_for_message(
         task_filter = f" OR a.task_id IN ({placeholders})"
         params.extend(task_ids)
     return conn.execute(
+        # The optional task filter uses generated placeholders; values remain
+        # bound parameters.
         f"""
         SELECT a.*, t.short_id AS task_short_id
         FROM actions a
         LEFT JOIN tasks t ON t.id = a.task_id
         WHERE a.target_message_id = ?{task_filter}
         ORDER BY a.created_at, a.id
-        """,
+        """,  # noqa: S608
         params,
     ).fetchall()
 
@@ -203,24 +206,25 @@ def _fetch_attempts_for_actions(
         return {}
     placeholders = ",".join("?" for _ in action_ids)
     rows = conn.execute(
+        # `placeholders` is generated solely from the integer action ID list.
         f"""
         SELECT *
         FROM dispatch_attempts
         WHERE action_id IN ({placeholders})
         ORDER BY action_id, started_at, id
-        """,
+        """,  # noqa: S608
         action_ids,
     ).fetchall()
     attempts: dict[int, list[dict[str, Any]]] = {
         action_id: [] for action_id in action_ids
     }
     for row in rows:
-        attempts.setdefault(int(row["action_id"]), []).append(_attempt_dto(row))
+        attempts.setdefault(int(row["action_id"]), []).append(attempt_dto(row))
     return attempts
 
 
 def _message_detail_dto(row: sqlite3.Row) -> dict[str, Any]:
-    data = _row_dict(row)
+    data = row_dict(row)
     return {
         "message_id": data["message_id"],
         "chat_id": data["chat_id"],
@@ -235,13 +239,13 @@ def _message_detail_dto(row: sqlite3.Row) -> dict[str, Any]:
         "direct_mention": bool(data["direct_mention"]),
         "at_all": bool(data["at_all"]),
         "text": data["text"],
-        "normalized": _loads_json_object(data["normalized_json"]),
+        "normalized": loads_json_object(data["normalized_json"]),
         "inserted_at": data["inserted_at"],
     }
 
 
 def _routing_audit_dto(row: sqlite3.Row) -> dict[str, Any]:
-    data = _row_dict(row)
+    data = row_dict(row)
     return {
         "id": data["id"],
         "message_id": data["message_id"],
@@ -258,7 +262,7 @@ def _routing_audit_dto(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _message_processing_dto(row: sqlite3.Row) -> dict[str, Any]:
-    data = _row_dict(row)
+    data = row_dict(row)
     return {
         "id": data["id"],
         "message_id": data["message_id"],
@@ -274,10 +278,10 @@ def _message_processing_dto(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _resource_dto(row: sqlite3.Row, *, base_dir: Path | None) -> dict[str, Any]:
-    data = _row_dict(row)
+    data = row_dict(row)
     stored_path = data.get("path")
     path_exists = _resource_path_exists(stored_path, base_dir=base_dir)
-    raw = _loads_json_object(data.get("raw_json"))
+    raw = loads_json_object(data.get("raw_json"))
     sha256 = data.get("sha256")
     return {
         "id": data["id"],
@@ -326,7 +330,7 @@ def _recorded_dispatch_outcome(
         "status": action["status"],
         "result_summary": action["result_summary"],
         "attempts": attempts,
-        "readback_summary": _readback_summary(attempts),
+        "readback_summary": readback_summary(attempts),
     }
 
 

@@ -9,7 +9,7 @@ import subprocess
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 
@@ -81,7 +81,7 @@ def read_yaml(path: Path) -> dict[str, Any]:
         raise EvalError(f"failed to read {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise EvalError(f"{path} must contain a YAML mapping")
-    return data
+    return cast(dict[str, Any], data)
 
 
 def write_json(path: Path, data: Any) -> None:
@@ -201,7 +201,8 @@ def sensitive_config_paths(raw: Any) -> list[str]:
 
     def visit(value: Any, path: tuple[str, ...]) -> None:
         if isinstance(value, dict):
-            for key, child in value.items():
+            mapping = cast(dict[str, Any], value)
+            for key, child in mapping.items():
                 key_text = str(key)
                 lowered = key_text.lower()
                 child_path = (*path, key_text)
@@ -213,7 +214,7 @@ def sensitive_config_paths(raw: Any) -> list[str]:
                     paths.append(".".join(child_path))
                 visit(child, child_path)
         elif isinstance(value, list):
-            for index, child in enumerate(value):
+            for index, child in enumerate(cast(list[Any], value)):
                 visit(child, (*path, str(index)))
 
     visit(raw, ())
@@ -230,7 +231,8 @@ def text_sha256(value: str) -> str:
 
 def git_output(argv: list[str], cwd: Path) -> str | None:
     try:
-        completed = subprocess.run(
+        # This helper invokes fixed Git subcommands with shell=False.
+        completed = subprocess.run(  # noqa: S603
             argv,
             cwd=cwd,
             capture_output=True,

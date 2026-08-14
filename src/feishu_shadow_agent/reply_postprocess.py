@@ -3,11 +3,11 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pydantic import ValidationError
 
-from .agent_backend import AgentBackend
+from .agent_backend import ReplyPostprocessBackend
 from .agent_invocation import (
     AgentInvoker,
     agent_result_error,
@@ -34,7 +34,7 @@ class ReplyPostprocessor:
         *,
         config: AppConfig,
         base_dir: str | Path,
-        agent_backend: AgentBackend,
+        agent_backend: ReplyPostprocessBackend,
         agent_invoker: AgentInvoker,
     ):
         self.config = config
@@ -114,8 +114,11 @@ class ReplyPostprocessor:
                 audit=audit,
                 error=truncate_error(failure),
             )
+        response_data: object = getattr(result, "json_data", None)
         try:
-            output = ReplyPostprocessOutput.model_validate(result.json_data)
+            output = ReplyPostprocessOutput.model_validate(
+                cast(dict[str, Any], response_data)
+            )
         except ValidationError as exc:
             return self._failed(
                 original_reply,
@@ -196,7 +199,15 @@ class ReplyPostprocessor:
         if cfg.humanizer_zh.enabled:
             enabled.append("humanizer_zh")
             humanizer_configured = cfg.humanizer_zh.skill_path
-            assert humanizer_configured is not None
+            if humanizer_configured is None:
+                return _GuidancePaths(
+                    enabled_guidance=enabled,
+                    owner_style_configured_path=owner_configured,
+                    owner_style_resolved_path=owner_resolved,
+                    humanizer_configured_path=None,
+                    humanizer_resolved_path=None,
+                    error="humanizer_skill_missing",
+                )
             humanizer_resolved = resolve_relative_path(
                 humanizer_configured, self.base_dir
             )

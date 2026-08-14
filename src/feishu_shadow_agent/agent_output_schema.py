@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel
 
@@ -11,14 +11,16 @@ def agent_output_schema(model: type[BaseModel]) -> dict[str, Any]:
     return schema
 
 
-def _require_all_object_properties(value: Any) -> None:
+def _require_all_object_properties(value: object) -> None:
     if isinstance(value, dict):
-        properties = value.get("properties")
+        mapping = cast(dict[str, object], value)
+        properties = mapping.get("properties")
         if isinstance(properties, dict):
-            value["required"] = list(properties.keys())
-            value.setdefault("additionalProperties", False)
-        for child in value.values():
+            property_map = cast(dict[str, object], properties)
+            mapping["required"] = list(property_map)
+            mapping.setdefault("additionalProperties", False)
+        for child in mapping.values():
             _require_all_object_properties(child)
     elif isinstance(value, list):
-        for child in value:
+        for child in cast(list[object], value):
             _require_all_object_properties(child)

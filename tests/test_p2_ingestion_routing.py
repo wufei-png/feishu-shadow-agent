@@ -92,12 +92,25 @@ class FakeFeishuClient:
         end: str | None,
         page_token: str | None = None,
         page_size: int = 50,
+        order: str = "asc",
     ) -> MessagePage:
         self.calls.append(f"chat:{chat_id}:{page_token}")
         value = self.chat_pages.get((chat_id, page_token), MessagePage([]))
         if isinstance(value, Exception):
             raise value
         return value
+
+    def list_p2p_messages(
+        self,
+        *,
+        user_id: str,
+        start: str | None,
+        end: str | None,
+        page_token: str | None = None,
+        page_size: int = 50,
+    ) -> MessagePage:
+        self.calls.append(f"p2p:{user_id}:{page_token}")
+        return MessagePage([])
 
     def list_thread_messages(
         self,

@@ -27,7 +27,7 @@ def replay_message_dry_run(
         timeout_seconds=loaded_config.config.lark_cli.timeout_seconds,
         cwd=loaded_config.base_dir,
     )
-    previews = []
+    previews: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="feishu-shadow-agent-replay-") as tmp:
         temp_db = Path(tmp) / "agent.sqlite3"
         if store.path.exists():

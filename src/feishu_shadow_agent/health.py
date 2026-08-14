@@ -8,13 +8,13 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
+from typing import Protocol, cast
 
 from .agent_backend import AgentRunResult
 from .agent_skill_context import load_agent_skill_names
 from .claude_code import claude_code_execution_policy
 from .codex import codex_execution_policy
 from .config import LoadedConfig
-from .feishu.client import FeishuClient
 from .hermes import hermes_execution_policy
 from .paths import (
     resolve_agent_skill_path,
@@ -23,6 +23,22 @@ from .paths import (
 )
 from .store.sqlite_store import SQLiteStore
 from .types import HealthCheckResult, LarkCliResult, new_run_id
+
+
+class HealthFeishuClient(Protocol):
+    def version(self) -> LarkCliResult: ...
+
+    def auth_status(self, *, verify: bool = True) -> LarkCliResult: ...
+
+    def owner_message(
+        self,
+        *,
+        owner_open_id: str,
+        text: str,
+        idempotency_key: str,
+        dry_run: bool = True,
+    ) -> LarkCliResult: ...
+
 
 REQUIRED_USER_SCOPES = {
     "search:message",
@@ -54,7 +70,7 @@ class HermesHttpChecker:
                 "failed",
                 "agent_backend.hermes.health_url is not configured",
             )
-        headers = {}
+        headers: dict[str, str] = {}
         if hermes.api_key_env:
             api_key = os.environ.get(hermes.api_key_env)
             if not api_key:
@@ -65,11 +81,15 @@ class HermesHttpChecker:
                     f"environment variable {hermes.api_key_env} is not set",
                 )
             headers["Authorization"] = f"Bearer {api_key}"
-        request = urllib.request.Request(
+        # Config validation permits only http(s), excluding file/custom schemes.
+        request = urllib.request.Request(  # noqa: S310
             hermes.health_url, headers=headers, method="GET"
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            # The request above is constrained to the configured http(s) API.
+            with urllib.request.urlopen(  # noqa: S310
+                request, timeout=timeout_seconds
+            ) as response:
                 status = response.status
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             return HealthCheckResult(
@@ -286,7 +306,7 @@ class HealthSuite:
         *,
         loaded_config: LoadedConfig,
         store: SQLiteStore,
-        feishu_client: FeishuClient,
+        feishu_client: HealthFeishuClient,
         agent_backend_checker: BackendReadinessChecker | None = None,
         hermes_checker: HermesChecker | None = None,
         run_id: str | None = None,
@@ -367,7 +387,8 @@ class HealthSuite:
         try:
             self.store.initialize()
             self.store.health_probe()
-        except Exception as exc:  # pragma: no cover - platform-specific detail
+        # Health probes isolate platform/storage failures into a check result.
+        except Exception as exc:  # noqa: BLE001
             return HealthCheckResult(
                 "sqlite_writable",
                 "critical",
@@ -489,7 +510,8 @@ class HealthSuite:
     def _check_product_policy_initialized(self) -> HealthCheckResult:
         try:
             probe = self.store.product_policy_initialization_probe()
-        except Exception as exc:  # pragma: no cover - platform-specific detail
+        # Health probes isolate platform/storage failures into a check result.
+        except Exception as exc:  # noqa: BLE001
             return HealthCheckResult(
                 "product_policy_initialized",
                 "critical",
@@ -594,9 +616,14 @@ class HealthSuite:
     def _check_user_scopes(self, auth_json: object) -> HealthCheckResult:
         scope_text = ""
         if isinstance(auth_json, dict):
-            user = auth_json.get("identities", {}).get("user", {})
-            if isinstance(user, dict):
-                scope_text = str(user.get("scope") or "")
+            auth_map = cast(dict[str, object], auth_json)
+            identities = auth_map.get("identities")
+            if isinstance(identities, dict):
+                identities_map = cast(dict[str, object], identities)
+                user = identities_map.get("user")
+                if isinstance(user, dict):
+                    user_map = cast(dict[str, object], user)
+                    scope_text = str(user_map.get("scope") or "")
         if not scope_text:
             return HealthCheckResult(
                 "required_user_scopes",
@@ -622,11 +649,15 @@ class HealthSuite:
         )
 
     def _check_bot_available(self, auth_json: object) -> HealthCheckResult:
-        bot = {}
+        bot: dict[str, object] = {}
         if isinstance(auth_json, dict):
-            maybe_bot = auth_json.get("identities", {}).get("bot", {})
-            if isinstance(maybe_bot, dict):
-                bot = maybe_bot
+            auth_map = cast(dict[str, object], auth_json)
+            identities = auth_map.get("identities")
+            if isinstance(identities, dict):
+                identities_map = cast(dict[str, object], identities)
+                maybe_bot = identities_map.get("bot")
+                if isinstance(maybe_bot, dict):
+                    bot = cast(dict[str, object], maybe_bot)
         bot_open_id = bot.get("openId") or bot.get("open_id") or bot.get("id")
         if (
             bot.get("available") is True or bot.get("status") == "ready"
@@ -780,7 +811,16 @@ class HealthSuite:
             )
         if cfg.humanizer_zh.enabled:
             skill_path = cfg.humanizer_zh.skill_path
-            assert skill_path is not None
+            if skill_path is None:
+                results.append(
+                    HealthCheckResult(
+                        name="reply_postprocess_humanizer_zh_skill",
+                        severity="critical",
+                        status="failed",
+                        message="reply postprocess humanizer-zh skill path is not configured",
+                    )
+                )
+                return results
             path = resolve_relative_path(skill_path, self.loaded_config.base_dir)
             results.append(
                 _readable_file_result(
@@ -845,12 +885,21 @@ def _command_failed(
     )
 
 
+def _decode_command_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value
+
+
 def _run_hermes_command(
     argv: list[str], *, timeout_seconds: int, cwd: Path | None = None
 ) -> AgentRunResult:
     started = time.monotonic()
     try:
-        completed = subprocess.run(
+        # Hermes/Claude/Codex probes use structured argv and shell=False.
+        completed = subprocess.run(  # noqa: S603
             argv,
             cwd=cwd,
             capture_output=True,
@@ -862,8 +911,8 @@ def _run_hermes_command(
         return AgentRunResult(
             argv=argv,
             exit_code=None,
-            stdout=exc.stdout or "",
-            stderr=exc.stderr or "",
+            stdout=_decode_command_output(exc.stdout),
+            stderr=_decode_command_output(exc.stderr),
             error=f"command timed out after {timeout_seconds}s",
             timed_out=True,
             latency_ms=int((time.monotonic() - started) * 1000),
@@ -892,7 +941,8 @@ def _run_codex_command(
 ) -> AgentRunResult:
     started = time.monotonic()
     try:
-        completed = subprocess.run(
+        # Hermes/Claude/Codex probes use structured argv and shell=False.
+        completed = subprocess.run(  # noqa: S603
             argv,
             cwd=cwd,
             capture_output=True,
@@ -904,8 +954,8 @@ def _run_codex_command(
         return AgentRunResult(
             argv=argv,
             exit_code=None,
-            stdout=exc.stdout or "",
-            stderr=exc.stderr or "",
+            stdout=_decode_command_output(exc.stdout),
+            stderr=_decode_command_output(exc.stderr),
             error=f"command timed out after {timeout_seconds}s",
             timed_out=True,
             latency_ms=int((time.monotonic() - started) * 1000),
@@ -937,7 +987,8 @@ def _run_claude_code_command(
 ) -> AgentRunResult:
     started = time.monotonic()
     try:
-        completed = subprocess.run(
+        # Hermes/Claude/Codex probes use structured argv and shell=False.
+        completed = subprocess.run(  # noqa: S603
             argv,
             cwd=cwd,
             capture_output=True,
@@ -949,8 +1000,8 @@ def _run_claude_code_command(
         return AgentRunResult(
             argv=argv,
             exit_code=None,
-            stdout=exc.stdout or "",
-            stderr=exc.stderr or "",
+            stdout=_decode_command_output(exc.stdout),
+            stderr=_decode_command_output(exc.stderr),
             error=f"command timed out after {timeout_seconds}s",
             timed_out=True,
             latency_ms=int((time.monotonic() - started) * 1000),
