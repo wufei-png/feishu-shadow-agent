@@ -122,7 +122,8 @@ class MaintenanceCommandService:
             logger=self.logger,
         ).prune(run_id=run_id, dry_run=dry_run)
         changed = not dry_run and (
-            summary.raw_messages_pruned > 0
+            any(summary.content_scrubbed.values())
+            or any(summary.log_content_scrubbed.values())
             or summary.resources_deleted > 0
             or summary.resources_expired > 0
         )

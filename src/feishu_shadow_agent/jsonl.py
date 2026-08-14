@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import logging as std_logging
 import os
 import sys
 import threading
+from collections.abc import Collection, Iterator
+from contextlib import ExitStack, contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -35,6 +38,8 @@ class JSONLLogger:
         self.level = level
         self.console = console
         self.text_path = None if text_path is None else Path(text_path)
+        if self.text_path is not None and _same_file_path(self.path, self.text_path):
+            raise ValueError("JSONL and text logs must use different files")
         self._handler_lock = threading.RLock()
         self._logger = std_logging.getLogger(f"feishu_shadow_agent.{id(self)}")
         self._logger.handlers = []
@@ -107,7 +112,7 @@ class JSONLLogger:
     def _configure_handlers(self) -> None:
         level_number = _level_number(self.level)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        json_handler = std_logging.FileHandler(self.path, encoding="utf-8")
+        json_handler = _CoordinatedFileHandler(self.path, encoding="utf-8")
         self.path.chmod(0o600)
         json_handler.setLevel(level_number)
         json_handler.setFormatter(_JSONLFormatter())
@@ -115,7 +120,7 @@ class JSONLLogger:
 
         if self.text_path is not None:
             self.text_path.parent.mkdir(parents=True, exist_ok=True)
-            text_handler = std_logging.FileHandler(self.text_path, encoding="utf-8")
+            text_handler = _CoordinatedFileHandler(self.text_path, encoding="utf-8")
             self.text_path.chmod(0o600)
             text_handler.setLevel(level_number)
             text_handler.setFormatter(_TextFormatter())
@@ -127,34 +132,131 @@ class JSONLLogger:
             console_handler.setFormatter(_TextFormatter())
             self._logger.addHandler(console_handler)
 
-    def scrub_before(self, cutoff: str, *, dry_run: bool) -> dict[str, int]:
+    def scrub_before(
+        self,
+        cutoff: str,
+        *,
+        dry_run: bool,
+        protected_task_ids: Collection[str] = (),
+        protected_message_ids: Collection[str] = (),
+        protected_action_ids: Collection[str] = (),
+        protected_approval_ids: Collection[str] = (),
+    ) -> dict[str, int]:
         """Remove old log payloads while preserving minimal event metadata."""
         with self._handler_lock:
-            return self._scrub_before_locked(cutoff, dry_run=dry_run)
+            return self._scrub_before_locked(
+                cutoff,
+                dry_run=dry_run,
+                protected_task_ids=frozenset(protected_task_ids),
+                protected_message_ids=frozenset(protected_message_ids),
+                protected_action_ids=frozenset(protected_action_ids),
+                protected_approval_ids=frozenset(protected_approval_ids),
+            )
 
-    def _scrub_before_locked(self, cutoff: str, *, dry_run: bool) -> dict[str, int]:
-        for handler in self._logger.handlers:
-            handler.flush()
+    def _scrub_before_locked(
+        self,
+        cutoff: str,
+        *,
+        dry_run: bool,
+        protected_task_ids: frozenset[str],
+        protected_message_ids: frozenset[str],
+        protected_action_ids: frozenset[str],
+        protected_approval_ids: frozenset[str],
+    ) -> dict[str, int]:
         paths = [("jsonl", self.path, True)]
         if self.text_path is not None:
             paths.append(("text", self.text_path, False))
-        if dry_run:
-            return {
-                name: _scrub_log_file(path, cutoff=cutoff, jsonl=jsonl, dry_run=True)
-                for name, path, jsonl in paths
-            }
+        with ExitStack() as locks:
+            for path in sorted({path for _, path, _ in paths}):
+                locks.enter_context(_exclusive_log_lock(path))
+            for handler in self._logger.handlers:
+                handler.flush()
+            if dry_run:
+                return {
+                    name: _scrub_log_file(
+                        path,
+                        cutoff=cutoff,
+                        jsonl=jsonl,
+                        dry_run=True,
+                        protected_task_ids=protected_task_ids,
+                        protected_message_ids=protected_message_ids,
+                        protected_action_ids=protected_action_ids,
+                        protected_approval_ids=protected_approval_ids,
+                    )
+                    for name, path, jsonl in paths
+                }
 
-        handlers = list(self._logger.handlers)
-        for handler in handlers:
-            self._logger.removeHandler(handler)
-            handler.close()
+            handlers = list(self._logger.handlers)
+            for handler in handlers:
+                self._logger.removeHandler(handler)
+                handler.close()
+            try:
+                return {
+                    name: _scrub_log_file(
+                        path,
+                        cutoff=cutoff,
+                        jsonl=jsonl,
+                        dry_run=False,
+                        protected_task_ids=protected_task_ids,
+                        protected_message_ids=protected_message_ids,
+                        protected_action_ids=protected_action_ids,
+                        protected_approval_ids=protected_approval_ids,
+                    )
+                    for name, path, jsonl in paths
+                }
+            finally:
+                self._configure_handlers()
+
+
+class _CoordinatedFileHandler(std_logging.FileHandler):
+    """Serialize writers with retention and reopen after atomic replacement."""
+
+    def __init__(self, filename: str | Path, *, encoding: str):
+        self.coordinated_path = Path(filename)
+        super().__init__(filename, encoding=encoding)
+
+    def emit(self, record: std_logging.LogRecord) -> None:
+        with _exclusive_log_lock(self.coordinated_path):
+            self._reopen_if_replaced()
+            super().emit(record)
+
+    def _reopen_if_replaced(self) -> None:
+        if self.stream is None:
+            self.stream = self._open()
+            return
         try:
-            return {
-                name: _scrub_log_file(path, cutoff=cutoff, jsonl=jsonl, dry_run=False)
-                for name, path, jsonl in paths
-            }
+            current = self.coordinated_path.stat()
+            opened = os.fstat(self.stream.fileno())
+        except (FileNotFoundError, OSError):
+            current = None
+            opened = None
+        if (
+            current is not None
+            and opened is not None
+            and (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino)
+        ):
+            return
+        self.stream.flush()
+        self.stream.close()
+        self.stream = self._open()
+
+
+@contextmanager
+def _exclusive_log_lock(path: Path) -> Iterator[None]:
+    lock_path = path.with_name(f".{path.name}.lock")
+    flags = os.O_CREAT | os.O_RDWR
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(lock_path, flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
-            self._configure_handlers()
+            os.close(descriptor)
 
 
 class _JSONLFormatter(std_logging.Formatter):
@@ -201,6 +303,15 @@ def _level_number(level: LogLevel | str) -> int:
         ) from exc
 
 
+def _same_file_path(left: Path, right: Path) -> bool:
+    if left.resolve(strict=False) == right.resolve(strict=False):
+        return True
+    try:
+        return left.samefile(right)
+    except FileNotFoundError:
+        return False
+
+
 def _text_value(value: Any) -> str:
     if value is None:
         return "null"
@@ -218,7 +329,17 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
-def _scrub_log_file(path: Path, *, cutoff: str, jsonl: bool, dry_run: bool) -> int:
+def _scrub_log_file(
+    path: Path,
+    *,
+    cutoff: str,
+    jsonl: bool,
+    dry_run: bool,
+    protected_task_ids: frozenset[str],
+    protected_message_ids: frozenset[str],
+    protected_action_ids: frozenset[str],
+    protected_approval_ids: frozenset[str],
+) -> int:
     if not path.exists():
         return 0
     if path.is_symlink() or not path.is_file():
@@ -233,9 +354,23 @@ def _scrub_log_file(path: Path, *, cutoff: str, jsonl: bool, dry_run: bool) -> i
         with path.open("r", encoding="utf-8", errors="replace") as source:
             for line in source:
                 replacement, should_scrub = (
-                    _scrub_jsonl_line(line, cutoff_instant)
+                    _scrub_jsonl_line(
+                        line,
+                        cutoff_instant,
+                        protected_task_ids,
+                        protected_message_ids,
+                        protected_action_ids,
+                        protected_approval_ids,
+                    )
                     if jsonl
-                    else _scrub_text_line(line, cutoff_instant)
+                    else _scrub_text_line(
+                        line,
+                        cutoff_instant,
+                        protected_task_ids,
+                        protected_message_ids,
+                        protected_action_ids,
+                        protected_approval_ids,
+                    )
                 )
                 if should_scrub:
                     changed += 1
@@ -273,7 +408,14 @@ def _fsync_directory(path: Path) -> None:
         os.close(directory_fd)
 
 
-def _scrub_jsonl_line(line: str, cutoff: datetime) -> tuple[str, bool]:
+def _scrub_jsonl_line(
+    line: str,
+    cutoff: datetime,
+    protected_task_ids: frozenset[str],
+    protected_message_ids: frozenset[str],
+    protected_action_ids: frozenset[str],
+    protected_approval_ids: frozenset[str],
+) -> tuple[str, bool]:
     try:
         payload = json.loads(line)
         if not isinstance(payload, dict):
@@ -295,6 +437,24 @@ def _scrub_jsonl_line(line: str, cutoff: datetime) -> tuple[str, bool]:
         return json.dumps(replacement, ensure_ascii=False) + "\n", True
     if timestamp > cutoff:
         return line, False
+    task_id = payload.get("task_id")
+    if task_id is not None and str(task_id) in protected_task_ids:
+        return line, False
+    data = payload.get("data")
+    if (
+        isinstance(data, dict)
+        and data.get("message_id") is not None
+        and str(data["message_id"]) in protected_message_ids
+    ):
+        return line, False
+    if isinstance(data, dict) and any(
+        data.get(key) is not None and str(data[key]) in protected
+        for key, protected in (
+            ("action_id", protected_action_ids),
+            ("approval_id", protected_approval_ids),
+        )
+    ):
+        return line, False
     minimal = {
         key: payload.get(key) for key in ("ts", "level", "run_id", "task_id", "event")
     }
@@ -305,7 +465,14 @@ def _scrub_jsonl_line(line: str, cutoff: datetime) -> tuple[str, bool]:
     return replacement, True
 
 
-def _scrub_text_line(line: str, cutoff: datetime) -> tuple[str, bool]:
+def _scrub_text_line(
+    line: str,
+    cutoff: datetime,
+    protected_task_ids: frozenset[str],
+    protected_message_ids: frozenset[str],
+    protected_action_ids: frozenset[str],
+    protected_approval_ids: frozenset[str],
+) -> tuple[str, bool]:
     if line == "retention_unparseable_line_pruned retention_pruned=true\n":
         return line, False
     parts = line.rstrip("\n").split(maxsplit=3)
@@ -314,6 +481,28 @@ def _scrub_text_line(line: str, cutoff: datetime) -> tuple[str, bool]:
     except (IndexError, ValueError):
         return "retention_unparseable_line_pruned retention_pruned=true\n", True
     if timestamp > cutoff:
+        return line, False
+    if any(
+        part.removeprefix("task_id=") in protected_task_ids
+        for part in line.rstrip("\n").split()
+        if part.startswith("task_id=")
+    ):
+        return line, False
+    if any(
+        part.removeprefix(f"{key}=") in protected
+        for part in line.rstrip("\n").split()
+        for key, protected in (
+            ("action_id", protected_action_ids),
+            ("approval_id", protected_approval_ids),
+        )
+        if part.startswith(f"{key}=")
+    ):
+        return line, False
+    if any(
+        part.removeprefix("message_id=") in protected_message_ids
+        for part in line.rstrip("\n").split()
+        if part.startswith("message_id=")
+    ):
         return line, False
     minimal = " ".join(parts[:3]) + " retention_pruned=true\n"
     if line == minimal:

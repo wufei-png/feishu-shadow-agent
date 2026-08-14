@@ -700,9 +700,19 @@ class ConfigService:
             config = AppConfig.model_validate(raw)
         except ValidationError as exc:
             raise ConfigError(str(exc)) from exc
-        return LoadedConfig(
-            config=config, path=path, base_dir=path.resolve().parent, raw=raw
-        )
+        base_dir = path.resolve().parent
+        if config.logging.text_path is not None:
+            jsonl_path = _resolve_config_path(config.logging.jsonl_path, base_dir)
+            text_path = _resolve_config_path(config.logging.text_path, base_dir)
+            if jsonl_path == text_path or (
+                jsonl_path.exists()
+                and text_path.exists()
+                and jsonl_path.samefile(text_path)
+            ):
+                raise ConfigError(
+                    "logging.jsonl_path and logging.text_path must resolve to different files"
+                )
+        return LoadedConfig(config=config, path=path, base_dir=base_dir, raw=raw)
 
     def redacted_dict(self, config: AppConfig) -> dict[str, Any]:
         data = config.model_dump(mode="json")
@@ -731,3 +741,8 @@ class ConfigService:
         if isinstance(value, list):
             return [self._redact_mapping(item) for item in value]
         return value
+
+
+def _resolve_config_path(value: str, base_dir: Path) -> Path:
+    path = Path(value).expanduser()
+    return (path if path.is_absolute() else base_dir / path).resolve(strict=False)

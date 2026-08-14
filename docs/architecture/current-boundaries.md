@@ -104,7 +104,7 @@ The store owns persistence and transaction safety. The operator surface owns pro
 
 Allowed store responsibilities:
 
-- Schema migration and connection setup.
+- Current-schema bootstrap and connection setup.
 - Transactional inserts, updates, claims, and recovery primitives.
 - Small data access helpers used by routing, processing, dispatch, and maintenance services.
 

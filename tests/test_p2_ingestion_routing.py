@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,13 @@ from feishu_shadow_agent.config import (
     StorageConfig,
 )
 from feishu_shadow_agent.daemon import Daemon
-from feishu_shadow_agent.ingestion import IngestionService, MessageNormalizer
+from feishu_shadow_agent.ingestion import (
+    IngestionService,
+    MessageNormalizer,
+    ResourceQuotaGuard,
+    _filter_raws_in_window,
+    _raw_sort_key,
+)
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.routing import MessageRouter
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
@@ -312,6 +319,23 @@ def test_normalizer_marks_mentions_sender_roles_and_resources() -> None:
     }
     assert "RuntimeError: engine failed" in merge_forward.text
     assert merge_forward.resources == []
+
+
+def test_raw_batch_time_helpers_treat_naive_lark_timestamps_as_china_time() -> None:
+    raws = [
+        _message("om_11", create_time="2026-06-22 11:00"),
+        _message("om_10", create_time="2026-06-22 10:00"),
+    ]
+
+    ordered = sorted(raws, key=_raw_sort_key)
+    filtered = _filter_raws_in_window(
+        raws,
+        start="2026-06-22T02:30:00Z",
+        end="2026-06-22T03:30:00Z",
+    )
+
+    assert [raw["message_id"] for raw in ordered] == ["om_10", "om_11"]
+    assert [raw["message_id"] for raw in filtered] == ["om_11"]
 
 
 def test_group_ingest_drains_pages_sorts_dedupes_and_advances_checkpoint(
@@ -1549,8 +1573,20 @@ def test_resource_status_downloaded_and_bot_not_joined(
         default_chat_type="group",
         run_id="run_1",
     )
+    service.resources.process(
+        MessageNormalizer(owner_open_id="ou_owner").normalize(
+            _message(
+                "om_img",
+                mentions=[{"open_id": "ou_owner"}],
+                image_key="img_1",
+            ),
+            default_chat_type="group",
+        ),
+        run_id="run_2",
+    )
 
     assert fake.downloads[0]["file_key"] == "img_1"
+    assert len(fake.downloads) == 1
     assert fake.downloads[0]["output"].startswith("data/resources/om_img/image_")
     assert ".bin.part-" in fake.downloads[0]["output"]
     assert not Path(fake.downloads[0]["output"]).is_absolute()
@@ -1762,6 +1798,56 @@ def test_failed_resource_download_never_publishes_partial_file(
     assert resource["download_status"] == "failed"
     assert resource["path"] is None
     assert not list((tmp_path / "data/resources").rglob("*.*"))
+
+
+def test_resource_quota_guard_removes_only_stale_managed_partial_downloads(
+    tmp_path: Path,
+) -> None:
+    config = _config()
+    guard = ResourceQuotaGuard(config=config, base_dir=tmp_path)
+    guard.resource_root.mkdir(parents=True)
+    stale = guard.resource_root / f"image_deadbeef.bin.part-{'a' * 32}"
+    recent = guard.resource_root / f"file_deadbeef.bin.part-{'b' * 32}"
+    unrelated = guard.resource_root / "notes.part-old"
+    for path in (stale, recent, unrelated):
+        path.write_bytes(b"partial")
+    stale.touch()
+    recent.touch()
+    unrelated.touch()
+    stale_mtime = 1_000.0
+    stale.chmod(0o600)
+    os.utime(stale, (stale_mtime, stale_mtime))
+
+    deleted = guard.cleanup_stale_partial_downloads(now=2_000.0)
+
+    assert deleted == 1
+    assert not stale.exists()
+    assert recent.exists()
+    assert unrelated.exists()
+
+
+def test_resource_quota_counts_download_over_existing_final_as_replacement(
+    tmp_path: Path,
+) -> None:
+    config = _config(storage=StorageConfig(max_resource_dir_bytes=100))
+    guard = ResourceQuotaGuard(config=config, base_dir=tmp_path)
+    target_dir = guard.resource_root / "om_replace"
+    target_dir.mkdir(parents=True)
+    final_path = target_dir / "image_deadbeef.bin"
+    temporary_path = target_dir / f"image_deadbeef.bin.part-{'a' * 32}"
+    other_path = guard.resource_root / "other.bin"
+    final_path.write_bytes(b"o" * 60)
+    temporary_path.write_bytes(b"n" * 60)
+    other_path.write_bytes(b"x" * 30)
+
+    decision = guard.after_download(
+        temporary_path,
+        attempted_path="data/resources/om_replace/image_deadbeef.bin",
+        replacing_path=final_path,
+    )
+
+    assert decision.allow is True
+    assert temporary_path.exists()
 
 
 def test_resource_download_rejects_symlinked_parent(

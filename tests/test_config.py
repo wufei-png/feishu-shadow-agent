@@ -50,6 +50,25 @@ def test_load_minimal_config() -> None:
     assert loaded.config.reply_postprocess.humanizer_zh.enabled is False
 
 
+def test_logging_jsonl_and_text_paths_must_resolve_to_different_files(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+logging:
+  jsonl_path: logs/agent.log
+  text_path: ./logs/agent.log
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="must resolve to different files"):
+        ConfigService().load(config_path)
+
+
 def test_agent_backend_timeouts_default_to_unlimited(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("owner:\n  open_id: ou_owner\n", encoding="utf-8")

@@ -388,6 +388,52 @@ def test_retention_scrubs_jsonl_and_text_log_payloads_atomically(
                         "data": {"secret": "recent"},
                     }
                 ),
+                json.dumps(
+                    {
+                        "ts": OLD,
+                        "level": "info",
+                        "run_id": "run_active",
+                        "task_id": "t_active",
+                        "event": "active_event",
+                        "data": {"secret": "active"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": OLD,
+                        "level": "info",
+                        "run_id": "run_active_resource",
+                        "task_id": None,
+                        "event": "resource_downloaded",
+                        "data": {
+                            "message_id": "om_active",
+                            "secret": "active resource",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": OLD,
+                        "level": "info",
+                        "run_id": "run_active_action",
+                        "task_id": None,
+                        "event": "dispatch_action_completed",
+                        "data": {"action_id": 1, "secret": "active action"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": OLD,
+                        "level": "info",
+                        "run_id": "run_active_approval",
+                        "task_id": None,
+                        "event": "card_action_processed",
+                        "data": {
+                            "approval_id": "a_active",
+                            "secret": "active approval",
+                        },
+                    }
+                ),
                 "malformed secret line",
             ]
         )
@@ -397,12 +443,37 @@ def test_retention_scrubs_jsonl_and_text_log_payloads_atomically(
     text_path.write_text(
         f"{OLD} info old_event secret=old\n"
         f"{RECENT} info recent_event secret=recent\n"
+        f"{OLD} info active_event task_id=t_active secret=active\n"
+        f"{OLD} info resource_downloaded message_id=om_active secret=active-resource\n"
+        f"{OLD} info dispatch_action_completed action_id=1 secret=active-action\n"
+        f"{OLD} info card_action_processed approval_id=a_active secret=active-approval\n"
         "malformed secret line\n",
         encoding="utf-8",
     )
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    active_task_id = _insert_task(store, "t_active", "watching", "om_active")
+    with store.connect() as conn:
+        approval = conn.execute(
+            """
+            INSERT INTO approvals(
+              short_id, task_id, kind, status, payload_json, created_at
+            ) VALUES ('a_active', ?, 'send_reply', 'pending', '{}', ?)
+            """,
+            (active_task_id, OLD),
+        )
+        conn.execute(
+            """
+            INSERT INTO actions(
+              idempotency_key, task_id, approval_id, kind, status,
+              dry_run, execution_mode, payload_json, created_at, updated_at
+            ) VALUES ('action_active', ?, ?, 'send_reply', 'pending',
+                      0, 'production', '{}', ?, ?)
+            """,
+            (active_task_id, int(approval.lastrowid), OLD, OLD),
+        )
     logger = JSONLLogger(jsonl_path, text_path=text_path)
     service = RetentionService(
-        store=SQLiteStore(tmp_path / "agent.sqlite3"),
+        store=store,
         config=AppConfig(owner=OwnerConfig(open_id="ou_owner")),
         base_dir=tmp_path,
         logger=logger,
@@ -421,10 +492,18 @@ def test_retention_scrubs_jsonl_and_text_log_payloads_atomically(
     ]
     assert json_rows[0]["data"] == {"retention_pruned": True}
     assert json_rows[1]["data"] == {"secret": "recent"}
-    assert json_rows[2]["event"] == "retention_unparseable_line_pruned"
+    assert json_rows[2]["data"] == {"secret": "active"}
+    assert json_rows[3]["data"]["secret"] == "active resource"
+    assert json_rows[4]["data"]["secret"] == "active action"
+    assert json_rows[5]["data"]["secret"] == "active approval"
+    assert json_rows[6]["event"] == "retention_unparseable_line_pruned"
     text = text_path.read_text(encoding="utf-8")
     assert "secret=old" not in text
     assert "secret=recent" in text
+    assert "secret=active" in text
+    assert "secret=active-resource" in text
+    assert "secret=active-action" in text
+    assert "secret=active-approval" in text
     assert "malformed secret line" not in text
     assert jsonl_path.stat().st_mode & 0o777 == 0o600
     assert text_path.stat().st_mode & 0o777 == 0o600

@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Source code lives under `src/feishu_shadow_agent/`. Core daemon orchestration is in `daemon.py`, ingestion and normalization in `ingestion.py`, task routing in `routing.py`, Hermes integration in `hermes.py` and `processing.py`, Feishu CLI access in `feishu/lark_cli.py`, and SQLite persistence in `store/sqlite_store.py` plus `store/migrations/`. Tests live in `tests/` with fixtures in `tests/fixtures/`. Product specs and operational notes are under `docs/specs/`, `docs/plans/`, and `docs/testing.md`; generated cover assets live in `docs/assets/covers/`.
+Source code lives under `src/feishu_shadow_agent/`. Core daemon orchestration is in `daemon.py`, ingestion and normalization in `ingestion.py`, task routing in `routing.py`, Hermes integration in `hermes.py` and `processing.py`, Feishu CLI access in `feishu/lark_cli.py`, and SQLite persistence in `store/sqlite_store.py` plus the current baseline in `store/schema.sql`. Tests live in `tests/` with fixtures in `tests/fixtures/`. Product specs and operational notes are under `docs/specs/`, `docs/plans/`, and `docs/testing.md`; generated cover assets live in `docs/assets/covers/`.
 
 ## Build, Test, and Development Commands
 

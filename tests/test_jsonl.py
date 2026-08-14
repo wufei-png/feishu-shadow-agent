@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from feishu_shadow_agent.jsonl import JSONLLogger
 
 
@@ -89,3 +91,41 @@ def test_jsonl_logger_can_emit_human_readable_text_log(
     record = json.loads(jsonl_path.read_text(encoding="utf-8"))
     assert record["level"] == "error"
     assert record["event"] == "event_name"
+
+
+def test_existing_logger_reopens_files_after_another_instance_scrubs_them(
+    tmp_path: Path,
+) -> None:
+    jsonl_path = tmp_path / "agent.jsonl"
+    text_path = tmp_path / "agent.log"
+    writer = JSONLLogger(jsonl_path, text_path=text_path)
+    writer.info("before_scrub", data={"secret": "old"})
+    old_json = json.loads(jsonl_path.read_text(encoding="utf-8"))
+    old_json["ts"] = "2026-01-01T00:00:00Z"
+    jsonl_path.write_text(json.dumps(old_json) + "\n", encoding="utf-8")
+    text_path.write_text(
+        "2026-01-01T00:00:00Z info before_scrub secret=old\n",
+        encoding="utf-8",
+    )
+    scrubber = JSONLLogger(jsonl_path, text_path=text_path)
+
+    scrubber.scrub_before("2026-02-01T00:00:00Z", dry_run=False)
+    writer.info("after_scrub", data={"secret": "current"})
+
+    json_rows = [
+        json.loads(line) for line in jsonl_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["event"] for row in json_rows] == ["before_scrub", "after_scrub"]
+    assert json_rows[0]["data"] == {"retention_pruned": True}
+    text = text_path.read_text(encoding="utf-8")
+    assert "retention_pruned=true" in text
+    assert "after_scrub" in text
+
+
+def test_jsonl_logger_rejects_same_file_for_structured_and_text_logs(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "agent.log"
+
+    with pytest.raises(ValueError, match="must use different files"):
+        JSONLLogger(path, text_path=tmp_path / "." / "agent.log")

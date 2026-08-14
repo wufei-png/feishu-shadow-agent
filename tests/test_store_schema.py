@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from feishu_shadow_agent.store.sqlite_store import SQLiteStore
+from feishu_shadow_agent.store.sqlite_store import (
+    SQLITE_APPLICATION_ID,
+    SQLITE_SCHEMA_VERSION,
+    SQLiteStore,
+)
 from feishu_shadow_agent.types import HealthCheckResult, StateSchemaContract
 
 EXPECTED_TABLES = {
@@ -45,8 +49,28 @@ def test_schema_initialize_is_idempotent_and_creates_current_tables(
         rows = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'"
         ).fetchall()
+        application_id = conn.execute("PRAGMA application_id").fetchone()[0]
+        schema_version = conn.execute("PRAGMA user_version").fetchone()[0]
     assert EXPECTED_TABLES <= {row["name"] for row in rows}
     assert "schema_migrations" not in {row["name"] for row in rows}
+    assert application_id == SQLITE_APPLICATION_ID
+    assert schema_version == SQLITE_SCHEMA_VERSION
+
+
+def test_schema_initialize_rejects_unmarked_existing_database(tmp_path: Path) -> None:
+    path = tmp_path / "agent.sqlite3"
+    schema_path = Path(__file__).parents[1] / "src/feishu_shadow_agent/store/schema.sql"
+    unmarked_schema = "\n".join(
+        line
+        for line in schema_path.read_text(encoding="utf-8").splitlines()
+        if not line.startswith("PRAGMA application_id")
+        and not line.startswith("PRAGMA user_version")
+    )
+    with sqlite3.connect(path) as conn:
+        conn.executescript(unmarked_schema)
+
+    with pytest.raises(RuntimeError, match="current schema baseline"):
+        SQLiteStore(path).initialize()
 
 
 def test_unique_constraints_are_enforced(tmp_path: Path) -> None:
@@ -76,6 +100,18 @@ def test_sqlite_connections_apply_busy_timeout(tmp_path: Path) -> None:
         busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
 
     assert busy_timeout == 5000
+
+
+def test_initialized_store_reads_while_another_connection_holds_write_reservation(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.initialize()
+
+    with sqlite3.connect(store.path, timeout=0) as writer:
+        writer.execute("BEGIN IMMEDIATE")
+
+        assert store.get_checkpoint("missing") is None
 
 
 def test_checkpoint_and_run_health_roundtrip(tmp_path: Path) -> None:
@@ -252,7 +288,7 @@ def test_initialize_does_not_upgrade_an_incompatible_existing_table(
         conn.execute("CREATE TABLE tasks (id INTEGER PRIMARY KEY)")
 
     store = SQLiteStore(db_path)
-    with pytest.raises(sqlite3.OperationalError):
+    with pytest.raises(RuntimeError, match="current schema baseline"):
         store.initialize()
 
     with store.connect() as conn:

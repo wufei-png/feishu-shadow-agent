@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta
 from hashlib import sha256
@@ -36,6 +37,8 @@ from ..types import (
 )
 
 SQLITE_BUSY_TIMEOUT_MS = 5000
+SQLITE_APPLICATION_ID = 1179861319
+SQLITE_SCHEMA_VERSION = 1
 RUN_HEARTBEAT_STALE_AFTER_SECONDS = 300
 PRODUCT_POLICY_KEY = "reply_policy"
 LATEST_NON_OK_HEALTH_CHECKS_SQL = """
@@ -63,6 +66,8 @@ class SQLiteStore:
     def __init__(self, path: str | Path, *, clock: Callable[[], str] = utc_now_iso):
         self.path = Path(path)
         self.clock = lambda: normalize_instant(clock())
+        self._initialize_lock = threading.Lock()
+        self._initialized = False
 
     def connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -73,10 +78,36 @@ class SQLiteStore:
         return conn
 
     def initialize(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.connect() as conn:
-            schema = Path(__file__).with_name("schema.sql")
-            conn.executescript(schema.read_text(encoding="utf-8"))
+        if self._initialized:
+            return
+        with self._initialize_lock:
+            if self._initialized:
+                return
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.connect() as conn:
+                has_schema = bool(
+                    conn.execute(
+                        """
+                        SELECT 1
+                        FROM sqlite_master
+                        WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                        LIMIT 1
+                        """
+                    ).fetchone()
+                )
+                if has_schema and (
+                    conn.execute("PRAGMA application_id").fetchone()[0]
+                    != SQLITE_APPLICATION_ID
+                    or conn.execute("PRAGMA user_version").fetchone()[0]
+                    != SQLITE_SCHEMA_VERSION
+                ):
+                    raise RuntimeError(
+                        "SQLite database is not the current schema baseline; "
+                        "configure an empty database"
+                    )
+                schema = Path(__file__).with_name("schema.sql")
+                conn.executescript(schema.read_text(encoding="utf-8"))
+            self._initialized = True
 
     def health_probe(self) -> None:
         with self.connect() as conn:
@@ -1038,6 +1069,89 @@ class SQLiteStore:
                 )
                 counts[name] = int(cursor.rowcount)
         return counts
+
+    def list_effective_active_task_identifiers(self, *, now: str) -> set[str]:
+        """Return task identifiers whose content is still retention-protected."""
+        self.initialize()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, short_id
+                FROM tasks
+                WHERE status = 'watching'
+                  AND watch_until IS NOT NULL
+                  AND julianday(watch_until) > julianday(?)
+                """,
+                (now,),
+            ).fetchall()
+        return {
+            identifier
+            for row in rows
+            for identifier in (str(row["id"]), str(row["short_id"]))
+        }
+
+    def list_effective_active_message_ids(self, *, now: str) -> set[str]:
+        """Return messages linked to tasks whose content is retention-protected."""
+        self.initialize()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                WITH active_tasks AS (
+                  SELECT id, root_message_id
+                  FROM tasks
+                  WHERE status = 'watching'
+                    AND watch_until IS NOT NULL
+                    AND julianday(watch_until) > julianday(?)
+                )
+                SELECT root_message_id AS message_id
+                FROM active_tasks
+                WHERE root_message_id IS NOT NULL
+                UNION
+                SELECT tm.message_id
+                FROM task_messages tm
+                JOIN active_tasks t ON t.id = tm.task_id
+                """,
+                (now,),
+            ).fetchall()
+        return {str(row["message_id"]) for row in rows}
+
+    def list_effective_active_action_ids(self, *, now: str) -> set[str]:
+        """Return action identifiers linked to retention-protected tasks."""
+        self.initialize()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT a.id
+                FROM actions a
+                JOIN tasks t ON t.id = a.task_id
+                WHERE t.status = 'watching'
+                  AND t.watch_until IS NOT NULL
+                  AND julianday(t.watch_until) > julianday(?)
+                """,
+                (now,),
+            ).fetchall()
+        return {str(row["id"]) for row in rows}
+
+    def list_effective_active_approval_identifiers(self, *, now: str) -> set[str]:
+        """Return approval identifiers linked to retention-protected tasks."""
+        self.initialize()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT a.id, a.short_id
+                FROM approvals a
+                JOIN tasks t ON t.id = a.task_id
+                WHERE t.status = 'watching'
+                  AND t.watch_until IS NOT NULL
+                  AND julianday(t.watch_until) > julianday(?)
+                """,
+                (now,),
+            ).fetchall()
+        return {
+            identifier
+            for row in rows
+            for identifier in (str(row["id"]), str(row["short_id"]))
+        }
 
     def list_prunable_resources(self, *, cutoff: str, now: str) -> list[sqlite3.Row]:
         self.initialize()

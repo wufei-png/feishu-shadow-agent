@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -48,6 +49,7 @@ FILE_KEY_PATTERN = re.compile(
 AT_USER_ID_PATTERN = re.compile(
     r"<at\s+[^>]*user_id=[\"']([^\"']+)[\"'][^>]*>", re.IGNORECASE
 )
+PARTIAL_RESOURCE_PATTERN = re.compile(r"^.+\.bin\.part-[0-9a-f]{32}$")
 
 
 @dataclass(frozen=True)
@@ -223,6 +225,17 @@ class ResourceProcessor:
     def process(self, message: NormalizedMessage, *, run_id: str | None = None) -> None:
         if not message.resources:
             return
+        stale_parts_deleted = self.quota.cleanup_stale_partial_downloads()
+        if stale_parts_deleted:
+            self.logger.info(
+                "stale_partial_resources_deleted",
+                run_id=run_id,
+                data={"count": stale_parts_deleted},
+            )
+        existing_resources = {
+            (str(row["file_key"]), str(row["resource_type"])): row
+            for row in self.store.list_resources_for_messages([message.message_id])
+        }
         resource_policy = self.policy.can_download_resources(message)
         for resource in message.resources:
             if (
@@ -290,6 +303,25 @@ class ResourceProcessor:
             output = _resource_output(resource, self.config.storage.resource_dir)
             local_output = self.resource_base_dir / output
             stored_path = str(local_output) if self.store_absolute_paths else output
+            existing = existing_resources.get(
+                (resource.file_key, resource.resource_type)
+            )
+            if self._verified_existing_download(
+                existing,
+                local_output=local_output,
+                stored_path=stored_path,
+            ):
+                self.logger.debug(
+                    "resource_download_skipped",
+                    run_id=run_id,
+                    data={
+                        "message_id": resource.message_id,
+                        "file_key": resource.file_key,
+                        "resource_type": resource.resource_type,
+                        "reason": "already_downloaded",
+                    },
+                )
+                continue
             quota_preflight = self.quota.before_download()
             if not quota_preflight.allow:
                 self._record_quota_blocked(
@@ -387,7 +419,9 @@ class ResourceProcessor:
                     )
                     continue
                 quota_result = self.quota.after_download(
-                    temporary_path, attempted_path=output
+                    temporary_path,
+                    attempted_path=output,
+                    replacing_path=local_output,
                 )
                 if not quota_result.allow:
                     raw = {"result": result_json} | (quota_result.raw or {})
@@ -484,6 +518,28 @@ class ResourceProcessor:
                     },
                 )
 
+    def _verified_existing_download(
+        self,
+        existing: Any,
+        *,
+        local_output: Path,
+        stored_path: str,
+    ) -> bool:
+        if (
+            existing is None
+            or existing["download_status"] != "downloaded"
+            or existing["path"] != stored_path
+            or not existing["sha256"]
+        ):
+            return False
+        try:
+            self.quota.validate_download_target(local_output)
+        except ValueError:
+            return False
+        if local_output.is_symlink() or not local_output.is_file():
+            return False
+        return _sha256_if_exists(local_output) == existing["sha256"]
+
     def _record_quota_blocked(
         self,
         resource: ResourceRef,
@@ -549,8 +605,33 @@ class ResourceQuotaGuard:
             )
         return ResourceQuotaDecision(allow=True)
 
+    def cleanup_stale_partial_downloads(self, *, now: float | None = None) -> int:
+        if not self.resource_root.exists():
+            return 0
+        stale_after_seconds = max(300, self.config.lark_cli.timeout_seconds * 2)
+        stale_before = (time.time() if now is None else now) - stale_after_seconds
+        deleted = 0
+        for path in self.resource_root.rglob("*.part-*"):
+            try:
+                if (
+                    path.is_symlink()
+                    or not path.is_file()
+                    or PARTIAL_RESOURCE_PATTERN.fullmatch(path.name) is None
+                    or path.stat().st_mtime > stale_before
+                ):
+                    continue
+                path.unlink()
+            except OSError:
+                continue
+            deleted += 1
+        return deleted
+
     def after_download(
-        self, path: Path, *, attempted_path: str
+        self,
+        path: Path,
+        *,
+        attempted_path: str,
+        replacing_path: Path | None = None,
     ) -> ResourceQuotaDecision:
         size = path.stat().st_size
         if size > self.config.storage.max_resource_bytes:
@@ -568,7 +649,12 @@ class ResourceQuotaGuard:
                 status=ResourceStatus.TOO_LARGE.value,
                 raw=raw,
             )
-        usage = self.resource_dir_usage_bytes()
+        replaced_size = 0
+        if replacing_path is not None and replacing_path != path:
+            self.validate_download_target(replacing_path)
+            if not replacing_path.is_symlink() and replacing_path.is_file():
+                replaced_size = replacing_path.stat().st_size
+        usage = self.resource_dir_usage_bytes() - replaced_size
         if usage > self.config.storage.max_resource_dir_bytes:
             delete_error = self.delete_downloaded_file(path)
             raw = {
@@ -1356,7 +1442,7 @@ def _first_string(source: dict[str, Any], *keys: str) -> str | None:
 
 def _raw_sort_key(raw: dict[str, Any]) -> tuple[float, str]:
     sent_at = _first_string(raw, "create_time", "created_at", "sent_at", "timestamp")
-    parsed = parse_instant_or_none(sent_at)
+    parsed = _parse_dt_or_none(sent_at) if sent_at is not None else None
     return (
         parsed.timestamp() if parsed is not None else float("-inf"),
         _first_string(raw, "message_id", "messageId", "id") or "",
@@ -1414,7 +1500,11 @@ def _plus_minutes(value: str, minutes: int) -> str:
 
 
 def _parse_dt_or_none(value: str) -> datetime | None:
-    return parse_instant_or_none(value)
+    try:
+        normalized = normalize_message_sent_at(value)
+    except ValueError:
+        return None
+    return parse_instant_or_none(normalized)
 
 
 def _resource_output(resource: ResourceRef, resource_dir: str) -> str:

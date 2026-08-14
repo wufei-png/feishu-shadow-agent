@@ -5,6 +5,7 @@ from pathlib import Path
 from feishu_shadow_agent.config import AppConfig, LoadedConfig, OwnerConfig
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.maintenance_commands import MaintenanceCommandService
+from feishu_shadow_agent.retention import RetentionSummary
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import HealthCheckResult
 
@@ -103,6 +104,39 @@ def test_doctor_send_test_keeps_changed_when_owner_send_succeeds_before_critical
 
     assert result.status == "failed"
     assert result.command == "maintenance.doctor_send_test"
+    assert result.changed is True
+
+
+def test_retention_prune_reports_non_message_scrubbing_as_applied(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class FakeRetentionService:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def prune(self, **_: object) -> RetentionSummary:
+            return RetentionSummary(
+                dry_run=False,
+                raw_message_cutoff="2026-01-01T00:00:00Z",
+                resource_cutoff="2026-01-01T00:00:00Z",
+                feedback_content_cutoff="2026-01-01T00:00:00Z",
+                content_scrubbed={"approval_feedback": 1},
+                log_content_scrubbed={"jsonl": 1, "text": 0},
+            )
+
+    monkeypatch.setattr(
+        "feishu_shadow_agent.maintenance_commands.RetentionService",
+        FakeRetentionService,
+    )
+    service = _maintenance_service(
+        tmp_path,
+        monkeypatch,
+        results_by_send_test={},
+    )
+
+    result = service.retention_prune(dry_run=False, actor="local_console")
+
+    assert result.status == "applied"
     assert result.changed is True
 
 

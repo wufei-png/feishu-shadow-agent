@@ -100,6 +100,18 @@ class RetentionService:
             now, self.config.retention.feedback_content_days
         )
         now_iso = format_instant(now)
+        protected_log_task_ids = self.store.list_effective_active_task_identifiers(
+            now=now_iso
+        )
+        protected_log_message_ids = self.store.list_effective_active_message_ids(
+            now=now_iso
+        )
+        protected_log_action_ids = self.store.list_effective_active_action_ids(
+            now=now_iso
+        )
+        protected_log_approval_ids = (
+            self.store.list_effective_active_approval_identifiers(now=now_iso)
+        )
         content_candidates = self.store.scrub_sensitive_content(
             cutoff=raw_cutoff,
             feedback_cutoff=feedback_content_cutoff,
@@ -113,7 +125,14 @@ class RetentionService:
         log_content_candidates = (
             {}
             if self.logger is None
-            else self.logger.scrub_before(raw_cutoff, dry_run=True)
+            else self.logger.scrub_before(
+                raw_cutoff,
+                dry_run=True,
+                protected_task_ids=protected_log_task_ids,
+                protected_message_ids=protected_log_message_ids,
+                protected_action_ids=protected_log_action_ids,
+                protected_approval_ids=protected_log_approval_ids,
+            )
         )
         skipped: list[RetentionSkippedResource] = []
         deleted_resource_ids: list[int] = []
@@ -154,7 +173,12 @@ class RetentionService:
             expired = self.store.mark_resources_expired(expired_resource_ids)
             if self.logger is not None:
                 log_content_scrubbed = self.logger.scrub_before(
-                    raw_cutoff, dry_run=False
+                    raw_cutoff,
+                    dry_run=False,
+                    protected_task_ids=protected_log_task_ids,
+                    protected_message_ids=protected_log_message_ids,
+                    protected_action_ids=protected_log_action_ids,
+                    protected_approval_ids=protected_log_approval_ids,
                 )
 
         summary = RetentionSummary(
