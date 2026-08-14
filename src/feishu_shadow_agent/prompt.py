@@ -446,7 +446,7 @@ def _row_message_card(row: Any) -> dict[str, Any]:
 
 
 def _task_card(task: TaskRecord, *, message_count: int | None = None) -> dict[str, Any]:
-    card = {
+    card: dict[str, Any] = {
         "task_id": task.short_id,
         "status": task.status,
         "chat_id": task.chat_id,
