@@ -8,6 +8,7 @@ from typing import cast
 from pydantic import BaseModel
 
 from ..agent_backend import AgentBackend, AgentRunResult
+from ..prompt_identity import identify_prompt
 from .artifacts import text_sha256
 from .schemas import IngressJudgeOutput, SemanticJudgeOutput
 
@@ -78,6 +79,12 @@ class TracedAgentBackend:
             for prompt_type, prompts in self._prompts.items()
         }
 
+    def prompt_versions(self) -> dict[str, str]:
+        return {
+            prompt_type: identify_prompt(prompt_type, prompts[0]).version
+            for prompt_type, prompts in self._prompts.items()
+        }
+
     def task_session_ids(self) -> list[str]:
         return list(self._task_session_ids)
 
@@ -112,6 +119,16 @@ def merge_prompt_hashes(rows: list[dict[str, str]]) -> dict[str, str]:
     }
 
 
+def merge_prompt_versions(rows: list[dict[str, str]]) -> dict[str, str]:
+    prompt_types = sorted({key for row in rows for key in row})
+    return {
+        prompt_type: _merged_prompt_version(
+            [row[prompt_type] for row in rows if prompt_type in row]
+        )
+        for prompt_type in prompt_types
+    }
+
+
 def _ordered_prompt_hash(prompts: list[str]) -> str:
     if len(prompts) == 1:
         return text_sha256(prompts[0])
@@ -128,3 +145,10 @@ def _merged_trial_hash(hashes: list[str]) -> str:
     if hashes and all(value == hashes[0] for value in hashes):
         return hashes[0]
     return _ordered_hashes_hash(hashes)
+
+
+def _merged_prompt_version(versions: list[str]) -> str:
+    unique_versions = sorted(set(versions))
+    if len(unique_versions) == 1:
+        return unique_versions[0]
+    return "mixed:" + ",".join(unique_versions)

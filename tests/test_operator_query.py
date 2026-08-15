@@ -552,6 +552,10 @@ def test_task_detail_returns_related_read_models_and_effective_policy(
                 "2026-06-22T08:01:00+08:00",
             ),
         )
+        conn.execute(
+            "UPDATE agent_audits SET prompt_version = ?, prompt_hash = ?",
+            ("v1", "task-session-hash"),
+        )
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_root",
@@ -577,6 +581,8 @@ def test_task_detail_returns_related_read_models_and_effective_policy(
         "om_root"
     ]
     assert detail["agent_audits"][0]["request_type"] == "task_session"
+    assert detail["agent_audits"][0]["prompt_version"] == "v1"
+    assert detail["agent_audits"][0]["prompt_hash"] == "task-session-hash"
     assert detail["agent_audits"][0]["input_message_ids"] == ["om_root"]
     assert detail["agent_audits"][0]["response_summary"] == {
         "reply": "hello",
@@ -785,6 +791,11 @@ def test_message_detail_returns_processing_context_without_preview_side_effects(
                     f"2026-06-22T08:03:{index:02d}+08:00",
                 ),
             )
+        conn.execute(
+            "UPDATE agent_audits SET prompt_version = ?, prompt_hash = ? "
+            "WHERE request_type = 'router' AND input_message_ids_json = ?",
+            ("v1", "router-hash", json.dumps(["om_root"])),
+        )
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_root",
@@ -816,6 +827,8 @@ def test_message_detail_returns_processing_context_without_preview_side_effects(
     assert detail["resources"][0]["raw_summary"] == {"reason": "ok"}
     assert [audit["request_type"] for audit in detail["agent_audits"]] == ["router"]
     assert detail["agent_audits"][0]["task_id"] is None
+    assert detail["agent_audits"][0]["prompt_version"] == "v1"
+    assert detail["agent_audits"][0]["prompt_hash"] == "router-hash"
     assert detail["agent_audits"][0]["input_message_ids"] == ["om_root"]
     assert detail["agent_audits"][0]["response_summary"] == {
         "route": "new_task",

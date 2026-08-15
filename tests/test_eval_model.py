@@ -601,6 +601,10 @@ def test_full_chain_runs_setup_then_scores_target(tmp_path: Path) -> None:
     metadata = read_yaml(run_dir / "metadata.yaml")
     assert set(report["prompt_hashes"]) == {"task_session"}
     assert metadata["prompt_hashes"] == report["prompt_hashes"]
+    assert report["prompt_versions"] == {"task_session": "v1"}
+    assert metadata["prompt_versions"] == report["prompt_versions"]
+    assert trial["state"]["agent_audits"][0]["prompt_version"] == "v1"
+    assert trial["state"]["agent_audits"][0]["prompt_hash"]
 
 
 def test_full_chain_resource_uses_trial_local_fixture(tmp_path: Path) -> None:
@@ -655,6 +659,7 @@ def test_full_chain_resource_uses_trial_local_fixture(tmp_path: Path) -> None:
     assert not Path(resource["path"]).exists()
     assert first["state"] == second["state"]
     assert first["prompt_hashes"] == second["prompt_hashes"]
+    assert first["prompt_versions"] == second["prompt_versions"]
     assert not list(run_dir.rglob("*.sqlite3"))
 
 

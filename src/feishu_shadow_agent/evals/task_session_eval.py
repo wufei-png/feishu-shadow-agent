@@ -9,6 +9,7 @@ from ..context_access import ContextAccessBuilder
 from ..paths import resolve_agent_working_dir
 from ..processing import FORBIDDEN_MENTION_RE
 from ..prompt import InitialTaskSessionOutput
+from ..prompt_identity import identify_prompt
 from ..task_session_runner import TaskSessionRunner, TaskSessionRunResult
 from ..types import TaskRecord
 from .artifacts import EvalError
@@ -174,6 +175,7 @@ def _run_turn(
     response_data = (
         cast(dict[str, Any], json_data) if isinstance(json_data, dict) else None
     )
+    prompt_identity = identify_prompt("task_session", result.prompt)
     runtime.store.record_agent_audit(
         backend_provider=str(backend.provider),
         request_type="task_session",
@@ -188,6 +190,8 @@ def _run_turn(
         if result.result is None
         else result.result.error,
         latency_ms=None if result.result is None else result.result.latency_ms,
+        prompt_version=prompt_identity.version,
+        prompt_hash=prompt_identity.sha256,
         prompt={"text": result.prompt}
         if loaded.config.debug.save_full_agent_io
         else None,

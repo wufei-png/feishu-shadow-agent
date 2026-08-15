@@ -82,7 +82,8 @@ class MessageDetailQuery:
             ).fetchall()
             agent_audit_rows = conn.execute(
                 """
-                SELECT id, backend_provider, request_type, task_id, agent_session_id,
+                    SELECT id, backend_provider, request_type, prompt_version, prompt_hash,
+                           task_id, agent_session_id,
                        input_message_ids_json, input_resource_ids_json, response_json,
                        error, latency_ms, prompt_json, tool_permissions_profile, created_at
                 FROM agent_audits

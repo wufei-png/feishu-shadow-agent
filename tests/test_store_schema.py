@@ -73,6 +73,16 @@ def test_schema_initialize_rejects_unmarked_existing_database(tmp_path: Path) ->
         SQLiteStore(path).initialize()
 
 
+def test_schema_initialize_rejects_previous_version_database(tmp_path: Path) -> None:
+    path = tmp_path / "agent.sqlite3"
+    SQLiteStore(path).initialize()
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA user_version = 1")
+
+    with pytest.raises(RuntimeError, match="current schema baseline"):
+        SQLiteStore(path).initialize()
+
+
 def test_unique_constraints_are_enforced(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.initialize()
@@ -241,6 +251,8 @@ def test_baseline_schema_includes_current_columns(tmp_path: Path) -> None:
     assert "sender_name" in message_columns
     assert {
         "backend_provider",
+        "prompt_version",
+        "prompt_hash",
         "agent_session_id",
         "tool_permissions_profile",
     } <= audit_columns

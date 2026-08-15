@@ -20,7 +20,11 @@ from .artifacts import (
     write_metadata,
     write_yaml,
 )
-from .backend_trace import TracedAgentBackend, merge_prompt_hashes
+from .backend_trace import (
+    TracedAgentBackend,
+    merge_prompt_hashes,
+    merge_prompt_versions,
+)
 from .cases import LoadedEvalCase, load_eval_case, message_sent_at, scenario_message_ids
 from .dry_run import DryRunBackend
 from .full_chain_eval import run_full_chain_trial
@@ -119,6 +123,7 @@ class ModelEvalService:
         )
         results: list[dict[str, Any]] = []
         case_prompt_hashes: list[dict[str, str]] = []
+        case_prompt_versions: list[dict[str, str]] = []
         exit_code = 0
         for index, case_dir in enumerate(case_dirs, start=1):
             case_output = run_dir / "cases" / f"{index:03d}-{_safe_name(case_dir.name)}"
@@ -147,6 +152,10 @@ class ModelEvalService:
             write_yaml(case_output / "report.yaml", report)
             if isinstance(report.get("prompt_hashes"), dict):
                 case_prompt_hashes.append(cast(dict[str, str], report["prompt_hashes"]))
+            if isinstance(report.get("prompt_versions"), dict):
+                case_prompt_versions.append(
+                    cast(dict[str, str], report["prompt_versions"])
+                )
             results.append(
                 {
                     "case": str(case_dir),
@@ -168,7 +177,11 @@ class ModelEvalService:
             "passed": _batch_passed(results=results, exit_code=exit_code),
         }
         write_yaml(run_dir / "summary.yaml", summary)
-        _update_metadata_prompt_hashes(run_dir, merge_prompt_hashes(case_prompt_hashes))
+        _update_metadata_prompt_identity(
+            run_dir,
+            prompt_hashes=merge_prompt_hashes(case_prompt_hashes),
+            prompt_versions=merge_prompt_versions(case_prompt_versions),
+        )
         return run_dir, exit_code
 
     def _run_case_into(
@@ -251,6 +264,7 @@ class ModelEvalService:
             finally:
                 if traced_backend is not None:
                     trial["prompt_hashes"] = traced_backend.prompt_hashes()
+                    trial["prompt_versions"] = traced_backend.prompt_versions()
                     if self.loaded.config.debug.save_full_agent_io:
                         traced_backend.write_prompts(evidence_dir / "prompts")
                 if eval_type == "task-session":
@@ -310,6 +324,13 @@ class ModelEvalService:
                 if isinstance(row.get("prompt_hashes"), dict)
             ]
         )
+        prompt_versions = merge_prompt_versions(
+            [
+                row["prompt_versions"]
+                for row in trial_reports
+                if isinstance(row.get("prompt_versions"), dict)
+            ]
+        )
         report = {
             "schema_version": "eval_case_report_v1",
             "eval_type": eval_type,
@@ -325,6 +346,7 @@ class ModelEvalService:
             "run_agent_backend": run_backend,
             "backend_changed": case_backend != run_backend,
             "prompt_hashes": prompt_hashes,
+            "prompt_versions": prompt_versions,
             "trials": [
                 {
                     "trial": row["trial"],
@@ -336,7 +358,11 @@ class ModelEvalService:
             **aggregate,
         }
         if copy_run_config:
-            _update_metadata_prompt_hashes(run_dir, prompt_hashes)
+            _update_metadata_prompt_identity(
+                run_dir,
+                prompt_hashes=prompt_hashes,
+                prompt_versions=prompt_versions,
+            )
         return report, _exit_code(report)
 
 
@@ -523,12 +549,16 @@ def _safe_name(value: str) -> str:
     return cleaned[:100] or "case"
 
 
-def _update_metadata_prompt_hashes(
-    run_dir: Path, prompt_hashes: dict[str, str]
+def _update_metadata_prompt_identity(
+    run_dir: Path,
+    *,
+    prompt_hashes: dict[str, str],
+    prompt_versions: dict[str, str],
 ) -> None:
     path = run_dir / "metadata.yaml"
     if not path.is_file():
         return
     metadata = read_yaml(path)
     metadata["prompt_hashes"] = prompt_hashes
+    metadata["prompt_versions"] = prompt_versions
     write_yaml(path, metadata)

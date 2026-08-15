@@ -29,6 +29,7 @@ from .prompt import (
     TaskRouterOutput,
     build_router_prompt,
 )
+from .prompt_identity import identify_prompt
 from .reply_postprocess import ReplyPostprocessor, ReplyPostprocessResult
 from .resource_preflight import (
     ResourcePreflight,
@@ -598,6 +599,7 @@ class TaskProcessingService:
                 active_candidates=active_candidates, historical=historical
             ),
         )
+        router_prompt_identity = identify_prompt("router", prompt)
         outcome = self._call_agent_with_retries(
             lambda: self.agent_backend.task_router(prompt, cwd=self.agent_working_dir),
             run_id=run_id,
@@ -616,6 +618,8 @@ class TaskProcessingService:
             response=router_response,
             error=outcome.last_error if result is None else result.error,
             latency_ms=None if result is None else result.latency_ms,
+            prompt_version=router_prompt_identity.version,
+            prompt_hash=router_prompt_identity.sha256,
             prompt={"text": prompt} if self.config.debug.save_full_agent_io else None,
             tool_permissions_profile=self.config.tool_permissions,
         )
@@ -1091,6 +1095,9 @@ class TaskProcessingService:
             run_id=run_id,
             cwd=agent_working_dir,
         )
+        task_session_prompt_identity = identify_prompt(
+            "task_session", session_run.prompt
+        )
         outcome = session_run.outcome
         result = outcome.result
         session_response = _json_mapping(None if result is None else result.json_data)
@@ -1106,6 +1113,8 @@ class TaskProcessingService:
             response=session_response,
             error=outcome.last_error if result is None else result.error,
             latency_ms=None if result is None else result.latency_ms,
+            prompt_version=task_session_prompt_identity.version,
+            prompt_hash=task_session_prompt_identity.sha256,
             prompt={"text": session_run.prompt}
             if self.config.debug.save_full_agent_io
             else None,
@@ -1350,6 +1359,9 @@ class TaskProcessingService:
         if postprocess.audit is not None:
             audit_result = postprocess.audit["result"]
             audit_outcome = postprocess.audit["outcome"]
+            postprocess_prompt_identity = identify_prompt(
+                "reply_postprocess", postprocess.audit["prompt"]
+            )
             self.store.record_agent_audit(
                 backend_provider=self.agent_backend.provider,
                 request_type="reply_postprocess",
@@ -1369,6 +1381,8 @@ class TaskProcessingService:
                     else audit_result.error,
                 ),
                 latency_ms=None if audit_result is None else audit_result.latency_ms,
+                prompt_version=postprocess_prompt_identity.version,
+                prompt_hash=postprocess_prompt_identity.sha256,
                 prompt={"text": postprocess.audit["prompt"]}
                 if self.config.debug.save_full_agent_io
                 else None,

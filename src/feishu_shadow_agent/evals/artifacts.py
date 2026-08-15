@@ -164,6 +164,7 @@ def write_metadata(
     config_info: dict[str, Any],
     lark_cli_version: str | None = None,
     prompt_hashes: dict[str, str] | None = None,
+    prompt_versions: dict[str, str] | None = None,
 ) -> None:
     metadata = {
         "schema_version": "eval_metadata_v1",
@@ -176,6 +177,7 @@ def write_metadata(
         ),
         **config_info,
         "prompt_hashes": prompt_hashes or {},
+        "prompt_versions": prompt_versions or {},
         "agent_backend": model_metadata(loaded),
         "lark_cli_version": lark_cli_version,
         "contains_private_data": True,

@@ -39,7 +39,7 @@ from ..types import (
 
 SQLITE_BUSY_TIMEOUT_MS = 5000
 SQLITE_APPLICATION_ID = 1179861319
-SQLITE_SCHEMA_VERSION = 1
+SQLITE_SCHEMA_VERSION = 2
 RUN_HEARTBEAT_STALE_AFTER_SECONDS = 300
 PRODUCT_POLICY_KEY = "reply_policy"
 LATEST_NON_OK_HEALTH_CHECKS_SQL = """
@@ -2622,6 +2622,8 @@ class SQLiteStore:
         agent_session_id: str | None,
         input_message_ids: Iterable[str],
         input_resource_ids: Iterable[str],
+        prompt_version: str | None = None,
+        prompt_hash: str | None = None,
         response: dict[str, Any] | None = None,
         error: str | None = None,
         latency_ms: int | None = None,
@@ -2633,14 +2635,16 @@ class SQLiteStore:
             conn.execute(
                 """
                 INSERT INTO agent_audits(
-                  backend_provider, request_type, task_id, agent_session_id, input_message_ids_json,
+                  backend_provider, request_type, prompt_version, prompt_hash, task_id, agent_session_id, input_message_ids_json,
                   input_resource_ids_json, response_json, error, latency_ms, prompt_json,
                   tool_permissions_profile, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     backend_provider,
                     request_type,
+                    prompt_version,
+                    prompt_hash,
                     task_id,
                     agent_session_id,
                     json.dumps(

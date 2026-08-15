@@ -170,7 +170,8 @@ class TrialRuntime:
                 )
                 for row in conn.execute(
                     """
-                    SELECT backend_provider, request_type, task_id, agent_session_id,
+                    SELECT backend_provider, request_type, prompt_version, prompt_hash,
+                           task_id, agent_session_id,
                            input_message_ids_json, input_resource_ids_json,
                            response_json, error, tool_permissions_profile
                     FROM agent_audits ORDER BY id

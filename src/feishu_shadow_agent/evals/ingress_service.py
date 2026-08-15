@@ -170,6 +170,7 @@ class IngressEvalService:
             if traced_backend is not None:
                 metadata = read_yaml(run_dir / "metadata.yaml")
                 metadata["prompt_hashes"] = traced_backend.prompt_hashes()
+                metadata["prompt_versions"] = traced_backend.prompt_versions()
                 write_yaml(run_dir / "metadata.yaml", metadata)
                 if self.loaded.config.debug.save_full_agent_io:
                     traced_backend.write_prompts(run_dir / "prompts")

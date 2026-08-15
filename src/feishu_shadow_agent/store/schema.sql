@@ -1,7 +1,7 @@
 BEGIN IMMEDIATE;
 
 PRAGMA application_id = 1179861319;
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -226,6 +226,8 @@ CREATE TABLE IF NOT EXISTS agent_audits (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   backend_provider TEXT NOT NULL DEFAULT 'hermes',
   request_type TEXT NOT NULL,
+  prompt_version TEXT,
+  prompt_hash TEXT,
   task_id INTEGER,
   agent_session_id TEXT,
   input_message_ids_json TEXT NOT NULL DEFAULT '[]',

@@ -171,6 +171,8 @@ def _agent_audit_dto(row: sqlite3.Row) -> dict[str, Any]:
         "id": data["id"],
         "backend_provider": data["backend_provider"],
         "request_type": data["request_type"],
+        "prompt_version": data.get("prompt_version"),
+        "prompt_hash": data.get("prompt_hash"),
         "task_id": data["task_id"],
         "agent_session_id": data["agent_session_id"],
         "input_message_ids": _loads_json_list(data.get("input_message_ids_json")),
