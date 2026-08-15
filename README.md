@@ -15,7 +15,7 @@ Feishu Shadow Agent 是一个本机运行的飞书个人办公影子助手。它
 - Hermes、Codex 或 Claude Code CLI 负责任务路由和单任务会话处理
 - 可选官方飞书 Python SDK 长连接只接收 `card.action.trigger`；消息正文仍通过 user 身份轮询获取
 
-当前扩展边界见 [当前架构边界](docs/architecture/current-boundaries.md)；更多设计背景见 [MVP 设计](docs/specs/feishu-shadow-agent-mvp-design.md) 和 [流程图](docs/specs/feishu-shadow-agent-flows.md)。
+当前扩展边界、Agent prompt 契约和 Context Access 信任边界见 [当前架构边界](docs/architecture/current-boundaries.md)；更多设计背景见 [MVP 设计](docs/specs/feishu-shadow-agent-mvp-design.md) 和 [流程图](docs/specs/feishu-shadow-agent-flows.md)。
 
 ## 快速启动
 

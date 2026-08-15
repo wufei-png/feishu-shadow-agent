@@ -1014,7 +1014,9 @@ Agent 审计默认保存：
 - `agent_session_id`
 - `task_id`
 - `tool_permissions_profile`
-- request type: router/task_session
+- request type / persisted production prompt kind: router/task_session/reply_postprocess
+- `owner_style_refresh` remains in the prompt catalog but its current production refresh path does not write an `agent_audits` row
+- `prompt_version` and `prompt_hash` for the exact backend-neutral business prompt
 - input message IDs / resource IDs
 - endpoint/model metadata
 - response JSON
@@ -1027,7 +1029,7 @@ debug:
   save_full_agent_io: false
 ```
 
-不单独维护 prompt_version。通过 `runs.git_commit` 和 `runs.git_dirty` 回溯代码与 prompt 版本。
+`prompt_hash` 使用业务 prompt 的 UTF-8 SHA-256；Provider adapter 注入的 developer instruction、CLI flags 和 native skill wrapper 不混入该 hash。`prompt_version` 来自集中 prompt catalog；eval trial/run 的 metadata 另外保存各类 prompt 的 version/hash。`runs.git_commit` 和 `runs.git_dirty` 仍用于回溯代码状态，不能替代 prompt identity。
 
 git dirty 允许运行，但 doctor 和 runs 记录并提示。
 

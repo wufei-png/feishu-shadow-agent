@@ -180,6 +180,8 @@ Agent backend 的默认 `timeout_seconds: null` 允许模型完成配置的 turn
 
 `context_access` 不跟随写权限开放。只要本地 DB 存在，Router 会收到受 `query_scope` 限制的 bounded snapshot 和 read-only SQLite URI；Task Session 已由 Messages 提供会话正文，只收到 read-only URI、allowed tables 与当前 task scope，不再复制 snapshot。Hermes `safe` 没有本地 file/SQLite 工具：Router 使用 snapshot，Task Session 使用 Messages；具备只读 SQLite client 的 backend 才能直接查询 `read_only_uri`。
 
+这里的 read-only 是逻辑信任边界，不是物理沙箱：在 `full_access` 下，项目有意依赖模型遵循 prompt 中关于 URI、allowed tables 和 query scope 的约束；backend 仍可能拥有其他本地写工具。需要物理限制时使用 `read_only` 或外部 sandbox。该信任原则只适用于 Context Access，不适用于飞书对外写入；飞书写入仍由代码中的 schema、policy、approval、dry-run、幂等和 dispatch gate 保护。
+
 ### 非交互子进程下的重要语义
 
 daemon 通过 `subprocess` 以无 TTY 方式调用 `hermes chat -q -Q`。在此模式下，Hermes **不会**弹出交互式危险命令审批；对 `terminal()` 等路径，非 gateway 场景下通常会 **自动放行**（见 Hermes `tools/approval.py`）。

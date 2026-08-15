@@ -44,6 +44,17 @@ These rules belong in deterministic code and tests. Do not delegate them to prom
 - Approval provenance: dry-run approvals/actions never become production sends; production requires a fresh production approval.
 - Full-chain retention: after the configured content window, messages, inactive task state, approvals, actions, dispatch results, resources, agent audits, approval commands/feedback, processing errors, and log payloads are scrubbed in place. Minimal audit rows remain; only a watching task whose `watch_until` is still in the future delays scrubbing.
 
+## Agent Prompt Architecture And Trust Boundary
+
+Runtime prompt responsibilities are split by authority:
+
+- `agent_output_contract.py` owns the canonical Pydantic output models and runtime validation. Provider-native output schemas and the compact Task Session contract are derived from those models; no prompt wording is a second validation authority.
+- `prompt.py` owns backend-neutral runtime prompt builders and task-specific instructions. `prompt_instructions.py` owns shared evidence, data-boundary, escalation, skill, and Context Access rules.
+- Codex/Hermes/Claude adapter instructions remain provider-specific and are injected by the adapter layer. Evaluation judge prompts remain under `evals/` and are not added to production prompts.
+- The runtime prompt catalog is `router`, `task_session`, `reply_postprocess`, and `owner_style_refresh`; production `agent_audits` currently persist the first three, while owner-style refresh has no production audit row. Evaluation adds `ingress_judge`, `semantic_judge`, and the generic `structured_output` fallback. `agent_audits.request_type` is the persisted prompt kind. Audit rows and eval artifacts record the catalog version and SHA-256 of the exact backend-neutral business prompt, before provider-specific wrapper injection; full prompt text remains debug-only.
+
+Context Access has an intentionally narrow trust boundary. Its URI, allowed tables, and query scope are logically read-only, enforced primarily by the model-visible instructions and the model's instruction following. This remains true when `tool_permissions: full_access` gives the backend other local write-capable tools; it is not a filesystem or security sandbox. Stronger local isolation requires `read_only` or an external sandbox. Feishu writes are a separate code-owned boundary and remain protected by schema validation, policy, approval, dry-run, idempotency, and dispatch gates regardless of backend permissions.
+
 ## Agent-Owned Judgement
 
 These decisions can be handled by the agent, but only inside code-provided candidates and schemas:
