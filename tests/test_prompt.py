@@ -5,7 +5,18 @@ import json
 import pytest
 from pydantic import ValidationError
 
+from feishu_shadow_agent.decision import (
+    Answerability as CanonicalAnswerability,
+)
+from feishu_shadow_agent.decision import (
+    DecisionReason as CanonicalDecisionReason,
+)
+from feishu_shadow_agent.decision import (
+    validate_decision_reason as canonical_validate_decision_reason,
+)
 from feishu_shadow_agent.prompt import (
+    Answerability,
+    DecisionReason,
     FollowupTaskSessionOutput,
     InitialTaskSessionOutput,
     TaskRouterOutput,
@@ -14,8 +25,15 @@ from feishu_shadow_agent.prompt import (
     build_router_prompt,
     build_task_session_prompt,
     task_session_prompt_json_section,
+    validate_decision_reason,
 )
 from feishu_shadow_agent.types import NormalizedMessage, TaskCandidate, TaskRecord
+
+
+def test_prompt_preserves_legacy_decision_contract_exports() -> None:
+    assert Answerability is CanonicalAnswerability
+    assert DecisionReason is CanonicalDecisionReason
+    assert validate_decision_reason is canonical_validate_decision_reason
 
 
 def test_router_prompt_embeds_pydantic_output_schema() -> None:

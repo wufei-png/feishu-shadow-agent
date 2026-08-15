@@ -2,10 +2,20 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Literal
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel
 
+from .agent_output_contract import (
+    BaseTaskSessionOutput,
+    FollowupTaskSessionOutput,
+    InitialTaskSessionOutput,
+    OwnerStyleRefreshOutput,
+    ReplyPostprocessOutput,
+    StrictModel,
+    TaskRouterOutput,
+    task_session_output_contract,
+)
 from .decision import Answerability, DecisionReason, validate_decision_reason
 from .types import NormalizedMessage, TaskRecord
 
@@ -46,137 +56,6 @@ OWNER_STYLE_REFRESH_INSTRUCTION = (
 )
 
 
-class StrictModel(BaseModel):
-    # Agent output is an API boundary. Unknown fields are rejected so prompt
-    # drift becomes an auditable owner path instead of silently changing policy.
-    model_config = ConfigDict(extra="forbid")
-
-
-class TaskRouterOutput(StrictModel):
-    route: Literal["new_task", "attach_task", "reopen_task", "ignore", "ambiguous"] = (
-        Field(
-            description=(
-                "Routing decision for the incoming message: new_task creates a new task; attach_task appends to "
-                "one active candidate; reopen_task resumes one historical closed candidate; ignore means no task work "
-                "is needed; ambiguous asks the owner because the target "
-                "or intent is unclear."
-            )
-        )
-    )
-    target_task_id: str | None = Field(
-        default=None,
-        description=(
-            "Candidate task_id to act on. Required for attach_task and reopen_task; it must exactly "
-            "match a task_id from the provided candidates and must not be invented. Must be null for new_task, "
-            "ignore, and ambiguous."
-        ),
-    )
-    reason: str = Field(
-        default="", description="Short operator-readable reason for the decision."
-    )
-
-    @model_validator(mode="after")
-    def validate_target_for_route(self) -> TaskRouterOutput:
-        if self.route in {"attach_task", "reopen_task"}:
-            if self.target_task_id is None or not self.target_task_id.strip():
-                raise ValueError(f"{self.route} requires a non-empty target_task_id")
-        elif self.target_task_id is not None:
-            raise ValueError(f"{self.route} requires target_task_id to be null")
-        return self
-
-
-class BaseTaskSessionOutput(StrictModel):
-    answerability: Answerability = Field(
-        description=(
-            "Whether the daemon may reply automatically, needs owner review, or should not reply. Use auto_reply "
-            "only for sufficient evidence and low-risk replies; use needs_owner for uncertainty, commitments, "
-            "privacy-sensitive content, writes or permission expansion, or unclear human responsibility."
-        )
-    )
-    decision_reason: DecisionReason | None = Field(
-        description=(
-            "Primary reason for the answerability decision. Required for needs_owner and no_reply. "
-            "For auto_reply it may be null; when present it must be sufficient_evidence_low_risk."
-        )
-    )
-    proposed_reply: str = Field(
-        default="",
-        description=(
-            "Plain reply text without Feishu @ mentions. Required and non-empty for "
-            "auto_reply and needs_owner; must be empty for no_reply."
-        ),
-    )
-    reply_target_message_id: str | None = Field(
-        default=None,
-        description=(
-            "Message id to reply to. Required for auto_reply and needs_owner; must be null "
-            "for no_reply. When present, it must be one of the allowed reply targets in Reply Context."
-        ),
-    )
-    watch_action: Literal["keep_watching", "close"] = Field(
-        default="keep_watching",
-        description="Whether to keep watching this task or close it.",
-    )
-
-    @model_validator(mode="after")
-    def validate_reply_fields_for_answerability(self) -> BaseTaskSessionOutput:
-        validate_decision_reason(self.answerability, self.decision_reason)
-        proposed_reply = self.proposed_reply.strip()
-        reply_target = (
-            None
-            if self.reply_target_message_id is None
-            else self.reply_target_message_id.strip()
-        )
-        if self.answerability == "no_reply":
-            if proposed_reply:
-                raise ValueError("no_reply requires proposed_reply to be empty")
-            if self.reply_target_message_id is not None:
-                raise ValueError("no_reply requires reply_target_message_id to be null")
-            return self
-        if not proposed_reply:
-            raise ValueError(
-                f"{self.answerability} requires a non-empty proposed_reply"
-            )
-        if not reply_target:
-            raise ValueError(
-                f"{self.answerability} requires a non-empty reply_target_message_id"
-            )
-        return self
-
-
-class InitialTaskSessionOutput(BaseTaskSessionOutput):
-    task_label: str = Field(
-        description="Short task label for operator status views, based on the initial task."
-    )
-
-    @field_validator("task_label")
-    @classmethod
-    def trim_label(cls, value: str) -> str:
-        return " ".join(value.split())[:100]
-
-
-class FollowupTaskSessionOutput(BaseTaskSessionOutput):
-    pass
-
-
-class ReplyPostprocessOutput(StrictModel):
-    status: Literal["ok", "needs_owner"] = Field(
-        description="ok when final_reply is safe to use; otherwise needs_owner."
-    )
-    final_reply: str = Field(
-        default="", description="Postprocessed reply text without Feishu @ mentions."
-    )
-
-
-class OwnerStyleRefreshOutput(StrictModel):
-    status: Literal["ok", "failed"] = Field(
-        description="ok when profile_markdown is ready to write."
-    )
-    profile_markdown: str = Field(
-        default="", description="Generated Markdown owner style profile."
-    )
-
-
 def build_router_prompt(
     *,
     message: NormalizedMessage,
@@ -214,7 +93,7 @@ def build_task_session_prompt(
     reply_target_message_ids: list[str],
     messages: list[Any],
     resources: list[Any],
-    output_model: type[BaseModel] = InitialTaskSessionOutput,
+    output_model: type[BaseTaskSessionOutput] = InitialTaskSessionOutput,
     context_access: dict[str, Any] | None = None,
     chat_type: str | None = None,
 ) -> str:
@@ -239,7 +118,7 @@ def build_task_session_prompt(
         sections.append(_markdown_json_section("Context Access", context_access))
     sections.append(
         _markdown_text_section(
-            "Output Contract", _task_session_output_contract(output_model)
+            "Output Contract", task_session_output_contract(output_model)
         )
     )
     return "\n\n".join(sections)
@@ -350,31 +229,6 @@ def _reply_context_section(
     return "\n".join(lines)
 
 
-def _task_session_output_contract(output_model: type[BaseModel]) -> str:
-    lines = [
-        "Return exactly one final JSON object with no extra fields:",
-        "- `answerability`: `auto_reply` only for sufficient low-risk evidence; "
-        "`needs_owner` for uncertainty, commitments, privacy, writes or permission expansion, "
-        "or unclear human responsibility; `no_reply` when no external reply is needed.",
-        "- `decision_reason`: for `needs_owner`, one of `insufficient_evidence`, "
-        "`commitment_or_authorization`, `sensitive_or_high_impact`, `write_or_permission`, or "
-        "`human_judgment_required`; for `no_reply`, one of `no_response_needed`, "
-        "`already_resolved`, or `duplicate_or_stale`; for `auto_reply`, null or "
-        "`sufficient_evidence_low_risk`.",
-        "- `proposed_reply`: non-empty plain reply text for `auto_reply` or `needs_owner`; "
-        "empty for `no_reply`.",
-        "- `reply_target_message_id`: one allowed Reply Context target for `auto_reply` or "
-        "`needs_owner`; null for `no_reply`.",
-        "- `watch_action`: `keep_watching` or `close`.",
-    ]
-    if issubclass(output_model, InitialTaskSessionOutput):
-        lines.append("- `task_label`: a short label for the initial task.")
-    lines.append(
-        "Do not include Markdown, explanatory text, or @ mentions in the final response."
-    )
-    return "\n".join(lines)
-
-
 def _markdown_json_section(heading: str, value: Any) -> str:
     serialized = json.dumps(value, ensure_ascii=False, indent=2, default=str)
     fence = "`" * max(3, _longest_backtick_run(serialized) + 1)
@@ -426,6 +280,27 @@ def _message_card(message: NormalizedMessage) -> dict[str, Any]:
         "text": message.text,
         "direct_mention": message.direct_mention,
     }
+
+
+__all__ = [
+    "ROUTER_INSTRUCTION",
+    "TASK_SESSION_INSTRUCTION",
+    "Answerability",
+    "BaseTaskSessionOutput",
+    "DecisionReason",
+    "FollowupTaskSessionOutput",
+    "InitialTaskSessionOutput",
+    "OwnerStyleRefreshOutput",
+    "ReplyPostprocessOutput",
+    "StrictModel",
+    "TaskRouterOutput",
+    "build_owner_style_refresh_prompt",
+    "build_reply_postprocess_prompt",
+    "build_router_prompt",
+    "build_task_session_prompt",
+    "task_session_prompt_json_section",
+    "validate_decision_reason",
+]
 
 
 def _row_message_card(row: Any) -> dict[str, Any]:
