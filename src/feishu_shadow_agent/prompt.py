@@ -17,6 +17,7 @@ from .agent_output_contract import (
     task_session_output_contract,
 )
 from .decision import Answerability, DecisionReason, validate_decision_reason
+from .prompt_instructions import compose_agent_instruction
 from .types import NormalizedMessage, TaskRecord
 
 ROUTER_INSTRUCTION = (
@@ -65,7 +66,7 @@ def build_router_prompt(
     message_counts: dict[int, int] | None = None,
 ) -> str:
     payload = {
-        "instruction": ROUTER_INSTRUCTION,
+        "instruction": compose_agent_instruction(ROUTER_INSTRUCTION),
         "output_schema": _schema_hint(TaskRouterOutput),
         "message": _message_card(message),
         "active_candidates": [
@@ -99,7 +100,9 @@ def build_task_session_prompt(
 ) -> str:
     sections = [
         "# Task Session",
-        _markdown_text_section("Instructions", TASK_SESSION_INSTRUCTION),
+        _markdown_text_section(
+            "Instructions", compose_agent_instruction(TASK_SESSION_INSTRUCTION)
+        ),
         _reply_context_section(
             current_message_id=current_message_id,
             root_message_id=task.root_message_id,
@@ -165,7 +168,7 @@ def build_reply_postprocess_prompt(
             }
         )
     payload = {
-        "instruction": REPLY_POSTPROCESS_INSTRUCTION,
+        "instruction": compose_agent_instruction(REPLY_POSTPROCESS_INSTRUCTION),
         "guidance": guidance,
         "output_schema": _schema_hint(ReplyPostprocessOutput),
         "candidate_reply": original_reply,
@@ -180,7 +183,7 @@ def build_owner_style_refresh_prompt(
     samples: list[str],
 ) -> str:
     payload = {
-        "instruction": OWNER_STYLE_REFRESH_INSTRUCTION,
+        "instruction": compose_agent_instruction(OWNER_STYLE_REFRESH_INSTRUCTION),
         "output_schema": _schema_hint(OwnerStyleRefreshOutput),
         "profile_format": {
             "title": "Owner Reply Style Profile",
