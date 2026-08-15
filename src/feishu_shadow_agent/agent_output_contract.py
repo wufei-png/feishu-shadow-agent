@@ -53,7 +53,7 @@ class TaskRouterOutput(StrictModel):
 
 
 class BaseTaskSessionOutput(StrictModel):
-    _prompt_contract_rules: ClassVar[tuple[tuple[str, str], ...]] = (
+    prompt_contract_rules: ClassVar[tuple[tuple[str, str], ...]] = (
         (
             "answerability",
             "`auto_reply` only for sufficient low-risk evidence; `needs_owner` for uncertainty, commitments, "
@@ -173,7 +173,7 @@ def task_session_output_contract(output_model: type[BaseTaskSessionOutput]) -> s
 
     field_names = output_model.model_fields
     lines = ["Return exactly one final JSON object with no extra fields:"]
-    for field_name, rule in BaseTaskSessionOutput._prompt_contract_rules:
+    for field_name, rule in BaseTaskSessionOutput.prompt_contract_rules:
         if field_name == "decision_reason":
             rule = _decision_reason_contract()
         if field_name in field_names:
