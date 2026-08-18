@@ -8,6 +8,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from ..agent_backend import StructuredOutputBackend
+from ..prompt_instructions import prompt_text
 from .artifacts import EvalError, text_sha256
 from .schemas import SemanticJudgeOutput
 
@@ -71,15 +72,15 @@ def build_semantic_judge_prompt(
     visible_context: dict[str, Any],
 ) -> str:
     payload: dict[str, Any] = {
-        "instruction": (
-            "Compare the candidate answer with the reference answer using only factual "
-            "consistency and task completion. Ignore tone and wording differences. Report "
-            "only omissions, unsupported additions, contradictions, or overcommitments. "
-            "Use pass only when there is no substantive difference. Use partial when the "
-            "correct core remains usable but a substantive minor or major difference exists. "
-            "Use fail when the core answer is missing or contradicted, or any difference is "
-            "critical; a critical difference always requires fail. "
-            "Return strict JSON matching output_schema."
+        "instruction": prompt_text(
+            """
+            Compare the candidate answer with the reference answer using only factual consistency and task completion.
+            - Ignore tone and wording differences.
+            - Report only omissions, unsupported additions, contradictions, or overcommitments.
+            - Use pass only when there is no substantive difference.
+            - Use partial when the correct core remains usable but a substantive minor or major difference exists.
+            - Use fail when the core answer is missing or contradicted, or any difference is critical; a critical difference always requires fail.
+            """
         ),
         "reference_answer": reference_answer,
         "candidate_answer": candidate_answer,

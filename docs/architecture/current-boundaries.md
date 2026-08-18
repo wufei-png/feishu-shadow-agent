@@ -49,7 +49,7 @@ These rules belong in deterministic code and tests. Do not delegate them to prom
 Runtime prompt responsibilities are split by authority:
 
 - `agent_output_contract.py` owns the canonical Pydantic output models and runtime validation. Provider-native output schemas and the compact Task Session contract are derived from those models; no prompt wording is a second validation authority.
-- `prompt.py` owns backend-neutral runtime prompt builders and task-specific instructions. `prompt_instructions.py` owns shared evidence, data-boundary, escalation, skill, and Context Access rules.
+- `prompt.py` owns backend-neutral runtime prompt builders and task-specific instructions. `prompt_instructions.py` owns shared evidence, data-boundary, skill, and Context Access rules. Output-enum escalation stays in each kind's output contract or kind-specific instruction.
 - Codex/Hermes/Claude adapter instructions remain provider-specific and are injected by the adapter layer. Evaluation judge prompts remain under `evals/` and are not added to production prompts.
 - The runtime prompt catalog is `router`, `task_session`, `reply_postprocess`, and `owner_style_refresh`; production `agent_audits` currently persist the first three, while owner-style refresh has no production audit row. Evaluation adds `ingress_judge`, `semantic_judge`, and the generic `structured_output` fallback. `agent_audits.request_type` is the persisted prompt kind. Audit rows and eval artifacts record the catalog version and SHA-256 of the exact backend-neutral business prompt, before provider-specific wrapper injection; full prompt text remains debug-only.
 

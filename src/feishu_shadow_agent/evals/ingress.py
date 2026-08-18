@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from ..agent_backend import AgentBackend
 from ..ingestion import MessageNormalizer, normalize_message_sent_at
 from ..message_eligibility import MessageEligibilityPolicy
+from ..prompt_instructions import prompt_text
 from ..types import NormalizedMessage
 from .artifacts import EvalError, message_id_from_raw, text_excerpt
 from .schemas import IngressJudgeOutput, IngressReviewLabels
@@ -153,11 +154,13 @@ def run_ingress_judge(
 
 def build_ingress_judge_prompt(timeline: dict[str, Any]) -> str:
     payload = {
-        "instruction": (
-            "Independently judge whether every Feishu group message should be kept for owner task handling. "
-            "Use the full timeline for context; do not mechanically accept current_decision and do not assign "
-            "messages to tasks. Return exactly one label for every message. review_reason must be non-empty only "
-            "when expected_decision differs from current_decision. Return strict JSON matching output_schema."
+        "instruction": prompt_text(
+            """
+            Independently judge whether every Feishu group message should be kept for owner task handling.
+            - Use the full timeline for context; do not mechanically accept current_decision and do not assign messages to tasks.
+            - Return exactly one label for every message.
+            - review_reason must be non-empty only when expected_decision differs from current_decision.
+            """
         ),
         "output_schema": IngressJudgeOutput.model_json_schema(),
         "timeline": timeline,

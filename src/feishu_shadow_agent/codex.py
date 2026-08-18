@@ -33,14 +33,18 @@ from .prompt import (
     ReplyPostprocessOutput,
     TaskRouterOutput,
 )
+from .prompt_instructions import prompt_text
 
 # Test and embedding callers may provide a runner with a narrower timeout
 # contract; the subprocess adapter itself accepts the provider's optional value.
 CodexRunner = Callable[..., AgentRunResult]
 
-TASK_SESSION_DEVELOPER_INSTRUCTIONS = (
-    "This is a non-interactive structured Task Session. Use tools silently and do "
-    "not emit progress or commentary messages. Return exactly one final JSON object."
+TASK_SESSION_DEVELOPER_INSTRUCTIONS = prompt_text(
+    """
+    This is a non-interactive structured Task Session.
+    Use tools silently and do not emit progress or commentary messages.
+    Return exactly one final JSON object.
+    """
 )
 
 

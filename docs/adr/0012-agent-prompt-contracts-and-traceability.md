@@ -9,7 +9,7 @@ Runtime prompts need to serve several backends without making provider-specific 
 ## Decision
 
 1. Pydantic models in `agent_output_contract.py` are the canonical agent-output contract. Python validation is authoritative; provider-native schemas and the compact Task Session contract are derived aids.
-2. Backend-neutral runtime builders stay in `prompt.py`; shared rules stay in `prompt_instructions.py`; provider adapter instructions stay in Codex/Hermes/Claude adapters; evaluation judge prompts stay under `evals/`.
+2. Backend-neutral runtime builders stay in `prompt.py`; shared evidence, data-boundary, skill, and Context Access rules stay in `prompt_instructions.py`; output-enum escalation stays in each kind's output contract or kind-specific instruction; provider adapter instructions stay in Codex/Hermes/Claude adapters; evaluation judge prompts stay under `evals/`.
 3. The prompt catalog identifies each runtime/evaluation prompt kind and version. The exact backend-neutral business prompt is hashed with UTF-8 SHA-256. Production audit rows store kind, version, and hash without storing full prompt text by default; eval artifacts store versions alongside existing hashes.
 4. Context Access is a logically read-only, bounded interface. In `full_access`, its read-only behavior intentionally relies on the model following the prompt instructions; this is not a physical sandbox. Feishu external writes remain code-owned and are protected independently by policy, approval, dry-run, idempotency, and dispatch gates.
 
