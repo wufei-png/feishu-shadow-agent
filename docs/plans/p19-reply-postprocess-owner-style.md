@@ -333,11 +333,14 @@ Store behavior:
 Extend `AgentBackend` with semantic methods:
 
 ```python
-def reply_postprocess(prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
-    ...
+def reply_postprocess(
+    prompt: str, *, cwd: str | Path | None = None
+) -> AgentRunResult: ...
 
-def owner_style_refresh(prompt: str, *, cwd: str | Path | None = None) -> AgentRunResult:
-    ...
+
+def owner_style_refresh(
+    prompt: str, *, cwd: str | Path | None = None
+) -> AgentRunResult: ...
 ```
 
 `HermesCliClient` should still use `hermes chat -q -Q`, but these methods own:
