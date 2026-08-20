@@ -15,7 +15,20 @@ def test_identify_prompt_uses_catalog_version_and_sha256() -> None:
 
     assert identity.kind == "router"
     assert identity.version == PROMPT_VERSIONS["router"]
+    assert identity.version == "v2"
     assert identity.sha256 == hashlib.sha256(b"prompt body").hexdigest()
+
+
+def test_prompt_catalog_bumps_rewritten_kinds_to_v2() -> None:
+    assert PROMPT_VERSIONS == {
+        "router": "v2",
+        "task_session": "v2",
+        "reply_postprocess": "v2",
+        "owner_style_refresh": "v2",
+        "ingress_judge": "v2",
+        "semantic_judge": "v2",
+        "structured_output": "v1",
+    }
 
 
 def test_identify_prompt_rejects_unregistered_prompt_kind() -> None:

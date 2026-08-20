@@ -139,8 +139,18 @@ def test_router_prompt_embeds_pydantic_output_schema() -> None:
     target_description = prompt["output_schema"]["properties"]["target_task_id"][
         "description"
     ]
-    assert "attach_task appends to one active candidate" in route_description
+    assert "Choose exactly one route" in route_description
+    assert "attach_task only when it clearly continues one active candidate" in (
+        route_description
+    )
+    assert "reopen_task only when it clearly resumes one historical closed candidate" in (
+        route_description
+    )
+    assert "ignore for self/owner/admin/noise" in route_description
+    assert "ambiguous when evidence is weak" in route_description
     assert "Must be null for new_task" in target_description
+    assert "Choose exactly one route" not in prompt["instruction"]
+    assert "attach_task only when" not in prompt["instruction"]
     assert "schema" not in prompt
     assert prompt["active_candidates"][0]["matched_by"] == "thread"
     assert prompt["active_candidates"][0]["message_count"] == 3

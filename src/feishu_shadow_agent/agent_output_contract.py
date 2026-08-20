@@ -24,9 +24,12 @@ class TaskRouterOutput(StrictModel):
     route: Literal["new_task", "attach_task", "reopen_task", "ignore", "ambiguous"] = (
         Field(
             description=(
-                "Routing decision for the incoming message: new_task creates a new task; attach_task appends to "
-                "one active candidate; reopen_task resumes one historical closed candidate; ignore means no task work "
-                "is needed; ambiguous asks the owner because the target or intent is unclear."
+                "Choose exactly one route for the incoming message. "
+                "new_task when the message starts an independent task. "
+                "attach_task only when it clearly continues one active candidate. "
+                "reopen_task only when it clearly resumes one historical closed candidate. "
+                "ignore for self/owner/admin/noise messages that should not create work. "
+                "ambiguous when evidence is weak, multiple candidates fit, or the target is unclear."
             )
         )
     )

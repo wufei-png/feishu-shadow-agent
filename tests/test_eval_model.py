@@ -601,9 +601,9 @@ def test_full_chain_runs_setup_then_scores_target(tmp_path: Path) -> None:
     metadata = read_yaml(run_dir / "metadata.yaml")
     assert set(report["prompt_hashes"]) == {"task_session"}
     assert metadata["prompt_hashes"] == report["prompt_hashes"]
-    assert report["prompt_versions"] == {"task_session": "v1"}
+    assert report["prompt_versions"] == {"task_session": "v2"}
     assert metadata["prompt_versions"] == report["prompt_versions"]
-    assert trial["state"]["agent_audits"][0]["prompt_version"] == "v1"
+    assert trial["state"]["agent_audits"][0]["prompt_version"] == "v2"
     assert trial["state"]["agent_audits"][0]["prompt_hash"]
 
 
