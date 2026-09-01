@@ -24,9 +24,10 @@ Use this order when documents disagree:
 2. `CONTEXT.md` for product language
 3. `docs/adr/*.md` for accepted architectural decisions
 4. `docs/specs/*.md` for current product and API contracts
-5. `docs/plans/*.md` for historical phased implementation context
+5. `docs/plans/post-mvp-backlog.md` for the current active/deferred post-MVP index
+6. other `docs/plans/*.md` files for historical phased implementation context
 
-Plans can still be useful for rationale, acceptance commands, and old edge cases, but they are not the live contract once the corresponding phase has landed.
+Other phase plans can still be useful for rationale, acceptance commands, and old edge cases, but they are not the live contract once the corresponding phase has landed. The backlog is only an index for current work and cannot override this boundary.
 
 ## Code-Owned Rules
 

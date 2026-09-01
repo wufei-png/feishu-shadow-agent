@@ -1164,15 +1164,4 @@ prepare_send
 
 ## 26. 后续迭代
 
-明确后续但不进 MVP：
-
-- macOS LaunchAgent / Windows service / Ubuntu systemd。
-- 本地 Web UI / TUI 审批台。历史说明：本地 Operator Console 已由后续 P15-P18 落地；远程 Web UI、多用户 UI 和桌面二进制仍不在当前范围。
-- 飞书交互卡片。
-- 配置 UI 和 `ApprovalRequest(type=config_change)`。
-- `/reply` 补充背景。
-- `/retry` 重试资源下载或任务处理。
-- per-user policy UI。
-- SDK 接入和自管 OAuth token。
-- 向量检索历史任务。
-- 更细资源下载策略和文件类型分析。
+本节是 MVP 基线的历史记录；当前未完成的 post-MVP 工作统一见 [Post-MVP Backlog](../plans/post-mvp-backlog.md)，本节不重复列出。
