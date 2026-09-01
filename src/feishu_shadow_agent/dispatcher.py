@@ -510,6 +510,9 @@ class Dispatcher:
         else:
             result["readback"] = readback["result"]
             result["warnings"].extend(readback["warnings"])
+        # A successful send with a returned message ID makes the action terminal.
+        # Readback grades evidence and records warnings, but a missing or
+        # incomplete readback must not trigger an automatic resend.
         readback_ok = _readback_attempt_verified(
             action, readback=result["readback"], warnings=result["warnings"]
         )

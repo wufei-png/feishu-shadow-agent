@@ -96,6 +96,12 @@ class TaskSessionRunner:
         task_message_ids: list[str],
         prompt_message_ids: list[str],
     ) -> list[str]:
+        """Add a bounded contiguous tail of resource-only P2P context.
+
+        A resumed session already carries its prior conversation; this narrow
+        addition includes only adjacent messages whose text is an unavailable
+        resource placeholder, stopping at substantive or incomplete context.
+        """
         try:
             current_index = task_message_ids.index(current_message_id)
         except ValueError:

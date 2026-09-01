@@ -57,6 +57,16 @@ class ResourcePreflight:
         prompt_message_ids: list[str],
         run_id: str,
     ) -> ResourcePreflightResult:
+        """Classify prompt resources before a Task Session may run.
+
+        Missing current-message records and ordinary download failures are
+        retryable when a retry callback is configured; policy, bot-visibility,
+        size, and quota statuses stop without retry. A false result normally
+        gates the Task Session agent. For an unavailable P2P resource,
+        processing still calls the agent when the message also contains
+        substantive text so it can assess and escalate the request; resource-
+        only messages remain watch-only.
+        """
         resources = self.store.list_resources_for_messages(prompt_message_ids)
         state = resource_preflight_state(
             resources, message=message, prompt_message_ids=prompt_message_ids

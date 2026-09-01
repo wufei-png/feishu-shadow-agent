@@ -28,6 +28,12 @@ class ContextAccessBuilder:
         active_candidates: list[Any],
         historical: list[TaskRecord],
     ) -> dict[str, Any] | None:
+        """Describe bounded read-only access for Router verification.
+
+        The Router receives candidate cards plus a recent message snapshot;
+        the declared URI, table list, and query scope remain prompt-visible
+        constraints rather than permission to write or broaden the lookup.
+        """
         context = self.base_context_access()
         if context is None:
             return None
@@ -62,6 +68,11 @@ class ContextAccessBuilder:
         *,
         task: TaskRecord,
     ) -> dict[str, Any] | None:
+        """Describe task-scoped, logically read-only access for a Task Session.
+
+        Selected messages are already included in the prompt, so this context
+        carries only the task query scope and omits a duplicate snapshot.
+        """
         context = self.base_context_access()
         if context is None:
             return None

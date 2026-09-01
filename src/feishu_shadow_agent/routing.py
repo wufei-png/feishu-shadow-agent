@@ -90,6 +90,13 @@ class MessageRouter:
         retry_incomplete_processing: bool = False,
         agent_working_dir: str | None = None,
     ) -> RoutingResult:
+        """Resolve audited deterministic routes before returning model-router placeholders.
+
+        Duplicate/readback, self-message, owner, mention, reply/thread, and
+        burst cases are resolved locally. Unresolved trigger messages either
+        create a task or return an audited placeholder for the production
+        Task Router.
+        """
         if not inserted and self.store.message_has_routing_audit(message.message_id):
             if retry_incomplete_processing:
                 # A duplicate route audit means ingestion was durable, but Hermes
