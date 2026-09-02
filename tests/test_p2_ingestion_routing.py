@@ -1345,7 +1345,7 @@ def test_closed_recall_records_router_placeholder(tmp_path: Path) -> None:
         run_id="run_1",
     )
     assert created is not None and created.task is not None
-    store.close_task_for_owner_takeover(created.task.id)
+    store.update_task_after_agent(task_id=created.task.id, status="closed")
 
     recalled = service.process_raw_message(
         _message("om_2", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
@@ -1359,6 +1359,151 @@ def test_closed_recall_records_router_placeholder(tmp_path: Path) -> None:
     assert recalled.decision.reason == "closed_recall_router_placeholder"
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 1
+        audit = conn.execute(
+            """
+            SELECT route, route_reason, candidates_count, matched_by,
+                   target_task_id, router_called
+            FROM routing_audits
+            WHERE message_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            ("om_2",),
+        ).fetchone()
+    assert tuple(audit) == (
+        "ambiguous",
+        "closed_recall_router_placeholder",
+        1,
+        None,
+        None,
+        0,
+    )
+
+
+def test_closed_recall_multiple_candidates_remains_ambiguous_with_audit(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    for message_id in ("om_old_1", "om_old_2"):
+        message = service.normalizer.normalize(
+            _message(
+                message_id,
+                chat_id="ou_chat",
+                chat_type="p2p",
+                sender_id=message_id,
+                text="共同故障",
+            ),
+            default_chat_type="p2p",
+        )
+        store.upsert_message(message)
+        task = store.create_task_for_message(
+            message,
+            watch_until="2026-06-22T02:10:00+00:00",
+        )
+        store.update_task_after_agent(task_id=task.id, status="closed")
+
+    recalled = service.process_raw_message(
+        _message(
+            "om_conflict",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_new",
+            text="共同故障",
+        ),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    assert recalled is not None
+    assert recalled.decision.route == "ambiguous"
+    assert recalled.decision.reason == "closed_recall_router_placeholder"
+    with store.connect() as conn:
+        task_count = conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"]
+        audit = conn.execute(
+            """
+            SELECT route, route_reason, candidates_count, matched_by,
+                   target_task_id, router_called
+            FROM routing_audits
+            WHERE message_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            ("om_conflict",),
+        ).fetchone()
+    assert task_count == 2
+    assert tuple(audit) == (
+        "ambiguous",
+        "closed_recall_router_placeholder",
+        2,
+        None,
+        None,
+        0,
+    )
+
+
+@pytest.mark.parametrize("close_mode", ["operator", "takeover"])
+def test_owner_controlled_task_is_excluded_from_closed_recall(
+    tmp_path: Path, close_mode: str
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    if close_mode == "operator":
+        store.close_task_by_operator(created.task.id)
+    else:
+        store.close_task_for_owner_takeover(created.task.id)
+
+    routed = service.process_raw_message(
+        _message("om_2", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    assert routed is not None and routed.task is not None
+    assert routed.decision.route == "new_task"
+    with store.connect() as conn:
+        task_count = conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"]
+        audit = conn.execute(
+            """
+            SELECT route, route_reason, candidates_count, matched_by,
+                   target_task_id, router_called
+            FROM routing_audits
+            WHERE message_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            ("om_2",),
+        ).fetchone()
+    assert task_count == 2
+    assert tuple(audit) == (
+        "new_task",
+        "new_trigger",
+        0,
+        "new_trigger",
+        routed.task.id,
+        0,
+    )
 
 
 def test_lifecycle_watch_minutes_controls_new_task_watch_until(tmp_path: Path) -> None:
@@ -1433,7 +1578,7 @@ def test_lifecycle_closed_recall_days_bounds_historical_candidates(
         run_id="run_1",
     )
     assert created is not None and created.task is not None
-    store.close_task_for_owner_takeover(created.task.id)
+    store.update_task_after_agent(task_id=created.task.id, status="closed")
     with store.connect() as conn:
         conn.execute(
             "UPDATE tasks SET updated_at = ? WHERE id = ?",
@@ -1475,7 +1620,7 @@ def test_unrelated_closed_task_does_not_block_new_group_task(tmp_path: Path) -> 
         run_id="run_1",
     )
     assert old_task is not None and old_task.task is not None
-    store.close_task_for_owner_takeover(old_task.task.id)
+    store.update_task_after_agent(task_id=old_task.task.id, status="closed")
 
     new_task = service.process_raw_message(
         _message(
@@ -1490,10 +1635,29 @@ def test_unrelated_closed_task_does_not_block_new_group_task(tmp_path: Path) -> 
         run_id="run_1",
     )
 
-    assert new_task is not None
+    assert new_task is not None and new_task.task is not None
     assert new_task.decision.route == "new_task"
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 2
+        audit = conn.execute(
+            """
+            SELECT route, route_reason, candidates_count, matched_by,
+                   target_task_id, router_called
+            FROM routing_audits
+            WHERE message_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            ("om_new",),
+        ).fetchone()
+    assert tuple(audit) == (
+        "new_task",
+        "new_trigger",
+        0,
+        "new_trigger",
+        new_task.task.id,
+        0,
+    )
 
 
 def test_reply_to_closed_task_enters_recall_placeholder(tmp_path: Path) -> None:
@@ -1518,7 +1682,27 @@ def test_reply_to_closed_task_enters_recall_placeholder(tmp_path: Path) -> None:
         run_id="run_1",
     )
     assert old_task is not None and old_task.task is not None
-    store.close_task_for_owner_takeover(old_task.task.id)
+    store.insert_action_for_test(
+        idempotency_key="reply_sent_for_recall",
+        task_id=old_task.task.id,
+        status="sent",
+        result={"sent_message_id": "om_agent_reply"},
+    )
+    agent_reply = service.process_raw_message(
+        _message(
+            "om_agent_reply",
+            chat_id="oc_1",
+            sender_id="ou_owner",
+            reply_to="om_old",
+            text="agent reply",
+        ),
+        source="active_watch",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    assert agent_reply is not None
+    assert agent_reply.decision.reason == "self_message"
+    store.update_task_after_agent(task_id=old_task.task.id, status="closed")
 
     recalled = service.process_raw_message(
         _message(
@@ -1527,7 +1711,7 @@ def test_reply_to_closed_task_enters_recall_placeholder(tmp_path: Path) -> None:
             sender_id="ou_b",
             text="我这边也是这个问题",
             mentions=[{"open_id": "ou_owner"}],
-            reply_to="om_old",
+            reply_to="om_agent_reply",
         ),
         source="group_at_me",
         default_chat_type="group",
@@ -1539,6 +1723,34 @@ def test_reply_to_closed_task_enters_recall_placeholder(tmp_path: Path) -> None:
     assert recalled.decision.reason == "closed_recall_router_placeholder"
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 1
+        task_message = conn.execute(
+            """
+            SELECT role
+            FROM task_messages
+            WHERE task_id = ? AND message_id = ?
+            """,
+            (old_task.task.id, "om_agent_reply"),
+        ).fetchone()
+        audit = conn.execute(
+            """
+            SELECT route, route_reason, candidates_count, matched_by,
+                   target_task_id, router_called
+            FROM routing_audits
+            WHERE message_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            ("om_reply",),
+        ).fetchone()
+    assert task_message["role"] == "agent_reply"
+    assert tuple(audit) == (
+        "ambiguous",
+        "closed_recall_router_placeholder",
+        1,
+        None,
+        None,
+        0,
+    )
 
 
 def test_resource_status_downloaded_and_bot_not_joined(

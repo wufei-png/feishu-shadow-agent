@@ -12,7 +12,7 @@
 | P1 | 高流量群的 ingest 上限、lag 和恢复指标 | 群聊分析已有部分记录 | 明确每 tick 的消息上限、分页超时/积压策略和可观测指标；不得以静默截断代替恢复。当前仅有完整分页 drain 和 checkpoint 安全，不代表已解决高流量成本。 |
 | P1 | 消息生命周期语义 | 群聊分析已有记录 | 定义撤回、编辑、reaction、合并转发和跨 chat 引用在 normalizer、上下文和 routing 中的行为，并补 focused tests。 |
 | P1 | incidental mention 与 bot membership 自愈 | 群聊分析已有记录 | 区分 owner 作为发言者时对他人的 incidental mention；补充 bot 离群/下载失败后的探测、提示和人工策略边界。 |
-| P1 | closed recall 的确定性 shortcut | 群聊分析已有记录；当前仍有 recall router placeholder | 评估 reply-to 旧 agent 消息是否可直接 reopen；在不牺牲歧义安全的前提下减少一次 Router 调用，并覆盖历史候选冲突。 |
+| P1 | closed recall 的确定性 shortcut | 群聊分析已有记录；当前仍有 recall router placeholder | 本轮已收敛为候选安全边界：仅 `closed` 进入历史召回；各类客观证据仅用于构造候选，唯一候选不绕过 Router，继续由 Router 决定 `reopen_task` / `new_task` / `ignore` / `ambiguous`；已覆盖唯一结构命中、唯一弱命中、多候选冲突、无候选及审计回归。若未来仍需减少 Router 调用，需基于真实成本或误归属证据另行决策。 |
 | P1 | TaskProcessingService 进一步拆分 | 本次依据代码规模推断 | processing.py 当前约 1800 行。先按行为边界提取小模块并保持现有 contract/test 不变，再决定是否继续拆分；没有明确收益前不做纯重排。 |
 | P2 | 长 Task Session 的 context budget 或 running summary | 群聊分析已有记录 | 先用真实长对话失败证据确定窗口、summary owner 和恢复顺序，再决定 schema、prompt 或 session 策略；不得把 metadata 直接扩进生产 prompt。 |
 | P2 | activation mode 与多 active task 优先级 | 群聊分析已有记录 | 为 mention-only、thread follow-up、keyword 等入口定义明确优先级、冲突和 per-chat 配置，再实现。 |

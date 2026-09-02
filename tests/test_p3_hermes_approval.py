@@ -2296,7 +2296,7 @@ def test_task_router_can_reopen_historical_closed_recall_candidate(
         run_id="run_1",
     )
     assert created is not None and created.task is not None
-    store.close_task_for_owner_takeover(created.task.id)
+    store.update_task_after_agent(task_id=created.task.id, status="closed")
 
     hermes.router_outputs.append(
         {
@@ -2362,7 +2362,7 @@ def test_task_router_cannot_attach_historical_closed_recall_candidate(
         run_id="run_1",
     )
     assert created is not None and created.task is not None
-    store.close_task_for_owner_takeover(created.task.id)
+    store.update_task_after_agent(task_id=created.task.id, status="closed")
 
     hermes.router_outputs.append(
         {
@@ -2403,7 +2403,7 @@ def test_task_router_cannot_attach_historical_closed_recall_candidate(
     assert route_row["route_reason"] == "task_router_invalid_route"
     assert route_row["target_task_id"] is None
     assert route_row["router_called"] == 1
-    assert task["status"] == "human_taken_over"
+    assert task["status"] == "closed"
     assert task["closed_at"] is not None
     assert task_message is None
     assert notification is not None

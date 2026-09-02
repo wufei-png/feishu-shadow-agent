@@ -1643,7 +1643,7 @@ class SQLiteStore:
                 SELECT *
                 FROM tasks t
                 WHERE t.chat_id = ?
-                  AND t.status != 'watching'
+                  AND t.status = 'closed'
                   AND julianday(t.updated_at) >= julianday(?)
                   AND ({where_related})
                 ORDER BY t.updated_at DESC, t.id DESC
