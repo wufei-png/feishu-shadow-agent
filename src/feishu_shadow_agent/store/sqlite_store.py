@@ -2487,44 +2487,73 @@ class SQLiteStore:
             return {}
         limit = max(0, int(messages_per_task))
         self.initialize()
-        contexts: dict[int, dict[str, Any]] = {}
-        with self.connect() as conn:
-            for task_id in ids:
-                count_row = conn.execute(
-                    "SELECT COUNT(*) AS message_count FROM task_messages WHERE task_id = ?",
-                    (task_id,),
-                ).fetchone()
-                message_count = (
-                    0 if count_row is None else int(count_row["message_count"])
-                )
-                rows = conn.execute(
-                    """
-                    SELECT tm.message_id, tm.role, tm.created_at AS task_message_created_at,
-                           m.chat_id, m.chat_type, m.sender_id,
-                           m.sender_name, m.sender_role, m.sent_at, m.thread_id,
-                           m.reply_to_message_id, m.text
-                    FROM task_messages tm
-                    LEFT JOIN messages m ON m.message_id = tm.message_id
-                    WHERE tm.task_id = ?
-                    ORDER BY tm.created_at DESC, tm.message_id DESC
-                    LIMIT ?
-                    """,
-                    (task_id, limit),
-                ).fetchall()
-                contexts[task_id] = {
-                    "message_count": message_count,
-                    "truncated": message_count > len(rows),
-                    "recent_messages": [
-                        _task_context_message(row) for row in reversed(rows)
-                    ],
-                }
-        return {
-            task_id: contexts.get(
-                task_id,
-                {"message_count": 0, "truncated": False, "recent_messages": []},
-            )
+        placeholders = ",".join("?" for _ in ids)
+        contexts: dict[int, dict[str, Any]] = {
+            task_id: {
+                "message_count": 0,
+                "truncated": False,
+                "recent_messages": [],
+            }
             for task_id in ids
         }
+        with self.connect() as conn:
+            count_rows = conn.execute(
+                # `placeholders` is generated from integer task IDs.
+                f"""
+                SELECT task_id, COUNT(*) AS message_count
+                FROM task_messages
+                WHERE task_id IN ({placeholders})
+                GROUP BY task_id
+                """,  # noqa: S608
+                ids,
+            ).fetchall()
+            for row in count_rows:
+                contexts[int(row["task_id"])]["message_count"] = int(
+                    row["message_count"]
+                )
+
+            recent_rows: list[sqlite3.Row] = []
+            if limit > 0:
+                recent_rows = conn.execute(
+                    # `placeholders` is generated from integer task IDs.
+                    f"""
+                    SELECT task_id, message_id, role, task_message_created_at,
+                           chat_id, chat_type, sender_id, sender_name, sender_role,
+                           sent_at, thread_id, reply_to_message_id, text,
+                           context_rank
+                    FROM (
+                        SELECT tm.task_id, tm.message_id, tm.role,
+                               tm.created_at AS task_message_created_at,
+                               m.chat_id, m.chat_type, m.sender_id,
+                               m.sender_name, m.sender_role, m.sent_at, m.thread_id,
+                               m.reply_to_message_id, m.text,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY tm.task_id
+                                   ORDER BY COALESCE(m.sent_at, tm.created_at) DESC,
+                                            tm.created_at DESC,
+                                            tm.message_id DESC
+                               ) AS context_rank
+                        FROM task_messages tm
+                        LEFT JOIN messages m ON m.message_id = tm.message_id
+                        WHERE tm.task_id IN ({placeholders})
+                    ) AS ranked
+                    WHERE context_rank <= ?
+                    ORDER BY task_id, context_rank DESC
+                    """,  # noqa: S608
+                    [*ids, limit],
+                ).fetchall()
+
+        for row in recent_rows:
+            task_id = int(row["task_id"])
+            contexts[task_id]["recent_messages"].append(_task_context_message(row))
+
+        for task_id in ids:
+            context = contexts[task_id]
+            context["truncated"] = context["message_count"] > len(
+                context["recent_messages"]
+            )
+
+        return contexts
 
     def list_resources_for_messages(
         self, message_ids: Iterable[str]
@@ -2978,7 +3007,7 @@ class SQLiteStore:
                     if requested_outcome is not None
                     else payload.get("keep_watching_on_reject") is True
                 )
-                outcome: ApprovalOutcome = (
+                rejection_outcome: ApprovalOutcome = (
                     "no_send_keep_watching" if keep_watching else "no_send_end_task"
                 )
                 if keep_watching and approval["task_id"] is not None:
@@ -3009,7 +3038,7 @@ class SQLiteStore:
                         conn,
                         approval=approval,
                         command_id=command_id,
-                        outcome=outcome,
+                        outcome=rejection_outcome,
                         decision_reason=payload.get("decision_reason"),
                         suggested_reply=_payload_send_text(payload)
                         or approval["preview"],
@@ -3026,7 +3055,7 @@ class SQLiteStore:
                         "action_id": None,
                         "kept_watching": True,
                         "cancelled_actions": cancelled_actions,
-                        "outcome": outcome,
+                        "outcome": rejection_outcome,
                     }
                 if approval["task_id"] is not None:
                     self._close_task_after_reject_locked(
@@ -3039,7 +3068,7 @@ class SQLiteStore:
                     conn,
                     approval=approval,
                     command_id=command_id,
-                    outcome=outcome,
+                    outcome=rejection_outcome,
                     decision_reason=payload.get("decision_reason"),
                     suggested_reply=_payload_send_text(payload) or approval["preview"],
                     final_reply=None,
@@ -3053,7 +3082,7 @@ class SQLiteStore:
                     "approval_id": approval["short_id"],
                     "task_id": approval["task_id"],
                     "action_id": None,
-                    "outcome": outcome,
+                    "outcome": rejection_outcome,
                 }
             if payload.get("approvable") is False:
                 raise ValueError("approval requires /send final reply")
@@ -3081,12 +3110,12 @@ class SQLiteStore:
             self._mark_task_watching_after_send_locked(
                 conn, task_id=int(approval["task_id"]), now=now
             )
-            outcome = "suggestion_sent"
+            approval_outcome: ApprovalOutcome = "suggestion_sent"
             self._record_approval_feedback_locked(
                 conn,
                 approval=approval,
                 command_id=command_id,
-                outcome=outcome,
+                outcome=approval_outcome,
                 decision_reason=payload.get("decision_reason"),
                 suggested_reply=_payload_send_text(payload) or approval["preview"],
                 final_reply=_payload_send_text(payload),
@@ -3100,7 +3129,7 @@ class SQLiteStore:
                 "approval_id": approval["short_id"],
                 "task_id": approval["task_id"],
                 "action_id": action_id,
-                "outcome": outcome,
+                "outcome": approval_outcome,
             }
 
         if verb == "send":

@@ -9,7 +9,7 @@
 | 优先级 | 条目 | 来源 | 下一步与完成条件 |
 | --- | --- | --- | --- |
 | P0（外部闭环） | P21 DocMate Task Session 真实评测闭环 | 已有 P21 计划；代码部分已完成 | 在目标环境刷新 capture/golden/config/owner 一致性，完成 owner 标注与 promote，跑 fresh baseline，再做一次单变量对照；详见 [P21 评测计划](p21-task-session-docmate-eval.md)。 |
-| P1 | 高流量群的 ingest 上限、lag 和恢复指标 | 群聊分析已有部分记录 | 明确每 tick 的消息上限、分页超时/积压策略和可观测指标；不得以静默截断代替恢复。当前仅有完整分页 drain 和 checkpoint 安全，不代表已解决高流量成本。 |
+| P2 | 高流量群的 ingest 上限、lag 和恢复指标 | 群聊分析已有部分记录 | 明确每 tick 的消息上限、分页超时/积压策略和可观测指标；不得以静默截断代替恢复。当前仅有完整分页 drain 和 checkpoint 安全，不代表已解决高流量成本。 |
 | P1 | 消息生命周期语义 | 群聊分析已有记录 | 定义撤回、编辑、reaction、合并转发和跨 chat 引用在 normalizer、上下文和 routing 中的行为，并补 focused tests。 |
 | P1 | incidental mention 与 bot membership 自愈 | 群聊分析已有记录 | 区分 owner 作为发言者时对他人的 incidental mention；补充 bot 离群/下载失败后的探测、提示和人工策略边界。 |
 | P1 | closed recall 的确定性 shortcut | 群聊分析已有记录；当前仍有 recall router placeholder | 本轮已收敛为候选安全边界：仅 `closed` 进入历史召回；各类客观证据仅用于构造候选，唯一候选不绕过 Router，继续由 Router 决定 `reopen_task` / `new_task` / `ignore` / `ambiguous`；已覆盖唯一结构命中、唯一弱命中、多候选冲突、无候选及审计回归。若未来仍需减少 Router 调用，需基于真实成本或误归属证据另行决策。 |
