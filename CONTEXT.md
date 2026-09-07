@@ -171,3 +171,11 @@ _Avoid_: sub-message ingestion, per-child resource download, cross-chat fetch
 **Cross-Chat Reference**:
 Content or reply/quote provenance that spans chats, typically carried into a chat by a Merged Forward. A Cross-Chat Reference is never a routing signal and never triggers fetching from the origin chat; it is context text of the current chat only.
 _Avoid_: cross-chat task matching, origin-chat context fetch, global reply target
+
+**Incidental Mention**:
+An @-mention of other people inside a message the owner authored. An Incidental Mention is never a task signal: owner-authored messages are routed only as owner takeover of an existing task or ignored, and never create or trigger a Task Session.
+_Avoid_: task trigger, direct mention, follow-up
+
+**Bot Membership Fact**:
+A runtime-derived fact about whether the bot identity is a member of a chat, obtained from send/download failure attribution (such as bot-invisible errors) and active membership probes. It layers into Effective Policy without mutating the Product Policy Store and never produces a Policy Audit; a confirmed absence degrades replies according to reply_identity and allow_user_fallback, blocks resource downloads, and notifies the owner to resolve membership.
+_Avoid_: bot_joined config, policy override, auto-mutated policy
