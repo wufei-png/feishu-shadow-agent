@@ -179,3 +179,11 @@ _Avoid_: task trigger, direct mention, follow-up
 **Bot Membership Fact**:
 A runtime-derived fact about whether the bot identity is a member of a chat, obtained from send/download failure attribution (such as bot-invisible errors) and active membership probes. It layers into Effective Policy without mutating the Product Policy Store and never produces a Policy Audit; a confirmed absence degrades replies according to reply_identity and allow_user_fallback, blocks resource downloads, and notifies the owner to resolve membership.
 _Avoid_: bot_joined config, policy override, auto-mutated policy
+
+**Acquisition Drain**:
+One tick's fetch of a chat's message window through pagination. A Drain is complete only when every chat's window was fully fetched within the per-chat cap and the global per-tick budget; a partial drain never advances the checkpoint.
+_Avoid_: silent truncation, capped success, best-effort fetch
+
+**Ingest Backlog**:
+The unconsumed tail of a chat's acquisition window when a tick reaches its per-chat cap or time budget. It is represented by an un-advanced checkpoint and is re-fetched on the next tick, with overlap and message-id/revision deduplication; it is never silently truncated.
+_Avoid_: dropped messages, skipped window, silent recovery
