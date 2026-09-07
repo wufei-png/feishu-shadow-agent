@@ -215,7 +215,8 @@ class OperatorQueryService:
                     # caller values remain bound parameters.
                     f"""
                     SELECT a.id, a.short_id, a.task_id, t.short_id AS task_short_id, a.kind, a.status,
-                           a.payload_json, a.preview, a.created_at, a.expires_at, a.resolved_at
+                           a.payload_json, a.preview, a.source_message_id, a.source_revision,
+                           a.created_at, a.expires_at, a.resolved_at
                     FROM approvals a
                     LEFT JOIN tasks t ON t.id = a.task_id
                     {where_sql}
@@ -237,7 +238,8 @@ class OperatorQueryService:
                     # `_id_lookup` returns fixed SQL fragments and bound values.
                     f"""
                     SELECT a.id, a.short_id, a.task_id, t.short_id AS task_short_id, a.kind, a.status,
-                           a.payload_json, a.preview, a.created_at, a.expires_at, a.resolved_at
+                           a.payload_json, a.preview, a.source_message_id, a.source_revision,
+                           a.created_at, a.expires_at, a.resolved_at
                     FROM approvals a
                     LEFT JOIN tasks t ON t.id = a.task_id
                     WHERE {where_sql}
@@ -358,7 +360,8 @@ class OperatorQueryService:
                     """
                     SELECT id, backend_provider, request_type, prompt_version, prompt_hash,
                            task_id, agent_session_id,
-                           input_message_ids_json, input_resource_ids_json, response_json,
+                           input_message_ids_json, input_message_revisions_json,
+                           input_resource_ids_json, response_json,
                            error, latency_ms, prompt_json, tool_permissions_profile, created_at
                     FROM agent_audits
                     WHERE task_id = ?

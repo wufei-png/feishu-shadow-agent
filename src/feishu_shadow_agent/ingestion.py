@@ -6,7 +6,7 @@ import re
 import time
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
@@ -239,6 +239,7 @@ class MessageNormalizer:
             mentions=mentions,
             resources=_resources(message_id, raw, content),
             raw=raw,
+            is_deleted=_is_deleted(raw, content),
         )
 
     def _sender_role(
@@ -1096,7 +1097,13 @@ class IngestionService:
                 },
             )
             raise
-        inserted = self.store.upsert_message(message)
+        upsert = self.store.upsert_message_with_revision(message)
+        message = replace(
+            message,
+            revision=upsert.revision,
+            is_deleted=upsert.is_deleted,
+        )
+        inserted = upsert.inserted
         self.logger.emit(
             "info",
             "message_ingested",
@@ -1105,8 +1112,38 @@ class IngestionService:
                 "message_id": message.message_id,
                 "source": source,
                 "inserted": inserted,
+                "changed": upsert.changed,
+                "revision": message.revision,
+                "is_deleted": message.is_deleted,
             },
         )
+        if message.is_deleted:
+            if upsert.changed:
+                self.store.invalidate_stale_revision_side_effects(
+                    message_id=message.message_id,
+                    current_revision=message.revision,
+                    reason="source_message_deleted",
+                )
+                self.store.record_routing_audit(
+                    message_id=message.message_id,
+                    revision=message.revision,
+                    decision=RouteDecision(
+                        RouteName.IGNORE, reason="message_tombstone"
+                    ),
+                )
+                self._notify_tombstone_hanging_reply(message)
+                self.logger.info(
+                    "message_tombstone_recorded",
+                    run_id=run_id,
+                    data={
+                        "message_id": message.message_id,
+                        "revision": message.revision,
+                    },
+                )
+            return RoutingResult(
+                decision=RouteDecision(RouteName.IGNORE, reason="message_tombstone"),
+                task=None,
+            )
         if source == "approval_inbox":
             if (
                 self.approval_service is not None
@@ -1120,6 +1157,12 @@ class IngestionService:
                     data={"message_id": message.message_id, "result": result},
                 )
             return None
+        if upsert.changed and message.revision > 1:
+            self.store.invalidate_stale_revision_side_effects(
+                message_id=message.message_id,
+                current_revision=message.revision,
+                reason="stale_revision",
+            )
         now = self.clock()
         watch_until = _plus_minutes(now, self.config.lifecycle.watch_minutes)
         if message.is_self_message:
@@ -1131,6 +1174,7 @@ class IngestionService:
                     message,
                     source=source,
                     inserted=inserted,
+                    revision_changed=upsert.changed,
                     now=now,
                     watch_until=watch_until,
                     retry_incomplete_processing=False,
@@ -1151,7 +1195,9 @@ class IngestionService:
                     RouteName.IGNORE, reason=eligibility.reason_code
                 )
                 self.store.record_routing_audit(
-                    message_id=message.message_id, decision=decision
+                    message_id=message.message_id,
+                    revision=message.revision,
+                    decision=decision,
                 )
                 result = RoutingResult(decision=decision, task=None)
                 self._log_routing_result(
@@ -1166,6 +1212,7 @@ class IngestionService:
             message,
             source=source,
             inserted=inserted,
+            revision_changed=upsert.changed,
             now=now,
             watch_until=watch_until,
             retry_incomplete_processing=self.task_processor is not None,
@@ -1228,6 +1275,46 @@ class IngestionService:
                     },
                 )
         return result
+
+    def _notify_tombstone_hanging_reply(self, message: NormalizedMessage) -> None:
+        if self.approval_service is None:
+            return
+        previous = self.store.get_latest_sent_reply_for_source(
+            message_id=message.message_id,
+            before_revision=message.revision,
+        )
+        if previous is None:
+            return
+        task_ids = self.store.find_task_ids_for_message(message.message_id)
+        if not task_ids:
+            return
+        try:
+            task = self.store.get_task_by_id(task_ids[-1])
+        except KeyError:
+            return
+        self.approval_service.notify_owner(
+            task=task,
+            reason="source_recalled_after_send",
+            payload={
+                "type": "revision_correction_review",
+                "message_id": message.message_id,
+                "source_message_id": message.message_id,
+                "source_revision": message.revision,
+                "previous_reply": previous.get("text", ""),
+                "previous_action_id": previous.get("action_id"),
+                "suggested_reply": "",
+                "impact": "high",
+                "impact_reasons": ["source_message_deleted"],
+                "requires_owner_approval": False,
+                "resolution_options": ["send_correction", "no_action"],
+                "edit_supported": False,
+                "correction_delivery": "explicit_message",
+                "commands": [f"/send {task.short_id} <final reply>"],
+                "dedupe_key": (
+                    f"tombstone-hanging-reply:{message.message_id}:{message.revision}"
+                ),
+            },
+        )
 
     def _log_routing_result(
         self,
@@ -1369,6 +1456,17 @@ def _content(raw: dict[str, Any]) -> dict[str, Any]:
             else {"text": value}
         )
     return {}
+
+
+def _is_deleted(raw: dict[str, Any], content: dict[str, Any]) -> bool:
+    """Accept only explicit provider tombstone markers; absence is not deletion."""
+
+    for source in (raw, content):
+        for key in ("deleted", "is_deleted", "isDeleted", "recalled", "is_recalled"):
+            value = source.get(key)
+            if isinstance(value, bool) and value:
+                return True
+    return False
 
 
 def _message_text(raw: dict[str, Any], content: dict[str, Any]) -> str:
@@ -1563,7 +1661,9 @@ def _should_process_resources(
     return (
         not inserted
         and result.decision.reason == "duplicate_message"
-        and store.has_resource_eligible_routing_audit(message.message_id)
+        and store.has_resource_eligible_routing_audit(
+            message.message_id, revision=message.revision
+        )
         and store.has_missing_resources(message.resources)
     )
 

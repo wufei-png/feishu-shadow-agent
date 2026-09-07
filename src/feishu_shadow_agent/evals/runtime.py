@@ -145,7 +145,7 @@ class TrialRuntime:
                 dict(row)
                 for row in conn.execute(
                     """
-                    SELECT message_id, route, target_task_id, route_reason,
+                    SELECT message_id, revision, route, target_task_id, route_reason,
                            candidates_count, router_called, matched_by
                     FROM routing_audits ORDER BY id
                     """
@@ -155,7 +155,7 @@ class TrialRuntime:
                 dict(row)
                 for row in conn.execute(
                     """
-                    SELECT message_id, task_id, stage, status, attempt_count,
+                    SELECT message_id, revision, task_id, stage, status, attempt_count,
                            terminal_reason
                     FROM message_processing ORDER BY id
                     """
@@ -165,6 +165,7 @@ class TrialRuntime:
                 _json_columns(
                     dict(row),
                     "input_message_ids_json",
+                    "input_message_revisions_json",
                     "input_resource_ids_json",
                     "response_json",
                 )
@@ -172,7 +173,8 @@ class TrialRuntime:
                     """
                     SELECT backend_provider, request_type, prompt_version, prompt_hash,
                            task_id, agent_session_id,
-                           input_message_ids_json, input_resource_ids_json,
+                           input_message_ids_json, input_message_revisions_json,
+                           input_resource_ids_json,
                            response_json, error, tool_permissions_profile
                     FROM agent_audits ORDER BY id
                     """
@@ -183,7 +185,7 @@ class TrialRuntime:
                 for row in conn.execute(
                     """
                     SELECT id, short_id, task_id, kind, status, preview,
-                           payload_json
+                           source_message_id, source_revision, payload_json
                     FROM approvals ORDER BY id
                     """
                 ).fetchall()
@@ -193,7 +195,8 @@ class TrialRuntime:
                 for row in conn.execute(
                     """
                     SELECT id, task_id, approval_id, kind, status,
-                           target_message_id, payload_json, result_json
+                           target_message_id, source_message_id, source_revision,
+                           payload_json, result_json
                     FROM actions ORDER BY id
                     """
                 ).fetchall()

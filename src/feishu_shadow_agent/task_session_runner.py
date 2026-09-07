@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -11,7 +12,9 @@ from .agent_invocation import AgentAttemptOutcome, AgentInvoker
 from .context_access import ContextAccessBuilder
 from .prompt import (
     BaseTaskSessionOutput,
+    FollowupRevisionTaskSessionOutput,
     FollowupTaskSessionOutput,
+    InitialRevisionTaskSessionOutput,
     InitialTaskSessionOutput,
     build_task_session_prompt,
 )
@@ -25,6 +28,17 @@ from .types import NormalizedMessage, TaskRecord
 P2P_ADJACENT_RESOURCE_CONTEXT_LIMIT = 32
 
 
+def _empty_revisions() -> list[int]:
+    return []
+
+
+@dataclass(frozen=True)
+class RevisionReviewContext:
+    """Prompt-only context used when a prior reply for this source was sent."""
+
+    previous_sent_reply: str
+
+
 @dataclass(frozen=True)
 class TaskSessionPromptPlan:
     session_id: str | None
@@ -32,6 +46,8 @@ class TaskSessionPromptPlan:
     prompt_message_ids: list[str]
     output_model: type[BaseTaskSessionOutput]
     reply_target_message_ids: list[str]
+    revision_context: RevisionReviewContext | None = None
+    prompt_message_revisions: list[int] = field(default_factory=_empty_revisions)
 
 
 @dataclass(frozen=True)
@@ -59,7 +75,11 @@ class TaskSessionRunner:
         self.context_access = context_access
 
     def build_plan(
-        self, *, task: TaskRecord, message: NormalizedMessage
+        self,
+        *,
+        task: TaskRecord,
+        message: NormalizedMessage,
+        revision_context: RevisionReviewContext | None = None,
     ) -> TaskSessionPromptPlan:
         session_id = self.store.get_initialized_agent_session_id(
             task.id, backend_provider=str(self.agent_backend.provider)
@@ -77,17 +97,48 @@ class TaskSessionRunner:
                 task_message_ids=task_message_ids,
                 prompt_message_ids=prompt_message_ids,
             )
+        prompt_message_revisions = self._prompt_message_revisions(
+            prompt_message_ids=prompt_message_ids,
+            current_message=message,
+        )
+        if revision_context is None:
+            output_model: type[BaseTaskSessionOutput] = (
+                InitialTaskSessionOutput
+                if session_id is None
+                else FollowupTaskSessionOutput
+            )
+        else:
+            output_model = (
+                InitialRevisionTaskSessionOutput
+                if session_id is None
+                else FollowupRevisionTaskSessionOutput
+            )
         return TaskSessionPromptPlan(
             session_id=session_id,
             task_message_ids=task_message_ids,
             prompt_message_ids=prompt_message_ids,
-            output_model=InitialTaskSessionOutput
-            if session_id is None
-            else FollowupTaskSessionOutput,
+            output_model=output_model,
             reply_target_message_ids=reply_target_message_ids(
                 task=task, current_message_id=message.message_id
             ),
+            revision_context=revision_context,
+            prompt_message_revisions=prompt_message_revisions,
         )
+
+    def _prompt_message_revisions(
+        self,
+        *,
+        prompt_message_ids: list[str],
+        current_message: NormalizedMessage,
+    ) -> list[int]:
+        rows = self.store.get_messages_by_ids(prompt_message_ids)
+        revisions = {str(row["message_id"]): int(row["revision"] or 1) for row in rows}
+        return [
+            current_message.revision
+            if message_id == current_message.message_id
+            else revisions.get(message_id, 1)
+            for message_id in prompt_message_ids
+        ]
 
     def _include_adjacent_unavailable_resource_context(
         self,
@@ -180,10 +231,15 @@ class TaskSessionRunner:
             output_model=plan.output_model,
             context_access=self.context_access.task_session_context_access(task=task),
             chat_type=task.chat_type or message.chat_type,
+            previous_sent_reply=None
+            if plan.revision_context is None
+            else plan.revision_context.previous_sent_reply,
         )
         outcome = self.agent_invoker.call_with_retries(
-            lambda: self.agent_backend.task_session(
-                prompt, session_id=plan.session_id, cwd=cwd
+            lambda: self._invoke_task_session(
+                prompt=prompt,
+                plan=plan,
+                cwd=cwd,
             ),
             run_id=run_id,
             stage="task_session",
@@ -219,6 +275,37 @@ class TaskSessionRunner:
             outcome=outcome,
             result=result,
             output=output,
+        )
+
+    def _invoke_task_session(
+        self,
+        *,
+        prompt: str,
+        plan: TaskSessionPromptPlan,
+        cwd: str | Path | None,
+    ) -> AgentRunResult:
+        """Use provider-native schemas only for the revision review variant."""
+
+        structured_task_session = getattr(
+            self.agent_backend, "structured_task_session", None
+        )
+        if plan.revision_context is not None and callable(structured_task_session):
+            return cast(Callable[..., AgentRunResult], structured_task_session)(
+                prompt,
+                output_model=plan.output_model,
+                session_id=plan.session_id,
+                cwd=cwd,
+            )
+        structured_output = getattr(self.agent_backend, "structured_output", None)
+        if plan.revision_context is not None and callable(structured_output):
+            return cast(Callable[..., AgentRunResult], structured_output)(
+                prompt,
+                output_model=plan.output_model,
+                session_id=plan.session_id,
+                cwd=cwd,
+            )
+        return self.agent_backend.task_session(
+            prompt, session_id=plan.session_id, cwd=cwd
         )
 
 

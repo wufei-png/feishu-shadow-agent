@@ -11,6 +11,14 @@ from .decision import (
     validate_decision_reason,
 )
 
+RevisionSignal = Literal[
+    "factual_correction",
+    "commitment_change",
+    "permission_change",
+    "sensitive_change",
+    "uncertain",
+]
+
 
 class StrictModel(BaseModel):
     """Base model for the structured agent-output boundary."""
@@ -153,6 +161,32 @@ class FollowupTaskSessionOutput(BaseTaskSessionOutput):
     pass
 
 
+def _empty_revision_signals() -> list[RevisionSignal]:
+    return []
+
+
+class InitialRevisionTaskSessionOutput(InitialTaskSessionOutput):
+    revision_signals: list[RevisionSignal] = Field(
+        default_factory=_empty_revision_signals,
+        description=(
+            "Revision-only advisory signals. Include factual_correction, commitment_change, "
+            "permission_change, sensitive_change, or uncertain when the new evaluation may "
+            "invalidate a previously sent reply; use an empty list when none apply."
+        ),
+    )
+
+
+class FollowupRevisionTaskSessionOutput(FollowupTaskSessionOutput):
+    revision_signals: list[RevisionSignal] = Field(
+        default_factory=_empty_revision_signals,
+        description=(
+            "Revision-only advisory signals. Include factual_correction, commitment_change, "
+            "permission_change, sensitive_change, or uncertain when the new evaluation may "
+            "invalidate a previously sent reply; use an empty list when none apply."
+        ),
+    )
+
+
 class ReplyPostprocessOutput(StrictModel):
     status: Literal["ok", "needs_owner"] = Field(
         description="ok when final_reply is safe to use; otherwise needs_owner."
@@ -183,6 +217,14 @@ def task_session_output_contract(output_model: type[BaseTaskSessionOutput]) -> s
             lines.append(f"- `{field_name}`: {rule}")
     if "task_label" in field_names:
         lines.append("- `task_label`: a short label for the initial task.")
+    if "revision_signals" in field_names:
+        lines.append(
+            "- `revision_signals`: revision-only advisory signals; this field is present because "
+            "a previous reply for this source message was already sent. Include only applicable "
+            "values from `factual_correction`, `commitment_change`, `permission_change`, "
+            "`sensitive_change`, and `uncertain`; an empty list is valid. These signals can only "
+            "escalate owner review and never authorize sending."
+        )
     lines.append(
         "Do not include Markdown, explanatory text, or @ mentions in the final response."
     )
@@ -227,10 +269,13 @@ def _decision_reason_contract() -> str:
 
 __all__ = [
     "BaseTaskSessionOutput",
+    "FollowupRevisionTaskSessionOutput",
     "FollowupTaskSessionOutput",
+    "InitialRevisionTaskSessionOutput",
     "InitialTaskSessionOutput",
     "OwnerStyleRefreshOutput",
     "ReplyPostprocessOutput",
+    "RevisionSignal",
     "StrictModel",
     "TaskRouterOutput",
     "task_session_output_contract",

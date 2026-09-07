@@ -42,7 +42,7 @@ class MessageDetailQuery:
                 """
                 SELECT message_id, chat_id, chat_type, sender_id, sender_name, sender_type,
                        sender_role, sent_at, thread_id, reply_to_message_id, direct_mention,
-                       at_all, text, normalized_json, inserted_at
+                       at_all, text, is_deleted, revision, normalized_json, inserted_at
                 FROM messages
                 WHERE message_id = ?
                 """,
@@ -52,7 +52,7 @@ class MessageDetailQuery:
                 return None
             routing_audits = conn.execute(
                 """
-                SELECT id, message_id, task_id, route, route_reason, candidates_count,
+                SELECT id, message_id, revision, task_id, route, route_reason, candidates_count,
                        shortcut_hit, router_called, matched_by, target_task_id, created_at
                 FROM routing_audits
                 WHERE message_id = ?
@@ -62,7 +62,7 @@ class MessageDetailQuery:
             ).fetchall()
             processing_rows = conn.execute(
                 """
-                SELECT id, message_id, task_id, stage, status, attempt_count,
+                SELECT id, message_id, revision, task_id, stage, status, attempt_count,
                        last_error, terminal_reason, created_at, updated_at
                 FROM message_processing
                 WHERE message_id = ?
@@ -84,7 +84,8 @@ class MessageDetailQuery:
                 """
                     SELECT id, backend_provider, request_type, prompt_version, prompt_hash,
                            task_id, agent_session_id,
-                       input_message_ids_json, input_resource_ids_json, response_json,
+                           input_message_ids_json, input_message_revisions_json,
+                           input_resource_ids_json, response_json,
                        error, latency_ms, prompt_json, tool_permissions_profile, created_at
                 FROM agent_audits
                 WHERE input_message_ids_json LIKE ? ESCAPE '\\'
@@ -163,7 +164,8 @@ def _fetch_approvals_for_tasks(
         # `placeholders` is generated solely from the integer ID list.
         f"""
         SELECT a.id, a.short_id, a.task_id, t.short_id AS task_short_id, a.kind, a.status,
-               a.payload_json, a.preview, a.created_at, a.expires_at, a.resolved_at
+               a.payload_json, a.preview, a.source_message_id, a.source_revision,
+               a.created_at, a.expires_at, a.resolved_at
         FROM approvals a
         LEFT JOIN tasks t ON t.id = a.task_id
         WHERE a.task_id IN ({placeholders})
@@ -240,6 +242,8 @@ def _message_detail_dto(row: sqlite3.Row) -> dict[str, Any]:
         "direct_mention": bool(data["direct_mention"]),
         "at_all": bool(data["at_all"]),
         "text": data["text"],
+        "is_deleted": bool(data["is_deleted"]),
+        "revision": int(data["revision"] or 1),
         "normalized": loads_json_object(data["normalized_json"]),
         "inserted_at": data["inserted_at"],
     }
@@ -250,6 +254,7 @@ def _routing_audit_dto(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": data["id"],
         "message_id": data["message_id"],
+        "revision": int(data["revision"] or 1),
         "task_id": data["task_id"],
         "route": data["route"],
         "route_reason": data["route_reason"],
@@ -267,6 +272,7 @@ def _message_processing_dto(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": data["id"],
         "message_id": data["message_id"],
+        "revision": int(data["revision"] or 1),
         "task_id": data["task_id"],
         "stage": data["stage"],
         "status": data["status"],
