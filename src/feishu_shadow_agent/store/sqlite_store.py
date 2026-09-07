@@ -39,7 +39,7 @@ from ..types import (
 
 SQLITE_BUSY_TIMEOUT_MS = 5000
 SQLITE_APPLICATION_ID = 1179861319
-SQLITE_SCHEMA_VERSION = 2
+SQLITE_SCHEMA_VERSION = 3
 RUN_HEARTBEAT_STALE_AFTER_SECONDS = 300
 PRODUCT_POLICY_KEY = "reply_policy"
 LATEST_NON_OK_HEALTH_CHECKS_SQL = """
@@ -4142,6 +4142,7 @@ class SQLiteStore:
                 "reply_to_message_id": message.reply_to_message_id,
                 "direct_mention": message.direct_mention,
                 "at_all": message.at_all,
+                "message_type": message.message_type,
                 "sender_name": message.sender_name,
             },
             ensure_ascii=False,
@@ -4154,8 +4155,8 @@ class SQLiteStore:
                 INSERT INTO messages(
                   message_id, chat_id, chat_type, sender_id, sender_type, sent_at,
                   normalized_json, raw_json, inserted_at, thread_id, reply_to_message_id,
-                  sender_role, direct_mention, at_all, text, sender_name
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  sender_role, direct_mention, at_all, message_type, text, sender_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message.message_id,
@@ -4172,6 +4173,7 @@ class SQLiteStore:
                     message.sender_role,
                     int(message.direct_mention),
                     int(message.at_all),
+                    message.message_type,
                     message.text,
                     message.sender_name,
                 ),
@@ -4182,7 +4184,8 @@ class SQLiteStore:
             UPDATE messages
             SET chat_id = ?, chat_type = ?, sender_id = ?, sender_type = ?, sent_at = ?,
                 normalized_json = ?, raw_json = ?, thread_id = ?, reply_to_message_id = ?,
-                sender_role = ?, direct_mention = ?, at_all = ?, text = ?, sender_name = ?
+                sender_role = ?, direct_mention = ?, at_all = ?, message_type = ?,
+                text = ?, sender_name = ?
             WHERE message_id = ?
             """,
             (
@@ -4198,6 +4201,7 @@ class SQLiteStore:
                 message.sender_role,
                 int(message.direct_mention),
                 int(message.at_all),
+                message.message_type,
                 message.text,
                 message.sender_name,
                 message.message_id,

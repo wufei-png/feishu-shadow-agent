@@ -238,6 +238,7 @@ class MessageNormalizer:
             at_all=at_all,
             mentions=mentions,
             resources=_resources(message_id, raw, content),
+            message_type=_message_type(raw, content),
             raw=raw,
         )
 
@@ -1426,12 +1427,16 @@ def _append_unique(values: list[str], value: str) -> None:
         values.append(value)
 
 
+def _message_type(raw: dict[str, Any], content: dict[str, Any]) -> str | None:
+    return _first_string(
+        raw, "msg_type", "msgType", "message_type", "messageType"
+    ) or _first_string(content, "msg_type", "msgType", "message_type", "messageType")
+
+
 def _resources(
     message_id: str, raw: dict[str, Any], content: dict[str, Any]
 ) -> list[ResourceRef]:
-    message_type = _first_string(
-        raw, "msg_type", "msgType", "message_type", "messageType"
-    )
+    message_type = _message_type(raw, content)
     if message_type == "merge_forward":
         # Feishu renders forwarded child resources as text placeholders, but the
         # message resource API cannot reliably download them from the container.
