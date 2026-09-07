@@ -187,3 +187,11 @@ _Avoid_: silent truncation, capped success, best-effort fetch
 **Ingest Backlog**:
 The unconsumed tail of a chat's acquisition window when a tick reaches its per-chat cap or time budget. It is represented by an un-advanced checkpoint and is re-fetched on the next tick, with overlap and message-id/revision deduplication; it is never silently truncated.
 _Avoid_: dropped messages, skipped window, silent recovery
+
+**Task Context Window**:
+The bounded set of task messages embedded in a Task Session prompt for a rebuilt session: the root message, the most recent N messages, and the Task Running Summary when one exists. Follow-up prompts on a live provider session embed only the current message.
+_Avoid_: full replay, unbounded task messages, metadata dump
+
+**Task Running Summary**:
+A system-composed compact digest of a task's state — label, recent messages, and recorded decisions, actions, and approvals — used to re-anchor a rebuilt long Task Session. It is not agent-written and is never expanded with raw metadata inside production prompts.
+_Avoid_: agent-written summary, metadata-in-prompt, raw state dump
