@@ -22,7 +22,7 @@
 
 ## 当前状态（2026-08 刷新）
 
-- 代码全部落地并提交：`DraftTaskSessionLabels.expected_skills` / `TaskSessionLabels.expected_skills`（`evals/schemas.py`，去重并拒绝空名，旧 case 兼容）；eval-only skill trace（`evals/skill_trace.py`，接入 `evals/model_service.py`，区分 `preloaded_skills` 与 `runtime_loaded_skills`，非 Hermes backend 为 `unsupported_backend`）。生产 schema/prompt 无 trace 字段。
+- 代码全部落地并提交：`DraftTaskSessionLabels.expected_skills` / `TaskSessionLabels.expected_skills`（`evals/schemas.py`，去重并拒绝空名，旧 case 兼容）；eval-only skill trace（`evals/skill_trace.py`，接入 `evals/model_service.py`，区分 `requested_skills` 与 `runtime_loaded_skills`，非 Hermes backend 为 `unsupported_backend`）。生产 schema/prompt 无 trace 字段。
 - 10 个 case 已 promote 到 `data/evals/golden/task-session/`，`labels.yaml` 含 owner 审核后的 `answerability`/`watch_action`/`reference_answer`/`expected_skills`（技术问答标 `[docmate]`，`p2p-wait-no-reply` 为空列表）。
 - 2026-07-15 完成真实 baseline 与多轮单变量对照，完整实验记录在 ignored 的 `data/evals/P21_BASELINE_COMPARISON.md`（运行产物与报告一律不提交）。
 - 另有 5 个 lark-monthly case（20260812 捕获、20260813 运行）作为独立月循环，不属于本计划的 10 case 范围。
@@ -36,7 +36,8 @@
 - **explicit_context.skills 机制**：有效。Hermes 原生 `--skills` 与 Codex 原生 `[$docmate]` 引用均可稳定预加载/激活 DocMate（trace recall 1.0），但不产生 `skill_view` 调用、不改善最终回答；eval trace 已能区分预加载与运行时加载，避免误报。
 - **通用 prompt 候选（evidence gate、bounded wording、workflow 强制句、静默 developer instruction）**：能局部修正「未查证就 needs_owner」「一次性任务 keep_watching」结构偏置，但严格通过率仍为 0，且引入 60 秒 timeout 回归；全部撤回或仅保留 provider 级、不进业务 prompt 的项。**不继续增长 Task Session 提示词。**
 - **timeout 语义**：60 秒失败是执行预算问题（180 秒对照 3/3 完成）；`agent_backend.*.timeout_seconds` 现支持正整数或 `null`（默认 `null` 不截断），daemon 仍按消息串行、由部署显式配置故障隔离上限。
-- **保留的生产优化**：Task Session Markdown 分区输入（single authority，见 ADR-0011）、Session 级原生 skill 激活、紧凑 prompt（仅 Messages 嵌入正文）、Codex-only 静默 developer instruction、时间兼容判别（仅 answerability/watch_action 结构差异且已证明修复落地时可接受）。
+- **保留的生产优化**：Task Session Markdown 分区输入（single authority，见 ADR-0011）、Session 级原生 skill 激活、紧凑 prompt（仅 Messages 嵌入正文）、Codex-only 静默 developer instruction。
+- **未保留的实验**：时间兼容判别（对仅 answerability/watch_action 结构差异且已证明修复落地的当前状态答案放宽）只在实验中验证过（见 `data/evals/P21_BASELINE_COMPARISON.md` 无 wall-clock timeout 一节），未进入已提交代码——semantic judge 对结构差异仍 fail closed，`task_session_eval.py` 以结构通过为前提，`tests/test_eval_model.py` 断言 `"compatibility"` 不出现在结构结果中。
 - **剩余失败归因**：已从「DocMate 未命中」转为「命中后的证据收敛与答案忠实度」：package 读到正确 FAQ 后改坏命令；VPS/P2P 所需结论不在现有 DocMate FAQ/catalog；`p2p-pod-crash` 存在 capture-time reference 与 full-access 外部状态漂移（线上已修复时输出「当前已恢复」）。
 
 ## 遗留决策（owner）

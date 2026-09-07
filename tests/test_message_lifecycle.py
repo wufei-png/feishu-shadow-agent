@@ -6,7 +6,7 @@ from typing import Any
 from feishu_shadow_agent.config import AppConfig, OwnerConfig, ReplyPolicyConfig
 from feishu_shadow_agent.ingestion import MessageNormalizer
 from feishu_shadow_agent.operator_queries.message_detail import MessageDetailQuery
-from feishu_shadow_agent.routing import MessageRouter
+from feishu_shadow_agent.routing import CandidateCollector, MessageRouter
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import NormalizedMessage
 
@@ -116,13 +116,13 @@ def test_store_persists_message_type(tmp_path: Path) -> None:
     assert row["message_type"] == "merge_forward"
 
 
-def test_schema_version_3_includes_message_type_column(tmp_path: Path) -> None:
+def test_schema_version_4_includes_message_type_column(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.initialize()
     with store.connect() as conn:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
-    assert version == 3
+    assert version == 4
     assert "message_type" in columns
 
 
@@ -141,24 +141,42 @@ def test_cross_chat_reply_to_never_matches_candidates(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     root = _normalize(_raw("om_root", chat_id="oc_B"))
     store.upsert_message(root)
-    store.create_task_for_message_and_audit(
+    chat_b_task, _ = store.create_task_for_message_and_audit(
         root, watch_until="2026-06-22T12:10:00+08:00"
     )
 
-    # Reply target message id lives in chat B; the reply arrives in chat A.
-    reply = _normalize(_raw("om_reply", chat_id="oc_A", reply_to="om_root"))
-    router = MessageRouter(store=store)
-    result = router.route(
+    # Reply target message id lives in chat B; the reply arrives in chat A and
+    # carries a direct mention so it passes the non-direct-mention gate and
+    # actually reaches candidate collection.
+    reply = _normalize(
+        _raw(
+            "om_reply",
+            chat_id="oc_A",
+            reply_to="om_root",
+            mentions=[{"open_id": "ou_owner"}],
+        )
+    )
+    now = "2026-06-22T10:10:00+08:00"
+    candidates = CandidateCollector(store).collect(reply, now=now)
+    assert all(candidate.matched_by != "reply_to_msg" for candidate in candidates)
+
+    result = MessageRouter(store=store).route(
         message=reply,
         source="group_at_me",
         inserted=True,
-        now="2026-06-22T10:10:00+08:00",
+        now=now,
         watch_until="2026-06-22T12:10:00+08:00",
     )
-    # Routing never crosses chat boundaries: no task attached, no new task
-    # created from the cross-chat reply alone.
-    assert result.task is None
-    assert result.decision.route == "ignore"
+    # Routing never crosses chat boundaries: the cross-chat reply is handled as
+    # chat-A work (a new chat-A task), never attached to chat B's task.
+    assert result.task is not None
+    assert result.task.chat_id == "oc_A"
+    assert result.task.id != chat_b_task.id
+    with store.connect() as conn:
+        status = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (chat_b_task.id,)
+        ).fetchone()
+    assert status["status"] == "watching"
 
 
 def test_owner_takeover_does_not_cross_chat_boundary(tmp_path: Path) -> None:

@@ -1,7 +1,7 @@
 BEGIN IMMEDIATE;
 
 PRAGMA application_id = 1179861319;
-PRAGMA user_version = 3;
+PRAGMA user_version = 4;
 
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

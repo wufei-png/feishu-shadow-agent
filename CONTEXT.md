@@ -189,11 +189,11 @@ The unconsumed tail of a chat's acquisition window when a tick reaches its per-c
 _Avoid_: dropped messages, skipped window, silent recovery
 
 **Task Context Window**:
-The bounded set of task messages embedded in a Task Session prompt for a rebuilt session: the root message, the most recent N messages, and the Task Running Summary when one exists. Follow-up prompts on a live provider session embed only the current message.
-_Avoid_: full replay, unbounded task messages, metadata dump
+The designed bounded set of task messages for a rebuilt Task Session prompt — the root message, the most recent N messages, and the Task Running Summary when one exists — proposed by P22 and pending validation from real long-conversation evidence. Current code still embeds all task messages on a fresh rebuild; follow-up prompts on a live provider session embed only the current message.
+_Avoid_: full replay (current behavior), unbounded task messages, metadata dump
 
 **Task Running Summary**:
-A system-composed compact digest of a task's state — label, recent messages, and recorded decisions, actions, and approvals — used to re-anchor a rebuilt long Task Session. It is not agent-written and is never expanded with raw metadata inside production prompts.
+The designed system-composed compact digest of a task's state — label, recent messages, and recorded decisions, actions, and approvals — proposed by P22 to re-anchor a rebuilt long Task Session. It is not yet implemented, is not agent-written, and is never expanded with raw metadata inside production prompts.
 _Avoid_: agent-written summary, metadata-in-prompt, raw state dump
 
 **Activation Entrance**:

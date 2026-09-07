@@ -24,7 +24,7 @@ P9 是 P5-P8 行为稳定后的结构清理：在不改变产品语义的前提�
 - `reply_postprocess.py` / `reply_style.py`：回复后处理与 owner style。
 - `approval_cards.py` / `card_actions.py`：审批卡片与动作。
 - `SendComposer`、`ApprovalService`：回复组装与审批/通知/升级（processing.py 内的小型 collaborator）。
-- `revision.py`（撤回/编辑切片）：revision 影响评估。
+- `revision.py`（撤回/编辑切片，随 main 的 revision slice 落地，非本分支引入）：revision 影响评估。
 
 ## 最终决策（2026-08）
 
