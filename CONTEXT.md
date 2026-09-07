@@ -195,3 +195,11 @@ _Avoid_: full replay, unbounded task messages, metadata dump
 **Task Running Summary**:
 A system-composed compact digest of a task's state — label, recent messages, and recorded decisions, actions, and approvals — used to re-anchor a rebuilt long Task Session. It is not agent-written and is never expanded with raw metadata inside production prompts.
 _Avoid_: agent-written summary, metadata-in-prompt, raw state dump
+
+**Activation Entrance**:
+A deterministic signal that can start or continue a Task Session: a direct mention of the owner, a reply to a task message, a thread id, a sender or watch-key follow-up, or a burst-attach window. Keyword-based entrances are explicitly out of scope.
+_Avoid_: keyword trigger, non-mention activation, any-message activation
+
+**Activation Priority**:
+The deterministic order in which Activation Entrances resolve: unique reply-to, then unique thread, then burst attach, then the Task Router for ambiguous multi-task cases or closed-task recall; otherwise a new task is created. A direct mention alone only contributes candidates and lets the Router decide when several active tasks are plausible; a topic switch is expressed by a new message or thread rather than by re-mentioning.
+_Avoid_: mention-first, free-for-all candidates, global priority queue
