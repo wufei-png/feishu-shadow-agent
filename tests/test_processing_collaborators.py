@@ -7,6 +7,7 @@ import pytest
 
 from feishu_shadow_agent.agent_backend import AgentRunResult
 from feishu_shadow_agent.agent_invocation import AgentInvoker
+from feishu_shadow_agent.agent_output_contract import InitialRevisionTaskSessionOutput
 from feishu_shadow_agent.config import AgentBackendConfig, AppConfig, OwnerConfig
 from feishu_shadow_agent.context_access import ContextAccessBuilder
 from feishu_shadow_agent.jsonl import JSONLLogger
@@ -19,6 +20,8 @@ from feishu_shadow_agent.resource_preflight import (
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.task_session_runner import (
     P2P_ADJACENT_RESOURCE_CONTEXT_LIMIT,
+    RevisionReviewContext,
+    TaskSessionPromptPlan,
     TaskSessionRunner,
 )
 from feishu_shadow_agent.types import (
@@ -106,6 +109,91 @@ def test_agent_invoker_retries_transient_result_but_not_terminal_result(
     assert (
         terminal.last_error is not None and "permission denied" in terminal.last_error
     )
+
+
+def test_revision_task_session_uses_provider_structured_output_schema() -> None:
+    calls: list[type[object]] = []
+
+    class Backend:
+        provider = "codex"
+
+        def task_session(self, prompt: str, **kwargs: object) -> AgentRunResult:
+            raise AssertionError("revision sessions must use structured_output")
+
+        def structured_output(
+            self,
+            prompt: str,
+            *,
+            output_model: type[object],
+            session_id: str | None = None,
+            cwd: str | Path | None = None,
+        ) -> AgentRunResult:
+            calls.append(output_model)
+            return AgentRunResult(["structured"], 0, json_data={})
+
+    runner = TaskSessionRunner(
+        store=None,  # type: ignore[arg-type]
+        agent_backend=Backend(),  # type: ignore[arg-type]
+        agent_invoker=None,  # type: ignore[arg-type]
+        context_access=None,  # type: ignore[arg-type]
+    )
+    plan = TaskSessionPromptPlan(
+        session_id="session-1",
+        task_message_ids=[],
+        prompt_message_ids=[],
+        output_model=InitialRevisionTaskSessionOutput,
+        reply_target_message_ids=[],
+        revision_context=RevisionReviewContext(previous_sent_reply="old reply"),
+    )
+
+    result = runner._invoke_task_session(prompt="revision", plan=plan, cwd=None)
+
+    assert result.ok
+    assert calls == [InitialRevisionTaskSessionOutput]
+
+
+def test_revision_task_session_prefers_provider_task_session_setup() -> None:
+    calls: list[type[object]] = []
+
+    class Backend:
+        provider = "codex"
+
+        def task_session(self, prompt: str, **kwargs: object) -> AgentRunResult:
+            raise AssertionError("revision sessions must use the structured task path")
+
+        def structured_task_session(
+            self,
+            prompt: str,
+            *,
+            output_model: type[object],
+            session_id: str | None = None,
+            cwd: str | Path | None = None,
+        ) -> AgentRunResult:
+            calls.append(output_model)
+            return AgentRunResult(["structured-task-session"], 0, json_data={})
+
+        def structured_output(self, **kwargs: object) -> AgentRunResult:
+            raise AssertionError("provider-specific task setup should be preferred")
+
+    runner = TaskSessionRunner(
+        store=None,  # type: ignore[arg-type]
+        agent_backend=Backend(),  # type: ignore[arg-type]
+        agent_invoker=None,  # type: ignore[arg-type]
+        context_access=None,  # type: ignore[arg-type]
+    )
+    plan = TaskSessionPromptPlan(
+        session_id=None,
+        task_message_ids=[],
+        prompt_message_ids=[],
+        output_model=InitialRevisionTaskSessionOutput,
+        reply_target_message_ids=[],
+        revision_context=RevisionReviewContext(previous_sent_reply="old reply"),
+    )
+
+    result = runner._invoke_task_session(prompt="revision", plan=plan, cwd=None)
+
+    assert result.ok
+    assert calls == [InitialRevisionTaskSessionOutput]
 
 
 @pytest.mark.parametrize("tool_permissions", ["read_only", "full_access"])

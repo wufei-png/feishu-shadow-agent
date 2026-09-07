@@ -312,6 +312,8 @@ def _assert_owner_notification_context(
     chat_id: str,
 ) -> None:
     assert payload["incoming_message"] == {"message_id": message_id, "text": text}
+    assert payload["source_message_id"] == message_id
+    assert payload["source_revision"] == 1
     assert payload["source"]["chat_id"] == chat_id
     assert payload["source"]["sender_name"] == sender_name
 
@@ -2773,7 +2775,7 @@ def test_task_session_exception_retries_terminal_without_empty_approval(
     assert payload["type"] == "processing_failed"
     assert payload["message_id"] == "om_1"
     assert payload["stage"] == "task_session"
-    assert payload["dedupe_key"] == "owner-processing-failed:om_1:task_session"
+    assert payload["dedupe_key"] == "owner-processing-failed:om_1:task_session:1"
     _assert_owner_notification_context(
         payload, message_id="om_1", text="hello", sender_name="Ext", chat_id="ou_chat"
     )

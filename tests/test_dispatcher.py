@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import sqlite3
+from dataclasses import replace
 from pathlib import Path
+from threading import Event, Thread
 from typing import Any
+from unittest.mock import patch
 
 from feishu_shadow_agent import dispatcher as dispatcher_module
 from feishu_shadow_agent.config import AppConfig, LifecycleConfig, OwnerConfig
 from feishu_shadow_agent.dispatcher import Dispatcher
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
-from feishu_shadow_agent.types import LarkCliResult, MessagePage
+from feishu_shadow_agent.types import LarkCliResult, MessagePage, NormalizedMessage
 
 
 class FakeFeishu:
@@ -123,6 +127,149 @@ def test_dry_run_preview_keeps_action_pending(tmp_path: Path) -> None:
     assert action.status == "pending"
     assert action.result["dry_run"]["ok"] is True
     assert [call["dry_run"] for call in fake.reply_calls] == [True]
+
+
+def test_stale_revision_action_is_cancelled_without_adapter_call(
+    tmp_path: Path,
+) -> None:
+    store, dispatcher, fake = _dispatcher(tmp_path)
+    task_id = _insert_task(store)
+    source = NormalizedMessage(
+        message_id="om_source",
+        chat_id="oc_1",
+        chat_type="group",
+        sender_id="ou_ext",
+        sender_name="Ext",
+        sender_type="user",
+        sender_role="external_user_message",
+        sent_at="2026-06-22T10:00:00+08:00",
+        thread_id=None,
+        reply_to_message_id=None,
+        text="old source",
+        direct_mention=False,
+        at_all=False,
+    )
+    store.upsert_message(source)
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "old reply",
+            "identity": "user",
+            "source_message_id": "om_source",
+            "source_revision": 1,
+        },
+    )
+    assert action_id is not None
+
+    store.upsert_message(replace(source, text="edited source"))
+
+    summary = dispatcher.dispatch(
+        run_id="run_stale_revision",
+        allow_send_reply_actual=True,
+        allow_owner_notification_actual=False,
+    )
+
+    action = store.get_action(action_id)
+    assert summary.failed == 1
+    assert summary.sent == 0
+    assert fake.reply_calls == []
+    assert action is not None
+    assert action.status == "cancelled"
+    assert "stale_revision" in action.result["warnings"]
+    assert store.list_dispatchable_actions(kind="owner_notification") == []
+
+
+def test_revision_send_does_not_hold_sqlite_lock_during_external_send(
+    tmp_path: Path,
+) -> None:
+    store, dispatcher, fake = _dispatcher(tmp_path)
+    task_id = _insert_task(store)
+    source = NormalizedMessage(
+        message_id="om_source",
+        chat_id="oc_1",
+        chat_type="group",
+        sender_id="ou_ext",
+        sender_name="Ext",
+        sender_type="user",
+        sender_role="external_user_message",
+        sent_at="2026-06-22T10:00:00+08:00",
+        thread_id=None,
+        reply_to_message_id=None,
+        text="old source",
+        direct_mention=False,
+        at_all=False,
+    )
+    store.upsert_message(source)
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "old reply",
+            "identity": "user",
+            "source_message_id": source.message_id,
+            "source_revision": 1,
+        },
+    )
+    assert action_id is not None
+    action = store.get_action(action_id)
+    assert action is not None
+
+    fake.reply_results.append(LarkCliResult(["dry"], 0, json_data={"api": []}))
+    send_started = Event()
+    allow_send = Event()
+    edit_finished = Event()
+    edit_errors: list[BaseException] = []
+
+    def edit_source() -> None:
+        try:
+            edited = store.upsert_message_with_revision(
+                replace(source, text="new source")
+            )
+            store.invalidate_stale_revision_side_effects(
+                message_id=source.message_id,
+                current_revision=edited.revision,
+            )
+        except sqlite3.Error as exc:  # pragma: no cover - defensive thread capture
+            edit_errors.append(exc)
+        finally:
+            edit_finished.set()
+
+    def blocked_send(_action: Any) -> LarkCliResult:
+        send_started.set()
+        if not allow_send.wait(timeout=2):
+            raise AssertionError("test send was not released")
+        return LarkCliResult(["send"], 0, json_data={"data": {"message_id": "om_sent"}})
+
+    dispatch_thread = Thread(
+        target=lambda: dispatcher.dispatch(
+            run_id="run_revision_race",
+            allow_send_reply_actual=True,
+            allow_owner_notification_actual=False,
+        )
+    )
+    edit_thread = Thread(target=edit_source)
+    with patch.object(dispatcher, "_send", side_effect=blocked_send):
+        dispatch_thread.start()
+        assert send_started.wait(timeout=1)
+        edit_thread.start()
+        assert edit_finished.wait(timeout=1)
+        allow_send.set()
+        dispatch_thread.join(timeout=2)
+        edit_thread.join(timeout=2)
+
+    assert not edit_errors
+    assert not dispatch_thread.is_alive()
+    assert edit_finished.is_set()
+    current = store.get_message(source.message_id)
+    assert current is not None
+    assert current["revision"] == 2
+    finished = store.get_action(action_id)
+    assert finished is not None
+    assert finished.status == "sent"
+    assert finished.result["sent_message_id"] == "om_sent"
 
 
 def test_dry_run_provenance_cannot_be_promoted_by_production_dispatch(

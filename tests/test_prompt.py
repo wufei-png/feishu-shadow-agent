@@ -17,7 +17,9 @@ from feishu_shadow_agent.decision import (
 from feishu_shadow_agent.prompt import (
     Answerability,
     DecisionReason,
+    FollowupRevisionTaskSessionOutput,
     FollowupTaskSessionOutput,
+    InitialRevisionTaskSessionOutput,
     InitialTaskSessionOutput,
     TaskRouterOutput,
     build_owner_style_refresh_prompt,
@@ -143,8 +145,9 @@ def test_router_prompt_embeds_pydantic_output_schema() -> None:
     assert "attach_task only when it clearly continues one active candidate" in (
         route_description
     )
-    assert "reopen_task only when it clearly resumes one historical closed candidate" in (
-        route_description
+    assert (
+        "reopen_task only when it clearly resumes one historical closed candidate"
+        in (route_description)
     )
     assert "ignore for self/owner/admin/noise" in route_description
     assert "ambiguous when evidence is weak" in route_description
@@ -357,6 +360,60 @@ def test_followup_task_session_prompt_omits_task_label_and_rejects_extra_label()
                 "watch_action": "keep_watching",
             }
         )
+
+
+def test_revision_contract_is_exposed_only_with_a_previous_sent_reply() -> None:
+    task = TaskRecord(
+        id=1,
+        short_id="t_abc",
+        status="watching",
+        chat_id="oc_1",
+        chat_type="group",
+        thread_id="omt_1",
+        root_message_id="om_root",
+        task_label="Existing task",
+        watch_until="2026-06-22T12:00:00+08:00",
+    )
+    common = {
+        "task": task,
+        "current_message_id": "om_2",
+        "reply_target_message_ids": ["om_2", "om_root"],
+        "messages": [],
+        "resources": [],
+    }
+
+    normal_prompt = build_task_session_prompt(
+        **common,
+        output_model=FollowupTaskSessionOutput,
+    )
+    revision_prompt = build_task_session_prompt(
+        **common,
+        output_model=FollowupRevisionTaskSessionOutput,
+        previous_sent_reply="旧回复",
+    )
+
+    assert "## Revision Review" not in normal_prompt
+    assert "revision_signals" not in normal_prompt
+    assert "## Revision Review" in revision_prompt
+    assert "revision_signals" in revision_prompt
+    assert "旧回复" in revision_prompt
+
+    payload = {
+        "answerability": "auto_reply",
+        "decision_reason": None,
+        "proposed_reply": "新回复",
+        "reply_target_message_id": "om_2",
+        "watch_action": "keep_watching",
+    }
+    FollowupRevisionTaskSessionOutput.model_validate(payload | {"revision_signals": []})
+    FollowupRevisionTaskSessionOutput.model_validate(payload)
+    with pytest.raises(ValidationError):
+        FollowupTaskSessionOutput.model_validate(payload | {"revision_signals": []})
+
+    InitialRevisionTaskSessionOutput.model_validate(
+        payload | {"task_label": "label", "revision_signals": []}
+    )
+    InitialRevisionTaskSessionOutput.model_validate(payload | {"task_label": "label"})
 
 
 def test_task_session_prompt_uses_current_chat_type_when_task_value_is_missing() -> (

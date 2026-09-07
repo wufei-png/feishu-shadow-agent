@@ -190,6 +190,7 @@ def _run_turn(
         if result.result is None
         else result.result.error,
         latency_ms=None if result.result is None else result.result.latency_ms,
+        input_message_revisions=plan.prompt_message_revisions,
         prompt_version=prompt_identity.version,
         prompt_hash=prompt_identity.sha256,
         prompt={"text": result.prompt}

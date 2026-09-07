@@ -250,10 +250,21 @@ class NormalizedMessage:
     resources: list[ResourceRef] = field(default_factory=lambda: list[ResourceRef]())
     message_type: str | None = None
     raw: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
+    is_deleted: bool = False
+    revision: int = 1
 
     @property
     def is_self_message(self) -> bool:
         return self.sender_role in {"bot_message", "agent_message"}
+
+
+@dataclass(frozen=True)
+class MessageUpsertResult:
+    inserted: bool
+    changed: bool
+    revision: int
+    is_deleted: bool
+    semantic_hash: str
 
 
 @dataclass(frozen=True)
@@ -287,6 +298,8 @@ class ActionRecord:
     result: dict[str, Any]
     created_at: str
     updated_at: str
+    source_message_id: str | None = None
+    source_revision: int | None = None
 
 
 @dataclass(frozen=True)

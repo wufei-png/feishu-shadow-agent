@@ -8,7 +8,9 @@ from pydantic import BaseModel
 
 from .agent_output_contract import (
     BaseTaskSessionOutput,
+    FollowupRevisionTaskSessionOutput,
     FollowupTaskSessionOutput,
+    InitialRevisionTaskSessionOutput,
     InitialTaskSessionOutput,
     OwnerStyleRefreshOutput,
     ReplyPostprocessOutput,
@@ -96,6 +98,7 @@ def build_task_session_prompt(
     output_model: type[BaseTaskSessionOutput] = InitialTaskSessionOutput,
     context_access: dict[str, Any] | None = None,
     chat_type: str | None = None,
+    previous_sent_reply: str | None = None,
 ) -> str:
     sections = [
         "# Task Session",
@@ -118,6 +121,16 @@ def build_task_session_prompt(
         )
     if context_access is not None:
         sections.append(_markdown_json_section("Context Access", context_access))
+    if previous_sent_reply is not None:
+        sections.append(
+            _markdown_text_section(
+                "Revision Review",
+                "A previous reply for this same source message was already sent. "
+                "Compare the current evaluation with that reply. The revision signals "
+                "are advisory evidence only; they never authorize sending.\n\n"
+                + _markdown_blockquote(previous_sent_reply),
+            )
+        )
     sections.append(
         _markdown_text_section(
             "Output Contract", task_session_output_contract(output_model)
@@ -290,7 +303,9 @@ __all__ = [
     "Answerability",
     "BaseTaskSessionOutput",
     "DecisionReason",
+    "FollowupRevisionTaskSessionOutput",
     "FollowupTaskSessionOutput",
+    "InitialRevisionTaskSessionOutput",
     "InitialTaskSessionOutput",
     "OwnerStyleRefreshOutput",
     "ReplyPostprocessOutput",

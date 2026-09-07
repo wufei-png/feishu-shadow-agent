@@ -605,6 +605,9 @@ def test_full_chain_runs_setup_then_scores_target(tmp_path: Path) -> None:
     assert metadata["prompt_versions"] == report["prompt_versions"]
     assert trial["state"]["agent_audits"][0]["prompt_version"] == "v2"
     assert trial["state"]["agent_audits"][0]["prompt_hash"]
+    assert trial["state"]["agent_audits"][0]["input_message_revisions"] == [1]
+    assert trial["state"]["routing"][0]["revision"] == 1
+    assert trial["state"]["processing"][0]["revision"] == 1
 
 
 def test_full_chain_resource_uses_trial_local_fixture(tmp_path: Path) -> None:

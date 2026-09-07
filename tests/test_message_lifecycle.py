@@ -125,14 +125,16 @@ def test_store_updates_message_type_on_reupsert(tmp_path: Path) -> None:
     assert row["message_type"] == "file"
 
 
-def test_schema_version_4_includes_message_type_column(tmp_path: Path) -> None:
+def test_schema_version_5_includes_message_type_column(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.initialize()
     with store.connect() as conn:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
-    assert version == 4
+    assert version == 5
     assert "message_type" in columns
+    assert "is_deleted" in columns
+    assert "revision" in columns
 
 
 def test_message_detail_exposes_message_type(tmp_path: Path) -> None:
