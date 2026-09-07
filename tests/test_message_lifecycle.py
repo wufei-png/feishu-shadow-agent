@@ -116,6 +116,15 @@ def test_store_persists_message_type(tmp_path: Path) -> None:
     assert row["message_type"] == "merge_forward"
 
 
+def test_store_updates_message_type_on_reupsert(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.upsert_message(_normalize(_raw("om_1", msg_type="image")))
+    store.upsert_message(_normalize(_raw("om_1", msg_type="file", text="edited")))
+    row = store.get_message("om_1")
+    assert row is not None
+    assert row["message_type"] == "file"
+
+
 def test_schema_version_4_includes_message_type_column(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.initialize()

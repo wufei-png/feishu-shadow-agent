@@ -23,7 +23,7 @@
 ## 当前状态（2026-08 刷新）
 
 - 代码全部落地并提交：`DraftTaskSessionLabels.expected_skills` / `TaskSessionLabels.expected_skills`（`evals/schemas.py`，去重并拒绝空名，旧 case 兼容）；eval-only skill trace（`evals/skill_trace.py`，接入 `evals/model_service.py`，区分 `requested_skills` 与 `runtime_loaded_skills`，非 Hermes backend 为 `unsupported_backend`）。生产 schema/prompt 无 trace 字段。
-- 10 个 case 已 promote 到 `data/evals/golden/task-session/`，`labels.yaml` 含 owner 审核后的 `answerability`/`watch_action`/`reference_answer`/`expected_skills`（技术问答标 `[docmate]`，`p2p-wait-no-reply` 为空列表）。
+- 10 个 case 已 promote 到 `data/evals/golden/task-session/`，`labels.yaml` 含 owner 审核后的 `answerability`/`watch_action`/`reference_answer`/`expected_skills`（7 个技术问答标 `[docmate]`；`group-deployment-param`、`p2p-atlas-package`、`p2p-wait-no-reply` 为空列表）。
 - 2026-07-15 完成真实 baseline 与多轮单变量对照，完整实验记录在 ignored 的 `data/evals/P21_BASELINE_COMPARISON.md`（运行产物与报告一律不提交）。
 - 另有 5 个 lark-monthly case（20260812 捕获、20260813 运行）作为独立月循环，不属于本计划的 10 case 范围。
 - 当前机器即 Ubuntu 主机（`/home/SENSETIME/wufei2/go/src/github.com/wufei-png/feishu-shadow-agent` 及其 worktree）；如需 live capture/live ingress，运行前先确认 Lark CLI 登录状态。fixture eval 不依赖登录。
