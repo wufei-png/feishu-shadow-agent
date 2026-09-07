@@ -9,7 +9,7 @@
 | 优先级 | 条目 | 来源 | 下一步与完成条件 |
 | --- | --- | --- | --- |
 | P2 | 高流量群的 ingest 上限、lag 和恢复指标 | 群聊分析已有部分记录 | 明确每 tick 的消息上限、分页超时/积压策略和可观测指标；不得以静默截断代替恢复。当前仅有完整分页 drain 和 checkpoint 安全，不代表已解决高流量成本。 |
-| P1 | 消息生命周期语义（剩余 reaction、合并转发和跨 chat 引用） | 群聊分析已有记录；撤回/编辑第一切片已完成 | 已落地显式 tombstone、编辑 revision、revision-bound routing/Task Session/审批/动作门禁，以及旧回复的低/高影响 owner 复核；补齐 reaction、合并转发和跨 chat 引用的语义与 focused tests。 |
+| P1 | 消息生命周期语义（剩余 reaction、合并转发和跨 chat 引用） | 群聊分析已有记录；撤回/编辑第一切片已完成（在主 worktree 未提交） | 设计已敲定：reaction 为非信号（ADR-0014）；合并转发为容器单消息、记录全部 msg_type、展开文本原样保留、子资源占位符为天花板（ADR-0013，子资源下载依赖 lark-cli 暴露 message_list）；路由永不跨 chat（ADR-0013）。实现 = NormalizedMessage 加 message_type + 路由跨 chat 守卫 + focused tests。 |
 | P1 | incidental mention 与 bot membership 自愈 | 群聊分析已有记录 | 区分 owner 作为发言者时对他人的 incidental mention；补充 bot 离群/下载失败后的探测、提示和人工策略边界。 |
 | P1 | TaskProcessingService 进一步拆分 | 本次依据代码规模推断 | processing.py 当前约 1800 行。先按行为边界提取小模块并保持现有 contract/test 不变，再决定是否继续拆分；没有明确收益前不做纯重排。 |
 | P2 | 长 Task Session 的 context budget 或 running summary | 群聊分析已有记录 | 先用真实长对话失败证据确定窗口、summary owner 和恢复顺序，再决定 schema、prompt 或 session 策略；不得把 metadata 直接扩进生产 prompt。 |
