@@ -9,7 +9,7 @@
 | 优先级 | 条目 | 来源 | 下一步与完成条件 |
 | --- | --- | --- | --- |
 | P2 | 高流量群的 ingest 上限、lag 和恢复指标 | 群聊分析已有部分记录 | 设计已敲定（ADR-0016）：每 chat 页数/消息数上限 + 每 tick 全局时间预算；未全量 drain 时 checkpoint 不推进，溢出为 Ingest Backlog 由下一 tick 重拉（overlap+去重兜底），绝不静默截断；指标经 Operator Query slice（checkpoint 年龄/页数/消息数/drain 完成/积压标记）+ JSONL。实现 = 上限/预算落 ingestion、指标 slice、focused tests。 |
-| P1 | 消息生命周期语义（剩余 reaction、合并转发和跨 chat 引用） | 群聊分析已有记录；撤回/编辑第一切片已完成（在主 worktree 未提交） | 设计已敲定：reaction 为非信号（ADR-0014）；合并转发为容器单消息、记录全部 msg_type、展开文本原样保留、子资源占位符为天花板（ADR-0013，子资源下载依赖 lark-cli 暴露 message_list）；路由永不跨 chat（ADR-0013）。实现 = NormalizedMessage 加 message_type + 路由跨 chat 守卫 + focused tests。 |
+| P2 | 合并转发子资源下载（外部依赖） | ADR-0013 | 合并转发子图片/文件当前为占位符天花板；需 lark-cli 暴露 merge_forward 原始 message_list（子消息 id）后，本 repo 才能实现按子消息 id 的尽力下载 + 占位符兜底。前置 = lark-cli 工具链变更。 |
 | P1 | incidental mention 与 bot membership 自愈 | 群聊分析已有记录 | 设计已敲定：incidental mention 为非信号，路由层边界已存在（owner 消息只 takeover/IGNORE），补文档与 focused tests；bot 离群 = 被动失败归因（扩展 send 路径）+ 主动探测（`im chat.members bots`）+ Effective Policy 运行时派生降级（ADR-0015），通知 owner 处置、不自动改写 Policy Store、不自动加群。实现 = send 路径归因 + 探测适配 + 降级/通知 + 测试。 |
 | P2 | 长 Task Session 的 context budget 或 running summary | 群聊分析已有记录 | 设计方向已定（详见 [P22 证据计划](p22-task-session-context-budget-evidence.md)）：fresh 重建有界化（root+最近 N 条+Task Running Summary），follow-up 保持单条，summary 由系统组合生成、仅 fresh 注入。下一步：采集真实长对话样本（5–10+ 轮）做三变量对照取证，再决定窗口 N 与是否进生产 schema/prompt。 |
 | P2 | activation mode 与多 active task 优先级 | 群聊分析已有记录 | 设计已敲定：保持确定性顺序 reply_to > thread > burst > Router/新任务（换题=新消息/新线程），纯 mention 歧义进 Router；不实现 keyword 入口；不新增 per-chat activation_mode 字段，现有 auto_reply+获取来源已隐含激活语义。实现 = 入口层次/优先级文档化 + 冲突场景 focused tests。 |
