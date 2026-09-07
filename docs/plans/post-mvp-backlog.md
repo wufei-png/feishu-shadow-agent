@@ -11,7 +11,6 @@
 | P2 | 高流量群的 ingest 上限、lag 和恢复指标 | 群聊分析已有部分记录 | 明确每 tick 的消息上限、分页超时/积压策略和可观测指标；不得以静默截断代替恢复。当前仅有完整分页 drain 和 checkpoint 安全，不代表已解决高流量成本。 |
 | P1 | 消息生命周期语义（剩余 reaction、合并转发和跨 chat 引用） | 群聊分析已有记录；撤回/编辑第一切片已完成（在主 worktree 未提交） | 设计已敲定：reaction 为非信号（ADR-0014）；合并转发为容器单消息、记录全部 msg_type、展开文本原样保留、子资源占位符为天花板（ADR-0013，子资源下载依赖 lark-cli 暴露 message_list）；路由永不跨 chat（ADR-0013）。实现 = NormalizedMessage 加 message_type + 路由跨 chat 守卫 + focused tests。 |
 | P1 | incidental mention 与 bot membership 自愈 | 群聊分析已有记录 | 设计已敲定：incidental mention 为非信号，路由层边界已存在（owner 消息只 takeover/IGNORE），补文档与 focused tests；bot 离群 = 被动失败归因（扩展 send 路径）+ 主动探测（`im chat.members bots`）+ Effective Policy 运行时派生降级（ADR-0015），通知 owner 处置、不自动改写 Policy Store、不自动加群。实现 = send 路径归因 + 探测适配 + 降级/通知 + 测试。 |
-| P1 | TaskProcessingService 进一步拆分 | 本次依据代码规模推断 | processing.py 当前约 1800 行。先按行为边界提取小模块并保持现有 contract/test 不变，再决定是否继续拆分；没有明确收益前不做纯重排。 |
 | P2 | 长 Task Session 的 context budget 或 running summary | 群聊分析已有记录 | 先用真实长对话失败证据确定窗口、summary owner 和恢复顺序，再决定 schema、prompt 或 session 策略；不得把 metadata 直接扩进生产 prompt。 |
 | P2 | activation mode 与多 active task 优先级 | 群聊分析已有记录 | 为 mention-only、thread follow-up、keyword 等入口定义明确优先级、冲突和 per-chat 配置，再实现。 |
 | P2 | 后台补充背景与任务/资源重试命令 | MVP 后续列表 | 评估 /reply background 和 /retry 的权限、状态机、幂等和 owner 可见性；现有 dispatch retry 的人工恢复不能自动等价替代。 |
