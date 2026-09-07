@@ -203,3 +203,11 @@ _Avoid_: keyword trigger, non-mention activation, any-message activation
 **Activation Priority**:
 The deterministic order in which Activation Entrances resolve: unique reply-to, then unique thread, then burst attach, then the Task Router for ambiguous multi-task cases or closed-task recall; otherwise a new task is created. A direct mention alone only contributes candidates and lets the Router decide when several active tasks are plausible; a topic switch is expressed by a new message or thread rather than by re-mentioning.
 _Avoid_: mention-first, free-for-all candidates, global priority queue
+
+**Task Background Supplement**:
+Owner-supplied context attached to an active task through an Operator Command. It is stored as task-level state, injected only when a fresh Task Session is rebuilt, and never changes the rule that owner-authored messages are takeover-or-ignore only.
+_Avoid_: owner-message-as-context, always-injected background, metadata-in-prompt
+
+**Operator Retry**:
+A state-machine-bounded re-execution of a failed terminal stage — task processing, resource download, or dispatch — requested by the owner. Only terminal or externally blocked states are retryable; a retry starts a new attempt or claim under the existing idempotency key and claim-token mechanism and never replays already-successful stages.
+_Avoid_: in-flight retry, arbitrary re-run, silent re-dispatch

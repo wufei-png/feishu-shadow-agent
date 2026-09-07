@@ -13,6 +13,6 @@
 | P1 | incidental mention 与 bot membership 自愈 | 群聊分析已有记录 | 设计已敲定：incidental mention 为非信号，路由层边界已存在（owner 消息只 takeover/IGNORE），补文档与 focused tests；bot 离群 = 被动失败归因（扩展 send 路径）+ 主动探测（`im chat.members bots`）+ Effective Policy 运行时派生降级（ADR-0015），通知 owner 处置、不自动改写 Policy Store、不自动加群。实现 = send 路径归因 + 探测适配 + 降级/通知 + 测试。 |
 | P2 | 长 Task Session 的 context budget 或 running summary | 群聊分析已有记录 | 设计方向已定（详见 [P22 证据计划](p22-task-session-context-budget-evidence.md)）：fresh 重建有界化（root+最近 N 条+Task Running Summary），follow-up 保持单条，summary 由系统组合生成、仅 fresh 注入。下一步：采集真实长对话样本（5–10+ 轮）做三变量对照取证，再决定窗口 N 与是否进生产 schema/prompt。 |
 | P2 | activation mode 与多 active task 优先级 | 群聊分析已有记录 | 设计已敲定：保持确定性顺序 reply_to > thread > burst > Router/新任务（换题=新消息/新线程），纯 mention 歧义进 Router；不实现 keyword 入口；不新增 per-chat activation_mode 字段，现有 auto_reply+获取来源已隐含激活语义。实现 = 入口层次/优先级文档化 + 冲突场景 focused tests。 |
-| P2 | 后台补充背景与任务/资源重试命令 | MVP 后续列表 | 评估 /reply background 和 /retry 的权限、状态机、幂等和 owner 可见性；现有 dispatch retry 的人工恢复不能自动等价替代。 |
+| P2 | 后台补充背景与任务/资源重试命令 | MVP 后续列表 | 设计已敲定：补充背景 = 仅 owner 的 Operator Command（任务级状态，仅 fresh 重建注入，与 P22 一致，owner 消息语义不变）；/retry = 任务处理+资源下载+dispatch 统一命令，仅终态/阻塞态可重试（新 attempt/claim，复用幂等键与 claim_token，in-flight 禁止）。实现 = 命令 + 状态机门禁 + 注入 + 审计与测试。 |
 | P2 | 通用配置编辑和 per-user policy | MVP 后续列表 | 当前 Policy/Settings 页面不等于任意 config editor；先定义 config_change approval、审计和回滚边界。 |
 | P2 | 部署与外部集成扩展 | MVP 后续列表 | LaunchAgent、systemd、Windows service、桌面/远程 console、SDK/OAuth、向量检索和更细资源分析均未纳入当前目标，按实际产品需求拆成独立决策。 |
