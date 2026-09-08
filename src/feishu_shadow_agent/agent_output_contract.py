@@ -165,25 +165,25 @@ def _empty_revision_signals() -> list[RevisionSignal]:
     return []
 
 
+REVISION_SIGNALS_DESCRIPTION = (
+    "Advisory flags for whether this evaluation may invalidate the already-sent reply. "
+    "Include only applicable factual_correction, commitment_change, permission_change, "
+    "sensitive_change, or uncertain; empty if the sent reply still holds. "
+    "These flags cannot authorize sending."
+)
+
+
 class InitialRevisionTaskSessionOutput(InitialTaskSessionOutput):
     revision_signals: list[RevisionSignal] = Field(
         default_factory=_empty_revision_signals,
-        description=(
-            "Revision-only advisory signals. Include factual_correction, commitment_change, "
-            "permission_change, sensitive_change, or uncertain when the new evaluation may "
-            "invalidate a previously sent reply; use an empty list when none apply."
-        ),
+        description=REVISION_SIGNALS_DESCRIPTION,
     )
 
 
 class FollowupRevisionTaskSessionOutput(FollowupTaskSessionOutput):
     revision_signals: list[RevisionSignal] = Field(
         default_factory=_empty_revision_signals,
-        description=(
-            "Revision-only advisory signals. Include factual_correction, commitment_change, "
-            "permission_change, sensitive_change, or uncertain when the new evaluation may "
-            "invalidate a previously sent reply; use an empty list when none apply."
-        ),
+        description=REVISION_SIGNALS_DESCRIPTION,
     )
 
 
@@ -218,13 +218,9 @@ def task_session_output_contract(output_model: type[BaseTaskSessionOutput]) -> s
     if "task_label" in field_names:
         lines.append("- `task_label`: a short label for the initial task.")
     if "revision_signals" in field_names:
-        lines.append(
-            "- `revision_signals`: revision-only advisory signals; this field is present because "
-            "a previous reply for this source message was already sent. Include only applicable "
-            "values from `factual_correction`, `commitment_change`, `permission_change`, "
-            "`sensitive_change`, and `uncertain`; an empty list is valid. These signals can only "
-            "escalate owner review and never authorize sending."
-        )
+        description = output_model.model_fields["revision_signals"].description
+        if description:
+            lines.append(f"- `revision_signals`: {description}")
     lines.append(
         "Do not include Markdown, explanatory text, or @ mentions in the final response."
     )

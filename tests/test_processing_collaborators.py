@@ -7,7 +7,10 @@ import pytest
 
 from feishu_shadow_agent.agent_backend import AgentRunResult
 from feishu_shadow_agent.agent_invocation import AgentInvoker
-from feishu_shadow_agent.agent_output_contract import InitialRevisionTaskSessionOutput
+from feishu_shadow_agent.agent_output_contract import (
+    FollowupTaskSessionOutput,
+    InitialRevisionTaskSessionOutput,
+)
 from feishu_shadow_agent.config import AgentBackendConfig, AppConfig, OwnerConfig
 from feishu_shadow_agent.context_access import ContextAccessBuilder
 from feishu_shadow_agent.jsonl import JSONLLogger
@@ -150,6 +153,42 @@ def test_revision_task_session_uses_provider_structured_output_schema() -> None:
 
     assert result.ok
     assert calls == [InitialRevisionTaskSessionOutput]
+
+
+def test_happy_path_task_session_does_not_use_revision_schema() -> None:
+    calls: list[str] = []
+
+    class Backend:
+        provider = "codex"
+
+        def task_session(self, prompt: str, **kwargs: object) -> AgentRunResult:
+            calls.append("task_session")
+            return AgentRunResult(["task-session"], 0, json_data={})
+
+        def structured_task_session(self, **kwargs: object) -> AgentRunResult:
+            raise AssertionError("happy path must not use the revision structured path")
+
+        def structured_output(self, **kwargs: object) -> AgentRunResult:
+            raise AssertionError("happy path must not use structured_output")
+
+    runner = TaskSessionRunner(
+        store=None,  # type: ignore[arg-type]
+        agent_backend=Backend(),  # type: ignore[arg-type]
+        agent_invoker=None,  # type: ignore[arg-type]
+        context_access=None,  # type: ignore[arg-type]
+    )
+    plan = TaskSessionPromptPlan(
+        session_id="session-1",
+        task_message_ids=[],
+        prompt_message_ids=[],
+        output_model=FollowupTaskSessionOutput,
+        reply_target_message_ids=[],
+    )
+
+    result = runner._invoke_task_session(prompt="normal", plan=plan, cwd=None)
+
+    assert result.ok
+    assert calls == ["task_session"]
 
 
 def test_revision_task_session_prefers_provider_task_session_setup() -> None:

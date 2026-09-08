@@ -125,10 +125,9 @@ def build_task_session_prompt(
         sections.append(
             _markdown_text_section(
                 "Revision Review",
-                "A previous reply for this same source message was already sent. "
-                "Compare the current evaluation with that reply. The revision signals "
-                "are advisory evidence only; they never authorize sending.\n\n"
-                + _markdown_blockquote(previous_sent_reply),
+                "The quoted text is the reply already sent for this source message. "
+                "Treat Messages as the current source and produce a normal evaluation "
+                "against it.\n\n" + _markdown_blockquote(previous_sent_reply),
             )
         )
     sections.append(
