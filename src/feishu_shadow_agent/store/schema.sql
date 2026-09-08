@@ -1,7 +1,8 @@
 BEGIN IMMEDIATE;
 
 PRAGMA application_id = 1179861319;
-PRAGMA user_version = 3;
+PRAGMA application_id = 1179861319;
+PRAGMA user_version = 5;
 
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -18,6 +19,7 @@ CREATE TABLE IF NOT EXISTS messages (
   reply_to_message_id TEXT,
   direct_mention INTEGER NOT NULL DEFAULT 0,
   at_all INTEGER NOT NULL DEFAULT 0,
+  message_type TEXT,
   text TEXT,
   is_deleted INTEGER NOT NULL DEFAULT 0,
   revision INTEGER NOT NULL DEFAULT 1,

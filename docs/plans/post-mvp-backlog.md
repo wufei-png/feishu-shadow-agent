@@ -8,13 +8,11 @@
 
 | 优先级 | 条目 | 来源 | 下一步与完成条件 |
 | --- | --- | --- | --- |
-| P0（外部闭环） | P21 DocMate Task Session 真实评测闭环 | 已有 P21 计划；代码部分已完成 | 在目标环境刷新 capture/golden/config/owner 一致性，完成 owner 标注与 promote，跑 fresh baseline，再做一次单变量对照；详见 [P21 评测计划](p21-task-session-docmate-eval.md)。 |
-| P2 | 高流量群的 ingest 上限、lag 和恢复指标 | 群聊分析已有部分记录 | 明确每 tick 的消息上限、分页超时/积压策略和可观测指标；不得以静默截断代替恢复。当前仅有完整分页 drain 和 checkpoint 安全，不代表已解决高流量成本。 |
-| P1 | 消息生命周期语义（剩余 reaction、合并转发和跨 chat 引用） | 群聊分析已有记录；本次已完成撤回/编辑第一切片 | 已落地显式 tombstone、编辑 revision、revision-bound routing/Task Session/审批/动作门禁，以及旧回复的低/高影响 owner 复核；补齐 reaction、合并转发和跨 chat 引用的语义与 focused tests。 |
-| P1 | incidental mention 与 bot membership 自愈 | 群聊分析已有记录 | 区分 owner 作为发言者时对他人的 incidental mention；补充 bot 离群/下载失败后的探测、提示和人工策略边界。 |
-| P1 | TaskProcessingService 进一步拆分 | 本次依据代码规模推断 | processing.py 当前约 1800 行。先按行为边界提取小模块并保持现有 contract/test 不变，再决定是否继续拆分；没有明确收益前不做纯重排。 |
-| P2 | 长 Task Session 的 context budget 或 running summary | 群聊分析已有记录 | 先用真实长对话失败证据确定窗口、summary owner 和恢复顺序，再决定 schema、prompt 或 session 策略；不得把 metadata 直接扩进生产 prompt。 |
-| P2 | activation mode 与多 active task 优先级 | 群聊分析已有记录 | 为 mention-only、thread follow-up、keyword 等入口定义明确优先级、冲突和 per-chat 配置，再实现。 |
-| P2 | 后台补充背景与任务/资源重试命令 | MVP 后续列表 | 评估 /reply background 和 /retry 的权限、状态机、幂等和 owner 可见性；现有 dispatch retry 的人工恢复不能自动等价替代。 |
+| P2 | 高流量群的 ingest 上限、lag 和恢复指标 | 群聊分析已有部分记录 | 设计已敲定（ADR-0016）：每 chat 页数/消息数上限 + 每 tick 全局时间预算；未全量 drain 时 checkpoint 不推进，溢出为 Ingest Backlog 由下一 tick 重拉（overlap+去重兜底），绝不静默截断；指标经 Operator Query slice（checkpoint 年龄/页数/消息数/drain 完成/积压标记）+ JSONL。实现 = 上限/预算落 ingestion、指标 slice、focused tests。 |
+| P2 | 合并转发子资源下载（外部依赖） | ADR-0013 | 合并转发子图片/文件当前为占位符天花板；需 lark-cli 暴露 merge_forward 原始 message_list（子消息 id）后，本 repo 才能实现按子消息 id 的尽力下载 + 占位符兜底。前置 = lark-cli 工具链变更。 |
+| P1 | incidental mention 与 bot membership 自愈 | 群聊分析已有记录 | 设计已敲定：incidental mention 为非信号，路由层边界已存在（owner 消息只 takeover/IGNORE），补文档与 focused tests；bot 离群 = 被动失败归因（扩展 send 路径）+ 主动探测（`im chat.members bots`）+ Effective Policy 运行时派生降级（ADR-0015），通知 owner 处置、不自动改写 Policy Store、不自动加群。实现 = send 路径归因 + 探测适配 + 降级/通知 + 测试。 |
+| P2 | 长 Task Session 的 context budget 或 running summary | 群聊分析已有记录 | 设计方向已定（详见 [P22 证据计划](p22-task-session-context-budget-evidence.md)）：fresh 重建有界化（root+最近 N 条+Task Running Summary），follow-up 保持单条，summary 由系统组合生成、仅 fresh 注入。下一步：采集真实长对话样本（5–10+ 轮）做三变量对照取证，再决定窗口 N 与是否进生产 schema/prompt。 |
+| P2 | activation mode 与多 active task 优先级 | 群聊分析已有记录 | 设计已敲定：保持确定性顺序 reply_to > thread > burst > Router/新任务（换题=新消息/新线程），纯 mention 歧义进 Router；不实现 keyword 入口；不新增 per-chat activation_mode 字段，现有 auto_reply+获取来源已隐含激活语义。实现 = 入口层次/优先级文档化 + 冲突场景 focused tests。 |
+| P2 | 后台补充背景与任务/资源重试命令 | MVP 后续列表 | 设计已敲定：补充背景 = 仅 owner 的 Operator Command（任务级状态，仅 fresh 重建注入，与 P22 一致，owner 消息语义不变）；/retry = 任务处理+资源下载+dispatch 统一命令，仅终态/阻塞态可重试（新 attempt/claim，复用幂等键与 claim_token，in-flight 禁止）。实现 = 命令 + 状态机门禁 + 注入 + 审计与测试。 |
 | P2 | 通用配置编辑和 per-user policy | MVP 后续列表 | 当前 Policy/Settings 页面不等于任意 config editor；先定义 config_change approval、审计和回滚边界。 |
 | P2 | 部署与外部集成扩展 | MVP 后续列表 | LaunchAgent、systemd、Windows service、桌面/远程 console、SDK/OAuth、向量检索和更细资源分析均未纳入当前目标，按实际产品需求拆成独立决策。 |

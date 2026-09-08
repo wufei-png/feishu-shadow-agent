@@ -248,6 +248,7 @@ class NormalizedMessage:
     at_all: bool
     mentions: list[str] = field(default_factory=lambda: list[str]())
     resources: list[ResourceRef] = field(default_factory=lambda: list[ResourceRef]())
+    message_type: str | None = None
     raw: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     is_deleted: bool = False
     revision: int = 1

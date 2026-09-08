@@ -42,7 +42,8 @@ class MessageDetailQuery:
                 """
                 SELECT message_id, chat_id, chat_type, sender_id, sender_name, sender_type,
                        sender_role, sent_at, thread_id, reply_to_message_id, direct_mention,
-                       at_all, text, is_deleted, revision, normalized_json, inserted_at
+                       at_all, message_type, text, is_deleted, revision,
+                       normalized_json, inserted_at
                 FROM messages
                 WHERE message_id = ?
                 """,
@@ -241,6 +242,7 @@ def _message_detail_dto(row: sqlite3.Row) -> dict[str, Any]:
         "reply_to_message_id": data["reply_to_message_id"],
         "direct_mention": bool(data["direct_mention"]),
         "at_all": bool(data["at_all"]),
+        "message_type": data.get("message_type"),
         "text": data["text"],
         "is_deleted": bool(data["is_deleted"]),
         "revision": int(data["revision"] or 1),

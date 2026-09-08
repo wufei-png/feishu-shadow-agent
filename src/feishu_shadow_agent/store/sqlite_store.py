@@ -41,7 +41,7 @@ from .migrate import migrate_schema
 
 SQLITE_BUSY_TIMEOUT_MS = 5000
 SQLITE_APPLICATION_ID = 1179861319
-SQLITE_SCHEMA_VERSION = 3
+SQLITE_SCHEMA_VERSION = 5
 RUN_HEARTBEAT_STALE_AFTER_SECONDS = 300
 PRODUCT_POLICY_KEY = "reply_policy"
 LATEST_NON_OK_HEALTH_CHECKS_SQL = """
@@ -4646,6 +4646,7 @@ class SQLiteStore:
                     "reply_to_message_id": message.reply_to_message_id,
                     "direct_mention": message.direct_mention,
                     "at_all": message.at_all,
+                    "message_type": message.message_type,
                     "sender_name": message.sender_name,
                     "is_deleted": message.is_deleted,
                 },
@@ -4658,9 +4659,9 @@ class SQLiteStore:
                 INSERT INTO messages(
                   message_id, chat_id, chat_type, sender_id, sender_type, sent_at,
                   normalized_json, raw_json, inserted_at, thread_id, reply_to_message_id,
-                  sender_role, direct_mention, at_all, text, sender_name,
+                  sender_role, direct_mention, at_all, message_type, text, sender_name,
                   is_deleted, revision, semantic_hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message.message_id,
@@ -4677,6 +4678,7 @@ class SQLiteStore:
                     message.sender_role,
                     int(message.direct_mention),
                     int(message.at_all),
+                    message.message_type,
                     "" if message.is_deleted else message.text,
                     message.sender_name,
                     int(message.is_deleted),
@@ -4731,6 +4733,7 @@ class SQLiteStore:
                 "reply_to_message_id": message.reply_to_message_id,
                 "direct_mention": message.direct_mention,
                 "at_all": message.at_all,
+                "message_type": message.message_type,
                 "sender_name": message.sender_name,
                 "is_deleted": effective_deleted,
             },
@@ -4743,8 +4746,8 @@ class SQLiteStore:
             UPDATE messages
             SET chat_id = ?, chat_type = ?, sender_id = ?, sender_type = ?, sent_at = ?,
                 normalized_json = ?, raw_json = ?, thread_id = ?, reply_to_message_id = ?,
-                sender_role = ?, direct_mention = ?, at_all = ?, text = ?, sender_name = ?,
-                is_deleted = ?, revision = ?, semantic_hash = ?
+                sender_role = ?, direct_mention = ?, at_all = ?, message_type = ?,
+                text = ?, sender_name = ?, is_deleted = ?, revision = ?, semantic_hash = ?
             WHERE message_id = ? AND is_deleted = 0 AND revision = ?
             """,
             (
@@ -4760,6 +4763,7 @@ class SQLiteStore:
                 message.sender_role,
                 int(message.direct_mention),
                 int(message.at_all),
+                message.message_type,
                 "" if effective_deleted else message.text,
                 message.sender_name,
                 int(effective_deleted),
