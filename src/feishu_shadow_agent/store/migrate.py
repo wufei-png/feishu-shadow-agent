@@ -52,14 +52,20 @@ def migrate_schema(
 ) -> None:
     """Upgrade a marked SQLite store between supported baselines.
 
-    Empty databases use schema.sql directly. This path only handles in-place
-    upgrades of an already-marked database, currently v2 -> v3.
+    Empty databases use schema.sql directly. This path handles in-place
+    upgrades of an already-marked database: v2 -> v3 (revision slice) and
+    v2 -> v5 / v3 -> v5 (revision slice plus messages.message_type).
     """
 
     if current_version == target_version:
         return
-    if current_version == 2 and target_version == 3:
+    if current_version == 2:
         _migrate_v2_to_v3(conn)
+        current_version = 3
+    if current_version == 3 and target_version >= 4:
+        _add_column_if_missing(conn, "messages", "message_type TEXT")
+        current_version = 5
+    if current_version == target_version:
         conn.execute(f"PRAGMA user_version = {int(target_version)}")
         return
     raise RuntimeError(
