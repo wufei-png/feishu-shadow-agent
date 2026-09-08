@@ -143,6 +143,28 @@ def test_first_seen_tombstone_does_not_store_message_text(tmp_path: Path) -> Non
     assert stored["is_deleted"] == 1
 
 
+def test_empty_semantic_hash_stamps_without_creating_a_revision(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    first = _message("old source")
+    store.upsert_message_with_revision(first)
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE messages SET semantic_hash = '' WHERE message_id = ?",
+            ("om_source",),
+        )
+
+    stamped = store.upsert_message_with_revision(first)
+    stored = store.get_message("om_source")
+
+    assert (stamped.changed, stamped.revision) == (False, 1)
+    assert stored is not None
+    assert stored["revision"] == 1
+    assert stored["semantic_hash"]
+
+    edited = store.upsert_message_with_revision(replace(first, text="edited source"))
+    assert (edited.changed, edited.revision) == (True, 2)
+
+
 def test_message_upsert_tracks_revisions_and_keeps_tombstone_terminal(
     tmp_path: Path,
 ) -> None:

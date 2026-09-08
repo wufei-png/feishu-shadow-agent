@@ -37,6 +37,7 @@ from ..types import (
     new_run_id,
     utc_now_iso,
 )
+from .migrate import migrate_schema
 
 SQLITE_BUSY_TIMEOUT_MS = 5000
 SQLITE_APPLICATION_ID = 1179861319
@@ -97,18 +98,26 @@ class SQLiteStore:
                         """
                     ).fetchone()
                 )
-                if has_schema and (
-                    conn.execute("PRAGMA application_id").fetchone()[0]
-                    != SQLITE_APPLICATION_ID
-                    or conn.execute("PRAGMA user_version").fetchone()[0]
-                    != SQLITE_SCHEMA_VERSION
-                ):
-                    raise RuntimeError(
-                        "SQLite database is not the current schema baseline; "
-                        "configure an empty database"
-                    )
-                schema = Path(__file__).with_name("schema.sql")
-                conn.executescript(schema.read_text(encoding="utf-8"))
+                if not has_schema:
+                    schema = Path(__file__).with_name("schema.sql")
+                    conn.executescript(schema.read_text(encoding="utf-8"))
+                else:
+                    application_id = conn.execute("PRAGMA application_id").fetchone()[0]
+                    schema_version = conn.execute("PRAGMA user_version").fetchone()[0]
+                    if application_id != SQLITE_APPLICATION_ID:
+                        raise RuntimeError(
+                            "SQLite database is not the current schema baseline; "
+                            "configure an empty database"
+                        )
+                    if schema_version != SQLITE_SCHEMA_VERSION:
+                        migrate_schema(
+                            conn,
+                            current_version=int(schema_version),
+                            target_version=SQLITE_SCHEMA_VERSION,
+                        )
+                    else:
+                        schema = Path(__file__).with_name("schema.sql")
+                        conn.executescript(schema.read_text(encoding="utf-8"))
             self._initialized = True
 
     def health_probe(self) -> None:
@@ -4695,6 +4704,9 @@ class SQLiteStore:
                 is_deleted=True,
                 semantic_hash=previous_hash,
             )
+        # Migrated v2 rows keep semantic_hash=''. Stamp the live snapshot
+        # without creating a revision so the first poll is not an edit.
+        uninitialized_hash = previous_hash == ""
         changed = previous_hash != semantic_hash or message.is_deleted
         if not changed:
             return MessageUpsertResult(
@@ -4704,7 +4716,12 @@ class SQLiteStore:
                 is_deleted=False,
                 semantic_hash=previous_hash,
             )
-        revision = previous_revision + 1
+        if uninitialized_hash and not message.is_deleted:
+            revision = previous_revision
+            result_changed = False
+        else:
+            revision = previous_revision + 1
+            result_changed = True
         effective_deleted = message.is_deleted
         normalized_json = json.dumps(
             {
@@ -4778,7 +4795,7 @@ class SQLiteStore:
             )
         return MessageUpsertResult(
             inserted=False,
-            changed=True,
+            changed=result_changed,
             revision=revision,
             is_deleted=effective_deleted,
             semantic_hash=semantic_hash,
