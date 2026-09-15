@@ -870,6 +870,164 @@ class IngestionService:
         )
         return StageResult("approval_inbox", ok=True)
 
+    def run_processing_retries(self, *, run_id: str, limit: int = 20) -> StageResult:
+        if self.task_processor is None:
+            return StageResult("processing_retries", ok=True)
+        processed = 0
+        failures = 0
+        for _ in range(max(0, limit)):
+            attempt = self.store.claim_next_processing_retry(run_id=run_id)
+            if attempt is None:
+                break
+            attempt_id = int(attempt["id"])
+            claim_token = str(attempt["claim_token"])
+            completion = "failed"
+            error: str | None = "processing retry did not complete"
+            try:
+                row = self.store.get_message(str(attempt["message_id"]))
+                if row is None:
+                    completion = "cancelled"
+                    error = "message not found"
+                elif bool(row["is_deleted"]) or int(row["revision"]) != int(
+                    attempt["revision"]
+                ):
+                    completion = "cancelled"
+                    error = "stale message revision"
+                else:
+                    raw_value = json.loads(row["raw_json"])
+                    if not isinstance(raw_value, dict) or not raw_value:
+                        raise ValueError("message raw payload is unavailable")
+                    message = replace(
+                        self.normalizer.normalize(
+                            cast(dict[str, Any], raw_value),
+                            default_chat_type=row["chat_type"],
+                        ),
+                        revision=int(row["revision"]),
+                        is_deleted=bool(row["is_deleted"]),
+                    )
+                    now = self.clock()
+                    watch_until = _plus_minutes(
+                        now, self.config.lifecycle.watch_minutes
+                    )
+                    source = "p2p" if message.chat_type == "p2p" else "group_at_me"
+                    if attempt["stage"] == "task_router":
+                        placeholder_reason = (
+                            self.store.get_task_router_placeholder_reason(
+                                message.message_id, revision=message.revision
+                            )
+                        )
+                        if placeholder_reason is None:
+                            raise ValueError(
+                                "task-router placeholder routing is unavailable"
+                            )
+                        rerouted = self.task_processor.run_task_router(
+                            message=message,
+                            source=source,
+                            reason=placeholder_reason,
+                            now=now,
+                            watch_until=watch_until,
+                            run_id=run_id,
+                        )
+                        if isinstance(rerouted, RoutingResult):
+                            self.task_processor.process(
+                                message=message,
+                                routing=rerouted,
+                                source=source,
+                                now=now,
+                                watch_until=watch_until,
+                                run_id=run_id,
+                            )
+                        status = self.store.message_processing_status(
+                            message.message_id,
+                            revision=message.revision,
+                            stage="task_router",
+                        )
+                        completion = "succeeded" if status == "processed" else "failed"
+                        error = None if completion == "succeeded" else status
+                        routed = None
+                    else:
+                        routed = self.store.get_latest_non_duplicate_routing_decision(
+                            message.message_id, revision=message.revision
+                        )
+                    if attempt["stage"] != "task_router" and routed is None:
+                        raise ValueError("routing decision is unavailable")
+                    if routed is not None:
+                        decision, task = routed
+                        if attempt["task_id"] is not None and (
+                            task is None or task.id != int(attempt["task_id"])
+                        ):
+                            raise ValueError("retry task binding is stale")
+                        if task is not None and task.status != "watching":
+                            completion = "cancelled"
+                            error = "task ownership or closure blocks retry"
+                        else:
+                            if attempt["stage"] == "resource_download":
+                                self.resources.process(message, run_id=run_id)
+                            self.task_processor.process(
+                                message=message,
+                                routing=RoutingResult(decision=decision, task=task),
+                                source=source,
+                                now=now,
+                                watch_until=watch_until,
+                                run_id=run_id,
+                            )
+                            status = self.store.message_processing_status(
+                                message.message_id,
+                                revision=message.revision,
+                                stage=str(attempt["stage"]),
+                            )
+                            completion = (
+                                "succeeded" if status == "processed" else "failed"
+                            )
+                            error = None if completion == "succeeded" else status
+                finished = self.store.finish_processing_retry(
+                    attempt_id,
+                    claim_token=claim_token,
+                    status=completion,
+                    error=error,
+                )
+                if not finished:
+                    raise RuntimeError("processing retry claim was superseded")
+                processed += 1
+                failures += completion != "succeeded"
+                self.logger.emit(
+                    "info" if completion == "succeeded" else "warning",
+                    "processing_retry_finished",
+                    run_id=run_id,
+                    data={
+                        "attempt_id": attempt_id,
+                        "message_id": attempt["message_id"],
+                        "stage": attempt["stage"],
+                        "status": completion,
+                        "error": error,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.store.finish_processing_retry(
+                    attempt_id,
+                    claim_token=claim_token,
+                    status="failed",
+                    error=str(exc),
+                )
+                processed += 1
+                failures += 1
+                self.logger.error(
+                    "processing_retry_failed",
+                    run_id=run_id,
+                    data={
+                        "attempt_id": attempt_id,
+                        "message_id": attempt["message_id"],
+                        "stage": attempt["stage"],
+                        "error": str(exc),
+                    },
+                )
+        return StageResult(
+            "processing_retries",
+            ok=failures == 0,
+            processed=processed,
+            error=None if failures == 0 else f"{failures} processing retries failed",
+        )
+
     def run_approval_inbox(self, *, run_id: str) -> StageResult:
         if self.approval_service is None:
             return self.run_approval_inbox_placeholder(run_id=run_id)

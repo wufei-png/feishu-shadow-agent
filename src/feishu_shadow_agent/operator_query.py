@@ -652,6 +652,30 @@ class OperatorQueryService:
                     """,
                     (int(task["id"]), coerce_limit(limit)),
                 ).fetchall()
+                processing_rows = conn.execute(
+                    """
+                    SELECT mp.*,
+                           pra.id AS retry_id,
+                           pra.status AS retry_status,
+                           pra.actor AS retry_actor,
+                           pra.reason AS retry_reason,
+                           pra.error AS retry_error,
+                           pra.created_at AS retry_created_at,
+                           pra.finished_at AS retry_finished_at
+                    FROM message_processing mp
+                    LEFT JOIN processing_retry_attempts pra ON pra.id = (
+                      SELECT latest.id FROM processing_retry_attempts latest
+                      WHERE latest.message_id = mp.message_id
+                        AND latest.revision = mp.revision
+                        AND latest.stage = mp.stage
+                      ORDER BY latest.id DESC LIMIT 1
+                    )
+                    WHERE mp.task_id = ?
+                    ORDER BY mp.updated_at DESC, mp.id DESC
+                    LIMIT ?
+                    """,
+                    (int(task["id"]), coerce_limit(limit)),
+                ).fetchall()
         except ReadStoreUnavailable:
             return None
         task_summary = task_summary_dto(task)
@@ -667,6 +691,7 @@ class OperatorQueryService:
             "pending_approvals": pending_approvals,
             "actions": actions,
             "agent_audits": [agent_audit_dto(row) for row in agent_audit_rows],
+            "processing": [_task_processing_dto(row) for row in processing_rows],
             "effective_policy": self.effective_policy_summary(
                 task["chat_id"], task["chat_type"]
             ),
@@ -873,6 +898,34 @@ def _task_recommended_actions(
     elif any(action["status"] == ActionStatus.FAILED.value for action in actions):
         recommendations.append("retry_or_cancel_failed_actions")
     return recommendations
+
+
+def _task_processing_dto(row: sqlite3.Row) -> dict[str, Any]:
+    retry = None
+    if row["retry_id"] is not None:
+        retry = {
+            "id": int(row["retry_id"]),
+            "status": row["retry_status"],
+            "actor": row["retry_actor"],
+            "reason": row["retry_reason"],
+            "error": row["retry_error"],
+            "created_at": row["retry_created_at"],
+            "finished_at": row["retry_finished_at"],
+        }
+    return {
+        "id": int(row["id"]),
+        "message_id": row["message_id"],
+        "revision": int(row["revision"]),
+        "task_id": None if row["task_id"] is None else int(row["task_id"]),
+        "stage": row["stage"],
+        "status": row["status"],
+        "attempt_count": int(row["attempt_count"] or 0),
+        "last_error": row["last_error"],
+        "terminal_reason": row["terminal_reason"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "latest_retry": retry,
+    }
 
 
 def _row_attention_task(row: sqlite3.Row) -> dict[str, Any]:

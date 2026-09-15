@@ -63,11 +63,24 @@ class MessageDetailQuery:
             ).fetchall()
             processing_rows = conn.execute(
                 """
-                SELECT id, message_id, revision, task_id, stage, status, attempt_count,
-                       last_error, terminal_reason, created_at, updated_at
-                FROM message_processing
-                WHERE message_id = ?
-                ORDER BY updated_at DESC, id DESC
+                SELECT mp.*,
+                       pra.id AS retry_id,
+                       pra.status AS retry_status,
+                       pra.actor AS retry_actor,
+                       pra.reason AS retry_reason,
+                       pra.error AS retry_error,
+                       pra.created_at AS retry_created_at,
+                       pra.finished_at AS retry_finished_at
+                FROM message_processing mp
+                LEFT JOIN processing_retry_attempts pra ON pra.id = (
+                  SELECT latest.id FROM processing_retry_attempts latest
+                  WHERE latest.message_id = mp.message_id
+                    AND latest.revision = mp.revision
+                    AND latest.stage = mp.stage
+                  ORDER BY latest.id DESC LIMIT 1
+                )
+                WHERE mp.message_id = ?
+                ORDER BY mp.updated_at DESC, mp.id DESC
                 """,
                 (message_id,),
             ).fetchall()
@@ -271,6 +284,17 @@ def _routing_audit_dto(row: sqlite3.Row) -> dict[str, Any]:
 
 def _message_processing_dto(row: sqlite3.Row) -> dict[str, Any]:
     data = row_dict(row)
+    retry = None
+    if data.get("retry_id") is not None:
+        retry = {
+            "id": int(data["retry_id"]),
+            "status": data["retry_status"],
+            "actor": data["retry_actor"],
+            "reason": data.get("retry_reason"),
+            "error": data.get("retry_error"),
+            "created_at": data.get("retry_created_at"),
+            "finished_at": data.get("retry_finished_at"),
+        }
     return {
         "id": data["id"],
         "message_id": data["message_id"],
@@ -283,6 +307,7 @@ def _message_processing_dto(row: sqlite3.Row) -> dict[str, Any]:
         "terminal_reason": data.get("terminal_reason"),
         "created_at": data.get("created_at"),
         "updated_at": data.get("updated_at"),
+        "latest_retry": retry,
     }
 
 

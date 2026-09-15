@@ -2916,6 +2916,7 @@ def test_daemon_tick_runs_p2_stages_in_order(tmp_path: Path) -> None:
 
     assert [result.name for result in results] == [
         "bot_membership",
+        "processing_retries",
         "approval_inbox",
         "group_at_me",
         "p2p",

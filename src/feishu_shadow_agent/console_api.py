@@ -460,6 +460,24 @@ def create_console_app(
             result=result,
         ).as_dict()
 
+    @api.post("/messages/{message_id}/processing/{stage}/retry")
+    def retry_message_processing(
+        message_id: str,
+        stage: str,
+        body: Annotated[CommandRequest | None, Body()] = None,
+    ) -> dict[str, Any]:
+        payload = body or CommandRequest()
+        return (
+            command_service()
+            .retry_processing(
+                message_id,
+                stage=stage,
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=payload.reason,
+            )
+            .as_dict()
+        )
+
     @api.post("/approvals/{approval_id}/approve")
     def approve_approval(
         approval_id: str,

@@ -2,7 +2,7 @@ BEGIN IMMEDIATE;
 
 PRAGMA application_id = 1179861319;
 PRAGMA application_id = 1179861319;
-PRAGMA user_version = 5;
+PRAGMA user_version = 6;
 
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -312,6 +312,28 @@ CREATE TABLE IF NOT EXISTS message_processing (
   FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS processing_retry_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  task_id INTEGER,
+  stage TEXT NOT NULL CHECK (stage IN ('task_router', 'task_session', 'resource_download')),
+  source_status TEXT NOT NULL
+    CHECK (source_status IN ('processing_failed_terminal', 'blocked_waiting_external')),
+  status TEXT NOT NULL CHECK (status IN ('queued', 'claimed', 'succeeded', 'failed', 'cancelled')),
+  claim_token TEXT,
+  run_id TEXT,
+  actor TEXT NOT NULL,
+  reason TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  claimed_at TEXT,
+  finished_at TEXT,
+  content_expired_at TEXT,
+  FOREIGN KEY (message_id) REFERENCES messages(message_id) ON DELETE CASCADE,
+  FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_chat_sent ON messages(chat_id, sent_at, message_id);
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id);
 CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages(reply_to_message_id);
@@ -322,6 +344,11 @@ CREATE INDEX IF NOT EXISTS idx_agent_audits_task ON agent_audits(task_id, create
 CREATE INDEX IF NOT EXISTS idx_approval_commands_status ON approval_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_message_processing_status ON message_processing(status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_message_processing_message ON message_processing(message_id, revision, stage);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_processing_retry_active
+ON processing_retry_attempts(message_id, revision, stage)
+WHERE status IN ('queued', 'claimed');
+CREATE INDEX IF NOT EXISTS idx_processing_retry_status
+ON processing_retry_attempts(status, created_at, id);
 CREATE INDEX IF NOT EXISTS idx_dispatch_attempts_action ON dispatch_attempts(action_id, started_at, id);
 CREATE INDEX IF NOT EXISTS idx_dispatch_attempts_status ON dispatch_attempts(status, finished_at);
 CREATE INDEX IF NOT EXISTS idx_policy_audits_policy ON policy_audits(policy_key, created_at);

@@ -41,6 +41,7 @@ These rules belong in deterministic code and tests. Do not delegate them to prom
 - Bot membership facts: active probes and attributed bot send/download failures may derive present, absent, or unknown runtime state; they never mutate owner-authored Product Policy or auto-join a chat.
 - Reply gates: answerability/decision-reason combination validation, direct group mention requirement, empty reply rejection, forbidden mention cleanup, and identity fallback rules.
 - Dispatch safety: dry-run before send, idempotency key reuse, single active send constraint, readback verification, owner notification for failed/uncertain reply sends, and manual recovery for uncertain sends.
+- Processing recovery: only terminal or externally blocked `task_router`, `resource_download`, and `task_session` stages may be manually queued. Each retry has a fresh claim token, remains bound to the source revision and task ownership, and never turns uncertain dispatch into an automatic resend.
 - Operator mutations: all state-changing owner actions, including card callbacks, go through Operator Command services and return `CommandResult`.
 - Operator read models: CLI status and console reads go through `OperatorQueryService`, not direct store DTO snapshots.
 - Approval provenance: dry-run approvals/actions never become production sends; production requires a fresh production approval.
@@ -77,11 +78,12 @@ If an agent output crosses these bounds, the code should reject it, downgrade to
 - `policy.py`: Product Policy resolution for resource and reply decisions. Keep chat policy fallback rules here instead of copying them into processing, UI, or store code.
 - `membership.py`: active bot-membership probes, fact expiry, failure attribution, and episode-level owner notification deduplication. Unknown and expired facts must not be treated as confirmed absence.
 - `processing.py`: task-level orchestration from route result to task session, postprocess, reply gate, approval, or send action. New feature branches should prefer extracting helpers over adding more nested branches here.
+- `ingestion.py`: ingress orchestration, resource acquisition, and claimed manual processing retries. A task-router retry must recover the original deterministic placeholder rather than treating the later failure audit as a final route.
 - `dispatcher.py`: dispatch claiming, dry-run, actual send, readback, stale sending detection, and manual recovery.
 - `approval_cards.py`: deterministic Card JSON construction. Cards bind one concrete approval and expose only the supported resolution actions.
 - `card_actions.py`: owner-only `card.action.trigger` parsing, event-id idempotency, atomic command/feedback application, callback connection health, and daemon wake-up.
 - `operator_queries/`: read-only operator DTOs. It may derive status, overdue fields, feedback metrics, health issues, and recommended actions, but it must not mutate state.
-- `operator_commands.py`: explicit operator mutations. Console and CLI commands should call this facade instead of reaching into store transactions directly.
+- `operator_commands.py`: explicit operator mutations, including auditable processing and dispatch recovery. Console and CLI commands should call this facade instead of reaching into store transactions directly.
 - `store/sqlite_store.py`: SQLite persistence and transactional primitives. Avoid adding new product-facing read models here.
 - `prompt.py` and `context_access.py`: agent input contracts. Every model-visible field must have a current decision purpose.
 - `console_api.py`: local HTTP adapter only. Keep business decisions in query/command services.

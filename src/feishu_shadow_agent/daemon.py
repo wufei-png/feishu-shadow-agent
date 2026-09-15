@@ -163,6 +163,7 @@ class Daemon:
 
             stages = [
                 run_bot_membership,
+                service.run_processing_retries,
                 service.run_approval_inbox,
                 *service.ordered_ingestion_stages(),
             ]

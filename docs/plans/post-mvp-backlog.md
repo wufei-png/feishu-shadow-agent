@@ -17,30 +17,18 @@
 
 | 类别 | 当前证据 | 阶段 |
 | --- | --- | --- |
-| 已记录、尚未完成 | 后台背景与统一重试 | S7–S8 |
+| 已记录、尚未完成 | Owner 补充任务背景 | S8 |
 | 待取证的效果假设 | TaskSessionRunner._prompt_message_ids 在 fresh 时使用任务全部消息，resumed 时使用当前消息；长上下文效果仍需对照评测 | S9–S10 |
-| 文档/环境漂移 | docs/testing.md 仍描述不升级旧 schema，store/migrate.py 已有旧库迁移；本机工具版本与项目约束不一致 | 执行检查及相关阶段 |
 
-当前使用 `uv 0.12.4` 完成 `uv sync --locked --extra cards`。实施前 Python 全量为 **705 passed, 1 skipped**；最近阶段 S6 的指定 Python 契约为 **100 passed**，Ruff lint/format 与 Pyright 均通过；最近前端检查仍为 **9 passed** 且 typecheck/lint/build 通过。S3 另用隔离的合成 SQLite 数据完成 1440px 桌面和 500px 窄屏真实浏览器视觉验收，未操作生产记录；未运行打包或真实端到端。
+当前使用 `uv 0.12.4` 完成 `uv sync --locked --extra cards`。实施前 Python 全量为 **705 passed, 1 skipped**；最近阶段 S7 的指定及相邻 Python 契约为 **386 passed**，Ruff lint/format 与 Pyright 均通过；最近前端检查为 **10 passed** 且 lint/typecheck/build 通过。迁移能力说明已与当前受支持的已标记 schema 升级路径对齐。S3 另用隔离的合成 SQLite 数据完成 1440px 桌面和 500px 窄屏真实浏览器视觉验收，未操作生产记录；未运行打包或真实端到端。
 
 ## 实施阶段
 
 依赖表示技术前置；编号表示默认实施顺序。每阶段包含必要的 UI/API/命令/存储纵向改动与测试，不能把阶段是否正确推迟到后续证明。PY、FE 检查缩写见文末。
 
-### S7 — 统一人工重试
-
-依赖：S4–S6，UI 复用 S3。交付：任务处理、资源下载与 dispatch 的统一人工恢复入口。
-
-- CLI/Console 经 Operator Command 按当前阻塞阶段提供操作；仅终态/阻塞态可重试，in-flight 禁止；保持 owner-only 身份和审计。
-- 复用业务幂等键及现有 claim 校验机制，每次新 attempt 使用新的 claim token；旧执行者不能回写新 attempt，不能把“复用机制”实现成复用旧 token。
-- 已发送、过期 revision、owner 接管、dry-run provenance 门禁继续有效；failed_needs_review 保留人工核实与显式恢复，不加入后台自动重发。
-- 验收：资源恢复后继续正确处理、任务失败后重试、重复命令、并发 claim、旧 worker 迟到、修订失效；操作结果及审计能追溯原失败与新 attempt。
-- 检查：PY `tests/test_operator_commands.py tests/test_console_api.py tests/test_dispatcher.py tests/test_p3_hermes_approval.py tests/test_revision.py`；FE 验证恢复闭环。
-- 源码入口：`operator_commands.py`、`processing.py`、`dispatcher.py`、`store/sqlite_store.py`。
-
 ### S8 — Owner 补充任务背景
 
-依赖：S7，UI 复用 S3。交付：显式、可审计的任务背景编辑能力。
+依赖：已完成的 S7，UI 复用 S3。交付：显式、可审计的任务背景编辑能力。
 
 - owner Operator Command 保存/修改/清空任务级背景，带审计与版本；仅 fresh 重建时作为任务证据注入，不改变 owner 原聊天消息的接管语义。
 - UI 明确“下次 fresh 重建生效”，不暗示已进入当前 live provider session；背景服从任务隔离及 retention 清理。

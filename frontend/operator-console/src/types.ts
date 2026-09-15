@@ -352,6 +352,7 @@ export type TaskDetail = TaskSummary & {
   pending_approvals: ApprovalSummary[];
   actions: DispatchActionSummary[];
   agent_audits: AgentAudit[];
+  processing?: MessageProcessing[];
   effective_policy: EffectivePolicy;
   recommended_actions: string[];
 };
@@ -432,6 +433,7 @@ export type MessageDetail = {
 export type MessageProcessing = {
   id: number;
   message_id: string;
+  revision: number;
   task_id: number | null;
   stage: string;
   status: string;
@@ -440,6 +442,15 @@ export type MessageProcessing = {
   terminal_reason: string | null;
   created_at: string | null;
   updated_at: string | null;
+  latest_retry?: {
+    id: number;
+    status: "queued" | "claimed" | "succeeded" | "failed" | "cancelled";
+    actor: string;
+    reason: string | null;
+    error: string | null;
+    created_at: string | null;
+    finished_at: string | null;
+  } | null;
 };
 
 export type MessageResource = {

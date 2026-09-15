@@ -439,7 +439,7 @@ Task Session:
   后续 follow-up 使用 agent backend 的 resume/session 机制；Hermes backend 对应 `hermes chat --resume <agent_session_id>`。
 ```
 
-数据库只按当前 schema 从空库初始化；旧库和旧 `agent_session_id` 格式不读取、不识别、不迁移。同一飞书 thread 后续消息可以挂到同一个 task session。
+数据库可从空库初始化当前 schema，也可迁移代码明确支持且带版本标记的旧 schema；未标记或不受支持的布局不会被猜测迁移。旧 `agent_session_id` 格式仍不读取、不识别、不迁移。同一飞书 thread 后续消息可以挂到同一个 task session。
 
 Hermes 输出必须是严格 JSON，由 Python schema 校验。校验失败降级 owner 审批。
 

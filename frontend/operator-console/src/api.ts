@@ -157,6 +157,10 @@ export function reopenTask(token: string, taskId: string, body: CommandBody): Pr
   return postCommand(`/api/tasks/${encodeURIComponent(taskId)}/reopen`, token, body);
 }
 
+export function retryMessageProcessing(token: string, messageId: string, stage: string, body: CommandBody): Promise<CommandResult> {
+  return postCommand(`/api/messages/${encodeURIComponent(messageId)}/processing/${encodeURIComponent(stage)}/retry`, token, body);
+}
+
 export function expireApprovals(token: string, body: CommandBody): Promise<CommandResult> {
   return postCommand("/api/maintenance/expire-approvals", token, body);
 }

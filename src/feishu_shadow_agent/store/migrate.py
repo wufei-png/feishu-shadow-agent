@@ -45,6 +45,34 @@ WHERE kind = 'send_reply'
   AND status IN ('pending', 'sending', 'failed_needs_review')
   AND target_message_id IS NOT NULL
 """
+_PROCESSING_RETRY_V6_SQL = """
+CREATE TABLE IF NOT EXISTS processing_retry_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  task_id INTEGER,
+  stage TEXT NOT NULL CHECK (stage IN ('task_router', 'task_session', 'resource_download')),
+  source_status TEXT NOT NULL
+    CHECK (source_status IN ('processing_failed_terminal', 'blocked_waiting_external')),
+  status TEXT NOT NULL CHECK (status IN ('queued', 'claimed', 'succeeded', 'failed', 'cancelled')),
+  claim_token TEXT,
+  run_id TEXT,
+  actor TEXT NOT NULL,
+  reason TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  claimed_at TEXT,
+  finished_at TEXT,
+  content_expired_at TEXT,
+  FOREIGN KEY (message_id) REFERENCES messages(message_id) ON DELETE CASCADE,
+  FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_processing_retry_active
+ON processing_retry_attempts(message_id, revision, stage)
+WHERE status IN ('queued', 'claimed');
+CREATE INDEX IF NOT EXISTS idx_processing_retry_status
+ON processing_retry_attempts(status, created_at, id);
+"""
 
 
 def migrate_schema(
@@ -53,8 +81,8 @@ def migrate_schema(
     """Upgrade a marked SQLite store between supported baselines.
 
     Empty databases use schema.sql directly. This path handles in-place
-    upgrades of an already-marked database: v2 -> v3 (revision slice) and
-    v2 -> v5 / v3 -> v5 (revision slice plus messages.message_type).
+    upgrades of an already-marked database through the current additive
+    processing-retry schema.
     """
 
     if current_version == target_version:
@@ -65,6 +93,9 @@ def migrate_schema(
     if current_version == 3 and target_version >= 4:
         _add_column_if_missing(conn, "messages", "message_type TEXT")
         current_version = 5
+    if current_version == 5 and target_version >= 6:
+        conn.executescript(_PROCESSING_RETRY_V6_SQL)
+        current_version = 6
     if current_version == target_version:
         conn.execute(f"PRAGMA user_version = {int(target_version)}")
         return

@@ -126,7 +126,7 @@ git diff --check
 - `tests/test_lark_channel_compat.py`：官方 Channel SDK 的隔离 event loop、交互回调帧分发兼容层；只使用本地 fake frame，不访问飞书。
 - `tests/test_daemon.py`：tick 顺序、heartbeat、运行中 health fail-closed、approval inbox 失败保护、dispatch 行为。
 - `tests/test_dispatcher.py`：dry-run、真实发送、dispatch attempt、读回验证、stale sending 恢复。
-- `tests/test_store_schema.py`：SQLite current schema bootstrap、busy timeout、约束、状态 enum 契约、幂等动作；项目不升级或兼容旧 schema。
+- `tests/test_store_schema.py`：SQLite current schema bootstrap、受支持的已标记旧 schema 迁移、busy timeout、约束、状态 enum 契约、幂等动作；未标记或不受支持的 schema 仍拒绝自动猜测迁移。
 - `tests/test_product_policy_store.py`：Product Policy Store 初始化探针、config import/replace、chat policy skip、audit old/new。
 - `tests/test_policy_runtime.py`：runtime resolver 从 Product Policy Store 读取、缺失全局策略 fail closed、DB policy 覆盖 YAML import source。
 - `tests/test_operator_query.py`：OperatorQueryService 只读 dashboard/detail DTO、overdue 派生、effective policy、Policy Import Diff 和 audit history。
@@ -281,13 +281,23 @@ FEISHU_SHADOW_AGENT_REAL_E2E_APPROVAL_ID=a_xxx \
 python -m feishu_shadow_agent maintenance expire-approvals --config config.yaml
 ```
 
-本地 Operator Console 可用于查看 Dashboard、Approvals、Tasks、Dispatch、Feedback、Policy、Settings 和 Health，并通过本地 command facade 执行 approval、dispatch recovery、maintenance expiry 和 Product Policy import/update：
+本地 Operator Console 可用于查看 Dashboard、Approvals、Tasks、Dispatch、Feedback、Policy、Settings 和 Health，并通过本地 command facade 执行 approval、processing/dispatch recovery、maintenance expiry 和 Product Policy import/update：
 
 ```bash
 python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --port 8765
 ```
 
 启动后使用 stdout 中带 `token` 的本地 URL 打开浏览器。`/api/*` 只接受该进程生成的 bearer token；console 默认只绑定 loopback host，不写 `config.yaml`。Policy 页面仍通过 `OperatorCommandService` 调用与 CLI 一致的 `policy import-config` / policy update 命令边界。Health 展示规范化诊断 issue 和失败摘要，不作为 raw log viewer。
+
+任务或消息详情中的终态/外部阻塞处理阶段可显式重试；CLI 使用同一 command facade：
+
+```bash
+python -m feishu_shadow_agent task retry-processing --config config.yaml --message-id <om_xxx> --stage task_router
+python -m feishu_shadow_agent task retry-processing --config config.yaml --message-id <om_xxx> --stage resource_download --reason "resource access restored"
+python -m feishu_shadow_agent task retry-processing --config config.yaml --message-id <om_xxx> --stage task_session
+```
+
+命令只把一次新 attempt 入队，由 daemon 使用新的 claim token 执行。重复的 queued 命令是 `no_change`，claimed/in-flight、已发送、旧 revision 或 owner 已接管/关闭的 task 会被拒绝。`failed_needs_review` 仍必须在 Dispatch 中人工核实，不由 processing retry 自动重发。
 
 发送后检查：
 

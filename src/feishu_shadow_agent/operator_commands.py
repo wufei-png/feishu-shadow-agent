@@ -436,6 +436,57 @@ class MaintenanceCommandService:
         )
 
 
+class ProcessingRetryCommandService:
+    def __init__(self, store: SQLiteStore):
+        self.store = store
+
+    def retry(
+        self,
+        message_id: str,
+        *,
+        stage: str,
+        actor: str,
+        reason: str | None = None,
+    ) -> CommandResult:
+        target = {
+            "type": "message_processing",
+            "message_id": message_id,
+            "stage": stage,
+        }
+        try:
+            raw = self.store.request_processing_retry(
+                message_id=message_id,
+                stage=stage,
+                actor=actor,
+                reason=reason,
+            )
+        except ValueError as exc:
+            return _error_result(
+                status=_processing_retry_error_status(str(exc)),
+                command="processing.retry",
+                actor=actor,
+                reason=reason,
+                target=target,
+                error=str(exc),
+            )
+        changed = bool(raw.get("changed"))
+        return CommandResult(
+            status="applied" if changed else "no_change",
+            command="processing.retry",
+            actor=actor,
+            reason=reason,
+            target=target,
+            changed=changed,
+            result=raw,
+            next_actions=[
+                {
+                    "command": "status",
+                    "target": {"type": "message", "message_id": message_id},
+                }
+            ],
+        )
+
+
 class TaskCommandService:
     def __init__(self, store: SQLiteStore):
         self.store = store
@@ -739,6 +790,7 @@ class OperatorCommandService:
             store, keep_watching_until_factory=keep_watching_until_factory
         )
         self.dispatch = DispatchCommandService(store, readback_marker=readback_marker)
+        self.processing_retries = ProcessingRetryCommandService(store)
         self.maintenance = MaintenanceCommandService(store)
         self.tasks = TaskCommandService(store)
         self.policy = PolicyCommandService(store)
@@ -885,6 +937,18 @@ class OperatorCommandService:
         reason: str | None = None,
     ) -> CommandResult:
         return self.dispatch.retry(action_id, actor=actor, reason=reason)
+
+    def retry_processing(
+        self,
+        message_id: str,
+        *,
+        stage: str,
+        actor: str = "operator",
+        reason: str | None = None,
+    ) -> CommandResult:
+        return self.processing_retries.retry(
+            message_id, stage=stage, actor=actor, reason=reason
+        )
 
     def cancel_dispatch_action(
         self,
@@ -1126,6 +1190,23 @@ def _dispatch_error_status(error: str) -> str:
         or "text mismatch" in lowered
         or "text did not match" in lowered
     ):
+        return "validation_failed"
+    return "failed"
+
+
+def _processing_retry_error_status(error: str) -> str:
+    lowered = error.lower()
+    if "not found" in lowered:
+        return "not_found"
+    if (
+        "in flight" in lowered
+        or "stale" in lowered
+        or "ownership" in lowered
+        or "closure" in lowered
+        or "was sent" in lowered
+    ):
+        return "conflict"
+    if "only accepts" in lowered:
         return "validation_failed"
     return "failed"
 

@@ -233,6 +233,7 @@ message
 task_ids
 task_summaries
 routing_audits
+processing
 approvals
 actions
 recorded_dispatch_outcomes
@@ -241,7 +242,7 @@ recommended_actions
 
 Rules:
 
-- It is read-only.
+- The detail query is read-only. A processing retry is a separate explicit command.
 - It must not mutate approval expiry.
 - It must not call `Dispatcher.preview_action()`, because dispatch preview
   records preview output.
@@ -268,6 +269,16 @@ Task lifecycle commands:
 POST /api/tasks/{task_id}/close
 POST /api/tasks/{task_id}/reopen
 ```
+
+Processing recovery commands:
+
+```text
+POST /api/messages/{message_id}/processing/{stage}/retry
+```
+
+`stage` is one of `task_router`, `resource_download`, or `task_session`.
+Only a current-revision terminal or externally blocked stage can be queued;
+an active attempt, sent reply, or closed/taken-over task returns a conflict.
 
 Dispatch recovery commands:
 

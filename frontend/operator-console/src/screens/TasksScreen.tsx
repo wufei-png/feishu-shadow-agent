@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, Bot, MessageSquare, RotateCcw, Send, XCircle } from "lucide-react";
-import { closeTask, getTask, listTasks, reopenTask } from "../api";
+import { closeTask, getTask, listTasks, reopenTask, retryMessageProcessing } from "../api";
 import {
   Badge,
   Button,
@@ -28,9 +28,11 @@ import { MessageDetailPanel } from "./MessageDetailPanel";
 type TaskFilter = TaskStatus | "all";
 
 type TaskCommandInput = {
-  kind: "close" | "reopen";
+  kind: "close" | "reopen" | "retry-processing";
   taskId: string;
   reason?: string;
+  messageId?: string;
+  stage?: string;
 };
 
 const pageSize = 50;
@@ -92,7 +94,9 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
     mutationFn: (input: TaskCommandInput) =>
       input.kind === "close"
         ? closeTask(token, input.taskId, { reason: input.reason })
-        : reopenTask(token, input.taskId, { reason: input.reason }),
+        : input.kind === "reopen"
+          ? reopenTask(token, input.taskId, { reason: input.reason })
+          : retryMessageProcessing(token, input.messageId ?? "", input.stage ?? "", { reason: input.reason }),
     onSuccess: async (result, input) => {
       setCommandResults((current) => ({ ...current, [input.taskId]: result }));
       await invalidateAfterTaskCommand(queryClient);
@@ -128,6 +132,22 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
     busyTaskIdsRef.current.add(taskId);
     setBusyTaskIds(new Set(busyTaskIdsRef.current));
     taskCommand.mutate({ kind, taskId, reason: clean(reason) });
+  }
+
+  function retryProcessing(messageId: string, stage: string): void {
+    const taskId = detail.data?.task_id;
+    if (!taskId || busyTaskIdsRef.current.has(taskId)) {
+      return;
+    }
+    busyTaskIdsRef.current.add(taskId);
+    setBusyTaskIds(new Set(busyTaskIdsRef.current));
+    taskCommand.mutate({
+      kind: "retry-processing",
+      taskId,
+      messageId,
+      stage,
+      reason: clean(reason)
+    });
   }
 
   if (tasks.isLoading) {
@@ -239,6 +259,33 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
                 </Button>
               </div>
               <CommandResultPanel result={commandResult} />
+            </div>
+
+            <div className="detail-panel">
+              <div className="subsection-title">
+                <RotateCcw aria-hidden="true" size={16} />
+                <h2>Processing recovery</h2>
+              </div>
+              {(detail.data.processing ?? []).filter((item) => ["processing_failed_terminal", "blocked_waiting_external"].includes(item.status)).length ? (
+                <ul className="timeline-list">
+                  {(detail.data.processing ?? []).filter((item) => ["processing_failed_terminal", "blocked_waiting_external"].includes(item.status)).map((item) => {
+                    const activeRetry = item.latest_retry?.status === "queued" || item.latest_retry?.status === "claimed";
+                    return (
+                      <li key={`${item.message_id}-${item.revision}-${item.stage}`}>
+                        <RotateCcw aria-hidden="true" size={14} />
+                        <span>{item.stage} · {item.message_id} r{item.revision}</span>
+                        <small>{item.status}{item.terminal_reason ? ` · ${item.terminal_reason}` : ""}</small>
+                        <Button disabled={selectedTaskBusy || activeRetry} onClick={() => retryProcessing(item.message_id, item.stage)} tone="warning">
+                          {activeRetry ? "已排队" : "重试"}
+                        </Button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : (
+                <p className="detail-note">没有可人工重试的处理阶段。</p>
+              )}
+              <p className="detail-note">仅终态或外部阻塞可重试；发送结果不确定仍需在发送页人工核实。</p>
             </div>
 
             <div className="detail-panel">

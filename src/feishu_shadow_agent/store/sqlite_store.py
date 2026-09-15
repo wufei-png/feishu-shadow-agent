@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 from ..config import AppConfig, ChatPolicyConfig, ReplyPolicyConfig
 from ..time_utils import normalize_instant, parse_instant_or_none, shift_instant
@@ -42,7 +43,7 @@ from .migrate import migrate_schema
 
 SQLITE_BUSY_TIMEOUT_MS = 5000
 SQLITE_APPLICATION_ID = 1179861319
-SQLITE_SCHEMA_VERSION = 5
+SQLITE_SCHEMA_VERSION = 6
 RUN_HEARTBEAT_STALE_AFTER_SECONDS = 300
 PRODUCT_POLICY_KEY = "reply_policy"
 LATEST_NON_OK_HEALTH_CHECKS_SQL = """
@@ -797,6 +798,30 @@ class SQLiteStore:
             )
         return decision, task
 
+    def get_task_router_placeholder_reason(
+        self, message_id: str, *, revision: int
+    ) -> str | None:
+        """Recover the deterministic route that originally invoked task-router."""
+
+        self.initialize()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT route_reason
+                FROM routing_audits
+                WHERE message_id = ? AND revision = ?
+                  AND route = 'ambiguous'
+                  AND route_reason IN (
+                    'router_placeholder',
+                    'closed_recall_router_placeholder'
+                  )
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (message_id, revision),
+            ).fetchone()
+        return None if row is None else str(row["route_reason"])
+
     def message_processing_is_final(
         self, message_id: str, *, stage: str, revision: int | None = None
     ) -> bool:
@@ -873,6 +898,189 @@ class SQLiteStore:
                     now,
                 ),
             )
+
+    def request_processing_retry(
+        self,
+        *,
+        message_id: str,
+        stage: str,
+        actor: str,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Queue one manual retry from a terminal or externally blocked stage."""
+
+        self.initialize()
+        now = self.clock()
+        with self.connect() as conn:
+            processing = conn.execute(
+                """
+                SELECT mp.*, m.revision AS current_revision, m.is_deleted,
+                       t.status AS task_status
+                FROM message_processing mp
+                JOIN messages m ON m.message_id = mp.message_id
+                LEFT JOIN tasks t ON t.id = mp.task_id
+                WHERE mp.message_id = ? AND mp.stage = ?
+                ORDER BY mp.revision DESC, mp.id DESC
+                LIMIT 1
+                """,
+                (message_id, stage),
+            ).fetchone()
+            if processing is None:
+                raise ValueError(f"processing stage not found: {message_id} {stage}")
+            if processing["status"] not in {
+                "processing_failed_terminal",
+                "blocked_waiting_external",
+            }:
+                raise ValueError(
+                    "processing retry only accepts terminal or externally blocked stages"
+                )
+            if bool(processing["is_deleted"]) or int(
+                processing["current_revision"]
+            ) != int(processing["revision"]):
+                raise ValueError(
+                    "processing retry is bound to a stale message revision"
+                )
+            if (
+                processing["task_id"] is not None
+                and processing["task_status"] != "watching"
+            ):
+                raise ValueError(
+                    "processing retry is blocked by task ownership or closure"
+                )
+            already_sent = conn.execute(
+                """
+                SELECT 1 FROM actions
+                WHERE kind = 'send_reply' AND status = 'sent'
+                  AND source_message_id = ? AND source_revision = ?
+                LIMIT 1
+                """,
+                (message_id, int(processing["revision"])),
+            ).fetchone()
+            if already_sent is not None:
+                raise ValueError(
+                    "processing retry is blocked because the reply was sent"
+                )
+            active = conn.execute(
+                """
+                SELECT * FROM processing_retry_attempts
+                WHERE message_id = ? AND revision = ? AND stage = ?
+                  AND status IN ('queued', 'claimed')
+                ORDER BY id DESC LIMIT 1
+                """,
+                (message_id, int(processing["revision"]), stage),
+            ).fetchone()
+            if active is not None:
+                if active["status"] == "claimed":
+                    raise ValueError("processing retry is already in flight")
+                return {"changed": False, "attempt": _row_dict(active)}
+            cursor = conn.execute(
+                """
+                INSERT INTO processing_retry_attempts(
+                  message_id, revision, task_id, stage, source_status, status,
+                  actor, reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+                """,
+                (
+                    message_id,
+                    int(processing["revision"]),
+                    processing["task_id"],
+                    stage,
+                    processing["status"],
+                    actor,
+                    None if reason is None else _truncate(reason),
+                    now,
+                ),
+            )
+            attempt = conn.execute(
+                "SELECT * FROM processing_retry_attempts WHERE id = ?",
+                (_cursor_lastrowid(cursor),),
+            ).fetchone()
+        if attempt is None:
+            raise ValueError("processing retry queue write failed")
+        return {"changed": True, "attempt": _row_dict(attempt)}
+
+    def claim_next_processing_retry(self, *, run_id: str) -> dict[str, Any] | None:
+        self.initialize()
+        now = self.clock()
+        claim_token = f"processing-retry-{uuid4()}"
+        with self.connect() as conn:
+            candidate = conn.execute(
+                """
+                SELECT id FROM processing_retry_attempts
+                WHERE status = 'queued'
+                ORDER BY created_at, id
+                LIMIT 1
+                """
+            ).fetchone()
+            if candidate is None:
+                return None
+            cursor = conn.execute(
+                """
+                UPDATE processing_retry_attempts
+                SET status = 'claimed', claim_token = ?, run_id = ?, claimed_at = ?
+                WHERE id = ? AND status = 'queued'
+                """,
+                (claim_token, run_id, now, int(candidate["id"])),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = conn.execute(
+                "SELECT * FROM processing_retry_attempts WHERE id = ?",
+                (int(candidate["id"]),),
+            ).fetchone()
+        return None if row is None else _row_dict(row)
+
+    def finish_processing_retry(
+        self,
+        attempt_id: int,
+        *,
+        claim_token: str,
+        status: str,
+        error: str | None = None,
+    ) -> bool:
+        if status not in {"succeeded", "failed", "cancelled"}:
+            raise ValueError(f"invalid processing retry completion status: {status}")
+        self.initialize()
+        with self.connect() as conn:
+            attempt = conn.execute(
+                "SELECT message_id, revision, task_id, stage FROM processing_retry_attempts WHERE id = ?",
+                (attempt_id,),
+            ).fetchone()
+            cursor = conn.execute(
+                """
+                UPDATE processing_retry_attempts
+                SET status = ?, error = ?, finished_at = ?
+                WHERE id = ? AND status = 'claimed' AND claim_token = ?
+                """,
+                (
+                    status,
+                    None if error is None else _truncate(error),
+                    self.clock(),
+                    attempt_id,
+                    claim_token,
+                ),
+            )
+            if cursor.rowcount == 1 and status == "succeeded" and attempt is not None:
+                conn.execute(
+                    """
+                    UPDATE actions
+                    SET status = 'cancelled', updated_at = ?
+                    WHERE kind = 'owner_notification' AND status = 'pending'
+                      AND (? IS NULL OR task_id = ?)
+                      AND json_extract(payload_json, '$.source_message_id') = ?
+                      AND json_extract(payload_json, '$.source_revision') = ?
+                      AND json_extract(payload_json, '$.stage') = ?
+                    """,
+                    (
+                        self.clock(),
+                        attempt["task_id"],
+                        attempt["task_id"],
+                        attempt["message_id"],
+                        int(attempt["revision"]),
+                        attempt["stage"],
+                    ),
+                )
+        return cursor.rowcount == 1
 
     def upsert_resource(
         self,
@@ -1115,6 +1323,19 @@ class SQLiteStore:
                     AND t.status = 'watching' AND t.watch_until IS NOT NULL
                     AND julianday(t.watch_until) > julianday(?)
                 )
+                """,
+                (cutoff, now),
+            ),
+            (
+                "processing_retry_attempts",
+                "processing_retry_attempts",
+                "reason = NULL, error = NULL, content_expired_at = ?",
+                (now,),
+                f"""
+                content_expired_at IS NULL
+                AND julianday(COALESCE(finished_at, created_at)) <= julianday(?)
+                AND (reason IS NOT NULL OR error IS NOT NULL)
+                AND {active_task_by_id.format(table="processing_retry_attempts")}
                 """,
                 (cutoff, now),
             ),

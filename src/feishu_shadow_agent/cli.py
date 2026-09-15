@@ -378,6 +378,18 @@ def build_parser() -> argparse.ArgumentParser:
     task_reopen.add_argument("--task-id", required=True)
     task_reopen.add_argument("--reason", help="optional operator audit reason")
     task_reopen.set_defaults(handler=_handle_task_reopen)
+    task_retry = task_subparsers.add_parser(
+        "retry-processing", help="queue a terminal or blocked processing stage"
+    )
+    _add_config_arg(task_retry)
+    task_retry.add_argument("--message-id", required=True)
+    task_retry.add_argument(
+        "--stage",
+        required=True,
+        choices=["task_router", "resource_download", "task_session"],
+    )
+    task_retry.add_argument("--reason", help="optional operator audit reason")
+    task_retry.set_defaults(handler=_handle_task_retry_processing)
 
     return parser
 
@@ -579,6 +591,17 @@ def _handle_task_reopen(args: argparse.Namespace) -> int:
     result = OperatorCommandService(store).reopen_task(
         args.task_id,
         watch_until=_watch_until_from_now(loaded.config.lifecycle.watch_minutes),
+        actor="local_cli",
+        reason=args.reason,
+    )
+    return _emit_command_result(result)
+
+
+def _handle_task_retry_processing(args: argparse.Namespace) -> int:
+    _, store, _ = _load_runtime(args.config)
+    result = OperatorCommandService(store).retry_processing(
+        args.message_id,
+        stage=args.stage,
         actor="local_cli",
         reason=args.reason,
     )

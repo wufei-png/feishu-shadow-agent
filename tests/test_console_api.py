@@ -955,6 +955,32 @@ def test_message_replay_route_returns_dry_run_command_result(
     assert calls == ["om_found", "om_missing"]
 
 
+def test_processing_retry_route_queues_operator_command(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    task_id = _seed_task_with_message(store, message_id="om_retry")
+    store.record_message_processing(
+        message_id="om_retry",
+        task_id=task_id,
+        stage="resource_download",
+        status="blocked_waiting_external",
+        terminal_reason="bot_not_joined",
+    )
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/api/messages/om_retry/processing/resource_download/retry",
+        headers=_auth(),
+        json={"reason": "bot re-added"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "applied"
+    assert payload["command"] == "processing.retry"
+    assert payload["actor"] == "local_console"
+    assert payload["result"]["attempt"]["stage"] == "resource_download"
+
+
 def test_dispatch_mark_sent_route_uses_readback_marker(tmp_path: Path) -> None:
     store = _store(tmp_path)
     task_id = _seed_task_with_message(store)

@@ -745,6 +745,19 @@ def test_task_detail_returns_related_read_models_and_effective_policy(
         },
     )
     assert action_id is not None
+    store.record_message_processing(
+        message_id="om_root",
+        task_id=task_id,
+        stage="resource_download",
+        status="blocked_waiting_external",
+        terminal_reason="bot_not_joined",
+    )
+    store.request_processing_retry(
+        message_id="om_root",
+        stage="resource_download",
+        actor="local_console",
+        reason="bot restored",
+    )
     query = OperatorQueryService(
         store,
         policy_import_source=config,
@@ -769,6 +782,30 @@ def test_task_detail_returns_related_read_models_and_effective_policy(
     }
     assert detail["pending_approvals"][0]["approval_id"] == "a_review"
     assert detail["actions"][0]["action_id"] == action_id
+    assert detail["processing"] == [
+        {
+            "id": detail["processing"][0]["id"],
+            "message_id": "om_root",
+            "revision": 1,
+            "task_id": task_id,
+            "stage": "resource_download",
+            "status": "blocked_waiting_external",
+            "attempt_count": 0,
+            "last_error": None,
+            "terminal_reason": "bot_not_joined",
+            "created_at": detail["processing"][0]["created_at"],
+            "updated_at": detail["processing"][0]["updated_at"],
+            "latest_retry": {
+                "id": detail["processing"][0]["latest_retry"]["id"],
+                "status": "queued",
+                "actor": "local_console",
+                "reason": "bot restored",
+                "error": None,
+                "created_at": detail["processing"][0]["latest_retry"]["created_at"],
+                "finished_at": None,
+            },
+        }
+    ]
     assert detail["effective_policy"] == {
         "policy_source": "explicit_chat",
         "auto_reply": True,
@@ -898,10 +935,10 @@ def test_message_detail_returns_processing_context_without_preview_side_effects(
                 "om_root",
                 task_id,
                 "resource_download",
-                "processed",
+                "blocked_waiting_external",
                 1,
-                None,
-                None,
+                "bot unavailable",
+                "bot_not_joined",
                 "2026-06-22T08:00:00+08:00",
                 "2026-06-22T08:01:00+08:00",
             ),
@@ -977,6 +1014,12 @@ def test_message_detail_returns_processing_context_without_preview_side_effects(
             "WHERE request_type = 'router' AND input_message_ids_json = ?",
             ("v1", "router-hash", json.dumps(["om_root"])),
         )
+    store.request_processing_retry(
+        message_id="om_root",
+        stage="resource_download",
+        actor="local_console",
+        reason="bot restored",
+    )
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_root",
@@ -1002,7 +1045,10 @@ def test_message_detail_returns_processing_context_without_preview_side_effects(
     assert detail["task_summaries"][0]["task_id"] == "t_1"
     assert detail["routing_audits"][0]["route"] == "new_task"
     assert detail["processing"][0]["stage"] == "resource_download"
-    assert detail["processing"][0]["status"] == "processed"
+    assert detail["processing"][0]["status"] == "blocked_waiting_external"
+    assert detail["processing"][0]["latest_retry"]["status"] == "queued"
+    assert detail["processing"][0]["latest_retry"]["actor"] == "local_console"
+    assert detail["processing"][0]["latest_retry"]["reason"] == "bot restored"
     assert detail["resources"][0]["file_key"] == "file_1"
     assert detail["resources"][0]["path_exists"] is True
     assert detail["resources"][0]["raw_summary"] == {"reason": "ok"}

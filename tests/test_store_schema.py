@@ -38,6 +38,7 @@ EXPECTED_TABLES = {
     "approval_commands",
     "approval_feedback",
     "message_processing",
+    "processing_retry_attempts",
 }
 
 
@@ -59,6 +60,26 @@ def test_schema_initialize_is_idempotent_and_creates_current_tables(
     assert "schema_migrations" not in {row["name"] for row in rows}
     assert application_id == SQLITE_APPLICATION_ID
     assert schema_version == SQLITE_SCHEMA_VERSION
+
+
+def test_schema_migrates_v5_processing_retry_table(tmp_path: Path) -> None:
+    path = tmp_path / "agent.sqlite3"
+    initial = SQLiteStore(path)
+    initial.initialize()
+    with initial.connect() as conn:
+        conn.execute("DROP TABLE processing_retry_attempts")
+        conn.execute("PRAGMA user_version = 5")
+
+    migrated = SQLiteStore(path)
+    migrated.initialize()
+
+    with migrated.connect() as conn:
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'processing_retry_attempts'"
+        ).fetchone()
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert table is not None
+    assert version == SQLITE_SCHEMA_VERSION
 
 
 def test_schema_initialize_rejects_unmarked_existing_database(tmp_path: Path) -> None:
