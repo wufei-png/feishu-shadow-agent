@@ -15,7 +15,7 @@ import {
   statusTone
 } from "../components/Primitives";
 import { invalidateAfterMaintenanceCommand, queryKeys } from "../queryKeys";
-import type { ApprovalSummary, AttentionTask, CommandResult, DispatchActionSummary, RouteKey } from "../types";
+import type { ApprovalSummary, AttentionTask, CommandResult, DispatchActionSummary, IngestionStatus, RouteKey } from "../types";
 
 export function DashboardScreen({ token, navigate }: { token: string; navigate: (route: RouteKey, selectedId?: string) => void }) {
   const queryClient = useQueryClient();
@@ -93,6 +93,8 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
       </div>
 
       <aside className="work-detail">
+        <IngestionPanel status={snapshot?.ingestion_status} />
+
         <div className="detail-panel">
           <p className="eyebrow">PRODUCT POLICY</p>
           <h2>运行时策略</h2>
@@ -132,6 +134,48 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
       </aside>
     </section>
   );
+}
+
+function IngestionPanel({ status }: { status: IngestionStatus | undefined }) {
+  const summary = status?.summary;
+  const backlogs = status?.sources.filter((source) => !source.drain_complete) ?? [];
+  return (
+    <div className="detail-panel">
+      <p className="eyebrow">INGESTION</p>
+      <div className="detail-title-row">
+        <h2>摄取积压</h2>
+        <Badge tone={summary?.backlog_count ? "warning" : "success"}>{summary?.backlog_count ?? 0} 个来源</Badge>
+      </div>
+      <dl className="fact-list">
+        <div><dt>最老 checkpoint</dt><dd>{formatAge(summary?.oldest_checkpoint_age_seconds)}</dd></div>
+        <div><dt>预算耗尽</dt><dd>{summary?.budget_exhausted_count ?? 0}</dd></div>
+      </dl>
+      {backlogs.length ? (
+        <ul className="timeline-list">
+          {backlogs.slice(0, 5).map((source) => (
+            <li key={source.checkpoint_key}>
+              <AlertTriangle aria-hidden="true" size={14} />
+              <span>{source.checkpoint_key}</span>
+              <small>{source.backlog?.reason ?? "deferred"} · {source.backlog?.pages_fetched ?? 0} 页 / {source.backlog?.messages_fetched ?? 0} 条</small>
+            </li>
+          ))}
+        </ul>
+      ) : <div className="quiet-empty"><CheckCircle2 aria-hidden="true" size={18} /><span>当前没有摄取积压</span></div>}
+    </div>
+  );
+}
+
+function formatAge(seconds: number | null | undefined): string {
+  if (seconds == null) {
+    return "尚无成功 checkpoint";
+  }
+  if (seconds < 60) {
+    return `${seconds} 秒`;
+  }
+  if (seconds < 3600) {
+    return `${Math.floor(seconds / 60)} 分钟`;
+  }
+  return `${Math.floor(seconds / 3600)} 小时`;
 }
 
 function Metric({ label, value, tone }: { label: string; value: number; tone: string }) {

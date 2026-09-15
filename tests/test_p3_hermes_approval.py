@@ -3072,7 +3072,12 @@ def test_approval_inbox_approves_pending_request_and_advances_checkpoint(
     assert result.processed == 1
     assert fake.calls == ["p2p:ou_bot:None"]
     assert store.get_checkpoint("approval_inbox") == {
-        "last_success_at": "2026-06-22T02:10:00+00:00"
+        "last_success_at": "2026-06-22T02:10:00+00:00",
+        "last_drain": {
+            "completed_at": "2026-06-22T02:10:00+00:00",
+            "messages_fetched": 1,
+            "pages_fetched": 1,
+        },
     }
     with store.connect() as conn:
         approval = conn.execute(

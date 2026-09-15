@@ -17,33 +17,19 @@
 
 | 类别 | 当前证据 | 阶段 |
 | --- | --- | --- |
-| 已记录、尚未实现 | ingestion._drain 全量分页并累积 items；上限、时间预算、积压指标仍未落地 | S4 |
-| 设计风险，尚非线上故障结论 | ADR-0016 的保留 checkpoint 后重拉方案，必须证明固定窗口持续超 cap 时不会反复停在同一批页面 | S4 |
 | 已记录、尚未完成 | bot membership 运行时事实、路由冲突契约、后台背景与统一重试 | S5–S8 |
 | 待取证的效果假设 | TaskSessionRunner._prompt_message_ids 在 fresh 时使用任务全部消息，resumed 时使用当前消息；长上下文效果仍需对照评测 | S9–S10 |
 | 文档/环境漂移 | docs/testing.md 仍描述不升级旧 schema，store/migrate.py 已有旧库迁移；本机工具版本与项目约束不一致 | 执行检查及相关阶段 |
 
-当前使用 `uv 0.12.4` 完成 `uv sync --locked --extra cards`。实施前 Python 全量为 **705 passed, 1 skipped**；最近阶段的指定 Python 契约为 **87 passed**，前端为 **9 passed**，Ruff lint/format、Pyright、前端 typecheck/lint/build 均通过。S3 另用隔离的合成 SQLite 数据完成 1440px 桌面和 500px 窄屏真实浏览器视觉验收，未操作生产记录；未运行打包或真实端到端。
+当前使用 `uv 0.12.4` 完成 `uv sync --locked --extra cards`。实施前 Python 全量为 **705 passed, 1 skipped**；最近阶段的指定 Python 契约为 **230 passed**，前端为 **9 passed**，Ruff lint/format、Pyright、前端 typecheck/lint/build 均通过。S3 另用隔离的合成 SQLite 数据完成 1440px 桌面和 500px 窄屏真实浏览器视觉验收，未操作生产记录；未运行打包或真实端到端。
 
 ## 实施阶段
 
 依赖表示技术前置；编号表示默认实施顺序。每阶段包含必要的 UI/API/命令/存储纵向改动与测试，不能把阶段是否正确推迟到后续证明。PY、FE 检查缩写见文末。
 
-### S4 — 有界摄取与积压恢复
-
-依赖：无（工作台指标入口已具备）。交付：有界且能持续前进的摄取链路。
-
-- 落实每 chat 页数/消息数上限和每 tick 全局时间预算；明确 group search、P2P、active watch 的预算与公平调度，不能把跨 chat 搜索简单当成单 chat 拉取。
-- 遵守 [ADR-0016](../adr/0016-ingest-caps-defer-not-truncate.md)：未 drain 完整窗口不能推进“完整成功”checkpoint，不静默截断。
-- 先用固定超限窗口证明进度方案；保存可恢复进度或分割窗口时处理排序、分页 token 失效、重启、重叠去重和消息修订。现有 ADR 对进度表示不足时补充当前决策，不能每 tick 重读相同前缀。
-- checkpoint 年龄、页数/消息数、drain 完成、预算耗尽、积压与恢复进度经 Operator Query 和 JSONL 可见。
-- 验收：固定窗口超过两次 cap 仍最终 drain；持续写入时其他来源仍推进；中途失败、重启、token 失效、重复/修订消息不漏不重发；预算耗尽后后续 daemon 阶段仍可运行。
-- 检查：PY `tests/test_p2_ingestion_routing.py tests/test_daemon.py tests/test_config.py tests/test_operator_query.py`；指标 UI 用 FE 验证。
-- 源码入口：`ingestion.py`、`daemon.py`、`config.py`、checkpoint 存储与 Operator Query。
-
 ### S5 — Bot membership 运行时恢复
 
-依赖：无；默认在 S4 后实施。交付：可信的成员事实、派生降级、通知与恢复可见性。
+依赖：无。交付：可信的成员事实、派生降级、通知与恢复可见性。
 
 - 按 [ADR-0015](../adr/0015-bot-membership-derived-at-runtime-not-policy-mutation.md) 扩展发送/下载失败归因，适配 `im chat.members bots` 主动探测；先验证工具链实际能力与返回结构，缺失则记录依赖，不能把 unknown 当 absent。
 - 区分确认在群、确认离群、未知/探测失败，定义事实缓存有效期和重试节奏；按 reply_identity、allow_user_fallback 派生 Effective Policy。

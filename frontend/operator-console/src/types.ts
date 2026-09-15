@@ -21,6 +21,7 @@ export type DashboardSnapshot = {
   health_issue_summary?: HealthIssueSummary;
   attention_summary?: AttentionSummary;
   attention_tasks?: AttentionTask[];
+  ingestion_status?: IngestionStatus;
   pending_approvals?: ApprovalSummary[];
   active_tasks?: TaskSummary[];
   pending_actions?: DispatchActionSummary[];
@@ -33,6 +34,35 @@ export type DashboardSnapshot = {
     last_tick_started_at?: string | null;
     last_tick_finished_at?: string | null;
   } | null;
+};
+
+export type IngestionStatus = {
+  summary: {
+    source_count: number;
+    backlog_count: number;
+    budget_exhausted_count: number;
+    oldest_checkpoint_age_seconds: number | null;
+  };
+  sources: Array<{
+    checkpoint_key: string;
+    updated_at: string | null;
+    last_success_at: string | null;
+    checkpoint_age_seconds: number | null;
+    drain_complete: boolean;
+    backlog: {
+      start?: string;
+      end?: string;
+      reason?: string;
+      pages_fetched?: number;
+      messages_fetched?: number;
+      restart_count?: number;
+    } | null;
+    last_drain: {
+      pages_fetched?: number;
+      messages_fetched?: number;
+      completed_at?: string;
+    } | null;
+  }>;
 };
 
 export type AttentionSummary = {

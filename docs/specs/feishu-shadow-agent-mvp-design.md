@@ -233,13 +233,11 @@ agent_message
 
 ## 6. Tick 顺序
 
-每轮 tick 顺序：
+每轮 tick 先处理 approval inbox；其后的摄取来源轮转首个执行机会，避免共享预算耗尽时固定饿死后续来源：
 
 ```text
 1. approval inbox
-2. group_at_me ingest
-3. p2p ingest
-4. active task watch
+2–4. group_at_me ingest / p2p ingest / active task watch（跨 tick 轮转）
 5. pending actions dispatch
 ```
 
@@ -255,7 +253,7 @@ checkpoint: active_watch.thread.<thread_id>
 
 每个入口只在对应阶段“拉取 + 入库 + 初步归属处理”成功后推进 checkpoint。
 
-ingest 分页必须 drain 完再推进 checkpoint：同一窗口内如果 `messages-search` / `chat-messages-list` / `threads-messages-list` 还有下一页，必须继续拉取并完成入库与初步归属。任何分页、入库或归属失败，都不推进该入口 checkpoint。
+ingest 分页必须 drain 完再推进 `last_success_at`。页数、消息数或 tick 共享时间预算耗尽时，固定窗口、下一页 token 和累计进度作为 backlog 保留到后续 tick；处理失败不保存下一页进度。恢复 token 首次请求失败时清除 token 并从同一固定窗口重拉，依靠 message revision 与 routing audit 幂等去重。详细恢复契约见 [ADR-0016](../adr/0016-ingest-caps-defer-not-truncate.md)。
 
 同一 chat/thread 在同一 tick 拉到多条消息时，按 `create_time asc, message_id asc` 逐条处理。每条消息完成 normalize、去重、归属和必要的 task 状态更新后，再处理下一条，避免后到消息先被错误 attach 到 active task。
 

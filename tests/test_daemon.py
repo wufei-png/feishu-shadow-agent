@@ -14,6 +14,7 @@ from feishu_shadow_agent.cli import main
 from feishu_shadow_agent.config import (
     AppConfig,
     ChatPolicyConfig,
+    DaemonConfig,
     LoadedConfig,
     OwnerConfig,
 )
@@ -1159,6 +1160,93 @@ def test_fake_feishu_hermes_tick_runs_ordered_ingest_watch_and_dispatch(
             "SELECT COUNT(*) AS c FROM actions WHERE status = 'sent'"
         ).fetchone()["c"]
     assert sent_actions == 2
+
+
+def test_ingestion_budget_exhaustion_still_runs_dispatch_and_retention(
+    tmp_path: Path,
+) -> None:
+    monotonic_values = iter([0.0])
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    logger = JSONLLogger(tmp_path / "agent.jsonl")
+    suite = FakeHealthSuite(
+        [HealthCheckResult("config_schema", "critical", "ok", "ok")]
+    )
+    fake = FakeFeishu()
+    config = AppConfig(
+        owner=OwnerConfig(open_id="ou_owner"),
+        daemon=DaemonConfig(ingest_tick_budget_seconds=1),
+    )
+    _seed_policy(store, config)
+    daemon = Daemon(
+        store=store,
+        logger=logger,
+        health_suite=suite,  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=True,
+        app_config=config,
+        feishu_client=fake,  # type: ignore[arg-type]
+        runtime_health_interval_seconds=0,
+        ingestion_monotonic=lambda: next(monotonic_values, 2.0),
+    )
+
+    results = daemon.run_one_tick(run_id="run_budget")
+
+    assert [result.name for result in results][-2:] == ["dispatch", "retention"]
+    assert not any(call.startswith("search:") for call in fake.calls)
+    checkpoint = store.get_checkpoint("ingest.group_at_me")
+    assert checkpoint is not None
+    assert checkpoint["backlog"]["reason"] == "tick_budget_exhausted"
+    log_text = (tmp_path / "agent.jsonl").read_text(encoding="utf-8")
+    assert "ingestion_drain_deferred" in log_text
+    assert "tick_budget_exhausted" in log_text
+
+
+def test_source_rotation_lets_other_ingestion_progress_under_repeated_budget_pressure(
+    tmp_path: Path,
+) -> None:
+    monotonic_values = iter([0.0, 0.0, 2.0, 2.0, 10.0, 10.0, 12.0, 12.0])
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    logger = JSONLLogger(tmp_path / "agent.jsonl")
+    suite = FakeHealthSuite(
+        [HealthCheckResult("config_schema", "critical", "ok", "ok")]
+    )
+    fake = FakeFeishu()
+    fake.search_items[("group", True)] = [
+        _raw_message(
+            "om_group_fair",
+            chat_id="oc_group",
+            chat_type="group",
+            mentions=[{"open_id": "ou_owner"}],
+        )
+    ]
+    fake.search_items[("p2p", False)] = [
+        _raw_message("om_p2p_fair", chat_id="ou_chat", chat_type="p2p")
+    ]
+    config = AppConfig(
+        owner=OwnerConfig(open_id="ou_owner"),
+        daemon=DaemonConfig(ingest_tick_budget_seconds=1),
+    )
+    _seed_policy(store, config)
+    daemon = Daemon(
+        store=store,
+        logger=logger,
+        health_suite=suite,  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=True,
+        app_config=config,
+        feishu_client=fake,  # type: ignore[arg-type]
+        runtime_health_interval_seconds=0,
+        ingestion_monotonic=lambda: next(monotonic_values, 12.0),
+    )
+
+    daemon.run_one_tick(run_id="run_fair")
+    daemon.run_one_tick(run_id="run_fair")
+
+    with store.connect() as conn:
+        message_ids = {
+            row["message_id"] for row in conn.execute("SELECT message_id FROM messages")
+        }
+    assert {"om_group_fair", "om_p2p_fair"} <= message_ids
 
 
 def test_dispatch_failure_is_reflected_in_tick_heartbeat_summary(

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Callable, Iterable
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .config import AppConfig
 from .operator_queries.common import (
@@ -38,7 +39,7 @@ from .store.sqlite_store import (
     RUN_HEARTBEAT_STALE_AFTER_SECONDS,
     SQLiteStore,
 )
-from .time_utils import shift_instant
+from .time_utils import parse_instant_or_none, shift_instant
 from .types import ActionStatus, ApprovalStatus, TaskStatus, utc_now_iso
 
 __all__ = [
@@ -143,6 +144,7 @@ class OperatorQueryService:
             "health_issue_summary": health_summary,
             "attention_summary": attention_summary,
             "attention_tasks": attention_tasks,
+            "ingestion_status": self.ingestion_status(now=now),
             "recent_health_warnings": self._recent_health_warnings(limit=limit),
             "recent_errors": recent_errors(failed_commands, failed_or_needs_review),
             "last_run": run_runtime_summary(last_run) if last_run else None,
@@ -276,6 +278,81 @@ class OperatorQueryService:
             )
         )
         return summary, [_row_attention_task(row) for row in tasks]
+
+    def ingestion_status(self, *, now: str | None = None) -> dict[str, Any]:
+        observed_at = now or self._now()
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT key, value_json, updated_at
+                    FROM checkpoints
+                    WHERE (key = 'approval_inbox'
+                           OR key IN ('ingest.group_at_me', 'ingest.p2p')
+                           OR key LIKE 'active_watch.%')
+                      AND key NOT LIKE 'ingest.scheduler.%'
+                    ORDER BY key
+                    """
+                ).fetchall()
+        except ReadStoreUnavailable:
+            rows = []
+        sources: list[dict[str, Any]] = []
+        checkpoint_ages: list[int] = []
+        backlog_count = 0
+        budget_exhausted_count = 0
+        for row in rows:
+            try:
+                decoded = json.loads(row["value_json"])
+            except (TypeError, json.JSONDecodeError):
+                decoded = {}
+            value = cast(dict[str, Any], decoded) if isinstance(decoded, dict) else {}
+            backlog_value = value.get("backlog")
+            backlog = (
+                cast(dict[str, Any], backlog_value)
+                if isinstance(backlog_value, dict)
+                else None
+            )
+            last_drain_value = value.get("last_drain")
+            last_drain = (
+                cast(dict[str, Any], last_drain_value)
+                if isinstance(last_drain_value, dict)
+                else None
+            )
+            last_success_at = value.get("last_success_at")
+            checkpoint_age_seconds: int | None = None
+            last_success = parse_instant_or_none(last_success_at)
+            observed = parse_instant_or_none(observed_at)
+            if last_success is not None and observed is not None:
+                checkpoint_age_seconds = max(
+                    0, int((observed - last_success).total_seconds())
+                )
+                checkpoint_ages.append(checkpoint_age_seconds)
+            if backlog is not None:
+                backlog_count += 1
+                if backlog.get("reason") == "tick_budget_exhausted":
+                    budget_exhausted_count += 1
+            sources.append(
+                {
+                    "checkpoint_key": row["key"],
+                    "updated_at": row["updated_at"],
+                    "last_success_at": last_success_at,
+                    "checkpoint_age_seconds": checkpoint_age_seconds,
+                    "drain_complete": backlog is None,
+                    "backlog": backlog,
+                    "last_drain": last_drain,
+                }
+            )
+        return {
+            "summary": {
+                "source_count": len(sources),
+                "backlog_count": backlog_count,
+                "budget_exhausted_count": budget_exhausted_count,
+                "oldest_checkpoint_age_seconds": (
+                    max(checkpoint_ages) if checkpoint_ages else None
+                ),
+            },
+            "sources": sources,
+        }
 
     def health_issues(
         self,

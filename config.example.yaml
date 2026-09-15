@@ -5,6 +5,11 @@ owner:
 daemon:
   tick_interval_seconds: 60
   overlap_seconds: 120
+  ingest_tick_budget_seconds: 30
+  ingest_search_max_pages: 20
+  ingest_search_max_messages: 1000
+  ingest_watch_max_pages_per_target: 5
+  ingest_watch_max_messages_per_target: 250
 
 health:
   interval_seconds: 300

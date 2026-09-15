@@ -112,6 +112,24 @@ class StageResult:
 
 
 @dataclass(frozen=True)
+class DrainWindow:
+    checkpoint_key: str
+    checkpoint: dict[str, Any]
+    start: str
+    end: str
+    page_token: str | None
+
+
+@dataclass(frozen=True)
+class DrainResult:
+    items: list[dict[str, Any]]
+    complete: bool
+    next_page_token: str | None
+    pages: int
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
 class ResourceQuotaDecision:
     allow: bool
     status: str | None = None
@@ -786,6 +804,7 @@ class IngestionService:
         resource_base_dir: str | Path | None = None,
         store_absolute_resource_paths: bool = False,
         preserve_resource_base_path: bool = False,
+        monotonic: Callable[[], float] | None = None,
     ):
         self.store = store
         self.feishu_client = feishu_client
@@ -825,6 +844,10 @@ class IngestionService:
                 )
             )
         self.clock = lambda: normalize_instant(clock())
+        self.monotonic = monotonic or time.monotonic
+        self.ingest_deadline = (
+            self.monotonic() + config.daemon.ingest_tick_budget_seconds
+        )
 
     def run_approval_inbox_placeholder(self, *, run_id: str) -> StageResult:
         self.logger.emit(
@@ -843,36 +866,36 @@ class IngestionService:
         )
         if not bot_open_id:
             raise RuntimeError("bot open_id is missing from lark-cli auth status")
-        start, end = self._window("approval_inbox")
-        self.logger.debug(
-            "ingestion_window_selected",
-            run_id=run_id,
-            data={
-                "source": "approval_inbox",
-                "checkpoint_key": "approval_inbox",
-                "start": start,
-                "end": end,
-            },
-        )
-        raws = self._drain(
-            lambda token: self.feishu_client.list_p2p_messages(
+        window = self._window("approval_inbox", source="approval_inbox", run_id=run_id)
+        drain = self._drain(
+            lambda token, page_size: self.feishu_client.list_p2p_messages(
                 user_id=bot_open_id,
-                start=start,
-                end=end,
+                start=window.start,
+                end=window.end,
                 page_token=token,
-                page_size=PAGE_SIZE,
+                page_size=page_size,
             ),
+            window=window,
             run_id=run_id,
             source="approval_inbox",
+            max_pages=self.config.daemon.ingest_search_max_pages,
+            max_messages=self.config.daemon.ingest_search_max_messages,
         )
         self._process_raw_batch(
-            raws,
+            drain.items,
             source="approval_inbox",
             default_chat_type="p2p",
             run_id=run_id,
         )
-        self.store.set_checkpoint("approval_inbox", {"last_success_at": end})
-        return StageResult("approval_inbox", ok=True, processed=len(raws))
+        self._record_drain(window, drain, run_id=run_id, source="approval_inbox")
+        return StageResult(
+            "approval_inbox",
+            ok=drain.complete,
+            processed=len(drain.items),
+            error=None
+            if drain.complete
+            else f"approval inbox deferred: {drain.reason}",
+        )
 
     def ingest_group_at_me(self, *, run_id: str) -> StageResult:
         return self._run_search_stage(
@@ -896,6 +919,7 @@ class IngestionService:
         now = self.clock()
         processed = 0
         targets = self.store.list_active_watch_targets(now=now)
+        targets = self._rotate_watch_targets(targets)
         self.logger.debug(
             "active_watch_targets_loaded",
             run_id=run_id,
@@ -913,57 +937,47 @@ class IngestionService:
                 continue
             if thread_id:
                 key = f"active_watch.thread.{thread_id}"
-                start, end = self._window(key)
-                self.logger.debug(
-                    "ingestion_window_selected",
-                    run_id=run_id,
-                    data={
-                        "source": "active_watch",
-                        "checkpoint_key": key,
-                        "start": start,
-                        "end": end,
-                    },
-                )
-                raws = self._drain(
-                    lambda token, thread_id=thread_id: (
+                window = self._window(key, source="active_watch", run_id=run_id)
+                drain = self._drain(
+                    lambda token, page_size, thread_id=thread_id: (
                         self.feishu_client.list_thread_messages(
                             thread_id=thread_id,
                             page_token=token,
-                            page_size=PAGE_SIZE,
+                            page_size=page_size,
                         )
                     ),
+                    window=window,
                     run_id=run_id,
                     source="active_watch_thread",
+                    max_pages=self.config.daemon.ingest_watch_max_pages_per_target,
+                    max_messages=self.config.daemon.ingest_watch_max_messages_per_target,
                 )
-                raws = _filter_raws_in_window(raws, start=start, end=end)
+                raws = _filter_raws_in_window(
+                    drain.items, start=window.start, end=window.end
+                )
             else:
                 key = f"active_watch.chat.{chat_id}"
-                start, end = self._window(key)
-                self.logger.debug(
-                    "ingestion_window_selected",
-                    run_id=run_id,
-                    data={
-                        "source": "active_watch",
-                        "checkpoint_key": key,
-                        "start": start,
-                        "end": end,
-                    },
-                )
-                raws = self._drain(
-                    lambda token, chat_id=chat_id, start=start, end=end: (
+                window = self._window(key, source="active_watch", run_id=run_id)
+                window_start = window.start
+                window_end = window.end
+                drain = self._drain(
+                    lambda token, page_size, chat_id=chat_id, start=window_start, end=window_end: (
                         self.feishu_client.list_chat_messages(
                             chat_id=chat_id,
                             start=start,
                             end=end,
                             page_token=token,
-                            page_size=PAGE_SIZE,
+                            page_size=page_size,
                         )
                     ),
+                    window=window,
                     run_id=run_id,
                     source="active_watch_chat",
+                    max_pages=self.config.daemon.ingest_watch_max_pages_per_target,
+                    max_messages=self.config.daemon.ingest_watch_max_messages_per_target,
                 )
                 raws = self._filter_active_watch_chat_followups(
-                    raws,
+                    drain.items,
                     default_chat_type=target["chat_type"],
                     now=now,
                 )
@@ -973,7 +987,14 @@ class IngestionService:
                 default_chat_type=target["chat_type"],
                 run_id=run_id,
             )
-            self.store.set_checkpoint(key, {"last_success_at": end})
+            self._record_drain(
+                window,
+                drain,
+                run_id=run_id,
+                source="active_watch_thread" if thread_id else "active_watch_chat",
+            )
+            if not drain.complete and drain.reason == "tick_budget_exhausted":
+                break
         return StageResult("active_watch", ok=True, processed=processed)
 
     def _run_search_stage(
@@ -985,37 +1006,30 @@ class IngestionService:
         is_at_me: bool,
         run_id: str,
     ) -> StageResult:
-        start, end = self._window(checkpoint_key)
-        self.logger.debug(
-            "ingestion_window_selected",
-            run_id=run_id,
-            data={
-                "source": name,
-                "checkpoint_key": checkpoint_key,
-                "start": start,
-                "end": end,
-            },
-        )
-        raws = self._drain(
-            lambda token: self.feishu_client.search_messages(
+        window = self._window(checkpoint_key, source=name, run_id=run_id)
+        drain = self._drain(
+            lambda token, page_size: self.feishu_client.search_messages(
                 chat_type=chat_type,
                 is_at_me=is_at_me,
-                start=start,
-                end=end,
+                start=window.start,
+                end=window.end,
                 page_token=token,
                 query="",
-                page_size=PAGE_SIZE,
+                page_size=page_size,
             ),
+            window=window,
             run_id=run_id,
             source=name,
+            max_pages=self.config.daemon.ingest_search_max_pages,
+            max_messages=self.config.daemon.ingest_search_max_messages,
         )
         processed = self._process_raw_batch(
-            raws,
+            drain.items,
             source=name,
             default_chat_type=chat_type,
             run_id=run_id,
         )
-        self.store.set_checkpoint(checkpoint_key, {"last_success_at": end})
+        self._record_drain(window, drain, run_id=run_id, source=name)
         return StageResult(name, ok=True, processed=processed)
 
     def _process_raw_batch(
@@ -1362,31 +1376,220 @@ class IngestionService:
             },
         )
 
-    def _window(self, checkpoint_key: str) -> tuple[str, str]:
-        end = self.clock()
+    def _window(self, checkpoint_key: str, *, source: str, run_id: str) -> DrainWindow:
         checkpoint = self.store.get_checkpoint(checkpoint_key) or {}
+        end = self.clock()
+        page_token: str | None = None
         last_success_at = checkpoint.get("last_success_at")
         if isinstance(last_success_at, str):
             start = _minus_seconds(last_success_at, self.config.daemon.overlap_seconds)
         else:
             start = _minus_seconds(end, self.config.daemon.overlap_seconds)
-        return start, end
+        backlog_value = checkpoint.get("backlog")
+        backlog = (
+            cast(dict[str, Any], backlog_value)
+            if isinstance(backlog_value, dict)
+            else None
+        )
+        if backlog is not None:
+            backlog_start = backlog.get("start")
+            backlog_end = backlog.get("end")
+            backlog_token = backlog.get("next_page_token")
+            if isinstance(backlog_start, str) and isinstance(backlog_end, str):
+                start = backlog_start
+                end = backlog_end
+                page_token = backlog_token if isinstance(backlog_token, str) else None
+            else:
+                backlog = None
+        self.logger.debug(
+            "ingestion_window_selected",
+            run_id=run_id,
+            data={
+                "source": source,
+                "checkpoint_key": checkpoint_key,
+                "start": start,
+                "end": end,
+                "resuming": backlog is not None,
+                "has_page_token": page_token is not None,
+            },
+        )
+        return DrainWindow(
+            checkpoint_key=checkpoint_key,
+            checkpoint=checkpoint,
+            start=start,
+            end=end,
+            page_token=page_token,
+        )
+
+    def _record_drain(
+        self,
+        window: DrainWindow,
+        drain: DrainResult,
+        *,
+        run_id: str,
+        source: str,
+    ) -> None:
+        previous_backlog_value = window.checkpoint.get("backlog")
+        previous_backlog = (
+            cast(dict[str, Any], previous_backlog_value)
+            if isinstance(previous_backlog_value, dict)
+            else None
+        )
+        previous_pages = (
+            int(previous_backlog.get("pages_fetched", 0))
+            if previous_backlog is not None
+            else 0
+        )
+        previous_messages = (
+            int(previous_backlog.get("messages_fetched", 0))
+            if previous_backlog is not None
+            else 0
+        )
+        if drain.complete:
+            self.store.set_checkpoint(
+                window.checkpoint_key,
+                {
+                    "last_success_at": window.end,
+                    "last_drain": {
+                        "pages_fetched": previous_pages + drain.pages,
+                        "messages_fetched": previous_messages + len(drain.items),
+                        "completed_at": self.clock(),
+                    },
+                },
+            )
+            self.logger.emit(
+                "info",
+                "ingestion_drain_completed",
+                run_id=run_id,
+                data={
+                    "source": source,
+                    "checkpoint_key": window.checkpoint_key,
+                    "start": window.start,
+                    "end": window.end,
+                    "pages_fetched": previous_pages + drain.pages,
+                    "messages_fetched": previous_messages + len(drain.items),
+                    "checkpoint_advanced": True,
+                },
+            )
+            return
+        value = {
+            key: value
+            for key, value in window.checkpoint.items()
+            if key not in {"backlog", "last_drain"}
+        }
+        value["backlog"] = {
+            "start": window.start,
+            "end": window.end,
+            "next_page_token": drain.next_page_token,
+            "pages_fetched": previous_pages + drain.pages,
+            "messages_fetched": previous_messages + len(drain.items),
+            "reason": drain.reason,
+            "updated_at": self.clock(),
+            "restart_count": (
+                int(previous_backlog.get("restart_count", 0))
+                if previous_backlog is not None
+                else 0
+            ),
+        }
+        self.store.set_checkpoint(window.checkpoint_key, value)
+        self.logger.emit(
+            "warning",
+            "ingestion_drain_deferred",
+            run_id=run_id,
+            data={
+                "source": source,
+                "checkpoint_key": window.checkpoint_key,
+                "start": window.start,
+                "end": window.end,
+                "pages_fetched": drain.pages,
+                "messages_fetched": len(drain.items),
+                "has_next_page_token": drain.next_page_token is not None,
+                "reason": drain.reason,
+                "checkpoint_advanced": False,
+            },
+        )
+
+    def _reset_resumed_token(
+        self, window: DrainWindow, *, run_id: str | None, source: str | None
+    ) -> None:
+        backlog_value = window.checkpoint.get("backlog")
+        if not isinstance(backlog_value, dict):
+            return
+        backlog = cast(dict[str, Any], backlog_value)
+        reset_backlog = dict(backlog)
+        reset_backlog["next_page_token"] = None
+        reset_backlog["reason"] = "page_token_reset_after_fetch_failure"
+        reset_backlog["updated_at"] = self.clock()
+        reset_backlog["restart_count"] = int(backlog.get("restart_count", 0)) + 1
+        value = dict(window.checkpoint)
+        value["backlog"] = reset_backlog
+        self.store.set_checkpoint(window.checkpoint_key, value)
+        self.logger.warning(
+            "ingestion_resume_token_reset",
+            run_id=run_id,
+            data={
+                "source": source,
+                "checkpoint_key": window.checkpoint_key,
+                "restart_count": reset_backlog["restart_count"],
+            },
+        )
+
+    def _rotate_watch_targets(
+        self, targets: list[dict[str, str | None]]
+    ) -> list[dict[str, str | None]]:
+        if not targets:
+            return targets
+        checkpoint = self.store.get_checkpoint("ingest.scheduler.active_watch") or {}
+        start_index = int(checkpoint.get("next_index", 0)) % len(targets)
+        self.store.set_checkpoint(
+            "ingest.scheduler.active_watch",
+            {"next_index": (start_index + 1) % len(targets)},
+        )
+        return targets[start_index:] + targets[:start_index]
+
+    def ordered_ingestion_stages(self) -> list[Callable[..., StageResult]]:
+        stages = [self.ingest_group_at_me, self.ingest_p2p, self.run_active_watch]
+        checkpoint = self.store.get_checkpoint("ingest.scheduler.sources") or {}
+        start_index = int(checkpoint.get("next_index", 0)) % len(stages)
+        self.store.set_checkpoint(
+            "ingest.scheduler.sources",
+            {"next_index": (start_index + 1) % len(stages)},
+        )
+        return stages[start_index:] + stages[:start_index]
 
     def _drain(
         self,
-        fetch_page: Callable[[str | None], MessagePage],
+        fetch_page: Callable[[str | None, int], MessagePage],
         *,
+        window: DrainWindow,
+        max_pages: int,
+        max_messages: int,
         run_id: str | None = None,
         source: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> DrainResult:
         items: list[dict[str, Any]] = []
-        page_token: str | None = None
+        page_token = window.page_token
         seen_tokens: set[str] = set()
         page_number = 0
         while True:
+            if page_number >= max_pages:
+                return DrainResult(
+                    items, False, page_token, page_number, "page_cap_exhausted"
+                )
+            if len(items) >= max_messages:
+                return DrainResult(
+                    items, False, page_token, page_number, "message_cap_exhausted"
+                )
+            if self.monotonic() >= self.ingest_deadline:
+                return DrainResult(
+                    items, False, page_token, page_number, "tick_budget_exhausted"
+                )
+            page_size = min(PAGE_SIZE, max_messages - len(items))
             try:
-                page = fetch_page(page_token)
+                page = fetch_page(page_token, page_size)
             except Exception as exc:
+                if page_number == 0 and window.page_token is not None:
+                    self._reset_resumed_token(window, run_id=run_id, source=source)
                 self.logger.error(
                     "message_page_fetch_failed",
                     run_id=run_id,
@@ -1398,6 +1601,10 @@ class IngestionService:
                     },
                 )
                 raise
+            if len(page.items) > page_size:
+                raise RuntimeError(
+                    f"message page returned {len(page.items)} items above requested {page_size}"
+                )
             page_number += 1
             self.logger.debug(
                 "message_page_fetched",
@@ -1413,8 +1620,8 @@ class IngestionService:
             items.extend(page.items)
             next_token = page.next_page_token
             if not page.has_more or not next_token:
-                return items
-            if next_token in seen_tokens:
+                return DrainResult(items, True, None, page_number)
+            if next_token == page_token or next_token in seen_tokens:
                 self.logger.error(
                     "message_pagination_token_loop",
                     run_id=run_id,

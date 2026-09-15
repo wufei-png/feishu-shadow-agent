@@ -85,11 +85,13 @@ flowchart TD
   Pause --> Recheck["按 retry_interval 重检"]
   Recheck --> RuntimeHealth
 
-  RuntimeHealth -->|是| ApprovalInbox["1. approval inbox<br/>成功后推进 approval_inbox checkpoint"]
-  ApprovalInbox --> GroupIngest["2. group_at_me ingest<br/>分页 drain + 时间升序处理<br/>成功后推进 ingest.group_at_me checkpoint"]
-  GroupIngest --> P2PIngest["3. p2p ingest<br/>分页 drain + 时间升序处理<br/>成功后推进 ingest.p2p checkpoint"]
-  P2PIngest --> ActiveWatch["4. active task watch<br/>按 chat/thread 合并拉取<br/>成功后推进 active_watch.* checkpoint"]
-  ActiveWatch --> Dispatch["5. pending actions dispatch<br/>send 互斥"]
+  RuntimeHealth -->|是| ApprovalInbox["1. approval inbox<br/>完整 drain 后推进 checkpoint"]
+  ApprovalInbox --> IngestScheduler["2–4. 摄取轮转<br/>group / p2p / active watch"]
+  IngestScheduler --> Backlog{"窗口完整 drain?"}
+  Backlog -->|否| Defer["保留固定窗口 + next token<br/>记录 cap / budget backlog"]
+  Backlog -->|是| Advance["推进对应 last_success_at"]
+  Defer --> Dispatch["5. pending actions dispatch<br/>send 互斥"]
+  Advance --> Dispatch
   Dispatch --> Sleep["sleep tick_interval"]
   Sleep --> Loop
 ```

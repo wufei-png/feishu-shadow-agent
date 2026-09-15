@@ -58,6 +58,31 @@ class DaemonConfig(StrictModel):
         ge=0,
         description="Look-back window added to message fetches so delayed Feishu results are not missed.",
     )
+    ingest_tick_budget_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description="Shared wall-clock budget for all ingestion sources in one daemon tick.",
+    )
+    ingest_search_max_pages: int = Field(
+        default=20,
+        ge=1,
+        description="Maximum pages fetched per cross-chat search or approval-inbox source in one tick.",
+    )
+    ingest_search_max_messages: int = Field(
+        default=1000,
+        ge=1,
+        description="Maximum messages fetched per cross-chat search or approval-inbox source in one tick.",
+    )
+    ingest_watch_max_pages_per_target: int = Field(
+        default=5,
+        ge=1,
+        description="Maximum pages fetched for one active chat or thread target in one tick.",
+    )
+    ingest_watch_max_messages_per_target: int = Field(
+        default=250,
+        ge=1,
+        description="Maximum messages fetched for one active chat or thread target in one tick.",
+    )
 
 
 class HealthConfig(StrictModel):

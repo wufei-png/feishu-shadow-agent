@@ -487,6 +487,50 @@ def test_dashboard_attention_counts_are_not_limited_by_preview_size(
     }
 
 
+def test_dashboard_ingestion_status_exposes_backlog_and_checkpoint_age(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.set_checkpoint(
+        "ingest.group_at_me",
+        {
+            "last_success_at": "2026-06-22T08:00:00+00:00",
+            "last_drain": {"pages_fetched": 2, "messages_fetched": 40},
+        },
+    )
+    store.set_checkpoint(
+        "ingest.p2p",
+        {
+            "last_success_at": "2026-06-22T09:00:00+00:00",
+            "backlog": {
+                "start": "2026-06-22T08:58:00+00:00",
+                "end": "2026-06-22T10:00:00+00:00",
+                "next_page_token": "opaque",
+                "pages_fetched": 3,
+                "messages_fetched": 150,
+                "reason": "tick_budget_exhausted",
+            },
+        },
+    )
+    store.set_checkpoint("ingest.scheduler.sources", {"next_index": 1})
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:00:00+00:00")
+
+    status = query.dashboard_snapshot()["ingestion_status"]
+
+    assert status["summary"] == {
+        "source_count": 2,
+        "backlog_count": 1,
+        "budget_exhausted_count": 1,
+        "oldest_checkpoint_age_seconds": 7200,
+    }
+    assert [source["checkpoint_key"] for source in status["sources"]] == [
+        "ingest.group_at_me",
+        "ingest.p2p",
+    ]
+    assert status["sources"][1]["drain_complete"] is False
+    assert status["sources"][1]["backlog"]["messages_fetched"] == 150
+
+
 def test_operator_query_derives_overdue_approval_without_mutating_db(
     tmp_path: Path,
 ) -> None:

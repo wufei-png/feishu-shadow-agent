@@ -33,6 +33,8 @@ describe("DashboardScreen", () => {
     await screen.findByRole("heading", { name: "待我处理" });
     expect(screen.getByText("待审批").parentElement?.textContent).toContain("23");
     expect(screen.getByText("关联任务").parentElement?.textContent).toContain("4");
+    expect(screen.getByRole("heading", { name: "摄取积压" })).toBeTruthy();
+    expect(screen.getByText("ingest.p2p").parentElement?.textContent).toContain("page_cap_exhausted");
 
     await user.click(screen.getByRole("button", { name: /需要处理的任务/ }));
     expect(navigate).toHaveBeenCalledWith("tasks", "t_attention");
@@ -69,6 +71,25 @@ function snapshot(): DashboardSnapshot {
         latest_at: "2026-09-16T00:00:00Z"
       }
     ],
+    ingestion_status: {
+      summary: {
+        source_count: 2,
+        backlog_count: 1,
+        budget_exhausted_count: 0,
+        oldest_checkpoint_age_seconds: 3600
+      },
+      sources: [
+        {
+          checkpoint_key: "ingest.p2p",
+          updated_at: "2026-09-16T00:00:00Z",
+          last_success_at: null,
+          checkpoint_age_seconds: null,
+          drain_complete: false,
+          backlog: { reason: "page_cap_exhausted", pages_fetched: 2, messages_fetched: 100 },
+          last_drain: null
+        }
+      ]
+    },
     pending_approvals: [
       {
         id: 1,
