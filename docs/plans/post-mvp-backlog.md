@@ -17,34 +17,21 @@
 
 | 类别 | 当前证据 | 阶段 |
 | --- | --- | --- |
-| 源码可确认的展示偏差 | dashboard_snapshot 默认返回最多 20 条预览，Dashboard 用数组长度展示审批/发送异常数量；顶部状态不体现请求错误和缓存过期 | S3 |
 | 已记录、尚未实现 | ingestion._drain 全量分页并累积 items；上限、时间预算、积压指标仍未落地 | S4 |
 | 设计风险，尚非线上故障结论 | ADR-0016 的保留 checkpoint 后重拉方案，必须证明固定窗口持续超 cap 时不会反复停在同一批页面 | S4 |
 | 已记录、尚未完成 | bot membership 运行时事实、路由冲突契约、后台背景与统一重试 | S5–S8 |
 | 待取证的效果假设 | TaskSessionRunner._prompt_message_ids 在 fresh 时使用任务全部消息，resumed 时使用当前消息；长上下文效果仍需对照评测 | S9–S10 |
 | 文档/环境漂移 | docs/testing.md 仍描述不升级旧 schema，store/migrate.py 已有旧库迁移；本机工具版本与项目约束不一致 | 执行检查及相关阶段 |
 
-当前使用 `uv 0.12.4` 完成 `uv sync --locked --extra cards`。实施前 Python 全量为 **705 passed, 1 skipped**；最近阶段的指定 Python 契约为 **86 passed**，前端为 **8 passed**，Ruff lint/format、Pyright、前端 typecheck/lint/build 均通过。未运行打包或真实端到端。
+当前使用 `uv 0.12.4` 完成 `uv sync --locked --extra cards`。实施前 Python 全量为 **705 passed, 1 skipped**；最近阶段的指定 Python 契约为 **87 passed**，前端为 **9 passed**，Ruff lint/format、Pyright、前端 typecheck/lint/build 均通过。S3 另用隔离的合成 SQLite 数据完成 1440px 桌面和 500px 窄屏真实浏览器视觉验收，未操作生产记录；未运行打包或真实端到端。
 
 ## 实施阶段
 
 依赖表示技术前置；编号表示默认实施顺序。每阶段包含必要的 UI/API/命令/存储纵向改动与测试，不能把阶段是否正确推迟到后续证明。PY、FE 检查缩写见文末。
 
-### S3 — 中文“待我处理”工作台
-
-依赖：无（可靠浏览前置已满足）。交付：围绕 owner 处理事项组织的完整工作台。
-
-- 在现有 Dashboard 上聚合发送结果不确定、阻塞/失败、待审批事项；同一任务关联展示，保留各对象身份与独立操作入口。
-- Operator Query 提供只读聚合和准确总量，不能把截断预览长度当总数；区分审批数、任务数、异常数，避免重复计数。
-- 操作前能看清触发消息、建议回复、阻塞原因、发送目标与当前状态；技术 JSON/审计详情按需展开，设置和健康页面保留直接入口。
-- 统一中文操作文案，保留必要技术原文；明确更新时间、读取失败及缓存过期。覆盖桌面、窄屏、键盘导航、可见焦点及可访问标签。
-- 验收：空待办、混合异常、大量记录、重复关联、加载/失败状态，以及定位对象并完成处理的闭环；后续 S4–S8 新状态随各阶段接入。
-- 检查：FE；PY `tests/test_operator_query.py tests/test_console_api.py`；使用合成数据做浏览器视觉和操作验收，不操作生产记录。
-- 源码入口：`DashboardScreen.tsx`、`App.tsx`、`styles.css`、`components/Primitives.tsx`、Operator Query。
-
 ### S4 — 有界摄取与积压恢复
 
-依赖：无；默认在 S3 后实施，并接入工作台指标。交付：有界且能持续前进的摄取链路。
+依赖：无（工作台指标入口已具备）。交付：有界且能持续前进的摄取链路。
 
 - 落实每 chat 页数/消息数上限和每 tick 全局时间预算；明确 group search、P2P、active watch 的预算与公平调度，不能把跨 chat 搜索简单当成单 chat 拉取。
 - 遵守 [ADR-0016](../adr/0016-ingest-caps-defer-not-truncate.md)：未 drain 完整窗口不能推进“完整成功”checkpoint，不静默截断。

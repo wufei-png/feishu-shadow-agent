@@ -19,6 +19,8 @@ export type DashboardSnapshot = {
   daemon_liveness?: Record<string, unknown>;
   policy_status?: PolicyStatus;
   health_issue_summary?: HealthIssueSummary;
+  attention_summary?: AttentionSummary;
+  attention_tasks?: AttentionTask[];
   pending_approvals?: ApprovalSummary[];
   active_tasks?: TaskSummary[];
   pending_actions?: DispatchActionSummary[];
@@ -31,6 +33,32 @@ export type DashboardSnapshot = {
     last_tick_started_at?: string | null;
     last_tick_finished_at?: string | null;
   } | null;
+};
+
+export type AttentionSummary = {
+  pending_approval_count: number;
+  overdue_approval_count: number;
+  failed_action_count: number;
+  uncertain_action_count: number;
+  blocked_processing_count: number;
+  failed_processing_count: number;
+  affected_task_count: number;
+  total_item_count: number;
+};
+
+export type AttentionTask = {
+  task_id: number;
+  task_short_id: string;
+  task_label: string | null;
+  chat_id: string | null;
+  status: TaskStatus;
+  pending_approval_count: number;
+  overdue_approval_count: number;
+  failed_action_count: number;
+  uncertain_action_count: number;
+  blocked_processing_count: number;
+  failed_processing_count: number;
+  latest_at: string | null;
 };
 
 export type HealthSeverity = "info" | "warning" | "error" | "critical";

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable, Iterable
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,7 @@ from .store.sqlite_store import (
     RUN_HEARTBEAT_STALE_AFTER_SECONDS,
     SQLiteStore,
 )
+from .time_utils import shift_instant
 from .types import ActionStatus, ApprovalStatus, TaskStatus, utc_now_iso
 
 __all__ = [
@@ -115,6 +117,11 @@ class OperatorQueryService:
             stale_after_seconds=stale_after_seconds,
             daemon_stale_after_seconds=daemon_stale_after_seconds,
         )["summary"]
+        attention_summary, attention_tasks = self._attention_work(
+            now=now,
+            stale_after_seconds=stale_after_seconds,
+            limit=limit,
+        )
         return {
             "daemon_liveness": daemon_liveness(
                 run_runtime_summary(daemon_run) if daemon_run else None,
@@ -134,6 +141,8 @@ class OperatorQueryService:
             ),
             "failed_or_needs_review_actions": failed_or_needs_review,
             "health_issue_summary": health_summary,
+            "attention_summary": attention_summary,
+            "attention_tasks": attention_tasks,
             "recent_health_warnings": self._recent_health_warnings(limit=limit),
             "recent_errors": recent_errors(failed_commands, failed_or_needs_review),
             "last_run": run_runtime_summary(last_run) if last_run else None,
@@ -148,6 +157,125 @@ class OperatorQueryService:
             ),
             "recent_failed_actions": failed_or_needs_review,
         }
+
+    def _attention_work(
+        self, *, now: str, stale_after_seconds: int, limit: int
+    ) -> tuple[dict[str, int], list[dict[str, Any]]]:
+        stale_cutoff = shift_instant(now, delta=timedelta(seconds=-stale_after_seconds))
+        empty = {
+            "pending_approval_count": 0,
+            "overdue_approval_count": 0,
+            "failed_action_count": 0,
+            "uncertain_action_count": 0,
+            "blocked_processing_count": 0,
+            "failed_processing_count": 0,
+            "affected_task_count": 0,
+            "total_item_count": 0,
+        }
+        try:
+            with self._connect() as conn:
+                counts = conn.execute(
+                    """
+                    SELECT
+                      (SELECT COUNT(*) FROM approvals WHERE status = 'pending') AS pending_approval_count,
+                      (SELECT COUNT(*) FROM approvals
+                       WHERE status = 'pending' AND expires_at IS NOT NULL
+                         AND julianday(expires_at) < julianday(?)) AS overdue_approval_count,
+                      (SELECT COUNT(*) FROM actions WHERE status = 'failed') AS failed_action_count,
+                      (SELECT COUNT(*) FROM actions
+                       WHERE status = 'failed_needs_review'
+                          OR (status = 'sending' AND julianday(updated_at) <= julianday(?))) AS uncertain_action_count,
+                      (SELECT COUNT(*) FROM message_processing
+                       WHERE status = 'blocked_waiting_external') AS blocked_processing_count,
+                      (SELECT COUNT(*) FROM message_processing
+                       WHERE status = 'processing_failed_terminal') AS failed_processing_count,
+                      (SELECT COUNT(DISTINCT task_id) FROM (
+                         SELECT task_id FROM approvals WHERE status = 'pending'
+                         UNION ALL
+                         SELECT task_id FROM actions
+                         WHERE status IN ('failed', 'failed_needs_review')
+                            OR (status = 'sending' AND julianday(updated_at) <= julianday(?))
+                         UNION ALL
+                         SELECT task_id FROM message_processing
+                         WHERE status IN ('blocked_waiting_external', 'processing_failed_terminal')
+                       ) WHERE task_id IS NOT NULL) AS affected_task_count
+                    """,
+                    (now, stale_cutoff, stale_cutoff),
+                ).fetchone()
+                tasks = conn.execute(
+                    """
+                    WITH approval_counts AS (
+                      SELECT task_id,
+                             COUNT(*) AS pending_approval_count,
+                             SUM(CASE WHEN expires_at IS NOT NULL
+                                          AND julianday(expires_at) < julianday(?)
+                                      THEN 1 ELSE 0 END) AS overdue_approval_count,
+                             MAX(created_at) AS latest_at
+                      FROM approvals
+                      WHERE status = 'pending' AND task_id IS NOT NULL
+                      GROUP BY task_id
+                    ), action_counts AS (
+                      SELECT task_id,
+                             SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_action_count,
+                             SUM(CASE WHEN status = 'failed_needs_review'
+                                           OR (status = 'sending' AND julianday(updated_at) <= julianday(?))
+                                      THEN 1 ELSE 0 END) AS uncertain_action_count,
+                             MAX(updated_at) AS latest_at
+                      FROM actions
+                      WHERE task_id IS NOT NULL
+                        AND (status IN ('failed', 'failed_needs_review')
+                             OR (status = 'sending' AND julianday(updated_at) <= julianday(?)))
+                      GROUP BY task_id
+                    ), processing_counts AS (
+                      SELECT task_id,
+                             SUM(CASE WHEN status = 'blocked_waiting_external' THEN 1 ELSE 0 END) AS blocked_processing_count,
+                             SUM(CASE WHEN status = 'processing_failed_terminal' THEN 1 ELSE 0 END) AS failed_processing_count,
+                             MAX(updated_at) AS latest_at
+                      FROM message_processing
+                      WHERE task_id IS NOT NULL
+                        AND status IN ('blocked_waiting_external', 'processing_failed_terminal')
+                      GROUP BY task_id
+                    )
+                    SELECT t.id AS task_id, t.short_id AS task_short_id, t.task_label,
+                           t.chat_id, t.status,
+                           COALESCE(ap.pending_approval_count, 0) AS pending_approval_count,
+                           COALESCE(ap.overdue_approval_count, 0) AS overdue_approval_count,
+                           COALESCE(ac.failed_action_count, 0) AS failed_action_count,
+                           COALESCE(ac.uncertain_action_count, 0) AS uncertain_action_count,
+                           COALESCE(pc.blocked_processing_count, 0) AS blocked_processing_count,
+                           COALESCE(pc.failed_processing_count, 0) AS failed_processing_count,
+                           MAX(COALESCE(ap.latest_at, ''), COALESCE(ac.latest_at, ''),
+                               COALESCE(pc.latest_at, ''), t.updated_at) AS latest_at
+                    FROM tasks t
+                    LEFT JOIN approval_counts ap ON ap.task_id = t.id
+                    LEFT JOIN action_counts ac ON ac.task_id = t.id
+                    LEFT JOIN processing_counts pc ON pc.task_id = t.id
+                    WHERE COALESCE(ap.pending_approval_count, 0)
+                        + COALESCE(ac.failed_action_count, 0)
+                        + COALESCE(ac.uncertain_action_count, 0)
+                        + COALESCE(pc.blocked_processing_count, 0)
+                        + COALESCE(pc.failed_processing_count, 0) > 0
+                    ORDER BY latest_at DESC, t.id DESC
+                    LIMIT ?
+                    """,
+                    (now, stale_cutoff, stale_cutoff, coerce_limit(limit)),
+                ).fetchall()
+        except ReadStoreUnavailable:
+            return empty, []
+        summary = {
+            key: int(counts[key] or 0) for key in empty if key != "total_item_count"
+        }
+        summary["total_item_count"] = sum(
+            summary[key]
+            for key in (
+                "pending_approval_count",
+                "failed_action_count",
+                "uncertain_action_count",
+                "blocked_processing_count",
+                "failed_processing_count",
+            )
+        )
+        return summary, [_row_attention_task(row) for row in tasks]
 
     def health_issues(
         self,
@@ -596,6 +724,23 @@ def _task_recommended_actions(
     elif any(action["status"] == ActionStatus.FAILED.value for action in actions):
         recommendations.append("retry_or_cancel_failed_actions")
     return recommendations
+
+
+def _row_attention_task(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "task_id": int(row["task_id"]),
+        "task_short_id": row["task_short_id"],
+        "task_label": row["task_label"],
+        "chat_id": row["chat_id"],
+        "status": row["status"],
+        "pending_approval_count": int(row["pending_approval_count"] or 0),
+        "overdue_approval_count": int(row["overdue_approval_count"] or 0),
+        "failed_action_count": int(row["failed_action_count"] or 0),
+        "uncertain_action_count": int(row["uncertain_action_count"] or 0),
+        "blocked_processing_count": int(row["blocked_processing_count"] or 0),
+        "failed_processing_count": int(row["failed_processing_count"] or 0),
+        "latest_at": row["latest_at"],
+    }
 
 
 def _id_lookup(alias: str, value: int | str) -> tuple[str, list[Any]]:

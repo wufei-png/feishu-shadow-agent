@@ -422,6 +422,71 @@ def test_dashboard_snapshot_health_summary_matches_open_health_issues(
     assert snapshot["health_issue_summary"]["open_issue_count"] == 1
 
 
+def test_dashboard_attention_counts_are_not_limited_by_preview_size(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    first_task = _insert_task(store, "t_attention_1", root_message_id="om_a1")
+    second_task = _insert_task(store, "t_attention_2", root_message_id="om_a2")
+    _insert_approval(store, task_id=first_task, short_id="a_attention_1")
+    _insert_approval(store, task_id=second_task, short_id="a_attention_2")
+    failed_action = store.create_send_reply_action(
+        task_id=first_task,
+        target_message_id="om_a1",
+        payload={"reply_target_message_id": "om_a1", "text": "reply one"},
+    )
+    uncertain_action = store.create_send_reply_action(
+        task_id=second_task,
+        target_message_id="om_a2",
+        payload={"reply_target_message_id": "om_a2", "text": "reply two"},
+    )
+    assert failed_action is not None and uncertain_action is not None
+    store.finish_action(failed_action, status="failed", result={"error": "send"})
+    store.finish_action(
+        uncertain_action,
+        status="failed_needs_review",
+        result={"error": "readback"},
+    )
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO message_processing(
+              message_id, revision, task_id, stage, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "om_blocked",
+                1,
+                first_task,
+                "resource_download",
+                "blocked_waiting_external",
+                "2026-06-22T09:00:00+08:00",
+                "2026-06-22T09:00:00+08:00",
+            ),
+        )
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:00:00+08:00")
+
+    snapshot = query.dashboard_snapshot(limit=1)
+
+    assert len(snapshot["pending_approvals"]) == 1
+    assert len(snapshot["failed_or_needs_review_actions"]) == 1
+    assert snapshot["attention_summary"] == {
+        "pending_approval_count": 2,
+        "overdue_approval_count": 0,
+        "failed_action_count": 1,
+        "uncertain_action_count": 1,
+        "blocked_processing_count": 1,
+        "failed_processing_count": 0,
+        "affected_task_count": 2,
+        "total_item_count": 5,
+    }
+    assert len(snapshot["attention_tasks"]) == 1
+    assert snapshot["attention_tasks"][0]["task_short_id"] in {
+        "t_attention_1",
+        "t_attention_2",
+    }
+
+
 def test_operator_query_derives_overdue_approval_without_mutating_db(
     tmp_path: Path,
 ) -> None:

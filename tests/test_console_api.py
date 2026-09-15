@@ -152,6 +152,8 @@ def test_dashboard_returns_operator_query_dto_with_valid_token(tmp_path: Path) -
     payload = response.json()
     assert payload["daemon_liveness"]["status"] == "not_started"
     assert payload["policy_status"]["initialized"] is False
+    assert payload["attention_summary"]["total_item_count"] == 0
+    assert payload["attention_tasks"] == []
     assert "policy_audits" not in payload
 
 
