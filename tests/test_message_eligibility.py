@@ -25,6 +25,12 @@ from feishu_shadow_agent.message_eligibility import MessageEligibilityPolicy
             "direct_owner_mention",
         ),
         ({}, ["active_watch"], "kept", "active_watch_message"),
+        (
+            {"mentions": [{"open_id": "ou_someone_else"}]},
+            ["group_at_me"],
+            "dropped",
+            "non_direct_mention",
+        ),
         ({}, ["group_at_me"], "dropped", "non_direct_mention"),
     ],
 )

@@ -17,26 +17,15 @@
 
 | 类别 | 当前证据 | 阶段 |
 | --- | --- | --- |
-| 已记录、尚未完成 | 路由冲突契约、后台背景与统一重试 | S6–S8 |
+| 已记录、尚未完成 | 后台背景与统一重试 | S7–S8 |
 | 待取证的效果假设 | TaskSessionRunner._prompt_message_ids 在 fresh 时使用任务全部消息，resumed 时使用当前消息；长上下文效果仍需对照评测 | S9–S10 |
 | 文档/环境漂移 | docs/testing.md 仍描述不升级旧 schema，store/migrate.py 已有旧库迁移；本机工具版本与项目约束不一致 | 执行检查及相关阶段 |
 
-当前使用 `uv 0.12.4` 完成 `uv sync --locked --extra cards`。实施前 Python 全量为 **705 passed, 1 skipped**；最近阶段 S5 的指定及相邻 Python 契约为 **185 passed**，前端为 **9 passed**，Ruff lint/format、Pyright、前端 typecheck/lint/build 均通过。S3 另用隔离的合成 SQLite 数据完成 1440px 桌面和 500px 窄屏真实浏览器视觉验收，未操作生产记录；未运行打包或真实端到端。
+当前使用 `uv 0.12.4` 完成 `uv sync --locked --extra cards`。实施前 Python 全量为 **705 passed, 1 skipped**；最近阶段 S6 的指定 Python 契约为 **100 passed**，Ruff lint/format 与 Pyright 均通过；最近前端检查仍为 **9 passed** 且 typecheck/lint/build 通过。S3 另用隔离的合成 SQLite 数据完成 1440px 桌面和 500px 窄屏真实浏览器视觉验收，未操作生产记录；未运行打包或真实端到端。
 
 ## 实施阶段
 
 依赖表示技术前置；编号表示默认实施顺序。每阶段包含必要的 UI/API/命令/存储纵向改动与测试，不能把阶段是否正确推迟到后续证明。PY、FE 检查缩写见文末。
-
-### S6 — 路由边界补齐
-
-依赖：无。交付：既定激活与任务归属语义的完整契约。
-
-- 核对并固化 `reply_to > thread > burst > Router/新任务`；纯 mention 歧义交 Router，换题由新消息/新线程处理。
-- incidental mention 不是信号；owner 消息保持 takeover/IGNORE，不引入 keyword 入口或 per-chat activation_mode。
-- 补多 active task、冲突关联信号、跨 chat 引用及消息修订测试；已正确逻辑只补缺失契约，不为了覆盖率重写实现。
-- 验收：确定性优先级下有唯一可解释归属；跨 chat 引用不触发跨群路由或抓取。
-- 检查：PY `tests/test_message_eligibility.py tests/test_p2_ingestion_routing.py tests/test_revision.py`；同步当前产品/路由说明。
-- 源码入口：`routing.py`、`message_eligibility.py`、`ingestion.py`。
 
 ### S7 — 统一人工重试
 

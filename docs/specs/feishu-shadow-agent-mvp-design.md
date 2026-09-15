@@ -573,6 +573,9 @@ thread:<thread_id>
 则进入候选，由 TaskMatcher 处理
 ```
 
+这里的 mention 仅指直接 `@owner`；顺带提及其他成员不构成激活或任务归属
+信号。所有 watch key 和消息引用匹配都必须限定在当前 `chat_id`。
+
 `included_messages` 是任务消息关联表，只用于去重、审计、构建 Hermes 输入，不参与跟踪判断。
 
 ## 15. CandidateCollector 与 TaskRouter
@@ -686,11 +689,11 @@ target_task_id
 可跳过 TaskRouter 的确定性 shortcut：
 
 ```text
-群聊有 thread_id:
-  thread:<thread_id> 唯一命中 active task。
-
 群聊 reply_to:
   reply_to 的 msg key 唯一命中 active task。
+
+群聊有 thread_id:
+  thread:<thread_id> 唯一命中 active task。
 
 burst window:
   source 是 p2p 或 group_at_me。
@@ -700,6 +703,11 @@ burst window:
   过滤后唯一 burst-eligible active task 命中时 attach_task，
   matched_by=burst_window，不调用 TaskRouter。
 ```
+
+优先级固定为：同 message revision 的既有 active task、`reply_to`、`thread`、
+burst window、TaskRouter。高优先级唯一命中时，即使低优先级信号指向另一
+active task，也使用高优先级结果并在 routing audit 中记录 `matched_by`。
+跨 chat 的 reply/thread 不参与候选，也不触发跨 chat 抓取。
 
 P2P single-active 不能无条件 attach。只有满足 burst window 或 reply/thread
 结构性 shortcut 时才可跳过 TaskRouter；窗口外的普通 follow-up 仍必须经

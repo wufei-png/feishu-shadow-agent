@@ -35,7 +35,7 @@ These rules belong in deterministic code and tests. Do not delegate them to prom
 
 - Feishu identity selection: user reads, user P2P replies, bot owner notifications, bot-preferred group replies, and bot resource downloads.
 - Message ingress eligibility: group `@owner`, P2P, `@All` suppression, sender role classification, and loop guard.
-- Deterministic routing shortcuts: reply-to, thread, and burst-window attachment.
+- Deterministic routing ownership and shortcuts: a revision stays with its original active task; otherwise reply-to, thread, and burst-window attachment are evaluated in that order before TaskRouter. Every structural lookup remains scoped to the current chat.
 - Product Policy resolution: Product Policy Store as runtime truth, explicit Policy Import Source comparison, and fail-closed behavior when global policy is missing.
 - Resource gates: bot joined, resource download enabled, size/quota checks, retryable download failures, and owner notification on blocked resources.
 - Bot membership facts: active probes and attributed bot send/download failures may derive present, absent, or unknown runtime state; they never mutate owner-authored Product Policy or auto-join a chat.

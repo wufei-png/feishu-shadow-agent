@@ -116,11 +116,14 @@ flowchart TD
   SaveMsg --> CandidateCollector["CandidateCollector 纯 SQLite 检索"]
 
   CandidateCollector --> MatchAudit["写 candidates_count / shortcut_hit"]
-  MatchAudit --> Deterministic{"确定性 shortcut 命中"}
-  Deterministic -->|thread_id 唯一命中| Attach
-  Deterministic -->|reply_to msg 唯一命中| Attach
+  MatchAudit --> Revision{"当前 message revision 已归属唯一 active task?"}
+  Revision -->|是| Attach
+  Revision -->|否| Reply{"reply_to msg 唯一命中?"}
+  Reply -->|是| Attach
+  Reply -->|否| Thread{"thread_id 唯一命中?"}
+  Thread -->|是| Attach
 
-  Deterministic -->|否| Burst{"burst window 唯一命中<br/>同 chat + 同 sender + 窗口内"}
+  Thread -->|否| Burst{"burst window 唯一命中<br/>同 chat + 同 sender + 窗口内"}
   Burst -->|是| Attach
   Burst -->|否| CandidateCount{"候选是否明确"}
   CandidateCount -->|无 active 或新触发| Historical["closed task recall 检索最近 7 天"]
@@ -140,6 +143,12 @@ flowchart TD
   NewTask --> Include
   Include --> TaskSession["进入 Hermes Task Session；watch_action=close 时关闭任务"]
 ```
+
+所有 reply/thread/watch-key 查询均以当前 `chat_id` 为边界；引用另一个群的
+message id 只保留为当前消息元数据，不会关联外群任务或触发跨群资源抓取。
+仅直接 `@owner` 是激活信号，顺带提及其他成员不是。没有 reply/thread/burst
+唯一命中的纯 mention、多 active task 或互相冲突的非优先信号交给 TaskRouter；
+owner 消息仍只走结构性 takeover 或 `IGNORE`。
 
 <a id="resource-download-flow"></a>
 

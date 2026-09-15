@@ -1179,6 +1179,196 @@ def test_thread_unique_match_uses_thread_shortcut(tmp_path: Path) -> None:
     assert attached.decision.matched_by == "thread"
 
 
+def test_reply_to_wins_over_conflicting_thread_and_burst_signals(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    reply_root = service.normalizer.normalize(
+        _message("om_reply_root", sender_id="ou_a", thread_id="omt_reply"),
+        default_chat_type="group",
+    )
+    thread_root = service.normalizer.normalize(
+        _message(
+            "om_thread_root",
+            sender_id="ou_conflict",
+            thread_id="omt_conflict",
+            create_time="2026-06-22T10:00:10+08:00",
+        ),
+        default_chat_type="group",
+    )
+    for root in (reply_root, thread_root):
+        store.upsert_message(root)
+        store.create_task_for_message(root, watch_until="2026-06-22T12:10:00+08:00")
+
+    result = service.process_raw_message(
+        _message(
+            "om_conflict",
+            sender_id="ou_conflict",
+            thread_id="omt_conflict",
+            reply_to="om_reply_root",
+            mentions=[{"open_id": "ou_owner"}],
+            create_time="2026-06-22T10:00:20+08:00",
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert result is not None and result.task is not None
+    assert result.decision.route == "attach_task"
+    assert result.decision.matched_by == "reply_to_msg"
+    assert result.task.root_message_id == "om_reply_root"
+    assert result.decision.candidates_count == 2
+
+
+def test_thread_wins_over_conflicting_burst_signal(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    thread_root = service.normalizer.normalize(
+        _message("om_thread_root", sender_id="ou_a", thread_id="omt_match"),
+        default_chat_type="group",
+    )
+    burst_root = service.normalizer.normalize(
+        _message(
+            "om_burst_root",
+            sender_id="ou_conflict",
+            thread_id="omt_other",
+            create_time="2026-06-22T10:00:10+08:00",
+        ),
+        default_chat_type="group",
+    )
+    for root in (thread_root, burst_root):
+        store.upsert_message(root)
+        store.create_task_for_message(root, watch_until="2026-06-22T12:10:00+08:00")
+
+    result = service.process_raw_message(
+        _message(
+            "om_conflict",
+            sender_id="ou_conflict",
+            thread_id="omt_match",
+            mentions=[{"open_id": "ou_owner"}],
+            create_time="2026-06-22T10:00:20+08:00",
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert result is not None and result.task is not None
+    assert result.decision.route == "attach_task"
+    assert result.decision.matched_by == "thread"
+    assert result.task.root_message_id == "om_thread_root"
+    assert result.decision.candidates_count == 2
+
+
+def test_cross_chat_reply_reference_cannot_attach_foreign_task(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    foreign_root = service.normalizer.normalize(
+        _message("om_foreign", chat_id="oc_foreign", sender_id="ou_a"),
+        default_chat_type="group",
+    )
+    store.upsert_message(foreign_root)
+    foreign_task = store.create_task_for_message(
+        foreign_root, watch_until="2026-06-22T12:10:00+08:00"
+    )
+
+    result = service.process_raw_message(
+        _message(
+            "om_local",
+            chat_id="oc_local",
+            sender_id="ou_b",
+            reply_to="om_foreign",
+            mentions=[{"open_id": "ou_owner"}],
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert result is not None and result.task is not None
+    assert result.decision.route == "new_task"
+    assert result.task.chat_id == "oc_local"
+    assert result.task.id != foreign_task.id
+    assert store.find_task_ids_for_message("om_local") == [result.task.id]
+
+
+def test_revision_keeps_original_task_despite_new_conflicting_signals(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    original = service.process_raw_message(
+        _message(
+            "om_original",
+            sender_id="ou_a",
+            mentions=[{"open_id": "ou_owner"}],
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    assert original is not None and original.task is not None
+    conflicting_root = service.normalizer.normalize(
+        _message(
+            "om_conflicting_root",
+            sender_id="ou_b",
+            thread_id="omt_conflicting",
+        ),
+        default_chat_type="group",
+    )
+    store.upsert_message(conflicting_root)
+    conflicting_task = store.create_task_for_message(
+        conflicting_root, watch_until="2026-06-22T12:10:00+08:00"
+    )
+
+    revised = service.process_raw_message(
+        _message(
+            "om_original",
+            sender_id="ou_a",
+            text="edited",
+            thread_id="omt_conflicting",
+            reply_to="om_conflicting_root",
+            mentions=[{"open_id": "ou_owner"}],
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_2",
+    )
+
+    assert revised is not None and revised.task is not None
+    assert revised.decision.route == "attach_task"
+    assert revised.decision.reason == "source_revision"
+    assert revised.decision.matched_by == "source_revision"
+    assert revised.task.id == original.task.id
+    assert revised.task.id != conflicting_task.id
+
+
 def test_owner_takeover_closes_task_and_cancels_pending_work(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     service = IngestionService(
