@@ -680,6 +680,26 @@ class SQLiteStore:
             return None
         return json.loads(row["value_json"])
 
+    def get_bot_membership_fact(self, chat_id: str) -> dict[str, Any] | None:
+        return self.get_checkpoint(f"runtime.bot_membership.{chat_id}")
+
+    def set_bot_membership_fact(self, chat_id: str, value: dict[str, Any]) -> None:
+        self.set_checkpoint(f"runtime.bot_membership.{chat_id}", value)
+
+    def list_bot_membership_candidate_chats(self) -> list[str]:
+        self.initialize()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT chat_id FROM chat_policies
+                UNION
+                SELECT chat_id FROM tasks
+                WHERE chat_type = 'group' AND chat_id IS NOT NULL
+                ORDER BY chat_id
+                """
+            ).fetchall()
+        return [str(row["chat_id"]) for row in rows if row["chat_id"]]
+
     def upsert_message(self, message: NormalizedMessage) -> bool:
         return self.upsert_message_with_revision(message).inserted
 

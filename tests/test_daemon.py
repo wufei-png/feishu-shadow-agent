@@ -705,6 +705,7 @@ def test_runtime_health_failure_rechecks_on_retry_interval_and_recovers(
     assert [result.name for result in first] == ["runtime_health"]
     assert [result.name for result in second] == ["runtime_health"]
     assert [result.name for result in third] == [
+        "bot_membership",
         "approval_inbox",
         "group_at_me",
         "p2p",
@@ -802,6 +803,7 @@ def test_product_policy_missing_blocks_tick_even_when_runtime_health_is_cached(
     second = daemon.run_one_tick(run_id="run_1")
 
     assert [result.name for result in first] == [
+        "bot_membership",
         "approval_inbox",
         "group_at_me",
         "p2p",
@@ -879,6 +881,7 @@ def test_approval_inbox_failure_blocks_send_reply_but_allows_owner_notification(
     results = daemon.run_one_tick(run_id="run_1")
 
     assert [result.name for result in results] == [
+        "bot_membership",
         "approval_inbox",
         "group_at_me",
         "p2p",
@@ -1141,6 +1144,7 @@ def test_fake_feishu_hermes_tick_runs_ordered_ingest_watch_and_dispatch(
     results = daemon.run_one_tick(run_id="run_1")
 
     assert [result.name for result in results] == [
+        "bot_membership",
         "approval_inbox",
         "group_at_me",
         "p2p",

@@ -531,6 +531,50 @@ def test_dashboard_ingestion_status_exposes_backlog_and_checkpoint_age(
     assert status["sources"][1]["backlog"]["messages_fetched"] == 150
 
 
+def test_dashboard_exposes_fresh_and_expired_bot_membership_facts(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.import_product_policy_from_config(
+        _config(chats={"oc_unobserved": ChatPolicyConfig(bot_joined=True)})
+    )
+    store.set_bot_membership_fact(
+        "oc_absent",
+        {
+            "status": "absent",
+            "checked_at": "2026-06-22T09:59:00+00:00",
+            "next_probe_at": "2026-06-22T10:04:00+00:00",
+            "source": "active_probe",
+            "error": None,
+        },
+    )
+    store.set_bot_membership_fact(
+        "oc_stale",
+        {
+            "status": "present",
+            "checked_at": "2026-06-22T09:00:00+00:00",
+            "next_probe_at": "2026-06-22T09:05:00+00:00",
+            "source": "active_probe",
+            "error": None,
+        },
+    )
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:00:00+00:00")
+
+    membership = query.dashboard_snapshot()["bot_membership_status"]
+
+    assert membership["summary"] == {
+        "present": 0,
+        "absent": 1,
+        "unknown": 1,
+        "unobserved": 1,
+    }
+    assert [(fact["chat_id"], fact["status"]) for fact in membership["facts"]] == [
+        ("oc_absent", "absent"),
+        ("oc_stale", "unknown"),
+        ("oc_unobserved", "unobserved"),
+    ]
+
+
 def test_operator_query_derives_overdue_approval_without_mutating_db(
     tmp_path: Path,
 ) -> None:
@@ -729,6 +773,8 @@ def test_task_detail_returns_related_read_models_and_effective_policy(
         "policy_source": "explicit_chat",
         "auto_reply": True,
         "bot_joined": True,
+        "configured_bot_joined": True,
+        "bot_membership_status": "unobserved",
         "reply_identity": "bot",
         "allow_user_fallback": False,
         "resource_download": False,

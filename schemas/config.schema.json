@@ -295,6 +295,20 @@
           "minimum": 1,
           "title": "Ingest Watch Max Messages Per Target",
           "type": "integer"
+        },
+        "bot_membership_ttl_seconds": {
+          "default": 300,
+          "description": "Seconds a confirmed bot membership observation remains authoritative.",
+          "minimum": 1,
+          "title": "Bot Membership Ttl Seconds",
+          "type": "integer"
+        },
+        "bot_membership_retry_seconds": {
+          "default": 60,
+          "description": "Seconds before retrying an unknown or failed bot membership probe.",
+          "minimum": 1,
+          "title": "Bot Membership Retry Seconds",
+          "type": "integer"
         }
       },
       "title": "DaemonConfig",

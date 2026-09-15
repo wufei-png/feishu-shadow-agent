@@ -2725,6 +2725,7 @@ def test_daemon_tick_runs_p2_stages_in_order(tmp_path: Path) -> None:
     results = daemon.run_one_tick(run_id="run_1")
 
     assert [result.name for result in results] == [
+        "bot_membership",
         "approval_inbox",
         "group_at_me",
         "p2p",

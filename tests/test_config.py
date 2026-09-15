@@ -35,6 +35,8 @@ def test_load_minimal_config() -> None:
     assert loaded.config.daemon.ingest_search_max_messages == 1000
     assert loaded.config.daemon.ingest_watch_max_pages_per_target == 5
     assert loaded.config.daemon.ingest_watch_max_messages_per_target == 250
+    assert loaded.config.daemon.bot_membership_ttl_seconds == 300
+    assert loaded.config.daemon.bot_membership_retry_seconds == 60
     assert loaded.config.retention.feedback_content_days == 30
     assert loaded.config.interactive_cards.enabled is False
     assert loaded.config.interactive_cards.app_id_env == "FEISHU_APP_ID"

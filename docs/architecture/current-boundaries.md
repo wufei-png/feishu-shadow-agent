@@ -38,6 +38,7 @@ These rules belong in deterministic code and tests. Do not delegate them to prom
 - Deterministic routing shortcuts: reply-to, thread, and burst-window attachment.
 - Product Policy resolution: Product Policy Store as runtime truth, explicit Policy Import Source comparison, and fail-closed behavior when global policy is missing.
 - Resource gates: bot joined, resource download enabled, size/quota checks, retryable download failures, and owner notification on blocked resources.
+- Bot membership facts: active probes and attributed bot send/download failures may derive present, absent, or unknown runtime state; they never mutate owner-authored Product Policy or auto-join a chat.
 - Reply gates: answerability/decision-reason combination validation, direct group mention requirement, empty reply rejection, forbidden mention cleanup, and identity fallback rules.
 - Dispatch safety: dry-run before send, idempotency key reuse, single active send constraint, readback verification, owner notification for failed/uncertain reply sends, and manual recovery for uncertain sends.
 - Operator mutations: all state-changing owner actions, including card callbacks, go through Operator Command services and return `CommandResult`.
@@ -74,6 +75,7 @@ If an agent output crosses these bounds, the code should reject it, downgrade to
 
 - `routing.py`: deterministic routing, owner takeover, duplicate route recovery, and the boundary that decides whether Hermes TaskRouter is needed.
 - `policy.py`: Product Policy resolution for resource and reply decisions. Keep chat policy fallback rules here instead of copying them into processing, UI, or store code.
+- `membership.py`: active bot-membership probes, fact expiry, failure attribution, and episode-level owner notification deduplication. Unknown and expired facts must not be treated as confirmed absence.
 - `processing.py`: task-level orchestration from route result to task session, postprocess, reply gate, approval, or send action. New feature branches should prefer extracting helpers over adding more nested branches here.
 - `dispatcher.py`: dispatch claiming, dry-run, actual send, readback, stale sending detection, and manual recovery.
 - `approval_cards.py`: deterministic Card JSON construction. Cards bind one concrete approval and expose only the supported resolution actions.

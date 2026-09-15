@@ -8,7 +8,12 @@ from typing import Any
 from unittest.mock import patch
 
 from feishu_shadow_agent import dispatcher as dispatcher_module
-from feishu_shadow_agent.config import AppConfig, LifecycleConfig, OwnerConfig
+from feishu_shadow_agent.config import (
+    AppConfig,
+    ChatPolicyConfig,
+    LifecycleConfig,
+    OwnerConfig,
+)
 from feishu_shadow_agent.dispatcher import Dispatcher
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
@@ -127,6 +132,99 @@ def test_dry_run_preview_keeps_action_pending(tmp_path: Path) -> None:
     assert action.status == "pending"
     assert action.result["dry_run"]["ok"] is True
     assert [call["dry_run"] for call in fake.reply_calls] == [True]
+
+
+def test_confirmed_absence_uses_allowed_user_fallback_at_dispatch(
+    tmp_path: Path,
+) -> None:
+    config = _config(
+        chats={
+            "oc_1": ChatPolicyConfig(
+                auto_reply=True,
+                bot_joined=True,
+                reply_identity="bot_preferred",
+                allow_user_fallback=True,
+            )
+        }
+    )
+    store, dispatcher, fake = _dispatcher(tmp_path, config=config)
+    store.import_product_policy_from_config(config)
+    task_id = _insert_task(store)
+    store.set_bot_membership_fact(
+        "oc_1",
+        {
+            "status": "absent",
+            "next_probe_at": "2999-01-01T00:00:00+00:00",
+        },
+    )
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "bot",
+        },
+    )
+    assert action_id is not None
+    fake.reply_results.extend(
+        [
+            LarkCliResult(["dry"], 0, json_data={"api": []}),
+            LarkCliResult(["send"], 0, json_data={"data": {"message_id": "om_sent"}}),
+        ]
+    )
+
+    summary = dispatcher.dispatch(
+        run_id="run_1",
+        allow_send_reply_actual=True,
+        allow_owner_notification_actual=False,
+    )
+
+    assert summary.sent == 1
+    assert [call["as_identity"] for call in fake.reply_calls] == ["user", "user"]
+
+
+def test_bot_send_membership_error_records_absence_and_notification(
+    tmp_path: Path,
+) -> None:
+    store, dispatcher, fake = _dispatcher(tmp_path)
+    task_id = _insert_task(store)
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "bot",
+        },
+    )
+    assert action_id is not None
+    fake.reply_results.extend(
+        [
+            LarkCliResult(["dry"], 0, json_data={"api": []}),
+            LarkCliResult(
+                ["send", "--as", "bot"],
+                3,
+                stderr="error 234040 bot invisible",
+                error="send failed",
+            ),
+        ]
+    )
+
+    summary = dispatcher.dispatch(
+        run_id="run_1",
+        allow_send_reply_actual=True,
+        allow_owner_notification_actual=False,
+    )
+
+    assert summary.failed == 1
+    fact = store.get_bot_membership_fact("oc_1")
+    assert fact is not None and fact["status"] == "absent"
+    with store.connect() as conn:
+        notifications = conn.execute(
+            "SELECT COUNT(*) AS c FROM actions WHERE kind = 'owner_notification'"
+        ).fetchone()["c"]
+    assert notifications == 2  # membership transition plus normal dispatch failure
 
 
 def test_stale_revision_action_is_cancelled_without_adapter_call(

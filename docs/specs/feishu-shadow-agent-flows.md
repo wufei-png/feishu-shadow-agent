@@ -150,7 +150,7 @@ flowchart TD
   Msg["已入库消息"] --> HasResource{"包含图片/文件资源"}
   HasResource -->|否| Continue["继续任务处理"]
   HasResource -->|是| Extract["user 身份读消息并提取 file_key"]
-  Extract --> BotKnown{"chat policy 标记 bot_joined"}
+  Extract --> BotKnown{"Effective Policy：配置值叠加新鲜 membership fact"}
   BotKnown -->|否，群聊| NotifyJoin["创建 resource_needs_bot owner notification"]
   BotKnown -->|否，P2P 纯资源消息| WaitContext["保持 watching，等待同任务文字上下文"]
   BotKnown -->|否，P2P 已有明确诉求| TaskWithoutResource["Task Session 使用文字、资源状态与外部证据"]
@@ -167,6 +167,12 @@ flowchart TD
   Retry -->|是| Download
   Retry -->|否| ResourceFailed["记录 resource_download terminal failed + owner notification"]
 ```
+
+群聊的 bot membership 由 daemon 主动探测及 bot 身份发送/下载错误共同更新。
+确认在群/离群的事实默认缓存 300 秒；权限、超时或格式错误记为 `unknown`，
+默认 60 秒后重试。`unknown` 和过期事实不覆盖 owner 配置，确认离群才阻断
+资源并按 `reply_identity`/`allow_user_fallback` 派生回复身份。首次确认在群不
+通知；每个离群 episode 及随后恢复各至多通知一次，且不写 Policy Audit。
 
 <a id="hermes-reply-flow"></a>
 

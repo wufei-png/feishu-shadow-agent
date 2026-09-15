@@ -83,6 +83,16 @@ class DaemonConfig(StrictModel):
         ge=1,
         description="Maximum messages fetched for one active chat or thread target in one tick.",
     )
+    bot_membership_ttl_seconds: int = Field(
+        default=300,
+        ge=1,
+        description="Seconds a confirmed bot membership observation remains authoritative.",
+    )
+    bot_membership_retry_seconds: int = Field(
+        default=60,
+        ge=1,
+        description="Seconds before retrying an unknown or failed bot membership probe.",
+    )
 
 
 class HealthConfig(StrictModel):

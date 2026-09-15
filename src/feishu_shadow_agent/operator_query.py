@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from .config import AppConfig
+from .membership import effective_membership_status
 from .operator_queries.common import (
     OperatorQueryReadError,
     OperatorQueryUnavailable,
@@ -145,6 +146,7 @@ class OperatorQueryService:
             "attention_summary": attention_summary,
             "attention_tasks": attention_tasks,
             "ingestion_status": self.ingestion_status(now=now),
+            "bot_membership_status": self.bot_membership_status(now=now),
             "recent_health_warnings": self._recent_health_warnings(limit=limit),
             "recent_errors": recent_errors(failed_commands, failed_or_needs_review),
             "last_run": run_runtime_summary(last_run) if last_run else None,
@@ -353,6 +355,76 @@ class OperatorQueryService:
             },
             "sources": sources,
         }
+
+    def bot_membership_status(self, *, now: str | None = None) -> dict[str, Any]:
+        observed_at = now or self._now()
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT key, value_json, updated_at
+                    FROM checkpoints
+                    WHERE key LIKE 'runtime.bot_membership.%'
+                    ORDER BY key
+                    """
+                ).fetchall()
+                candidate_rows = conn.execute(
+                    """
+                    SELECT chat_id FROM chat_policies
+                    UNION
+                    SELECT chat_id FROM tasks
+                    WHERE chat_type = 'group' AND chat_id IS NOT NULL
+                    ORDER BY chat_id
+                    """
+                ).fetchall()
+        except ReadStoreUnavailable:
+            rows = []
+            candidate_rows = []
+        facts: list[dict[str, Any]] = []
+        counts = {"present": 0, "absent": 0, "unknown": 0, "unobserved": 0}
+        prefix = "runtime.bot_membership."
+        observed_chats: set[str] = set()
+        for row in rows:
+            try:
+                decoded = json.loads(row["value_json"])
+            except (TypeError, json.JSONDecodeError):
+                decoded = {}
+            fact = cast(dict[str, Any], decoded) if isinstance(decoded, dict) else {}
+            status = effective_membership_status(fact, now=observed_at)
+            chat_id = str(row["key"])[len(prefix) :]
+            observed_chats.add(chat_id)
+            counts[status] += 1
+            facts.append(
+                {
+                    "chat_id": chat_id,
+                    "status": status,
+                    "observed_status": fact.get("status"),
+                    "checked_at": fact.get("checked_at"),
+                    "next_probe_at": fact.get("next_probe_at"),
+                    "source": fact.get("source"),
+                    "error": fact.get("error"),
+                    "updated_at": row["updated_at"],
+                }
+            )
+        for row in candidate_rows:
+            chat_id = str(row["chat_id"])
+            if chat_id in observed_chats:
+                continue
+            counts["unobserved"] += 1
+            facts.append(
+                {
+                    "chat_id": chat_id,
+                    "status": "unobserved",
+                    "observed_status": None,
+                    "checked_at": None,
+                    "next_probe_at": None,
+                    "source": None,
+                    "error": None,
+                    "updated_at": None,
+                }
+            )
+        facts.sort(key=lambda fact: str(fact["chat_id"]))
+        return {"summary": counts, "facts": facts}
 
     def health_issues(
         self,

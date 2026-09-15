@@ -13,6 +13,12 @@ from .config import AppConfig
 from .feishu.client import FeishuClient
 from .ingestion import MessageNormalizer
 from .jsonl import JSONLLogger
+from .membership import (
+    bot_membership_error,
+    effective_membership_status,
+    record_bot_membership_failure,
+)
+from .policy import PolicyResolver
 from .store.sqlite_store import SQLiteStore
 from .time_utils import format_instant, utc_now
 from .types import (
@@ -36,6 +42,13 @@ READBACK_BLOCKING_WARNINGS = {
     "readback_mentions_mismatch",
     "readback_mentions_unavailable",
 }
+
+
+def _command_used_bot(result: LarkCliResult) -> bool:
+    return any(
+        result.argv[index : index + 2] == ["--as", "bot"]
+        for index in range(max(0, len(result.argv) - 1))
+    )
 
 
 @dataclass(frozen=True)
@@ -484,6 +497,21 @@ class Dispatcher:
         result["send"] = _command_result(send)
         if not send.ok:
             result["error_stage"] = "send"
+            if bot_membership_error(send) and _command_used_bot(send):
+                chat_id = None
+                if action.task_id is not None:
+                    with suppress(KeyError):
+                        chat_id = self.store.get_task_by_id(action.task_id).chat_id
+                record_bot_membership_failure(
+                    store=self.store,
+                    config=self.config,
+                    logger=self.logger,
+                    chat_id=chat_id,
+                    run_id=run_id,
+                    source="dispatch_failure",
+                    error=send.error or send.stderr,
+                    execution_mode=action.execution_mode,
+                )
             attempt_status = _send_failure_attempt_status(send)
             action_status = (
                 ActionStatus.FAILED_NEEDS_REVIEW.value
@@ -630,6 +658,23 @@ class Dispatcher:
                 return _local_error(action, "send_reply text is missing")
             if identity not in {"user", "bot"}:
                 return _local_error(action, "send_reply identity must be user or bot")
+            if identity == "bot" and action.task_id is not None:
+                with suppress(KeyError):
+                    task = self.store.get_task_by_id(action.task_id)
+                    membership_status = effective_membership_status(
+                        self.store.get_bot_membership_fact(task.chat_id or "")
+                    )
+                    if membership_status == "absent":
+                        policy = PolicyResolver(self.store).resolve_chat_policy(
+                            task.chat_id, task.chat_type
+                        )
+                        if (
+                            policy.reply_identity == "bot_preferred"
+                            and policy.allow_user_fallback
+                        ):
+                            identity = "user"
+                        else:
+                            return _local_error(action, "bot_not_joined")
             return self.feishu.reply_message(
                 as_identity=identity,
                 message_id=target_message_id,
@@ -934,7 +979,15 @@ def _payload_identity(action: ActionRecord) -> str:
 
 def _owner_notification_text(payload: dict[str, Any]) -> str:
     lines = ["[feishu-shadow-agent] owner notification"]
-    for key in ("type", "task_id", "approval_id", "reason", "message"):
+    for key in (
+        "type",
+        "task_id",
+        "approval_id",
+        "chat_id",
+        "membership_status",
+        "reason",
+        "message",
+    ):
         value = payload.get(key)
         if value:
             lines.append(f"{key}: {_notification_display_text(str(value))}")

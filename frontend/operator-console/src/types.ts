@@ -22,6 +22,7 @@ export type DashboardSnapshot = {
   attention_summary?: AttentionSummary;
   attention_tasks?: AttentionTask[];
   ingestion_status?: IngestionStatus;
+  bot_membership_status?: BotMembershipStatus;
   pending_approvals?: ApprovalSummary[];
   active_tasks?: TaskSummary[];
   pending_actions?: DispatchActionSummary[];
@@ -34,6 +35,25 @@ export type DashboardSnapshot = {
     last_tick_started_at?: string | null;
     last_tick_finished_at?: string | null;
   } | null;
+};
+
+export type BotMembershipStatus = {
+  summary: {
+    present: number;
+    absent: number;
+    unknown: number;
+    unobserved: number;
+  };
+  facts: Array<{
+    chat_id: string;
+    status: "present" | "absent" | "unknown" | "unobserved";
+    observed_status: string | null;
+    checked_at: string | null;
+    next_probe_at: string | null;
+    source: string | null;
+    error: string | null;
+    updated_at: string | null;
+  }>;
 };
 
 export type IngestionStatus = {

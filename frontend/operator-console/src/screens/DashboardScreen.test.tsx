@@ -35,6 +35,7 @@ describe("DashboardScreen", () => {
     expect(screen.getByText("关联任务").parentElement?.textContent).toContain("4");
     expect(screen.getByRole("heading", { name: "摄取积压" })).toBeTruthy();
     expect(screen.getByText("ingest.p2p").parentElement?.textContent).toContain("page_cap_exhausted");
+    expect(screen.getByText("oc_absent").parentElement?.textContent).toContain("absent");
 
     await user.click(screen.getByRole("button", { name: /需要处理的任务/ }));
     expect(navigate).toHaveBeenCalledWith("tasks", "t_attention");
@@ -87,6 +88,21 @@ function snapshot(): DashboardSnapshot {
           drain_complete: false,
           backlog: { reason: "page_cap_exhausted", pages_fetched: 2, messages_fetched: 100 },
           last_drain: null
+        }
+      ]
+    },
+    bot_membership_status: {
+      summary: { present: 1, absent: 1, unknown: 0, unobserved: 0 },
+      facts: [
+        {
+          chat_id: "oc_absent",
+          status: "absent",
+          observed_status: "absent",
+          checked_at: "2026-09-16T00:00:00Z",
+          next_probe_at: "2026-09-16T00:05:00Z",
+          source: "active_probe",
+          error: null,
+          updated_at: "2026-09-16T00:00:00Z"
         }
       ]
     },

@@ -15,7 +15,7 @@ import {
   statusTone
 } from "../components/Primitives";
 import { invalidateAfterMaintenanceCommand, queryKeys } from "../queryKeys";
-import type { ApprovalSummary, AttentionTask, CommandResult, DispatchActionSummary, IngestionStatus, RouteKey } from "../types";
+import type { ApprovalSummary, AttentionTask, BotMembershipStatus, CommandResult, DispatchActionSummary, IngestionStatus, RouteKey } from "../types";
 
 export function DashboardScreen({ token, navigate }: { token: string; navigate: (route: RouteKey, selectedId?: string) => void }) {
   const queryClient = useQueryClient();
@@ -94,6 +94,7 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
 
       <aside className="work-detail">
         <IngestionPanel status={snapshot?.ingestion_status} />
+        <MembershipPanel status={snapshot?.bot_membership_status} />
 
         <div className="detail-panel">
           <p className="eyebrow">PRODUCT POLICY</p>
@@ -133,6 +134,32 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
         </div>
       </aside>
     </section>
+  );
+}
+
+function MembershipPanel({ status }: { status: BotMembershipStatus | undefined }) {
+  const attention = status?.facts.filter((fact) => fact.status !== "present") ?? [];
+  return (
+    <div className="detail-panel">
+      <p className="eyebrow">BOT MEMBERSHIP</p>
+      <div className="detail-title-row">
+        <h2>机器人群成员状态</h2>
+        <Badge tone={status?.summary.absent ? "danger" : status?.summary.unknown || status?.summary.unobserved ? "warning" : "success"}>
+          离群 {status?.summary.absent ?? 0} / 未知 {status?.summary.unknown ?? 0} / 待探测 {status?.summary.unobserved ?? 0}
+        </Badge>
+      </div>
+      {attention.length ? (
+        <ul className="timeline-list">
+          {attention.slice(0, 5).map((fact) => (
+            <li key={fact.chat_id}>
+              <AlertTriangle aria-hidden="true" size={14} />
+              <span>{fact.chat_id}</span>
+              <small>{fact.status} · {fact.source ?? "source unknown"} · {formatDate(fact.checked_at)}</small>
+            </li>
+          ))}
+        </ul>
+      ) : <div className="quiet-empty"><CheckCircle2 aria-hidden="true" size={18} /><span>没有已知的机器人离群或探测失败</span></div>}
+    </div>
   );
 }
 

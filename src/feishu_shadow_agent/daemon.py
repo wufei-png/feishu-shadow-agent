@@ -14,6 +14,7 @@ from .feishu.client import FeishuClient
 from .health import HealthSuite, has_critical_failure, summarize_results
 from .ingestion import IngestionFeishuClient, IngestionService, StageResult
 from .jsonl import JSONLLogger
+from .membership import BotMembershipService
 from .processing import TaskProcessingService
 from .retention import (
     RetentionService,
@@ -148,7 +149,23 @@ class Daemon:
                 config_base_dir=self.config_base_dir,
                 monotonic=self.ingestion_monotonic,
             )
-            stages = [service.run_approval_inbox, *service.ordered_ingestion_stages()]
+            membership = BotMembershipService(
+                store=self.store,
+                feishu_client=cast(Any, self.feishu_client),
+                config=self.app_config,
+                logger=self.logger,
+                execution_mode="dry_run" if self.dry_run else "production",
+            )
+
+            def run_bot_membership(*, run_id: str) -> StageResult:
+                summary = membership.refresh(run_id=run_id)
+                return StageResult("bot_membership", ok=True, processed=summary.probed)
+
+            stages = [
+                run_bot_membership,
+                service.run_approval_inbox,
+                *service.ordered_ingestion_stages(),
+            ]
             for stage in stages:
                 try:
                     result = stage(run_id=run_id)

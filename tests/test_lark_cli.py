@@ -46,6 +46,37 @@ def test_build_chat_messages_list_uses_order_flag() -> None:
     assert "--no-reactions" in argv
 
 
+def test_list_chat_bots_uses_installed_read_only_command_shape() -> None:
+    seen: list[list[str]] = []
+
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        seen.append(argv)
+        return LarkCliResult(
+            argv=argv,
+            exit_code=0,
+            json_data={"data": {"items": [{"bot_id": "ou_bot"}]}},
+        )
+
+    result = LarkCliClient(path="lark-cli", runner=runner).list_chat_bots(
+        chat_id="oc_1"
+    )
+
+    assert result.ok
+    assert seen == [
+        [
+            "lark-cli",
+            "im",
+            "chat.members",
+            "bots",
+            "--as",
+            "user",
+            "--json",
+            "--chat-id",
+            "oc_1",
+        ]
+    ]
+
+
 def test_list_p2p_messages_uses_user_identity_and_user_id() -> None:
     seen: list[list[str]] = []
 

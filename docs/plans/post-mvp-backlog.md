@@ -17,26 +17,15 @@
 
 | 类别 | 当前证据 | 阶段 |
 | --- | --- | --- |
-| 已记录、尚未完成 | bot membership 运行时事实、路由冲突契约、后台背景与统一重试 | S5–S8 |
+| 已记录、尚未完成 | 路由冲突契约、后台背景与统一重试 | S6–S8 |
 | 待取证的效果假设 | TaskSessionRunner._prompt_message_ids 在 fresh 时使用任务全部消息，resumed 时使用当前消息；长上下文效果仍需对照评测 | S9–S10 |
 | 文档/环境漂移 | docs/testing.md 仍描述不升级旧 schema，store/migrate.py 已有旧库迁移；本机工具版本与项目约束不一致 | 执行检查及相关阶段 |
 
-当前使用 `uv 0.12.4` 完成 `uv sync --locked --extra cards`。实施前 Python 全量为 **705 passed, 1 skipped**；最近阶段的指定 Python 契约为 **230 passed**，前端为 **9 passed**，Ruff lint/format、Pyright、前端 typecheck/lint/build 均通过。S3 另用隔离的合成 SQLite 数据完成 1440px 桌面和 500px 窄屏真实浏览器视觉验收，未操作生产记录；未运行打包或真实端到端。
+当前使用 `uv 0.12.4` 完成 `uv sync --locked --extra cards`。实施前 Python 全量为 **705 passed, 1 skipped**；最近阶段 S5 的指定及相邻 Python 契约为 **185 passed**，前端为 **9 passed**，Ruff lint/format、Pyright、前端 typecheck/lint/build 均通过。S3 另用隔离的合成 SQLite 数据完成 1440px 桌面和 500px 窄屏真实浏览器视觉验收，未操作生产记录；未运行打包或真实端到端。
 
 ## 实施阶段
 
 依赖表示技术前置；编号表示默认实施顺序。每阶段包含必要的 UI/API/命令/存储纵向改动与测试，不能把阶段是否正确推迟到后续证明。PY、FE 检查缩写见文末。
-
-### S5 — Bot membership 运行时恢复
-
-依赖：无。交付：可信的成员事实、派生降级、通知与恢复可见性。
-
-- 按 [ADR-0015](../adr/0015-bot-membership-derived-at-runtime-not-policy-mutation.md) 扩展发送/下载失败归因，适配 `im chat.members bots` 主动探测；先验证工具链实际能力与返回结构，缺失则记录依赖，不能把 unknown 当 absent。
-- 区分确认在群、确认离群、未知/探测失败，定义事实缓存有效期和重试节奏；按 reply_identity、allow_user_fallback 派生 Effective Policy。
-- 确认离群时阻断资源下载并按已有身份策略降级回复；通知 owner 去重，恢复入群后重新派生状态。不得自动改写 Policy Store 或自动加群。
-- 验收：离群、重加入、超时/权限错误、事实过期、fallback 开关组合；未知不误判，通知不刷屏，运行时变化不产生伪造的 Policy Audit。
-- 检查：PY `tests/test_lark_cli.py tests/test_policy_runtime.py tests/test_dispatcher.py tests/test_p2_ingestion_routing.py tests/test_operator_query.py`；FE 验证状态展示。
-- 源码入口：`feishu/lark_cli.py`、`policy.py`、`dispatcher.py`、资源下载路径与 Operator Query。
 
 ### S6 — 路由边界补齐
 

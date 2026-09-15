@@ -108,6 +108,24 @@ class LarkCliClient:
             argv.append("--no-reactions")
         return argv
 
+    def build_chat_members_bots(
+        self, *, chat_id: str, as_identity: str = "user"
+    ) -> list[str]:
+        _validate_identity(as_identity)
+        if not chat_id:
+            raise ValueError("chat_id is required")
+        return [
+            self.path,
+            "im",
+            "chat.members",
+            "bots",
+            "--as",
+            as_identity,
+            "--json",
+            "--chat-id",
+            chat_id,
+        ]
+
     def build_threads_messages_list(
         self,
         *,
@@ -479,6 +497,13 @@ class LarkCliClient:
             )
         )
         return _message_page_from_result(result)
+
+    def list_chat_bots(
+        self, *, chat_id: str, as_identity: str = "user"
+    ) -> LarkCliResult:
+        return self.run_json(
+            self.build_chat_members_bots(chat_id=chat_id, as_identity=as_identity)
+        )
 
     def list_thread_messages(
         self,
