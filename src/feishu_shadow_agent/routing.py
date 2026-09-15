@@ -293,14 +293,10 @@ class MessageRouter:
             return None
         if message.reply_to_message_id:
             tasks = [
-                task
-                for task in (
-                    self.store.get_task_by_id(task_id)
-                    for task_id in self.store.find_task_ids_for_message(
-                        message.reply_to_message_id
-                    )
+                self.store.get_task_by_id(task_id)
+                for task_id in self.store.find_task_ids_for_message(
+                    message.reply_to_message_id
                 )
-                if task is not None
             ]
             # Routing never crosses chat boundaries (ADR-0013): a reply target
             # in another chat is context here, never a takeover signal.
