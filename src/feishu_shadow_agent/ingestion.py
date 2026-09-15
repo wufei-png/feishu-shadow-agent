@@ -1192,23 +1192,45 @@ class IngestionService:
         if enforce_eligibility:
             eligibility = self.eligibility.decide(message, sources=[source])
             if not eligibility.eligible:
-                decision = RouteDecision(
-                    RouteName.IGNORE, reason=eligibility.reason_code
-                )
-                self.store.record_routing_audit(
-                    message_id=message.message_id,
-                    revision=message.revision,
-                    decision=decision,
-                )
-                result = RoutingResult(decision=decision, task=None)
-                self._log_routing_result(
-                    message=message,
-                    source=source,
-                    inserted=inserted,
-                    result=result,
+                hanging_reply = None
+                if upsert.changed and message.revision > 1:
+                    hanging_reply = self.store.get_latest_sent_reply_for_source(
+                        message_id=message.message_id,
+                        before_revision=message.revision,
+                    )
+                if hanging_reply is None:
+                    decision = RouteDecision(
+                        RouteName.IGNORE, reason=eligibility.reason_code
+                    )
+                    self.store.record_routing_audit(
+                        message_id=message.message_id,
+                        revision=message.revision,
+                        decision=decision,
+                    )
+                    result = RoutingResult(decision=decision, task=None)
+                    self._log_routing_result(
+                        message=message,
+                        source=source,
+                        inserted=inserted,
+                        result=result,
+                        run_id=run_id,
+                    )
+                    return result
+                # A new revision already has a sent-like reply. Eligibility
+                # still describes why this would not start work, but dropping
+                # here would cancel stale side effects and never offer a
+                # correction. Keep routing so revision review can attach.
+                self.logger.info(
+                    "revision_review_overrides_eligibility",
                     run_id=run_id,
+                    data={
+                        "message_id": message.message_id,
+                        "revision": message.revision,
+                        "source": source,
+                        "eligibility_reason": eligibility.reason_code,
+                        "previous_action_id": hanging_reply.get("action_id"),
+                    },
                 )
-                return result
         result = self.router.route(
             message,
             source=source,

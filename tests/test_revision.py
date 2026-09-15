@@ -8,7 +8,7 @@ from threading import Event, Thread
 from typing import Any
 
 from feishu_shadow_agent.agent_backend import AgentRunResult
-from feishu_shadow_agent.config import AppConfig, OwnerConfig
+from feishu_shadow_agent.config import AppConfig, ChatPolicyConfig, OwnerConfig
 from feishu_shadow_agent.ingestion import IngestionService, MessageNormalizer
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.paths import resolve_agent_working_dir
@@ -488,10 +488,13 @@ def _session_output(
 
 
 def _processing_service(
-    tmp_path: Path, backend: _SessionBackend
+    tmp_path: Path,
+    backend: _SessionBackend,
+    *,
+    config: AppConfig | None = None,
 ) -> tuple[SQLiteStore, IngestionService]:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    config = AppConfig(owner=OwnerConfig(open_id="ou_owner", name="Owner"))
+    config = config or AppConfig(owner=OwnerConfig(open_id="ou_owner", name="Owner"))
     store.import_product_policy_from_config(config)
     processor = TaskProcessingService(
         store=store,
@@ -688,6 +691,129 @@ def test_revision_none_does_not_auto_reply_or_notify(tmp_path: Path) -> None:
     assert [row["status"] for row in send_replies] == ["sent"]
     assert approvals == 0
     assert _owner_notifications(store) == []
+
+
+def _raw_group_mention(message_id: str, text: str, **extra: Any) -> dict[str, Any]:
+    payload = _raw_message(message_id, text, **extra)
+    payload["chat_id"] = "oc_1"
+    payload["chat_type"] = "group"
+    payload["mentions"] = [{"open_id": "ou_owner"}]
+    payload["is_at_me"] = True
+    return payload
+
+
+def _group_auto_reply_config() -> AppConfig:
+    return AppConfig(
+        owner=OwnerConfig(open_id="ou_owner", name="Owner"),
+        chats={"oc_1": ChatPolicyConfig(auto_reply=True, allow_user_fallback=True)},
+    )
+
+
+def test_at_all_edit_without_sent_reply_stays_ineligible(tmp_path: Path) -> None:
+    store, service = _processing_service(tmp_path, _SessionBackend())
+    result = service.process_raw_message(
+        {
+            **_raw_message("om_source", "hello @所有人", at_all=True),
+            "chat_id": "oc_1",
+            "chat_type": "group",
+        },
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert result is not None
+    assert result.decision.route == "ignore"
+    assert result.decision.reason == "at_all_suppressed"
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 0
+
+
+def test_group_at_all_edit_after_send_still_enters_revision_review(
+    tmp_path: Path,
+) -> None:
+    backend = _SessionBackend()
+    backend.session_outputs.append(_session_output())
+    backend.session_outputs.append(
+        _session_output(
+            include_task_label=False,
+            proposed_reply="updated reply",
+            _session_id="sid_2",
+        )
+    )
+    store, service = _processing_service(
+        tmp_path, backend, config=_group_auto_reply_config()
+    )
+    created = service.process_raw_message(
+        _raw_group_mention("om_source", "hello"),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    _mark_pending_send_replies_sent(store)
+
+    edited = service.process_raw_message(
+        {
+            **_raw_message("om_source", "hello edited @所有人", at_all=True),
+            "chat_id": "oc_1",
+            "chat_type": "group",
+        },
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_2",
+    )
+
+    assert edited is not None
+    assert edited.decision.route == "attach_task"
+    assert edited.decision.reason == "source_revision"
+    notifications = _owner_notifications(store)
+    assert len(notifications) == 1
+    assert notifications[0]["reason"] == "revision_low_impact_correction_review"
+    assert "updated reply" in notifications[0]["suggested_reply"]
+
+
+def test_group_mention_removed_after_send_still_enters_revision_review(
+    tmp_path: Path,
+) -> None:
+    backend = _SessionBackend()
+    backend.session_outputs.append(_session_output())
+    backend.session_outputs.append(
+        _session_output(
+            include_task_label=False,
+            proposed_reply="updated reply",
+            _session_id="sid_2",
+        )
+    )
+    store, service = _processing_service(
+        tmp_path, backend, config=_group_auto_reply_config()
+    )
+    created = service.process_raw_message(
+        _raw_group_mention("om_source", "hello"),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    _mark_pending_send_replies_sent(store)
+
+    edited = service.process_raw_message(
+        {
+            **_raw_message("om_source", "hello edited, no mention"),
+            "chat_id": "oc_1",
+            "chat_type": "group",
+        },
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_2",
+    )
+
+    assert edited is not None
+    assert edited.decision.route == "attach_task"
+    assert edited.decision.reason == "source_revision"
+    notifications = _owner_notifications(store)
+    assert len(notifications) == 1
+    assert notifications[0]["reason"] == "revision_low_impact_correction_review"
 
 
 def test_revision_low_impact_notifies_with_send_command(tmp_path: Path) -> None:
