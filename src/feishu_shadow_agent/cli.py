@@ -390,6 +390,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     task_retry.add_argument("--reason", help="optional operator audit reason")
     task_retry.set_defaults(handler=_handle_task_retry_processing)
+    task_background = task_subparsers.add_parser(
+        "set-background", help="set owner-provided task background"
+    )
+    _add_config_arg(task_background)
+    task_background.add_argument("--task-id", required=True)
+    task_background.add_argument("--reason", help="optional operator audit reason")
+    task_background.add_argument(
+        "--stdin",
+        action="store_true",
+        dest="read_stdin",
+        help="read task background from stdin",
+    )
+    task_background.add_argument("text", nargs=argparse.REMAINDER)
+    task_background.set_defaults(handler=_handle_task_set_background)
+    task_clear_background = task_subparsers.add_parser(
+        "clear-background", help="clear owner-provided task background"
+    )
+    _add_config_arg(task_clear_background)
+    task_clear_background.add_argument("--task-id", required=True)
+    task_clear_background.add_argument(
+        "--reason", help="optional operator audit reason"
+    )
+    task_clear_background.set_defaults(handler=_handle_task_clear_background)
 
     return parser
 
@@ -602,6 +625,32 @@ def _handle_task_retry_processing(args: argparse.Namespace) -> int:
     result = OperatorCommandService(store).retry_processing(
         args.message_id,
         stage=args.stage,
+        actor="local_cli",
+        reason=args.reason,
+    )
+    return _emit_command_result(result)
+
+
+def _handle_task_set_background(args: argparse.Namespace) -> int:
+    content = sys.stdin.read() if args.read_stdin else " ".join(args.text).strip()
+    if not content.strip():
+        print("set-background requires background text", file=sys.stderr)
+        return 2
+    _, store, _ = _load_runtime(args.config)
+    result = OperatorCommandService(store).update_task_background(
+        args.task_id,
+        content=content,
+        actor="local_cli",
+        reason=args.reason,
+    )
+    return _emit_command_result(result)
+
+
+def _handle_task_clear_background(args: argparse.Namespace) -> int:
+    _, store, _ = _load_runtime(args.config)
+    result = OperatorCommandService(store).update_task_background(
+        args.task_id,
+        content=None,
         actor="local_cli",
         reason=args.reason,
     )

@@ -13,7 +13,8 @@ vi.mock("../api", () => ({
   getTask: vi.fn(),
   listTasks: vi.fn(),
   reopenTask: vi.fn(),
-  retryMessageProcessing: vi.fn()
+  retryMessageProcessing: vi.fn(),
+  updateTaskBackground: vi.fn()
 }));
 
 afterEach(() => {
@@ -58,6 +59,40 @@ describe("TasksScreen processing recovery", () => {
       "task_session",
       { reason: undefined }
     );
+  });
+
+  it("labels task background as next-fresh and saves it through the command API", async () => {
+    const detail = taskDetail();
+    vi.mocked(api.listTasks).mockResolvedValue([detail]);
+    vi.mocked(api.getTask).mockResolvedValue(detail);
+    vi.mocked(api.updateTaskBackground).mockResolvedValue({
+      status: "applied",
+      command: "task.background.update",
+      actor: "local_console",
+      reason: null,
+      target: {},
+      changed: true,
+      result: {},
+      warnings: ["Task background applies on the next fresh session rebuild."],
+      next_actions: []
+    });
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <TasksScreen selectedId="t_retry" token="token" />
+      </QueryClientProvider>
+    );
+
+    await screen.findByRole("heading", { name: "任务背景" });
+    expect(screen.getByText(/下次 fresh 重建生效/)).toBeTruthy();
+    await user.type(screen.getByLabelText("Owner 补充背景"), "客户只接受周五发布");
+    await user.click(screen.getByRole("button", { name: "保存背景" }));
+
+    expect(api.updateTaskBackground).toHaveBeenCalledWith("token", "t_retry", {
+      content: "客户只接受周五发布",
+      reason: undefined
+    });
   });
 });
 
@@ -119,6 +154,8 @@ function taskDetail(): TaskDetail {
         }
       }
     ],
+    task_background: null,
+    task_background_history: [],
     effective_policy: {
       policy_source: "explicit_chat",
       auto_reply: true,

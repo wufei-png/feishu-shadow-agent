@@ -46,6 +46,7 @@ class TaskSessionPromptPlan:
     prompt_message_ids: list[str]
     output_model: type[BaseTaskSessionOutput]
     reply_target_message_ids: list[str]
+    task_background: str | None = None
     revision_context: RevisionReviewContext | None = None
     prompt_message_revisions: list[int] = field(default_factory=_empty_revisions)
 
@@ -120,6 +121,9 @@ class TaskSessionRunner:
             output_model=output_model,
             reply_target_message_ids=reply_target_message_ids(
                 task=task, current_message_id=message.message_id
+            ),
+            task_background=(
+                self.store.get_task_background(task.id) if session_id is None else None
             ),
             revision_context=revision_context,
             prompt_message_revisions=prompt_message_revisions,
@@ -231,6 +235,7 @@ class TaskSessionRunner:
             output_model=plan.output_model,
             context_access=self.context_access.task_session_context_access(task=task),
             chat_type=task.chat_type or message.chat_type,
+            task_background=plan.task_background,
             previous_sent_reply=None
             if plan.revision_context is None
             else plan.revision_context.previous_sent_reply,

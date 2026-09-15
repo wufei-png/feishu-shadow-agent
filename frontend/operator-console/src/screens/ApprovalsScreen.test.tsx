@@ -185,6 +185,8 @@ function task(taskId: string): TaskDetail {
     pending_approvals: [],
     actions: [],
     agent_audits: [],
+    task_background: null,
+    task_background_history: [],
     effective_policy: {
       policy_source: "global",
       auto_reply: true,

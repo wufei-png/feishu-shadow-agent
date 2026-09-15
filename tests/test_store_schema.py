@@ -22,6 +22,7 @@ EXPECTED_TABLES = {
     "tasks",
     "task_messages",
     "task_watch_keys",
+    "task_background_versions",
     "approvals",
     "actions",
     "dispatch_attempts",
@@ -79,6 +80,35 @@ def test_schema_migrates_v5_processing_retry_table(tmp_path: Path) -> None:
         ).fetchone()
         version = conn.execute("PRAGMA user_version").fetchone()[0]
     assert table is not None
+    assert version == SQLITE_SCHEMA_VERSION
+
+
+def test_schema_migrates_v6_task_background_table(tmp_path: Path) -> None:
+    path = tmp_path / "agent.sqlite3"
+    initial = SQLiteStore(path)
+    initial.initialize()
+    with initial.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO tasks(short_id, status, created_at, updated_at)
+            VALUES ('t_preserved', 'watching', 'now', 'now')
+            """
+        )
+        conn.execute("DROP TABLE task_background_versions")
+        conn.execute("PRAGMA user_version = 6")
+
+    SQLiteStore(path).initialize()
+
+    with initial.connect() as conn:
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'task_background_versions'"
+        ).fetchone()
+        task = conn.execute(
+            "SELECT short_id, status FROM tasks WHERE short_id = 't_preserved'"
+        ).fetchone()
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert table is not None
+    assert dict(task) == {"short_id": "t_preserved", "status": "watching"}
     assert version == SQLITE_SCHEMA_VERSION
 
 

@@ -552,6 +552,56 @@ class TaskCommandService:
             next_actions=_task_next_actions(raw.get("task")),
         )
 
+    def update_background(
+        self,
+        task_id: str,
+        *,
+        content: str | None,
+        actor: str,
+        reason: str | None = None,
+    ) -> CommandResult:
+        command = "task.background.update"
+        target = _task_target(task_id)
+        try:
+            raw = self.store.update_task_background(
+                task_id,
+                content=content,
+                actor=actor,
+                reason=reason,
+            )
+        except KeyError as exc:
+            return _error_result(
+                status="not_found",
+                command=command,
+                actor=actor,
+                reason=reason,
+                target=target,
+                error=str(exc),
+            )
+        except ValueError as exc:
+            return _error_result(
+                status="validation_failed",
+                command=command,
+                actor=actor,
+                reason=reason,
+                target=target,
+                error=str(exc),
+            )
+        changed = bool(raw.get("changed"))
+        return CommandResult(
+            status="applied" if changed else "no_change",
+            command=command,
+            actor=actor,
+            reason=reason,
+            target=target,
+            changed=changed,
+            result=raw,
+            warnings=["Task background applies on the next fresh session rebuild."],
+            next_actions=[
+                {"command": "task.inspect", "target": target},
+            ],
+        )
+
 
 class PolicyCommandService:
     def __init__(self, store: SQLiteStore):
@@ -983,6 +1033,21 @@ class OperatorCommandService:
     ) -> CommandResult:
         return self.tasks.reopen(
             task_id, watch_until=watch_until, actor=actor, reason=reason
+        )
+
+    def update_task_background(
+        self,
+        task_id: str,
+        *,
+        content: str | None,
+        actor: str = "operator",
+        reason: str | None = None,
+    ) -> CommandResult:
+        return self.tasks.update_background(
+            task_id,
+            content=content,
+            actor=actor,
+            reason=reason,
         )
 
     def import_policy_config(

@@ -353,8 +353,22 @@ export type TaskDetail = TaskSummary & {
   actions: DispatchActionSummary[];
   agent_audits: AgentAudit[];
   processing?: MessageProcessing[];
+  task_background: TaskBackgroundVersion | null;
+  task_background_history: TaskBackgroundVersion[];
   effective_policy: EffectivePolicy;
   recommended_actions: string[];
+};
+
+export type TaskBackgroundVersion = {
+  id: number;
+  task_id: number;
+  version: number;
+  content: string | null;
+  operation: "set" | "clear";
+  actor: string;
+  reason: string | null;
+  created_at: string | null;
+  content_expired_at: string | null;
 };
 
 export type ActionStatus = "pending" | "sending" | "sent" | "failed" | "failed_needs_review" | "cancelled";

@@ -43,7 +43,7 @@ from .migrate import migrate_schema
 
 SQLITE_BUSY_TIMEOUT_MS = 5000
 SQLITE_APPLICATION_ID = 1179861319
-SQLITE_SCHEMA_VERSION = 6
+SQLITE_SCHEMA_VERSION = 7
 RUN_HEARTBEAT_STALE_AFTER_SECONDS = 300
 PRODUCT_POLICY_KEY = "reply_policy"
 LATEST_NON_OK_HEALTH_CHECKS_SQL = """
@@ -1186,6 +1186,19 @@ class SQLiteStore:
                 (cutoff, now),
             ),
             (
+                "task_background_versions",
+                "task_background_versions",
+                "content = NULL, reason = NULL, content_expired_at = ?",
+                (now,),
+                f"""
+                content_expired_at IS NULL
+                AND julianday(created_at) <= julianday(?)
+                AND (content IS NOT NULL OR reason IS NOT NULL)
+                AND {active_task_by_id.format(table="task_background_versions")}
+                """,
+                (cutoff, now),
+            ),
+            (
                 "task_watch_keys",
                 "task_watch_keys",
                 "key = printf('retention-pruned:%d:%d', task_id, rowid)",
@@ -1733,6 +1746,94 @@ class SQLiteStore:
             "task": _task_command_summary(updated),
             "previous_status": task.status,
         }
+
+    def update_task_background(
+        self,
+        task_id: int | str,
+        *,
+        content: str | None,
+        actor: str,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Append one auditable task-background version without resetting sessions."""
+
+        self.initialize()
+        normalized_content = None
+        if content is not None and content.strip():
+            normalized_content = content.strip()
+        normalized_actor = actor.strip()
+        if not normalized_actor:
+            raise ValueError("task background actor is required")
+        normalized_reason = None if reason is None else reason.strip() or None
+        now = self.clock()
+        with self.connect() as conn:
+            task = self._get_task_by_lookup(conn, task_id)
+            if task is None:
+                raise KeyError(f"task not found: {task_id}")
+            current = conn.execute(
+                """
+                SELECT * FROM task_background_versions
+                WHERE task_id = ?
+                ORDER BY version DESC
+                LIMIT 1
+                """,
+                (task.id,),
+            ).fetchone()
+            current_content = None if current is None else current["content"]
+            if current_content == normalized_content:
+                return {
+                    "changed": False,
+                    "task": _task_command_summary(task),
+                    "background": _task_background_version(current),
+                }
+            version = 1 if current is None else int(current["version"]) + 1
+            cursor = conn.execute(
+                """
+                INSERT INTO task_background_versions(
+                  task_id, version, content, operation, actor, reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task.id,
+                    version,
+                    normalized_content,
+                    "clear" if normalized_content is None else "set",
+                    normalized_actor,
+                    normalized_reason,
+                    now,
+                ),
+            )
+            conn.execute("UPDATE tasks SET updated_at = ? WHERE id = ?", (now, task.id))
+            row = conn.execute(
+                "SELECT * FROM task_background_versions WHERE id = ?",
+                (cursor.lastrowid,),
+            ).fetchone()
+            updated_task = self._get_task_by_id(conn, task.id)
+        return {
+            "changed": True,
+            "task": _task_command_summary(updated_task),
+            "background": _task_background_version(row),
+        }
+
+    def get_task_background(self, task_id: int) -> str | None:
+        """Return only the current non-cleared model-visible content."""
+
+        self.initialize()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT content
+                FROM task_background_versions
+                WHERE task_id = ?
+                ORDER BY version DESC
+                LIMIT 1
+                """,
+                (task_id,),
+            ).fetchone()
+        if row is None or row["content"] is None:
+            return None
+        content = str(row["content"]).strip()
+        return content or None
 
     def close_task_for_owner_takeover_and_audit(
         self,
@@ -5181,6 +5282,22 @@ def _task_command_summary(task: TaskRecord) -> dict[str, Any]:
         "watch_until": task.watch_until,
         "agent_session_provider": task.agent_session_provider,
         "agent_working_dir": task.agent_working_dir,
+    }
+
+
+def _task_background_version(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return {
+        "id": int(row["id"]),
+        "task_id": int(row["task_id"]),
+        "version": int(row["version"]),
+        "content": row["content"],
+        "operation": row["operation"],
+        "actor": row["actor"],
+        "reason": row["reason"],
+        "created_at": row["created_at"],
+        "content_expired_at": row["content_expired_at"],
     }
 
 

@@ -78,6 +78,146 @@ def _task(*, task_id: int = 1, short_id: str = "t_abc") -> TaskRecord:
     )
 
 
+def test_task_session_plan_injects_background_only_for_fresh_matching_task() -> None:
+    class Store:
+        def __init__(self) -> None:
+            self.sessions = {1: None, 2: None, 3: "session-live"}
+            self.backgrounds = {
+                1: "first task evidence",
+                2: "second task evidence",
+                3: "old",
+            }
+
+        def get_initialized_agent_session_id(
+            self, task_id: int, *, backend_provider: str
+        ) -> str | None:
+            assert backend_provider == "hermes"
+            return self.sessions[task_id]
+
+        def list_task_message_ids(self, task_id: int) -> list[str]:
+            return [f"om_{task_id}"]
+
+        def get_messages_by_ids(
+            self, message_ids: list[str]
+        ) -> list[dict[str, object]]:
+            return [
+                {"message_id": message_id, "revision": 1} for message_id in message_ids
+            ]
+
+        def get_task_background(self, task_id: int) -> str | None:
+            return self.backgrounds.get(task_id)
+
+    class Backend:
+        provider = "hermes"
+
+    runner = TaskSessionRunner(
+        store=Store(),  # type: ignore[arg-type]
+        agent_backend=Backend(),  # type: ignore[arg-type]
+        agent_invoker=None,  # type: ignore[arg-type]
+        context_access=None,  # type: ignore[arg-type]
+    )
+
+    first = runner.build_plan(
+        task=_task(task_id=1), message=_message(message_id="om_1")
+    )
+    second = runner.build_plan(
+        task=_task(task_id=2), message=_message(message_id="om_2")
+    )
+    resumed = runner.build_plan(
+        task=_task(task_id=3), message=_message(message_id="om_3")
+    )
+
+    assert first.task_background == "first task evidence"
+    assert second.task_background == "second task evidence"
+    assert resumed.session_id == "session-live"
+    assert resumed.task_background is None
+
+
+def test_task_session_run_emits_background_only_for_fresh_prompt(
+    tmp_path: Path,
+) -> None:
+    class Store:
+        def get_initialized_agent_session_id(
+            self, task_id: int, *, backend_provider: str
+        ) -> str | None:
+            return None if task_id == 1 else "session-live"
+
+        def list_task_message_ids(self, task_id: int) -> list[str]:
+            return [f"om_{task_id}"]
+
+        def get_messages_by_ids(
+            self, message_ids: list[str]
+        ) -> list[dict[str, object]]:
+            return [
+                {
+                    "message_id": message_id,
+                    "revision": 1,
+                    "text": "hello",
+                    "sender_name": "Ext",
+                    "sender_role": "external_user_message",
+                    "sent_at": "2026-06-22T10:00:00+08:00",
+                    "thread_id": None,
+                    "reply_to_message_id": None,
+                }
+                for message_id in message_ids
+            ]
+
+        def get_task_background(self, task_id: int) -> str | None:
+            return "fresh-only background"
+
+    class Backend:
+        provider = "hermes"
+
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def task_session(
+            self, prompt: str, *, session_id: str | None, cwd: str | Path | None
+        ) -> AgentRunResult:
+            self.prompts.append(prompt)
+            return AgentRunResult(["agent"], 1, stderr="stop after prompt capture")
+
+    class ContextAccess:
+        def task_session_context_access(self, *, task: TaskRecord) -> None:
+            return None
+
+    backend = Backend()
+    runner = TaskSessionRunner(
+        store=Store(),  # type: ignore[arg-type]
+        agent_backend=backend,  # type: ignore[arg-type]
+        agent_invoker=AgentInvoker(
+            logger=JSONLLogger(tmp_path / "agent.jsonl"), max_attempts=1
+        ),
+        context_access=ContextAccess(),  # type: ignore[arg-type]
+    )
+    fresh_task = _task(task_id=1)
+    resumed_task = _task(task_id=2)
+    fresh_message = _message(message_id="om_1")
+    resumed_message = _message(message_id="om_2")
+
+    fresh_plan = runner.build_plan(task=fresh_task, message=fresh_message)
+    resumed_plan = runner.build_plan(task=resumed_task, message=resumed_message)
+    runner.run(
+        task=fresh_task,
+        message=fresh_message,
+        plan=fresh_plan,
+        resources=[],
+        run_id="run_fresh",
+    )
+    runner.run(
+        task=resumed_task,
+        message=resumed_message,
+        plan=resumed_plan,
+        resources=[],
+        run_id="run_resumed",
+    )
+
+    assert "## Owner Task Background" in backend.prompts[0]
+    assert "fresh-only background" in backend.prompts[0]
+    assert "## Owner Task Background" not in backend.prompts[1]
+    assert "fresh-only background" not in backend.prompts[1]
+
+
 def test_agent_invoker_retries_transient_result_but_not_terminal_result(
     tmp_path: Path,
 ) -> None:

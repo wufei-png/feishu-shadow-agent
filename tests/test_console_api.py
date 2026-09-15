@@ -451,6 +451,7 @@ def test_message_detail_api_is_service_backed_and_read_only(tmp_path: Path) -> N
         ("POST", "/api/tasks/t_missing/send"),
         ("POST", "/api/tasks/t_missing/close"),
         ("POST", "/api/tasks/t_missing/reopen"),
+        ("PATCH", "/api/tasks/t_missing/background"),
         ("POST", "/api/maintenance/expire-approvals"),
         ("POST", "/api/maintenance/doctor"),
         ("POST", "/api/maintenance/config-validate"),
@@ -979,6 +980,33 @@ def test_processing_retry_route_queues_operator_command(tmp_path: Path) -> None:
     assert payload["command"] == "processing.retry"
     assert payload["actor"] == "local_console"
     assert payload["result"]["attempt"]["stage"] == "resource_download"
+
+
+def test_task_background_route_versions_and_clears_owner_context(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    _seed_task_with_message(store, task_short_id="t_background")
+    client = _client(tmp_path)
+
+    created = client.patch(
+        "/api/tasks/t_background/background",
+        headers=_auth(),
+        json={"content": "Customer requires a Friday release.", "reason": "owner note"},
+    )
+    cleared = client.patch(
+        "/api/tasks/t_background/background",
+        headers=_auth(),
+        json={"content": None, "reason": "obsolete"},
+    )
+
+    assert created.status_code == 200
+    assert created.json()["command"] == "task.background.update"
+    assert created.json()["actor"] == "local_console"
+    assert created.json()["result"]["background"]["version"] == 1
+    assert cleared.status_code == 200
+    assert cleared.json()["result"]["background"]["version"] == 2
+    assert cleared.json()["result"]["background"]["operation"] == "clear"
 
 
 def test_dispatch_mark_sent_route_uses_readback_marker(tmp_path: Path) -> None:

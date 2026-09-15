@@ -260,6 +260,7 @@ def test_retention_scrubs_full_chain_except_effective_watch(tmp_path: Path) -> N
     expected = {
         "messages",
         "tasks",
+        "task_background_versions",
         "task_watch_keys",
         "approvals",
         "actions",
@@ -325,6 +326,12 @@ def test_retention_scrubs_full_chain_except_effective_watch(tmp_path: Path) -> N
                 "SELECT * FROM processing_retry_attempts ORDER BY message_id"
             )
         }
+        task_backgrounds = {
+            row["task_id"]: dict(row)
+            for row in conn.execute(
+                "SELECT * FROM task_background_versions ORDER BY task_id"
+            )
+        }
         watch_keys = {
             row["task_id"]: row["key"]
             for row in conn.execute("SELECT * FROM task_watch_keys ORDER BY task_id")
@@ -351,6 +358,9 @@ def test_retention_scrubs_full_chain_except_effective_watch(tmp_path: Path) -> N
         assert processing_retries[f"om_{suffix}"]["reason"] is None
         assert processing_retries[f"om_{suffix}"]["error"] is None
         assert processing_retries[f"om_{suffix}"]["content_expired_at"] is not None
+        assert task_backgrounds[task["id"]]["content"] is None
+        assert task_backgrounds[task["id"]]["reason"] is None
+        assert task_backgrounds[task["id"]]["content_expired_at"] is not None
         assert watch_keys[task["id"]].startswith("retention-pruned:")
 
     active = tasks["t_active"]
@@ -362,16 +372,20 @@ def test_retention_scrubs_full_chain_except_effective_watch(tmp_path: Path) -> N
     assert processing["om_active"]["last_error"] == "secret error active"
     assert processing_retries["om_active"]["reason"] == "secret reason active"
     assert processing_retries["om_active"]["content_expired_at"] is None
+    assert task_backgrounds[active["id"]]["content"] == "secret background active"
+    assert task_backgrounds[active["id"]]["content_expired_at"] is None
     assert watch_keys[active["id"]] == "secret-key-active"
 
     recent = tasks["t_recent"]
     assert messages["om_recent"]["text"] == "secret recent"
     assert recent["task_label"] == "secret label recent"
     assert processing_retries["om_recent"]["reason"] == "secret reason recent"
+    assert task_backgrounds[recent["id"]]["content"] == "secret background recent"
     assert len(messages) == len(tasks) == len(approvals) == len(actions) == 4
     assert len(resources) == len(audits) == len(commands) == len(feedback) == 4
     assert len(processing) == len(watch_keys) == 4
     assert len(processing_retries) == 4
+    assert len(task_backgrounds) == 4
 
 
 def test_retention_scrubs_jsonl_and_text_log_payloads_atomically(
@@ -745,6 +759,19 @@ def _insert_sensitive_chain(
         conn.execute(
             "INSERT INTO task_watch_keys(task_id, key, created_at) VALUES (?, ?, ?)",
             (task_id, f"secret-key-{suffix}", created_at),
+        )
+        conn.execute(
+            """
+            INSERT INTO task_background_versions(
+              task_id, version, content, operation, actor, reason, created_at
+            ) VALUES (?, 1, ?, 'set', 'owner', ?, ?)
+            """,
+            (
+                task_id,
+                f"secret background {suffix}",
+                f"secret background reason {suffix}",
+                created_at,
+            ),
         )
         approval = conn.execute(
             """

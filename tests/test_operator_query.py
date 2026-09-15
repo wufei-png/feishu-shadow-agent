@@ -758,6 +758,12 @@ def test_task_detail_returns_related_read_models_and_effective_policy(
         actor="local_console",
         reason="bot restored",
     )
+    store.update_task_background(
+        task_id,
+        content="Customer requires a Friday release.",
+        actor="local_console",
+        reason="owner note",
+    )
     query = OperatorQueryService(
         store,
         policy_import_source=config,
@@ -806,6 +812,11 @@ def test_task_detail_returns_related_read_models_and_effective_policy(
             },
         }
     ]
+    assert detail["task_background"]["version"] == 1
+    assert detail["task_background"]["content"] == (
+        "Customer requires a Friday release."
+    )
+    assert detail["task_background_history"] == [detail["task_background"]]
     assert detail["effective_policy"] == {
         "policy_source": "explicit_chat",
         "auto_reply": True,

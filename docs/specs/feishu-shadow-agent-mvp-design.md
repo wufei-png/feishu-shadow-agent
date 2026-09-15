@@ -469,7 +469,7 @@ Reply Context 只保留回复目标安全所需的字段，不携带 task/messag
 - chat_type（非空时）
 ```
 
-Messages 是 prompt 内飞书正文的唯一权威来源。Task Session 不再重复 task label 或 Context Access message snapshot；每条消息保留 message id、sender name/role、sent time 和正文，thread/reply-to 只在非空时展示。当前消息和 root 只出现在 Reply Context 的 id 字段里，Messages 标题不再标注 `(current)` / `(root)`。资源为空时连 `## Resources` 标题也不出现。Context Access 只提供 read-only URI、allowed tables 与当前 task query scope。Output Contract 精简说明最终字段和交叉约束；完整 Pydantic schema 不重复嵌入业务 prompt，支持结构化输出的 backend 仍通过原生参数接收 schema。
+Messages 是 prompt 内飞书正文的唯一权威来源。Task Session 不再重复 task label 或 Context Access message snapshot；每条消息保留 message id、sender name/role、sent time 和正文，thread/reply-to 只在非空时展示。当前消息和 root 只出现在 Reply Context 的 id 字段里，Messages 标题不再标注 `(current)` / `(root)`。资源为空时连 `## Resources` 标题也不出现。Owner 通过 Operator Command 维护的任务背景是独立、任务级、带版本的补充证据，只在 fresh provider session 构建时注入；resumed session 不重复注入，且较新的 Messages 冲突时优先。Context Access 只提供 read-only URI、allowed tables 与当前 task query scope。Output Contract 精简说明最终字段和交叉约束；完整 Pydantic schema 不重复嵌入业务 prompt，支持结构化输出的 backend 仍通过原生参数接收 schema。
 
 Task Session 初次处理：
 

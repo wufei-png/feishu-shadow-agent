@@ -268,7 +268,13 @@ Task lifecycle commands:
 ```text
 POST /api/tasks/{task_id}/close
 POST /api/tasks/{task_id}/reopen
+PATCH /api/tasks/{task_id}/background
 ```
+
+The background request requires `content`; a string appends a set/replace
+version and `null` appends a clear version. It may include `reason`. The command
+does not reset a live provider session, and the task detail DTO returns
+`task_background` plus recent `task_background_history` for auditability.
 
 Processing recovery commands:
 

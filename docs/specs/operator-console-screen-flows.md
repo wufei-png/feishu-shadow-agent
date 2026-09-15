@@ -257,6 +257,8 @@ Detail fields:
 task summary
 recent_messages
 processing
+task_background
+task_background_history
 pending_approvals
 actions
 effective_policy
@@ -284,6 +286,9 @@ recommended_actions
 
 Rules:
 
+- Task background supports save, replace, and clear through an explicit
+  Operator Command. The editor states that changes apply on the next fresh
+  rebuild and do not enter the current live provider session.
 - Message Detail must not generate a new preview.
 - Loading Message Detail must not mutate approvals, actions, attempts, or policy.
 - Terminal or externally blocked processing rows may expose an explicit retry
@@ -296,6 +301,7 @@ Primary API needs:
 ```text
 GET /api/tasks
 GET /api/tasks/{task_id}
+PATCH /api/tasks/{task_id}/background
 GET /api/messages/{message_id}/detail
 POST /api/messages/{message_id}/processing/{stage}/retry
 ```

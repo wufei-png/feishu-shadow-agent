@@ -676,6 +676,17 @@ class OperatorQueryService:
                     """,
                     (int(task["id"]), coerce_limit(limit)),
                 ).fetchall()
+                background_rows = conn.execute(
+                    """
+                    SELECT id, task_id, version, content, operation, actor, reason,
+                           created_at, content_expired_at
+                    FROM task_background_versions
+                    WHERE task_id = ?
+                    ORDER BY version DESC
+                    LIMIT ?
+                    """,
+                    (int(task["id"]), coerce_limit(limit)),
+                ).fetchall()
         except ReadStoreUnavailable:
             return None
         task_summary = task_summary_dto(task)
@@ -685,6 +696,7 @@ class OperatorQueryService:
             limit=limit,
         )
         actions = self.list_dispatch_actions(task_id=int(task["id"]), limit=limit)
+        background_versions = [_task_background_dto(row) for row in background_rows]
         return {
             **task_summary,
             "recent_messages": [message_dto(row) for row in reversed(messages)],
@@ -692,6 +704,10 @@ class OperatorQueryService:
             "actions": actions,
             "agent_audits": [agent_audit_dto(row) for row in agent_audit_rows],
             "processing": [_task_processing_dto(row) for row in processing_rows],
+            "task_background": (
+                None if not background_versions else background_versions[0]
+            ),
+            "task_background_history": background_versions,
             "effective_policy": self.effective_policy_summary(
                 task["chat_id"], task["chat_type"]
             ),
@@ -925,6 +941,20 @@ def _task_processing_dto(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "latest_retry": retry,
+    }
+
+
+def _task_background_dto(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "task_id": int(row["task_id"]),
+        "version": int(row["version"]),
+        "content": row["content"],
+        "operation": row["operation"],
+        "actor": row["actor"],
+        "reason": row["reason"],
+        "created_at": row["created_at"],
+        "content_expired_at": row["content_expired_at"],
     }
 
 

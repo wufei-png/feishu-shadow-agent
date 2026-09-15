@@ -161,6 +161,14 @@ export function retryMessageProcessing(token: string, messageId: string, stage: 
   return postCommand(`/api/messages/${encodeURIComponent(messageId)}/processing/${encodeURIComponent(stage)}/retry`, token, body);
 }
 
+export function updateTaskBackground(
+  token: string,
+  taskId: string,
+  body: { content: string | null; reason?: string }
+): Promise<CommandResult> {
+  return patchCommand(`/api/tasks/${encodeURIComponent(taskId)}/background`, token, body);
+}
+
 export function expireApprovals(token: string, body: CommandBody): Promise<CommandResult> {
   return postCommand("/api/maintenance/expire-approvals", token, body);
 }

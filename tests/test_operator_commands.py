@@ -769,6 +769,68 @@ def test_operator_command_service_cancel_sent_action_reports_conflict(
     assert "sent actions cannot be cancelled" in output["result"]["error"]
 
 
+def test_task_background_versions_set_replace_clear_and_isolate_tasks(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    first_id = _insert_task(store, "t_background_1", "om_background_1")
+    second_id = _insert_task(store, "t_background_2", "om_background_2")
+    store.set_task_agent_session_id(first_id, "session-live", backend_provider="hermes")
+    service = OperatorCommandService(store)
+
+    created = service.update_task_background(
+        "t_background_1",
+        content=" Customer only accepts a Friday release. ",
+        actor="owner",
+        reason="customer constraint",
+    )
+    unchanged = service.update_task_background(
+        "t_background_1",
+        content="Customer only accepts a Friday release.",
+        actor="owner",
+    )
+    replaced = service.update_task_background(
+        "t_background_1",
+        content="Customer approved a Monday release.",
+        actor="owner",
+    )
+    other = service.update_task_background(
+        "t_background_2",
+        content="This belongs only to the second task.",
+        actor="owner",
+    )
+    cleared = service.update_task_background(
+        "t_background_1", content=None, actor="owner", reason="no longer needed"
+    )
+
+    assert created.status == "applied"
+    assert created.result["background"]["version"] == 1
+    assert created.result["background"]["content"] == (
+        "Customer only accepts a Friday release."
+    )
+    assert unchanged.status == "no_change"
+    assert replaced.result["background"]["version"] == 2
+    assert other.result["background"]["version"] == 1
+    assert cleared.result["background"]["version"] == 3
+    assert cleared.result["background"]["operation"] == "clear"
+    assert cleared.result["background"]["content"] is None
+    assert store.get_task_background(first_id) is None
+    assert store.get_task_background(second_id) == (
+        "This belongs only to the second task."
+    )
+    assert store.get_task_by_id(first_id).agent_session_id == "session-live"
+    with store.connect() as conn:
+        versions = conn.execute(
+            "SELECT version, operation, actor, reason FROM task_background_versions "
+            "WHERE task_id = ? ORDER BY version",
+            (first_id,),
+        ).fetchall()
+    assert [row["version"] for row in versions] == [1, 2, 3]
+    assert [row["operation"] for row in versions] == ["set", "set", "clear"]
+    assert versions[0]["actor"] == "owner"
+    assert versions[0]["reason"] == "customer constraint"
+
+
 def test_operator_command_service_expire_approvals_reports_no_change(
     tmp_path: Path,
 ) -> None:

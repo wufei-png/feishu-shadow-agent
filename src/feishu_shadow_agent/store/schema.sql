@@ -2,7 +2,7 @@ BEGIN IMMEDIATE;
 
 PRAGMA application_id = 1179861319;
 PRAGMA application_id = 1179861319;
-PRAGMA user_version = 6;
+PRAGMA user_version = 7;
 
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,6 +63,20 @@ CREATE TABLE IF NOT EXISTS task_watch_keys (
   key TEXT NOT NULL,
   created_at TEXT NOT NULL,
   PRIMARY KEY (task_id, key),
+  FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS task_background_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL,
+  version INTEGER NOT NULL,
+  content TEXT,
+  operation TEXT NOT NULL CHECK (operation IN ('set', 'clear')),
+  actor TEXT NOT NULL,
+  reason TEXT,
+  created_at TEXT NOT NULL,
+  content_expired_at TEXT,
+  UNIQUE (task_id, version),
   FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
 );
 
@@ -339,6 +353,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id);
 CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages(reply_to_message_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_active ON tasks(status, watch_until);
 CREATE INDEX IF NOT EXISTS idx_tasks_chat_thread ON tasks(chat_id, thread_id);
+CREATE INDEX IF NOT EXISTS idx_task_background_versions_task
+ON task_background_versions(task_id, version DESC);
 CREATE INDEX IF NOT EXISTS idx_routing_audits_message ON routing_audits(message_id);
 CREATE INDEX IF NOT EXISTS idx_agent_audits_task ON agent_audits(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_approval_commands_status ON approval_commands(status, created_at);

@@ -103,6 +103,13 @@ class ApprovalCommandRequest(CommandRequest):
         )
 
 
+class TaskBackgroundRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str | None
+    reason: str | None = None
+
+
 class PolicyImportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -581,6 +588,22 @@ def create_console_app(
                 ),
                 actor=LOCAL_CONSOLE_ACTOR,
                 reason=payload.reason,
+            )
+            .as_dict()
+        )
+
+    @api.patch("/tasks/{task_id}/background")
+    def update_task_background(
+        task_id: str,
+        body: Annotated[TaskBackgroundRequest, Body()],
+    ) -> dict[str, Any]:
+        return (
+            command_service()
+            .update_task_background(
+                task_id,
+                content=body.content,
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=body.reason,
             )
             .as_dict()
         )

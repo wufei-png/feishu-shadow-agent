@@ -73,6 +73,23 @@ WHERE status IN ('queued', 'claimed');
 CREATE INDEX IF NOT EXISTS idx_processing_retry_status
 ON processing_retry_attempts(status, created_at, id);
 """
+_TASK_BACKGROUND_V7_SQL = """
+CREATE TABLE IF NOT EXISTS task_background_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL,
+  version INTEGER NOT NULL,
+  content TEXT,
+  operation TEXT NOT NULL CHECK (operation IN ('set', 'clear')),
+  actor TEXT NOT NULL,
+  reason TEXT,
+  created_at TEXT NOT NULL,
+  content_expired_at TEXT,
+  UNIQUE (task_id, version),
+  FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_task_background_versions_task
+ON task_background_versions(task_id, version DESC);
+"""
 
 
 def migrate_schema(
@@ -82,7 +99,7 @@ def migrate_schema(
 
     Empty databases use schema.sql directly. This path handles in-place
     upgrades of an already-marked database through the current additive
-    processing-retry schema.
+    processing-retry and task-background schemas.
     """
 
     if current_version == target_version:
@@ -96,6 +113,9 @@ def migrate_schema(
     if current_version == 5 and target_version >= 6:
         conn.executescript(_PROCESSING_RETRY_V6_SQL)
         current_version = 6
+    if current_version == 6 and target_version >= 7:
+        conn.executescript(_TASK_BACKGROUND_V7_SQL)
+        current_version = 7
     if current_version == target_version:
         conn.execute(f"PRAGMA user_version = {int(target_version)}")
         return

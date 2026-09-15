@@ -54,6 +54,7 @@ uv run --locked pytest -q tests/test_product_policy_store.py
 uv run --locked pytest -q tests/test_policy_runtime.py
 uv run --locked pytest -q tests/test_operator_query.py tests/test_operator_commands.py
 uv run --locked pytest -q tests/test_console_api.py tests/test_operator_query.py
+uv run --locked pytest -q tests/test_prompt.py tests/test_processing_collaborators.py
 uv run --locked pytest -q tests/test_reply_style.py
 ```
 
@@ -130,7 +131,7 @@ git diff --check
 - `tests/test_product_policy_store.py`：Product Policy Store 初始化探针、config import/replace、chat policy skip、audit old/new。
 - `tests/test_policy_runtime.py`：runtime resolver 从 Product Policy Store 读取、缺失全局策略 fail closed、DB policy 覆盖 YAML import source。
 - `tests/test_operator_query.py`：OperatorQueryService 只读 dashboard/detail DTO、overdue 派生、effective policy、Policy Import Diff 和 audit history。
-- `tests/test_operator_commands.py`：OperatorCommandService 审批/dispatch/maintenance/policy mutation 结果 shape、policy 直接写入和 audit actor/reason。
+- `tests/test_operator_commands.py`：OperatorCommandService 审批/dispatch/maintenance/policy mutation 结果 shape、policy 直接写入、任务背景版本与 audit actor/reason。
 - `tests/test_console_api.py`：本地 Operator Console 的 token/Host 校验、dashboard/queue/detail/policy/settings/health API、静态资源 serving 和 `console` CLI 启动输出。
 - `tests/test_retention.py`：有效 watch 延迟、全链路字段级 scrub、最小审计保留、资源删除和 JSONL/text 日志原子脱敏。
 
@@ -298,6 +299,13 @@ python -m feishu_shadow_agent task retry-processing --config config.yaml --messa
 ```
 
 命令只把一次新 attempt 入队，由 daemon 使用新的 claim token 执行。重复的 queued 命令是 `no_change`，claimed/in-flight、已发送、旧 revision 或 owner 已接管/关闭的 task 会被拒绝。`failed_needs_review` 仍必须在 Dispatch 中人工核实，不由 processing retry 自动重发。
+
+Owner 可为单个任务保存或清空补充背景。该版本只在下一次 fresh session 构建时进入 prompt，不会重置或修改当前 live provider session：
+
+```bash
+python -m feishu_shadow_agent task set-background --config config.yaml --task-id <t_xxx> "客户只接受周五发布"
+python -m feishu_shadow_agent task clear-background --config config.yaml --task-id <t_xxx> --reason "约束已失效"
+```
 
 发送后检查：
 

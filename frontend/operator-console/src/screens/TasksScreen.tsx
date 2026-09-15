@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, Bot, MessageSquare, RotateCcw, Send, XCircle } from "lucide-react";
-import { closeTask, getTask, listTasks, reopenTask, retryMessageProcessing } from "../api";
+import { closeTask, getTask, listTasks, reopenTask, retryMessageProcessing, updateTaskBackground } from "../api";
 import {
   Badge,
   Button,
@@ -28,11 +28,12 @@ import { MessageDetailPanel } from "./MessageDetailPanel";
 type TaskFilter = TaskStatus | "all";
 
 type TaskCommandInput = {
-  kind: "close" | "reopen" | "retry-processing";
+  kind: "close" | "reopen" | "retry-processing" | "update-background";
   taskId: string;
   reason?: string;
   messageId?: string;
   stage?: string;
+  content?: string | null;
 };
 
 const pageSize = 50;
@@ -52,6 +53,7 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(selectedId);
   const [messageId, setMessageId] = useState<string | null>(null);
   const [reasons, setReasons] = useState<Record<string, string>>({});
+  const [backgroundDrafts, setBackgroundDrafts] = useState<Record<string, string>>({});
   const [commandResults, setCommandResults] = useState<Record<string, CommandResult>>({});
   const busyTaskIdsRef = useRef(new Set<string>());
   const [busyTaskIds, setBusyTaskIds] = useState<Set<string>>(new Set());
@@ -96,7 +98,9 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
         ? closeTask(token, input.taskId, { reason: input.reason })
         : input.kind === "reopen"
           ? reopenTask(token, input.taskId, { reason: input.reason })
-          : retryMessageProcessing(token, input.messageId ?? "", input.stage ?? "", { reason: input.reason }),
+          : input.kind === "retry-processing"
+            ? retryMessageProcessing(token, input.messageId ?? "", input.stage ?? "", { reason: input.reason })
+            : updateTaskBackground(token, input.taskId, { content: input.content ?? null, reason: input.reason }),
     onSuccess: async (result, input) => {
       setCommandResults((current) => ({ ...current, [input.taskId]: result }));
       await invalidateAfterTaskCommand(queryClient);
@@ -117,6 +121,7 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
   const selectedTaskBusy = selectedTaskId ? busyTaskIds.has(selectedTaskId) : false;
   const canClose = detail.data?.status === "watching";
   const canReopen = detail.data ? ["closed", "closed_by_owner", "human_taken_over"].includes(detail.data.status) : false;
+  const backgroundDraft = selectedTaskId ? (backgroundDrafts[selectedTaskId] ?? detail.data?.task_background?.content ?? "") : "";
 
   function setReason(reason: string): void {
     if (selectedTaskId) {
@@ -146,6 +151,21 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
       taskId,
       messageId,
       stage,
+      reason: clean(reason)
+    });
+  }
+
+  function updateBackground(content: string | null): void {
+    const taskId = detail.data?.task_id;
+    if (!taskId || busyTaskIdsRef.current.has(taskId)) {
+      return;
+    }
+    busyTaskIdsRef.current.add(taskId);
+    setBusyTaskIds(new Set(busyTaskIdsRef.current));
+    taskCommand.mutate({
+      kind: "update-background",
+      taskId,
+      content,
       reason: clean(reason)
     });
   }
@@ -242,6 +262,45 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
                   ))}
                 </div>
               ) : null}
+            </div>
+
+            <div className="detail-panel">
+              <div className="subsection-title">
+                <Bot aria-hidden="true" size={16} />
+                <h2>任务背景</h2>
+              </div>
+              <TextareaField
+                label="Owner 补充背景"
+                onChange={(value) => {
+                  if (selectedTaskId) {
+                    setBackgroundDrafts((current) => ({ ...current, [selectedTaskId]: value }));
+                  }
+                }}
+                placeholder="仅写入这个任务需要长期参考的事实或约束"
+                rows={5}
+                value={backgroundDraft}
+              />
+              <p className="detail-note">
+                下次 fresh 重建生效；不会注入或重置当前 live provider session。
+                {detail.data.task_background ? ` 当前版本 v${detail.data.task_background.version}。` : " 尚无背景。"}
+              </p>
+              <div className="command-buttons">
+                <Button disabled={selectedTaskBusy || !backgroundDraft.trim()} onClick={() => updateBackground(backgroundDraft)} tone="info">
+                  保存背景
+                </Button>
+                <Button
+                  disabled={selectedTaskBusy || (!detail.data.task_background?.content && !backgroundDraft)}
+                  onClick={() => {
+                    if (selectedTaskId) {
+                      setBackgroundDrafts((current) => ({ ...current, [selectedTaskId]: "" }));
+                    }
+                    updateBackground(null);
+                  }}
+                  tone="danger"
+                >
+                  清空背景
+                </Button>
+              </div>
             </div>
 
             <div className="detail-panel">
