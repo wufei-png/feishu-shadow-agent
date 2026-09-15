@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Activity, Bell, ClipboardList, Database, FileText, HeartPulse, Home, MessageSquareDiff, Send, Settings, ShieldCheck, Wrench } from "lucide-react";
 import { getDashboard } from "./api";
 import { Badge, EmptyState } from "./components/Primitives";
-import { bootstrapTokenFromHash } from "./consoleSession";
+import { bootstrapTokenFromHash, decodeHashSegment } from "./consoleSession";
 import { queryKeys } from "./queryKeys";
 import { ApprovalsScreen } from "./screens/ApprovalsScreen";
 import { DashboardScreen } from "./screens/DashboardScreen";
@@ -170,7 +170,7 @@ function currentLocation(): { route: RouteKey; selectedId: string | null } {
   const route = navItems.some((item) => item.key === routeText) ? (routeText as RouteKey) : "dashboard";
   return {
     route,
-    selectedId: selectedId ? decodeURIComponent(selectedId) : null
+    selectedId: decodeHashSegment(selectedId)
   };
 }
 

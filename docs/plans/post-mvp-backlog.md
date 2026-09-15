@@ -17,36 +17,22 @@
 
 | 类别 | 当前证据 | 阶段 |
 | --- | --- | --- |
-| 源码可确认的导航缺陷 | Tasks/Approvals 的选择 effect 会把不在当前列表中的详情链接目标替换成首项；Dispatch 已有 selectedId 保护，可作对照 | S2 |
-| 源码可确认的浏览限制 | Tasks/Approvals/Dispatch 固定 limit=50、offset=0，无翻页入口；主要队列没有定时刷新 | S2 |
-| 源码可确认的展示偏差 | dashboard_snapshot 默认返回最多 20 条预览，Dashboard 用数组长度展示审批/发送异常数量；顶部状态不体现请求错误和缓存过期 | S2–S3 |
+| 源码可确认的展示偏差 | dashboard_snapshot 默认返回最多 20 条预览，Dashboard 用数组长度展示审批/发送异常数量；顶部状态不体现请求错误和缓存过期 | S3 |
 | 已记录、尚未实现 | ingestion._drain 全量分页并累积 items；上限、时间预算、积压指标仍未落地 | S4 |
 | 设计风险，尚非线上故障结论 | ADR-0016 的保留 checkpoint 后重拉方案，必须证明固定窗口持续超 cap 时不会反复停在同一批页面 | S4 |
 | 已记录、尚未完成 | bot membership 运行时事实、路由冲突契约、后台背景与统一重试 | S5–S8 |
 | 待取证的效果假设 | TaskSessionRunner._prompt_message_ids 在 fresh 时使用任务全部消息，resumed 时使用当前消息；长上下文效果仍需对照评测 | S9–S10 |
 | 文档/环境漂移 | docs/testing.md 仍描述不升级旧 schema，store/migrate.py 已有旧库迁移；本机工具版本与项目约束不一致 | 执行检查及相关阶段 |
 
-当前使用 `uv 0.12.4` 完成 `uv sync --locked --extra cards`。实施前 Python 全量为 **705 passed, 1 skipped**；S1 指定 Python 契约为 **209 passed**，前端为 **4 passed**，Ruff lint/format、Pyright、前端 typecheck/lint/build 均通过。未运行打包或真实端到端。
+当前使用 `uv 0.12.4` 完成 `uv sync --locked --extra cards`。实施前 Python 全量为 **705 passed, 1 skipped**；最近阶段的指定 Python 契约为 **86 passed**，前端为 **8 passed**，Ruff lint/format、Pyright、前端 typecheck/lint/build 均通过。未运行打包或真实端到端。
 
 ## 实施阶段
 
 依赖表示技术前置；编号表示默认实施顺序。每阶段包含必要的 UI/API/命令/存储纵向改动与测试，不能把阶段是否正确推迟到后续证明。PY、FE 检查缩写见文末。
 
-### S2 — 列表与详情可靠浏览
-
-依赖：无（审批操作安全前置已满足）。交付：队列可完整浏览，详情链接稳定，数据新鲜度明确。
-
-- Tasks/Approvals/Dispatch 增加分页，过滤条件变化时回首屏；排序有稳定次级键，明确翻页期间新增/状态变化的刷新行为。
-- 选中对象与 URL 对齐；链接目标独立于当前过滤器/页码加载，不被首项覆盖。补任务、审批、发送动作、消息间关联跳转及浏览器前进/后退。
-- 区分加载、空列表、会话失效、对象不存在、读取失败和已有数据过期；安全解析异常 hash，避免畸形链接使页面崩溃。
-- 队列定时/手动刷新及命令后缓存失效覆盖相关列表和详情，保留草稿；审查 queryKeys 中详情失效遗漏。
-- 验收：至少 51 条数据；跨过滤器、跨页详情链接；命令后刷新；断网、会话失效、旧响应迟到；刷新和回退不串对象、不丢编辑内容。
-- 检查：FE；PY `tests/test_operator_query.py tests/test_console_api.py`。
-- 源码入口：各队列 Screen、`App.tsx`、`queryKeys.ts`、`src/feishu_shadow_agent/operator_query.py`。
-
 ### S3 — 中文“待我处理”工作台
 
-依赖：S2。交付：围绕 owner 处理事项组织的完整工作台。
+依赖：无（可靠浏览前置已满足）。交付：围绕 owner 处理事项组织的完整工作台。
 
 - 在现有 Dashboard 上聚合发送结果不确定、阻塞/失败、待审批事项；同一任务关联展示，保留各对象身份与独立操作入口。
 - Operator Query 提供只读聚合和准确总量，不能把截断预览长度当总数；区分审批数、任务数、异常数，避免重复计数。

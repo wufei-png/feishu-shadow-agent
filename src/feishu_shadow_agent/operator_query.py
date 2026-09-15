@@ -194,13 +194,18 @@ class OperatorQueryService:
         self,
         *,
         status: str | None = None,
+        statuses: Iterable[str] | None = None,
         task_id: int | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         where: list[str] = []
         params: list[Any] = []
-        if status is not None:
+        status_values = tuple(statuses) if statuses is not None else ()
+        if status_values:
+            where.append(f"a.status IN ({','.join('?' for _ in status_values)})")
+            params.extend(status_values)
+        elif status is not None:
             where.append("a.status = ?")
             params.append(status)
         if task_id is not None:

@@ -59,13 +59,48 @@ export function LoadingState({ title = "Loading", detail = "Reading local operat
 }
 
 export function ErrorState({ title, error }: { title: string; error: unknown }) {
+  const request = requestError(error);
   return (
     <div className="empty-state">
       <AlertTriangle aria-hidden="true" className="danger" size={18} />
       <div>
-        <h1>{title}</h1>
-        <p>{error instanceof Error ? error.message : "Request failed."}</p>
+        <h1>{request?.status === 401 ? "Session expired" : request?.status === 404 ? "Object not found" : title}</h1>
+        <p>{request?.message ?? (error instanceof Error ? error.message : "Request failed.")}</p>
+        {request?.code ? <small>{request.code}</small> : null}
       </div>
+    </div>
+  );
+}
+
+export function QueueControls({
+  page,
+  hasNext,
+  isFetching,
+  updatedAt,
+  error,
+  onPrevious,
+  onNext,
+  onRefresh
+}: {
+  page: number;
+  hasNext: boolean;
+  isFetching: boolean;
+  updatedAt: number;
+  error: unknown;
+  onPrevious: () => void;
+  onNext: () => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <div aria-live="polite">
+      <div className="command-buttons">
+        <Button disabled={page === 0 || isFetching} onClick={onPrevious}>Previous</Button>
+        <Badge tone="muted">Page {page + 1}</Badge>
+        <Button disabled={!hasNext || isFetching} onClick={onNext}>Next</Button>
+        <Button disabled={isFetching} onClick={onRefresh}>{isFetching ? "Refreshing…" : "Refresh"}</Button>
+      </div>
+      <p className="detail-note">Updated {updatedAt ? new Date(updatedAt).toLocaleString() : "not yet"}</p>
+      {error ? <p className="detail-note danger">Refresh failed; showing cached data. {requestError(error)?.code ?? "request_failed"}</p> : null}
     </div>
   );
 }
@@ -250,6 +285,18 @@ export function shortText(value: string | null | undefined, fallback = "No previ
     return fallback;
   }
   return text.length > 160 ? `${text.slice(0, 157)}...` : text;
+}
+
+function requestError(error: unknown): { status?: number; code?: string; message?: string } | null {
+  if (!error || typeof error !== "object") {
+    return null;
+  }
+  const value = error as { status?: unknown; code?: unknown; message?: unknown };
+  return {
+    status: typeof value.status === "number" ? value.status : undefined,
+    code: typeof value.code === "string" ? value.code : undefined,
+    message: typeof value.message === "string" ? value.message : undefined
+  };
 }
 
 export function statusTone(status: string | null | undefined): Tone {

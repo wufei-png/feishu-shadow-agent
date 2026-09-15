@@ -20,12 +20,17 @@ vi.mock("../api", () => ({
 
 const approvalA = approval("a_one", 1, "t_one", "om_one", 3);
 const approvalB = approval("a_two", 2, "t_two", "om_two", 7);
+const deepLinkedApproval = approval("a_deep", 3, "t_deep", "om_deep", 2);
 
 beforeEach(() => {
+  window.location.hash = "";
   vi.stubGlobal("crypto", { randomUUID: vi.fn(() => "test-command-id") });
   vi.mocked(api.listApprovals).mockResolvedValue([approvalA, approvalB]);
   vi.mocked(api.getApproval).mockImplementation(async (_token, approvalId) => {
-    return approvalId === approvalB.approval_id ? approvalB : approvalA;
+    if (approvalId === approvalB.approval_id) {
+      return approvalB;
+    }
+    return approvalId === deepLinkedApproval.approval_id ? deepLinkedApproval : approvalA;
   });
   vi.mocked(api.getTask).mockImplementation(async (_token, taskId) => task(taskId));
   vi.mocked(api.expireApprovals).mockResolvedValue(commandResult("maintenance.expire_approvals"));
@@ -50,6 +55,7 @@ describe("ApprovalsScreen", () => {
     await user.click(screen.getByRole("button", { name: new RegExp(approvalB.approval_id) }));
     await screen.findByRole("heading", { name: approvalB.approval_id });
 
+    expect(window.location.hash).toBe(`#approvals/${approvalB.approval_id}`);
     expect((screen.getByLabelText("Reason") as HTMLTextAreaElement).value).toBe("");
     expect((screen.getByLabelText("Final reply") as HTMLTextAreaElement).value).toBe("");
     await user.type(screen.getByLabelText("Reason"), "reason for B");
@@ -90,13 +96,41 @@ describe("ApprovalsScreen", () => {
     await user.click(screen.getByRole("button", { name: new RegExp(approvalA.approval_id) }));
     await screen.findByText(/result-for-A/);
   });
+
+  it("keeps a deep-linked detail selected when it is outside the current page", async () => {
+    renderScreen(deepLinkedApproval.approval_id);
+
+    await screen.findByRole("heading", { name: deepLinkedApproval.approval_id });
+    expect(api.getApproval).toHaveBeenCalledWith("token", deepLinkedApproval.approval_id);
+  });
+
+  it("paginates beyond 50 rows and resets to the first page when filtering", async () => {
+    const firstPage = Array.from({ length: 51 }, (_, index) =>
+      approval(`a_page_${index}`, index + 10, `t_page_${index}`, `om_page_${index}`, 1)
+    );
+    vi.mocked(api.listApprovals).mockImplementation(async (_token, params) => {
+      return params.offset === 50 ? [approvalB] : firstPage;
+    });
+    const user = userEvent.setup();
+    renderScreen();
+    await screen.findByRole("button", { name: "Next" });
+
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => {
+      expect(api.listApprovals).toHaveBeenCalledWith("token", { status: "pending", limit: 51, offset: 50 });
+    });
+    await user.click(screen.getByRole("button", { name: "Expired" }));
+    await waitFor(() => {
+      expect(api.listApprovals).toHaveBeenCalledWith("token", { status: "expired", limit: 51, offset: 0 });
+    });
+  });
 });
 
-function renderScreen(): void {
+function renderScreen(selectedId = approvalA.approval_id): void {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(
     <QueryClientProvider client={queryClient}>
-      <ApprovalsScreen selectedId={approvalA.approval_id} token="token" />
+      <ApprovalsScreen selectedId={selectedId} token="token" />
     </QueryClientProvider>
   );
 }

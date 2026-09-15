@@ -14,6 +14,7 @@ import {
   JsonBlock,
   ListRow,
   LoadingState,
+  QueueControls,
   SectionHeader,
   SegmentedControl,
   shortText,
@@ -39,6 +40,7 @@ type DispatchCommandInput = {
 };
 
 const emptyDraft: DispatchDraft = { reason: "", sentMessageId: "" };
+const pageSize = 50;
 
 const dispatchFilters: Array<{ value: DispatchFilter; label: string }> = [
   { value: "failed_needs_review", label: "Needs review" },
@@ -53,21 +55,25 @@ const dispatchFilters: Array<{ value: DispatchFilter; label: string }> = [
 export function DispatchScreen({ token, selectedId }: { token: string; selectedId: string | null }) {
   const queryClient = useQueryClient();
   const [filter, setFilter] = useState<DispatchFilter>("failed_needs_review");
+  const [page, setPage] = useState(0);
   const [selectedActionId, setSelectedActionId] = useState<number | null>(numberOrNull(selectedId));
   const [drafts, setDrafts] = useState<Record<number, DispatchDraft>>({});
   const [commandResults, setCommandResults] = useState<Record<number, CommandResult>>({});
   const busyActionIdsRef = useRef(new Set<number>());
   const [busyActionIds, setBusyActionIds] = useState<Set<number>>(new Set());
   const actions = useQuery({
-    queryKey: queryKeys.dispatchActions({ status: filter, limit: 50, offset: 0 }),
-    queryFn: () => listDispatchActions(token, { status: filter === "all" ? undefined : filter, limit: 50, offset: 0 }),
-    enabled: Boolean(token)
+    queryKey: queryKeys.dispatchActions({ status: filter, limit: pageSize + 1, offset: page * pageSize }),
+    queryFn: () => listDispatchActions(token, { status: filter === "all" ? undefined : filter, limit: pageSize + 1, offset: page * pageSize }),
+    enabled: Boolean(token),
+    refetchInterval: 15_000
   });
-  const rows = useMemo(() => actions.data ?? [], [actions.data]);
+  const rows = useMemo(() => (actions.data ?? []).slice(0, pageSize), [actions.data]);
+  const hasNextPage = (actions.data?.length ?? 0) > pageSize;
   const detail = useQuery({
     queryKey: queryKeys.dispatchAction(selectedActionId),
     queryFn: () => getDispatchAction(token, selectedActionId ?? 0),
-    enabled: Boolean(token && selectedActionId !== null)
+    enabled: Boolean(token && selectedActionId !== null),
+    refetchInterval: 15_000
   });
 
   useEffect(() => {
@@ -150,7 +156,7 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
   if (actions.isLoading) {
     return <LoadingState title="Loading dispatch actions" />;
   }
-  if (actions.error) {
+  if (actions.error && !actions.data) {
     return <ErrorState title="Dispatch actions unavailable" error={actions.error} />;
   }
 
@@ -163,7 +169,25 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
             title="Send action readback"
             badge={<Badge tone={rows.length ? "warning" : "success"}>{rows.length}</Badge>}
           />
-          <SegmentedControl label="Dispatch status filter" onChange={setFilter} options={dispatchFilters} value={filter} />
+          <SegmentedControl
+            label="Dispatch status filter"
+            onChange={(nextFilter) => {
+              setFilter(nextFilter);
+              setPage(0);
+            }}
+            options={dispatchFilters}
+            value={filter}
+          />
+          <QueueControls
+            error={actions.error}
+            hasNext={hasNextPage}
+            isFetching={actions.isFetching}
+            onNext={() => setPage((current) => current + 1)}
+            onPrevious={() => setPage((current) => Math.max(0, current - 1))}
+            onRefresh={() => void actions.refetch()}
+            page={page}
+            updatedAt={actions.dataUpdatedAt}
+          />
           {rows.length ? (
             <div className="list-stack">
               {rows.map((action) => (
@@ -171,7 +195,7 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
                   badge={<Badge tone={statusTone(action.status)}>{action.status}</Badge>}
                   key={action.action_id}
                   meta={`${action.kind} · ${action.task_short_id ?? "no task"} · ${formatDate(action.updated_at)}`}
-                  onClick={() => setSelectedActionId(action.action_id)}
+                  onClick={() => selectAction(action.action_id, setSelectedActionId)}
                   selected={action.action_id === selectedActionId}
                   title={`Action ${action.action_id}`}
                 >
@@ -379,4 +403,9 @@ function errorResult(command: string, error: unknown): CommandResult {
     warnings: [],
     next_actions: []
   };
+}
+
+function selectAction(actionId: number, setSelectedActionId: (actionId: number) => void): void {
+  setSelectedActionId(actionId);
+  window.location.hash = `dispatch/${actionId}`;
 }

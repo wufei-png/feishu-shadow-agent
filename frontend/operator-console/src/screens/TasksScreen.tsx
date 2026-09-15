@@ -13,6 +13,7 @@ import {
   formatDate,
   ListRow,
   LoadingState,
+  QueueControls,
   SectionHeader,
   SegmentedControl,
   shortText,
@@ -32,6 +33,8 @@ type TaskCommandInput = {
   reason?: string;
 };
 
+const pageSize = 50;
+
 const taskFilters: Array<{ value: TaskFilter; label: string }> = [
   { value: "watching", label: "Watching" },
   { value: "closed", label: "Closed" },
@@ -43,6 +46,7 @@ const taskFilters: Array<{ value: TaskFilter; label: string }> = [
 export function TasksScreen({ token, selectedId }: { token: string; selectedId: string | null }) {
   const queryClient = useQueryClient();
   const [filter, setFilter] = useState<TaskFilter>("watching");
+  const [page, setPage] = useState(0);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(selectedId);
   const [messageId, setMessageId] = useState<string | null>(null);
   const [reasons, setReasons] = useState<Record<string, string>>({});
@@ -50,15 +54,18 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
   const busyTaskIdsRef = useRef(new Set<string>());
   const [busyTaskIds, setBusyTaskIds] = useState<Set<string>>(new Set());
   const tasks = useQuery({
-    queryKey: queryKeys.tasks({ status: filter, limit: 50, offset: 0 }),
-    queryFn: () => listTasks(token, { status: filter === "all" ? undefined : filter, limit: 50, offset: 0 }),
-    enabled: Boolean(token)
+    queryKey: queryKeys.tasks({ status: filter, limit: pageSize + 1, offset: page * pageSize }),
+    queryFn: () => listTasks(token, { status: filter === "all" ? undefined : filter, limit: pageSize + 1, offset: page * pageSize }),
+    enabled: Boolean(token),
+    refetchInterval: 15_000
   });
-  const rows = useMemo(() => tasks.data ?? [], [tasks.data]);
+  const rows = useMemo(() => (tasks.data ?? []).slice(0, pageSize), [tasks.data]);
+  const hasNextPage = (tasks.data?.length ?? 0) > pageSize;
   const detail = useQuery({
     queryKey: queryKeys.task(selectedTaskId),
     queryFn: () => getTask(token, selectedTaskId ?? ""),
-    enabled: Boolean(token && selectedTaskId)
+    enabled: Boolean(token && selectedTaskId),
+    refetchInterval: 15_000
   });
 
   useEffect(() => {
@@ -66,13 +73,16 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
   }, [selectedId]);
 
   useEffect(() => {
+    if (selectedId) {
+      return;
+    }
     if (!selectedTaskId && rows[0]) {
       setSelectedTaskId(rows[0].task_id);
     }
     if (selectedTaskId && rows.length && !rows.some((task) => task.task_id === selectedTaskId)) {
       setSelectedTaskId(rows[0].task_id);
     }
-  }, [rows, selectedTaskId]);
+  }, [rows, selectedId, selectedTaskId]);
 
   useEffect(() => {
     setMessageId(null);
@@ -123,7 +133,7 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
   if (tasks.isLoading) {
     return <LoadingState title="Loading tasks" />;
   }
-  if (tasks.error) {
+  if (tasks.error && !tasks.data) {
     return <ErrorState title="Tasks unavailable" error={tasks.error} />;
   }
 
@@ -136,7 +146,25 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
             title="Conversation context"
             badge={<Badge tone={rows.length ? "info" : "muted"}>{rows.length}</Badge>}
           />
-          <SegmentedControl label="Task status filter" onChange={setFilter} options={taskFilters} value={filter} />
+          <SegmentedControl
+            label="Task status filter"
+            onChange={(nextFilter) => {
+              setFilter(nextFilter);
+              setPage(0);
+            }}
+            options={taskFilters}
+            value={filter}
+          />
+          <QueueControls
+            error={tasks.error}
+            hasNext={hasNextPage}
+            isFetching={tasks.isFetching}
+            onNext={() => setPage((current) => current + 1)}
+            onPrevious={() => setPage((current) => Math.max(0, current - 1))}
+            onRefresh={() => void tasks.refetch()}
+            page={page}
+            updatedAt={tasks.dataUpdatedAt}
+          />
           {rows.length ? (
             <div className="list-stack">
               {rows.map((task) => (
@@ -144,7 +172,7 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
                   badge={<Badge tone={statusTone(task.status)}>{task.status}</Badge>}
                   key={task.task_id}
                   meta={`${task.chat_id ?? "no chat"} · ${task.message_count} messages · ${formatDate(task.updated_at)}`}
-                  onClick={() => setSelectedTaskId(task.task_id)}
+                  onClick={() => selectTask(task.task_id, setSelectedTaskId)}
                   selected={task.task_id === selectedTaskId}
                   title={task.task_label || task.task_id}
                 >
@@ -321,4 +349,9 @@ function errorResult(command: string, error: unknown): CommandResult {
     warnings: [],
     next_actions: []
   };
+}
+
+function selectTask(taskId: string, setSelectedTaskId: (taskId: string) => void): void {
+  setSelectedTaskId(taskId);
+  window.location.hash = `tasks/${encodeURIComponent(taskId)}`;
 }

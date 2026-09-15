@@ -116,7 +116,7 @@ export function getFeedbackOverview(
 
 export function listApprovals(
   token: string,
-  params: ListParams & { status?: ApprovalStatus }
+  params: ListParams & { status?: ApprovalStatus | ApprovalStatus[] }
 ): Promise<ApprovalSummary[]> {
   return fetchApi(`/api/approvals${queryString(params)}`, token);
 }

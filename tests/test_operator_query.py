@@ -510,6 +510,32 @@ def test_approval_dto_exposes_postprocess_badge_fields_without_full_payload(
     assert detail["payload"]["keep_watching_on_reject"] is True
 
 
+def test_approval_list_combines_statuses_with_stable_pagination(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    task_id = _insert_task(store)
+    approved_id = _insert_approval(store, task_id=task_id, short_id="a_approved")
+    rejected_id = _insert_approval(store, task_id=task_id, short_id="a_rejected")
+    _insert_approval(store, task_id=task_id, short_id="a_pending")
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE approvals SET status = 'approved' WHERE id = ?", (approved_id,)
+        )
+        conn.execute(
+            "UPDATE approvals SET status = 'rejected' WHERE id = ?", (rejected_id,)
+        )
+    query = OperatorQueryService(store)
+
+    first_page = query.list_approvals(
+        statuses=("approved", "rejected"), limit=1, offset=0
+    )
+    second_page = query.list_approvals(
+        statuses=("approved", "rejected"), limit=1, offset=1
+    )
+
+    assert [item["approval_id"] for item in first_page] == ["a_rejected"]
+    assert [item["approval_id"] for item in second_page] == ["a_approved"]
+
+
 def test_task_detail_returns_related_read_models_and_effective_policy(
     tmp_path: Path,
 ) -> None:

@@ -307,10 +307,10 @@ def create_console_app(
     def approvals(
         limit: Annotated[int, Query(ge=1, le=100)] = 20,
         offset: Annotated[int, Query(ge=0)] = 0,
-        status: ApprovalStatus | None = None,
+        status: Annotated[list[ApprovalStatus] | None, Query()] = None,
     ) -> list[dict[str, Any]]:
         return query_service().list_approvals(
-            status=None if status is None else status.value,
+            statuses=None if status is None else tuple(item.value for item in status),
             limit=limit,
             offset=offset,
         )
