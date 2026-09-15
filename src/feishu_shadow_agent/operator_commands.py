@@ -14,6 +14,7 @@ from .store.sqlite_store import SQLiteStore
 from .types import (
     ActionRecord,
     ApprovalOutcome,
+    ApprovalTargetBinding,
     ExecutionMode,
     FeedbackReason,
     new_run_id,
@@ -99,6 +100,7 @@ class ApprovalCommandService:
         feedback_reason: FeedbackReason | None = None,
         note: str | None = None,
         execution_mode: ExecutionMode = "production",
+        target_binding: ApprovalTargetBinding | None = None,
     ) -> CommandResult:
         return self._apply(
             "approve",
@@ -110,6 +112,7 @@ class ApprovalCommandService:
             note=note,
             execution_mode=execution_mode,
             requested_outcome="suggestion_sent",
+            target_binding=target_binding,
         )
 
     def reject(
@@ -123,6 +126,7 @@ class ApprovalCommandService:
         feedback_reason: FeedbackReason | None = None,
         note: str | None = None,
         execution_mode: ExecutionMode = "production",
+        target_binding: ApprovalTargetBinding | None = None,
     ) -> CommandResult:
         return self._apply(
             "reject",
@@ -140,6 +144,7 @@ class ApprovalCommandService:
                 if keep_watching
                 else "no_send_end_task"
             ),
+            target_binding=target_binding,
         )
 
     def send(
@@ -153,6 +158,7 @@ class ApprovalCommandService:
         feedback_reason: FeedbackReason | None = None,
         note: str | None = None,
         execution_mode: ExecutionMode = "production",
+        target_binding: ApprovalTargetBinding | None = None,
     ) -> CommandResult:
         return self._apply(
             "send",
@@ -167,6 +173,7 @@ class ApprovalCommandService:
             # The store compares the final text with the pending suggestion so
             # an unchanged send is recorded as suggestion_sent.
             requested_outcome=None,
+            target_binding=target_binding,
         )
 
     def apply_text(
@@ -222,6 +229,7 @@ class ApprovalCommandService:
         requested_outcome: ApprovalOutcome | None = None,
         command_text: str | None = None,
         keep_watching_until: str | None = None,
+        target_binding: ApprovalTargetBinding | None = None,
     ) -> CommandResult:
         effective_command_text = command_text or (
             f"/{verb} {target_id}"
@@ -246,6 +254,7 @@ class ApprovalCommandService:
             note=note,
             execution_mode=execution_mode,
             requested_outcome=requested_outcome,
+            expected_target_binding=target_binding,
         )
         raw_status = str(raw.get("status", "failed"))
         result = _dict_result(raw.get("result"))
@@ -744,6 +753,7 @@ class OperatorCommandService:
         feedback_reason: FeedbackReason | None = None,
         note: str | None = None,
         execution_mode: ExecutionMode = "production",
+        target_binding: ApprovalTargetBinding | None = None,
     ) -> CommandResult:
         return self.approvals.approve(
             target_id,
@@ -753,6 +763,7 @@ class OperatorCommandService:
             feedback_reason=feedback_reason,
             note=note,
             execution_mode=execution_mode,
+            target_binding=target_binding,
         )
 
     def apply_approval_text(
@@ -783,6 +794,7 @@ class OperatorCommandService:
         feedback_reason: FeedbackReason | None = None,
         note: str | None = None,
         execution_mode: ExecutionMode = "production",
+        target_binding: ApprovalTargetBinding | None = None,
     ) -> CommandResult:
         return self.approvals.reject(
             target_id,
@@ -793,6 +805,7 @@ class OperatorCommandService:
             feedback_reason=feedback_reason,
             note=note,
             execution_mode=execution_mode,
+            target_binding=target_binding,
         )
 
     def send(
@@ -806,6 +819,7 @@ class OperatorCommandService:
         feedback_reason: FeedbackReason | None = None,
         note: str | None = None,
         execution_mode: ExecutionMode = "production",
+        target_binding: ApprovalTargetBinding | None = None,
     ) -> CommandResult:
         return self.approvals.send(
             task_id,
@@ -816,6 +830,7 @@ class OperatorCommandService:
             feedback_reason=feedback_reason,
             note=note,
             execution_mode=execution_mode,
+            target_binding=target_binding,
         )
 
     def do_not_send(
@@ -1056,6 +1071,8 @@ def _policy_mutation_result(
 
 
 def _approval_command_status(raw_status: str, result: dict[str, Any]) -> str:
+    if result.get("outcome") == "stale_revision":
+        return "conflict"
     if raw_status == "applied":
         return "applied"
     if raw_status == "duplicate":
@@ -1076,6 +1093,7 @@ def _approval_error_status(error: str) -> str:
         "ambiguous" in lowered
         or "multiple pending" in lowered
         or "active send action already exists" in lowered
+        or "target is stale" in lowered
     ):
         return "conflict"
     if (

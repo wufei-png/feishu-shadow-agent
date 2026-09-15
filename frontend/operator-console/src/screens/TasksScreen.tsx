@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, Bot, MessageSquare, RotateCcw, Send, XCircle } from "lucide-react";
@@ -26,6 +26,12 @@ import { MessageDetailPanel } from "./MessageDetailPanel";
 
 type TaskFilter = TaskStatus | "all";
 
+type TaskCommandInput = {
+  kind: "close" | "reopen";
+  taskId: string;
+  reason?: string;
+};
+
 const taskFilters: Array<{ value: TaskFilter; label: string }> = [
   { value: "watching", label: "Watching" },
   { value: "closed", label: "Closed" },
@@ -39,8 +45,10 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
   const [filter, setFilter] = useState<TaskFilter>("watching");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(selectedId);
   const [messageId, setMessageId] = useState<string | null>(null);
-  const [reason, setReason] = useState("");
-  const [commandResult, setCommandResult] = useState<CommandResult | null>(null);
+  const [reasons, setReasons] = useState<Record<string, string>>({});
+  const [commandResults, setCommandResults] = useState<Record<string, CommandResult>>({});
+  const busyTaskIdsRef = useRef(new Set<string>());
+  const [busyTaskIds, setBusyTaskIds] = useState<Set<string>>(new Set());
   const tasks = useQuery({
     queryKey: queryKeys.tasks({ status: filter, limit: 50, offset: 0 }),
     queryFn: () => listTasks(token, { status: filter === "all" ? undefined : filter, limit: 50, offset: 0 }),
@@ -68,27 +76,49 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
 
   useEffect(() => {
     setMessageId(null);
-    setCommandResult(null);
   }, [selectedTaskId]);
 
-  const close = useMutation({
-    mutationFn: () => closeTask(token, selectedTaskId ?? "", { reason: clean(reason) }),
-    onSuccess: async (result) => {
-      setCommandResult(result);
+  const taskCommand = useMutation({
+    mutationFn: (input: TaskCommandInput) =>
+      input.kind === "close"
+        ? closeTask(token, input.taskId, { reason: input.reason })
+        : reopenTask(token, input.taskId, { reason: input.reason }),
+    onSuccess: async (result, input) => {
+      setCommandResults((current) => ({ ...current, [input.taskId]: result }));
       await invalidateAfterTaskCommand(queryClient);
     },
-    onError: (error) => setCommandResult(errorResult("task.close", error))
-  });
-  const reopen = useMutation({
-    mutationFn: () => reopenTask(token, selectedTaskId ?? "", { reason: clean(reason) }),
-    onSuccess: async (result) => {
-      setCommandResult(result);
-      await invalidateAfterTaskCommand(queryClient);
+    onError: (error, input) => {
+      setCommandResults((current) => ({
+        ...current,
+        [input.taskId]: errorResult(`task.${input.kind}`, error)
+      }));
     },
-    onError: (error) => setCommandResult(errorResult("task.reopen", error))
+    onSettled: (_result, _error, input) => {
+      busyTaskIdsRef.current.delete(input.taskId);
+      setBusyTaskIds(new Set(busyTaskIdsRef.current));
+    }
   });
+  const reason = selectedTaskId ? (reasons[selectedTaskId] ?? "") : "";
+  const commandResult = selectedTaskId ? (commandResults[selectedTaskId] ?? null) : null;
+  const selectedTaskBusy = selectedTaskId ? busyTaskIds.has(selectedTaskId) : false;
   const canClose = detail.data?.status === "watching";
   const canReopen = detail.data ? ["closed", "closed_by_owner", "human_taken_over"].includes(detail.data.status) : false;
+
+  function setReason(reason: string): void {
+    if (selectedTaskId) {
+      setReasons((current) => ({ ...current, [selectedTaskId]: reason }));
+    }
+  }
+
+  function runTaskCommand(kind: TaskCommandInput["kind"]): void {
+    const taskId = detail.data?.task_id;
+    if (!taskId || busyTaskIdsRef.current.has(taskId)) {
+      return;
+    }
+    busyTaskIdsRef.current.add(taskId);
+    setBusyTaskIds(new Set(busyTaskIdsRef.current));
+    taskCommand.mutate({ kind, taskId, reason: clean(reason) });
+  }
 
   if (tasks.isLoading) {
     return <LoadingState title="Loading tasks" />;
@@ -171,11 +201,11 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
               <h2>Task lifecycle</h2>
               <TextareaField label="Reason" onChange={setReason} placeholder="Optional operator note" rows={2} value={reason} />
               <div className="command-buttons">
-                <Button disabled={!canClose || close.isPending} onClick={() => close.mutate()} tone="danger">
+                <Button disabled={!canClose || selectedTaskBusy} onClick={() => runTaskCommand("close")} tone="danger">
                   <XCircle aria-hidden="true" size={15} />
                   Close
                 </Button>
-                <Button disabled={!canReopen || reopen.isPending} onClick={() => reopen.mutate()} tone="info">
+                <Button disabled={!canReopen || selectedTaskBusy} onClick={() => runTaskCommand("reopen")} tone="info">
                   <RotateCcw aria-hidden="true" size={15} />
                   Reopen
                 </Button>

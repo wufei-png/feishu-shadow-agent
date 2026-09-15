@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { RotateCcw, Send, ShieldCheck, XCircle } from "lucide-react";
@@ -26,6 +26,20 @@ import type { ActionStatus, CommandResult } from "../types";
 
 type DispatchFilter = ActionStatus | "all";
 
+type DispatchDraft = {
+  reason: string;
+  sentMessageId: string;
+};
+
+type DispatchCommandInput = {
+  kind: "retry" | "cancel" | "mark_sent";
+  actionId: number;
+  reason?: string;
+  sentMessageId: string;
+};
+
+const emptyDraft: DispatchDraft = { reason: "", sentMessageId: "" };
+
 const dispatchFilters: Array<{ value: DispatchFilter; label: string }> = [
   { value: "failed_needs_review", label: "Needs review" },
   { value: "failed", label: "Failed" },
@@ -40,9 +54,10 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
   const queryClient = useQueryClient();
   const [filter, setFilter] = useState<DispatchFilter>("failed_needs_review");
   const [selectedActionId, setSelectedActionId] = useState<number | null>(numberOrNull(selectedId));
-  const [reason, setReason] = useState("");
-  const [sentMessageId, setSentMessageId] = useState("");
-  const [commandResult, setCommandResult] = useState<CommandResult | null>(null);
+  const [drafts, setDrafts] = useState<Record<number, DispatchDraft>>({});
+  const [commandResults, setCommandResults] = useState<Record<number, CommandResult>>({});
+  const busyActionIdsRef = useRef(new Set<number>());
+  const [busyActionIds, setBusyActionIds] = useState<Set<number>>(new Set());
   const actions = useQuery({
     queryKey: queryKeys.dispatchActions({ status: filter, limit: 50, offset: 0 }),
     queryFn: () => listDispatchActions(token, { status: filter === "all" ? undefined : filter, limit: 50, offset: 0 }),
@@ -75,34 +90,62 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
     }
   }, [rows, selectedActionId, selectedId]);
 
-  const retry = useMutation({
-    mutationFn: () => retryDispatchAction(token, selectedActionId ?? 0, { reason: clean(reason) }),
-    onSuccess: async (result) => {
-      setCommandResult(result);
+  const dispatchCommand = useMutation({
+    mutationFn: (input: DispatchCommandInput) => {
+      if (input.kind === "retry") {
+        return retryDispatchAction(token, input.actionId, { reason: input.reason });
+      }
+      if (input.kind === "cancel") {
+        return cancelDispatchAction(token, input.actionId, { reason: input.reason });
+      }
+      return markDispatchSent(token, input.actionId, {
+        sent_message_id: input.sentMessageId,
+        reason: input.reason
+      });
+    },
+    onSuccess: async (result, input) => {
+      setCommandResults((current) => ({ ...current, [input.actionId]: result }));
       await invalidateAfterDispatchCommand(queryClient);
     },
-    onError: (error) => setCommandResult(errorResult("dispatch.retry", error))
-  });
-  const cancel = useMutation({
-    mutationFn: () => cancelDispatchAction(token, selectedActionId ?? 0, { reason: clean(reason) }),
-    onSuccess: async (result) => {
-      setCommandResult(result);
-      await invalidateAfterDispatchCommand(queryClient);
+    onError: (error, input) => {
+      setCommandResults((current) => ({
+        ...current,
+        [input.actionId]: errorResult(`dispatch.${input.kind}`, error)
+      }));
     },
-    onError: (error) => setCommandResult(errorResult("dispatch.cancel", error))
+    onSettled: (_result, _error, input) => {
+      busyActionIdsRef.current.delete(input.actionId);
+      setBusyActionIds(new Set(busyActionIdsRef.current));
+    }
   });
-  const markSent = useMutation({
-    mutationFn: () =>
-      markDispatchSent(token, selectedActionId ?? 0, {
-        sent_message_id: sentMessageId,
-        reason: clean(reason)
-      }),
-    onSuccess: async (result) => {
-      setCommandResult(result);
-      await invalidateAfterDispatchCommand(queryClient);
-    },
-    onError: (error) => setCommandResult(errorResult("dispatch.mark_sent", error))
-  });
+  const selectedDraft = selectedActionId === null ? emptyDraft : (drafts[selectedActionId] ?? emptyDraft);
+  const commandResult = selectedActionId === null ? null : (commandResults[selectedActionId] ?? null);
+  const selectedActionBusy = selectedActionId === null ? false : busyActionIds.has(selectedActionId);
+
+  function updateDraft(change: Partial<DispatchDraft>): void {
+    if (selectedActionId === null) {
+      return;
+    }
+    setDrafts((current) => ({
+      ...current,
+      [selectedActionId]: { ...emptyDraft, ...current[selectedActionId], ...change }
+    }));
+  }
+
+  function runDispatchCommand(kind: DispatchCommandInput["kind"]): void {
+    const actionId = detail.data?.action.action_id;
+    if (actionId === undefined || busyActionIdsRef.current.has(actionId)) {
+      return;
+    }
+    busyActionIdsRef.current.add(actionId);
+    setBusyActionIds(new Set(busyActionIdsRef.current));
+    dispatchCommand.mutate({
+      kind,
+      actionId,
+      reason: clean(selectedDraft.reason),
+      sentMessageId: selectedDraft.sentMessageId
+    });
+  }
 
   if (actions.isLoading) {
     return <LoadingState title="Loading dispatch actions" />;
@@ -209,25 +252,44 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
             <div className="detail-panel">
               <p className="eyebrow">Commands</p>
               <h2>Recover action</h2>
-              <TextareaField label="Reason" onChange={setReason} placeholder="Optional recovery note" rows={2} value={reason} />
+              <TextareaField
+                label="Reason"
+                onChange={(reason) => updateDraft({ reason })}
+                placeholder="Optional recovery note"
+                rows={2}
+                value={selectedDraft.reason}
+              />
               <div className="command-buttons">
-                <Button disabled={!hasRecommendedCommand(detail.data.recommended_actions, "dispatch retry") || retry.isPending} onClick={() => retry.mutate()} tone="warning">
+                <Button
+                  disabled={!hasRecommendedCommand(detail.data.recommended_actions, "dispatch retry") || selectedActionBusy}
+                  onClick={() => runDispatchCommand("retry")}
+                  tone="warning"
+                >
                   <RotateCcw aria-hidden="true" size={15} />
                   Retry
                 </Button>
-                <Button disabled={!hasRecommendedCommand(detail.data.recommended_actions, "dispatch cancel") || cancel.isPending} onClick={() => cancel.mutate()} tone="danger">
+                <Button
+                  disabled={!hasRecommendedCommand(detail.data.recommended_actions, "dispatch cancel") || selectedActionBusy}
+                  onClick={() => runDispatchCommand("cancel")}
+                  tone="danger"
+                >
                   <XCircle aria-hidden="true" size={15} />
                   Cancel
                 </Button>
               </div>
-              <TextField label="Sent message ID" onChange={setSentMessageId} placeholder="om_xxx from Feishu readback" value={sentMessageId} />
+              <TextField
+                label="Sent message ID"
+                onChange={(sentMessageId) => updateDraft({ sentMessageId })}
+                placeholder="om_xxx from Feishu readback"
+                value={selectedDraft.sentMessageId}
+              />
               <Button
                 disabled={
-                  !sentMessageId.trim() ||
+                  !selectedDraft.sentMessageId.trim() ||
                   !hasRecommendedCommand(detail.data.recommended_actions, "dispatch mark-sent") ||
-                  markSent.isPending
+                  selectedActionBusy
                 }
-                onClick={() => markSent.mutate()}
+                onClick={() => runDispatchCommand("mark_sent")}
                 tone="success"
               >
                 <ShieldCheck aria-hidden="true" size={15} />

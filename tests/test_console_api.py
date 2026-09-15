@@ -445,6 +445,7 @@ def test_message_detail_api_is_service_backed_and_read_only(tmp_path: Path) -> N
         ("GET", "/api/dispatch/actions/1"),
         ("POST", "/api/approvals/a_missing/approve"),
         ("POST", "/api/approvals/a_missing/reject"),
+        ("POST", "/api/approvals/a_missing/send"),
         ("POST", "/api/tasks/t_missing/send"),
         ("POST", "/api/tasks/t_missing/close"),
         ("POST", "/api/tasks/t_missing/reopen"),
@@ -586,7 +587,13 @@ def test_approval_and_task_command_routes_return_command_results(
     approve = client.post(
         f"/api/approvals/{approval_short_id}/approve",
         headers=_auth(),
-        json={"reason": "reviewed", "command_id": "cmd_approve_api"},
+        json={
+            "reason": "reviewed",
+            "command_id": "cmd_approve_api",
+            "expected_task_id": task_id,
+            "expected_source_message_id": "om_1",
+            "expected_source_revision": 1,
+        },
     )
     send = client.post(
         "/api/tasks/t_api_cmd/send",
@@ -643,6 +650,100 @@ def test_approval_and_task_command_routes_return_command_results(
     assert reopen.json()["command"] == "task.reopen"
     assert invalid_send.status_code == 400
     assert invalid_send.json()["error"]["code"] == "validation_failed"
+
+
+def test_approval_command_api_requires_and_enforces_target_binding(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    store = _store(tmp_path)
+    task_id = _seed_task_with_message(
+        store, task_short_id="t_bound", message_id="om_bound"
+    )
+    first_id = store.create_send_reply_approval(
+        task_id=task_id,
+        preview="first draft",
+        payload={
+            "reply_target_message_id": "om_bound",
+            "text": "first draft",
+            "identity": "user",
+            "source_message_id": "om_bound",
+            "source_revision": 1,
+        },
+        approval_timeout_hours=None,
+    )
+    second_id = store.create_send_reply_approval(
+        task_id=task_id,
+        preview="second draft",
+        payload={
+            "reply_target_message_id": "om_bound",
+            "text": "second draft",
+            "identity": "user",
+            "source_message_id": "om_bound",
+            "source_revision": 1,
+        },
+        approval_timeout_hours=None,
+    )
+    with store.connect() as conn:
+        first_short_id = conn.execute(
+            "SELECT short_id FROM approvals WHERE id = ?", (first_id,)
+        ).fetchone()["short_id"]
+
+    missing_binding = client.post(
+        f"/api/approvals/{first_short_id}/send",
+        headers=_auth(),
+        json={"final_reply": "edited first"},
+    )
+    wrong_binding = client.post(
+        f"/api/approvals/{first_short_id}/send",
+        headers=_auth(),
+        json={
+            "command_id": "cmd_wrong_binding",
+            "final_reply": "edited first",
+            "expected_task_id": task_id,
+            "expected_source_message_id": "om_bound",
+            "expected_source_revision": 2,
+        },
+    )
+
+    assert missing_binding.status_code == 400
+    assert missing_binding.json()["error"]["code"] == "validation_failed"
+    assert wrong_binding.status_code == 200
+    assert wrong_binding.json()["status"] == "conflict"
+    assert "target is stale" in wrong_binding.json()["result"]["error"]
+    with store.connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT status FROM approvals WHERE id = ?", (first_id,)
+            ).fetchone()["status"]
+            == "pending"
+        )
+        assert conn.execute("SELECT COUNT(*) AS c FROM actions").fetchone()["c"] == 0
+
+    bound_send = client.post(
+        f"/api/approvals/{first_short_id}/send",
+        headers=_auth(),
+        json={
+            "command_id": "cmd_correct_binding",
+            "final_reply": "edited first",
+            "expected_task_id": task_id,
+            "expected_source_message_id": "om_bound",
+            "expected_source_revision": 1,
+        },
+    )
+
+    assert bound_send.status_code == 200
+    assert bound_send.json()["status"] == "applied"
+    assert bound_send.json()["result"]["approval_id"] == first_short_id
+    with store.connect() as conn:
+        statuses = {
+            row["id"]: row["status"]
+            for row in conn.execute(
+                "SELECT id, status FROM approvals WHERE id IN (?, ?)",
+                (first_id, second_id),
+            ).fetchall()
+        }
+    assert statuses == {first_id: "approved", second_id: "pending"}
 
 
 def test_maintenance_and_dispatch_command_routes_return_command_results(

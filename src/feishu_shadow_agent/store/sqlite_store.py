@@ -18,6 +18,7 @@ from ..types import (
     ApprovalKind,
     ApprovalOutcome,
     ApprovalStatus,
+    ApprovalTargetBinding,
     DispatchAttemptRecord,
     DispatchAttemptStatus,
     DispatchClaim,
@@ -3157,6 +3158,7 @@ class SQLiteStore:
         note: str | None = None,
         execution_mode: ExecutionMode = "production",
         requested_outcome: ApprovalOutcome | None = None,
+        expected_target_binding: ApprovalTargetBinding | None = None,
     ) -> dict[str, Any]:
         self.initialize()
         now = self.clock()
@@ -3196,6 +3198,7 @@ class SQLiteStore:
                     note=note,
                     execution_mode=execution_mode,
                     requested_outcome=requested_outcome,
+                    expected_target_binding=expected_target_binding,
                 )
             except Exception as exc:  # noqa: BLE001
                 # Approval handlers are isolated inside the transaction so the
@@ -3279,6 +3282,7 @@ class SQLiteStore:
         note: str | None,
         execution_mode: ExecutionMode,
         requested_outcome: ApprovalOutcome | None,
+        expected_target_binding: ApprovalTargetBinding | None,
     ) -> dict[str, Any]:
         if execution_mode not in {"dry_run", "production"}:
             raise ValueError(
@@ -3335,6 +3339,7 @@ class SQLiteStore:
                 raise ValueError(
                     f"pending approval not found or ambiguous: {target_id}"
                 )
+            _require_expected_approval_target(approval, expected_target_binding)
             resolved_status = (
                 ApprovalStatus.APPROVED.value
                 if verb == "approve"
@@ -3524,6 +3529,9 @@ class SQLiteStore:
                 )
                 if concrete_approval is None:
                     raise ValueError(f"pending approval not found: {target_id}")
+                _require_expected_approval_target(
+                    concrete_approval, expected_target_binding
+                )
                 if concrete_approval["task_id"] is None:
                     raise ValueError("approval is not attached to a task")
                 task = conn.execute(
@@ -5533,6 +5541,24 @@ def _revive_failed_send_reply_action(
 def _payload_send_text(payload: dict[str, Any]) -> str:
     value = payload.get("text") or payload.get("composed_text") or ""
     return value if isinstance(value, str) else ""
+
+
+def _require_expected_approval_target(
+    approval: sqlite3.Row, expected: ApprovalTargetBinding | None
+) -> None:
+    if expected is None:
+        return
+    actual = ApprovalTargetBinding(
+        task_id=None if approval["task_id"] is None else int(approval["task_id"]),
+        source_message_id=approval["source_message_id"],
+        source_revision=(
+            None
+            if approval["source_revision"] is None
+            else int(approval["source_revision"])
+        ),
+    )
+    if actual != expected:
+        raise ValueError("approval target is stale: task or source revision changed")
 
 
 def _payload_source_message_id(payload: dict[str, Any]) -> str | None:

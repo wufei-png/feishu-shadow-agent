@@ -29,6 +29,13 @@ FeedbackReason: TypeAlias = Literal[
 ]
 
 
+@dataclass(frozen=True)
+class ApprovalTargetBinding:
+    task_id: int | None
+    source_message_id: str | None
+    source_revision: int | None
+
+
 class TaskStatus(StrEnum):
     WATCHING = "watching"
     CLOSED = "closed"

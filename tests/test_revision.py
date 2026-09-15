@@ -11,11 +11,17 @@ from feishu_shadow_agent.agent_backend import AgentRunResult
 from feishu_shadow_agent.config import AppConfig, ChatPolicyConfig, OwnerConfig
 from feishu_shadow_agent.ingestion import IngestionService, MessageNormalizer
 from feishu_shadow_agent.jsonl import JSONLLogger
+from feishu_shadow_agent.operator_commands import OperatorCommandService
 from feishu_shadow_agent.paths import resolve_agent_working_dir
 from feishu_shadow_agent.processing import ApprovalService, TaskProcessingService
 from feishu_shadow_agent.revision import assess_revision_impact
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
-from feishu_shadow_agent.types import LarkCliResult, MessagePage, NormalizedMessage
+from feishu_shadow_agent.types import (
+    ApprovalTargetBinding,
+    LarkCliResult,
+    MessagePage,
+    NormalizedMessage,
+)
 
 
 def test_revision_assessment_keeps_identical_reply_audit_only() -> None:
@@ -358,6 +364,50 @@ def test_old_revision_approval_and_action_cannot_cross_send_boundary(
     assert action is not None
     assert action.status == "cancelled"
     assert store.action_revision_is_current(action) is False
+
+
+def test_operator_command_reports_conflict_for_approval_invalidated_by_revision(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    source = _message("old source")
+    store.upsert_message(source)
+    task, _ = store.create_task_for_message_and_audit(
+        source,
+        watch_until="2026-06-22T12:00:00+08:00",
+    )
+    approval_id = store.create_send_reply_approval(
+        task_id=task.id,
+        preview="old reply",
+        payload={
+            "reply_target_message_id": source.message_id,
+            "text": "old reply",
+            "identity": "user",
+            "source_message_id": source.message_id,
+            "source_revision": 1,
+        },
+    )
+    with store.connect() as conn:
+        approval_short_id = conn.execute(
+            "SELECT short_id FROM approvals WHERE id = ?", (approval_id,)
+        ).fetchone()["short_id"]
+    store.upsert_message_with_revision(replace(source, text="edited source"))
+
+    result = OperatorCommandService(store).send(
+        approval_short_id,
+        "owner draft based on old source",
+        actor="local_console",
+        target_binding=ApprovalTargetBinding(
+            task_id=task.id,
+            source_message_id=source.message_id,
+            source_revision=1,
+        ),
+    )
+
+    assert result.status == "conflict"
+    assert result.changed is False
+    assert result.result["outcome"] == "stale_revision"
+    assert result.result["action_id"] is None
 
 
 def test_completed_send_is_preserved_when_revision_fence_wins(

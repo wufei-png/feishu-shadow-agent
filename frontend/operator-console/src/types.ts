@@ -150,6 +150,8 @@ export type ApprovalSummary = {
   short_id: string;
   task_id: number | null;
   task_short_id: string | null;
+  source_message_id: string | null;
+  source_revision: number | null;
   kind: string;
   status: ApprovalStatus;
   preview: string | null;

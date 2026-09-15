@@ -28,6 +28,12 @@ type CommandBody = {
   sent_message_id?: string;
 };
 
+export type ApprovalCommandBody = CommandBody & {
+  expected_task_id: number | null;
+  expected_source_message_id: string | null;
+  expected_source_revision: number | null;
+};
+
 export type PolicyImportBody = {
   reason?: string;
   replace?: boolean;
@@ -119,12 +125,16 @@ export function getApproval(token: string, approvalId: string): Promise<Approval
   return fetchApi(`/api/approvals/${encodeURIComponent(approvalId)}`, token);
 }
 
-export function approveApproval(token: string, approvalId: string, body: CommandBody): Promise<CommandResult> {
+export function approveApproval(token: string, approvalId: string, body: ApprovalCommandBody): Promise<CommandResult> {
   return postCommand(`/api/approvals/${encodeURIComponent(approvalId)}/approve`, token, body);
 }
 
-export function rejectApproval(token: string, approvalId: string, body: CommandBody): Promise<CommandResult> {
+export function rejectApproval(token: string, approvalId: string, body: ApprovalCommandBody): Promise<CommandResult> {
   return postCommand(`/api/approvals/${encodeURIComponent(approvalId)}/reject`, token, body);
+}
+
+export function sendApproval(token: string, approvalId: string, body: ApprovalCommandBody): Promise<CommandResult> {
+  return postCommand(`/api/approvals/${encodeURIComponent(approvalId)}/send`, token, body);
 }
 
 export function listTasks(token: string, params: ListParams & { status?: TaskStatus; chat_id?: string }): Promise<TaskSummary[]> {
