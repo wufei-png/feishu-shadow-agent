@@ -157,7 +157,15 @@ def scenario_message_ids(scenario: EvalModel) -> list[str]:
     if isinstance(scenario, TaskSessionScenario):
         if scenario.mode == "initial":
             return list(scenario.message_ids or [])
-        return [*(scenario.setup_message_ids or []), str(scenario.target_message_id)]
+        targets = (
+            [scenario.target_message_id]
+            if scenario.target_message_id is not None
+            else list(scenario.target_message_ids or [])
+        )
+        return [
+            *(scenario.setup_message_ids or []),
+            *(str(message_id) for message_id in targets),
+        ]
     if isinstance(scenario, FullChainScenario):
         return [
             *(item.message_id for item in scenario.setup),
@@ -252,16 +260,10 @@ def _validate_scenario_time_order(
             ]
             _require_strictly_increasing(values, "task-session message_ids")
         else:
-            setup_raws = [
-                raw_messages[item] for item in scenario.setup_message_ids or []
-            ]
+            raws = [raw_messages[item] for item in scenario_message_ids(scenario)]
             _require_increasing_message_order(
-                setup_raws, "task-session setup_message_ids"
+                raws, "task-session setup and target message ids"
             )
-            setup = [_message_datetime(raw) for raw in setup_raws]
-            target = _message_datetime(raw_messages[str(scenario.target_message_id)])
-            if setup[-1] >= target:
-                raise EvalError("task-session target must be later than setup messages")
         _validate_task_session_chat(scenario, raw_messages)
         return
     if isinstance(scenario, FullChainScenario):

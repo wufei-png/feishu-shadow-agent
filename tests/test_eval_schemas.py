@@ -6,7 +6,43 @@ from pydantic import ValidationError
 from feishu_shadow_agent.evals.schemas import (
     DraftTaskSessionLabels,
     TaskSessionLabels,
+    TaskSessionScenario,
 )
+
+
+def test_task_session_scenario_accepts_multiple_resume_targets() -> None:
+    scenario = TaskSessionScenario.model_validate(
+        {
+            "mode": "resume",
+            "setup_message_ids": ["om_1"],
+            "target_message_ids": ["om_2", "om_3"],
+        }
+    )
+
+    assert scenario.target_message_id is None
+    assert scenario.target_message_ids == ["om_2", "om_3"]
+
+
+@pytest.mark.parametrize(
+    "targets",
+    [
+        {},
+        {"target_message_ids": []},
+        {"target_message_id": "om_2", "target_message_ids": ["om_3"]},
+        {"target_message_ids": ["om_2", "om_2"]},
+    ],
+)
+def test_task_session_scenario_rejects_invalid_resume_targets(
+    targets: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        TaskSessionScenario.model_validate(
+            {
+                "mode": "resume",
+                "setup_message_ids": ["om_1"],
+                **targets,
+            }
+        )
 
 
 def test_task_session_labels_default_expected_skills_for_legacy_artifacts() -> None:

@@ -96,6 +96,7 @@ class TaskSessionScenario(EvalModel):
     message_ids: list[str] | None = None
     setup_message_ids: list[str] | None = None
     target_message_id: str | None = None
+    target_message_ids: list[str] | None = None
     resources: list[ResourceFixture] = Field(
         default_factory=lambda: list[ResourceFixture]()
     )
@@ -105,19 +106,34 @@ class TaskSessionScenario(EvalModel):
         if self.mode == "initial":
             if not self.message_ids:
                 raise ValueError("initial mode requires non-empty message_ids")
-            if self.setup_message_ids is not None or self.target_message_id is not None:
+            if (
+                self.setup_message_ids is not None
+                or self.target_message_id is not None
+                or self.target_message_ids is not None
+            ):
                 raise ValueError(
-                    "initial mode does not accept setup_message_ids or target_message_id"
+                    "initial mode does not accept setup_message_ids, "
+                    "target_message_id, or target_message_ids"
                 )
             _require_unique(self.message_ids, "message_ids")
             return self
-        if not self.setup_message_ids or not self.target_message_id:
-            raise ValueError(
-                "resume mode requires setup_message_ids and target_message_id"
-            )
+        if not self.setup_message_ids:
+            raise ValueError("resume mode requires non-empty setup_message_ids")
         if self.message_ids is not None:
             raise ValueError("resume mode does not accept message_ids")
-        ids = [*self.setup_message_ids, self.target_message_id]
+        if (self.target_message_id is None) == (self.target_message_ids is None):
+            raise ValueError(
+                "resume mode requires exactly one of target_message_id "
+                "or target_message_ids"
+            )
+        targets = (
+            [self.target_message_id]
+            if self.target_message_id is not None
+            else list(self.target_message_ids or [])
+        )
+        if not targets:
+            raise ValueError("resume target_message_ids must not be empty")
+        ids = [*self.setup_message_ids, *targets]
         _require_unique(ids, "resume message ids")
         return self
 

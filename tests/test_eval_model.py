@@ -406,6 +406,48 @@ def test_resume_runs_real_setup_then_target_only_prompt(tmp_path: Path) -> None:
     assert trial["target"]["plan"]["prompt_message_ids"] == ["om_2"]
 
 
+def test_resume_replays_multiple_targets_and_scores_final_turn(tmp_path: Path) -> None:
+    loaded = _loaded(tmp_path)
+    case = _golden_case(
+        tmp_path,
+        loaded.path,
+        "task-session-multi-resume",
+        [
+            _message("om_1", minute=1),
+            _message("om_2", minute=2),
+            _message("om_3", minute=3),
+        ],
+        {
+            "schema_version": "eval_case_v1",
+            "case_type": "task-session",
+            "mode": "resume",
+            "setup_message_ids": ["om_1"],
+            "target_message_ids": ["om_2", "om_3"],
+            "resources": [],
+        },
+        {
+            "schema_version": "task_session_labels_v1",
+            "answerability": "no_reply",
+            "watch_action": "keep_watching",
+        },
+    )
+    backend = StatefulNoReplyBackend()
+
+    run_dir, exit_code = EvalService(
+        loaded=loaded, backend_factory=lambda _: backend
+    ).run_task_session(case_dir=case, label=None, dry_run_backend=False)
+
+    assert exit_code == 0
+    assert backend.session_ids == [None, "session-1", "session-1"]
+    trial = read_yaml(run_dir / "trials/001/report.yaml")
+    assert [turn["current_message_id"] for turn in trial["intermediate_targets"]] == [
+        "om_2"
+    ]
+    assert trial["intermediate_targets"][0]["plan"]["prompt_message_ids"] == ["om_2"]
+    assert trial["target"]["current_message_id"] == "om_3"
+    assert trial["target"]["plan"]["prompt_message_ids"] == ["om_3"]
+
+
 def test_resume_setup_preserves_same_minute_message_position_order(
     tmp_path: Path,
 ) -> None:

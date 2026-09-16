@@ -275,12 +275,14 @@ def attach_task_session_target(
     case: LoadedEvalCase,
     loaded: LoadedConfig,
     task: TaskRecord,
+    message_id: str | None = None,
 ) -> NormalizedMessage:
     scenario = _task_session_scenario(case)
-    if scenario.mode != "resume" or not scenario.target_message_id:
+    target_message_id = message_id or scenario.target_message_id
+    if scenario.mode != "resume" or not target_message_id:
         raise EvalError("attach_task_session_target requires resume mode")
     normalizer = MessageNormalizer(owner_open_id=loaded.config.owner.open_id)
-    message = normalizer.normalize(case.raw_messages[scenario.target_message_id])
+    message = normalizer.normalize(case.raw_messages[target_message_id])
     runtime.clock.set(_message_time(message))
     runtime.store.upsert_message(message)
     runtime.store.attach_message_to_task(
@@ -297,9 +299,7 @@ def attach_task_session_target(
             _message_time(message), loaded.config.lifecycle.watch_minutes
         ),
     )
-    _seed_resource_rows(
-        runtime=runtime, case=case, message_ids=[scenario.target_message_id]
-    )
+    _seed_resource_rows(runtime=runtime, case=case, message_ids=[target_message_id])
     return message
 
 
