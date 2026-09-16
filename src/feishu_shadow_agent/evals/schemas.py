@@ -89,6 +89,21 @@ class RouterScenario(EvalModel):
         return self
 
 
+class TaskSessionFinalRebuild(EvalModel):
+    recent_messages: int = Field(gt=0)
+    summary: str | None = None
+
+    @field_validator("summary")
+    @classmethod
+    def validate_summary(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("final rebuild summary must not be blank")
+        return cleaned
+
+
 class TaskSessionScenario(EvalModel):
     schema_version: Literal["eval_case_v1"] = "eval_case_v1"
     case_type: Literal["task-session"] = "task-session"
@@ -97,6 +112,7 @@ class TaskSessionScenario(EvalModel):
     setup_message_ids: list[str] | None = None
     target_message_id: str | None = None
     target_message_ids: list[str] | None = None
+    final_rebuild: TaskSessionFinalRebuild | None = None
     resources: list[ResourceFixture] = Field(
         default_factory=lambda: list[ResourceFixture]()
     )
@@ -110,10 +126,11 @@ class TaskSessionScenario(EvalModel):
                 self.setup_message_ids is not None
                 or self.target_message_id is not None
                 or self.target_message_ids is not None
+                or self.final_rebuild is not None
             ):
                 raise ValueError(
                     "initial mode does not accept setup_message_ids, "
-                    "target_message_id, or target_message_ids"
+                    "target_message_id, target_message_ids, or final_rebuild"
                 )
             _require_unique(self.message_ids, "message_ids")
             return self

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, cast
 
 from ..agent_backend import AgentBackend
@@ -10,8 +11,12 @@ from ..paths import resolve_agent_working_dir
 from ..processing import FORBIDDEN_MENTION_RE
 from ..prompt import InitialTaskSessionOutput
 from ..prompt_identity import identify_prompt
-from ..task_session_runner import TaskSessionRunner, TaskSessionRunResult
-from ..types import TaskRecord
+from ..task_session_runner import (
+    TaskSessionPromptPlan,
+    TaskSessionRunner,
+    TaskSessionRunResult,
+)
+from ..types import NormalizedMessage, TaskRecord
 from .artifacts import EvalError
 from .cases import LoadedEvalCase
 from .judge import run_semantic_judge
@@ -22,6 +27,7 @@ from .runtime import (
 )
 from .schemas import (
     DraftTaskSessionLabels,
+    TaskSessionFinalRebuild,
     TaskSessionLabels,
     TaskSessionScenario,
 )
@@ -106,6 +112,11 @@ def run_task_session_trial(
                 task=task,
                 current=current,
                 run_id=f"{run_id}-target-{index + 1:03d}",
+                final_rebuild=(
+                    case.scenario.final_rebuild
+                    if index == len(target_ids) - 1
+                    else None
+                ),
             )
             _require_valid_run(target_run, stage="task-session target")
             if target_run.result and target_run.result.session_id:
@@ -196,8 +207,16 @@ def _run_turn(
     task: TaskRecord,
     current: Any,
     run_id: str,
+    final_rebuild: TaskSessionFinalRebuild | None = None,
 ) -> TaskSessionRunResult:
     plan = runner.build_plan(task=task, message=current)
+    if final_rebuild is not None:
+        plan = _final_rebuild_plan(
+            plan=plan,
+            runtime=runtime,
+            current=current,
+            rebuild=final_rebuild,
+        )
     resources = runtime.store.list_resources_for_messages(plan.prompt_message_ids)
     result = runner.run(
         task=task,
@@ -237,6 +256,40 @@ def _run_turn(
         tool_permissions_profile=loaded.config.tool_permissions,
     )
     return result
+
+
+def _final_rebuild_plan(
+    *,
+    plan: TaskSessionPromptPlan,
+    runtime: TrialRuntime,
+    current: NormalizedMessage,
+    rebuild: TaskSessionFinalRebuild,
+) -> TaskSessionPromptPlan:
+    task_message_ids = list(plan.task_message_ids)
+    prompt_message_ids = list(
+        dict.fromkeys(
+            [
+                *task_message_ids[:1],
+                *task_message_ids[-rebuild.recent_messages :],
+            ]
+        )
+    )
+    rows = runtime.store.get_messages_by_ids(prompt_message_ids)
+    revisions = {str(row["message_id"]): int(row["revision"] or 1) for row in rows}
+    prompt_message_revisions = [
+        current.revision
+        if message_id == current.message_id
+        else revisions.get(message_id, 1)
+        for message_id in prompt_message_ids
+    ]
+    return replace(
+        plan,
+        session_id=None,
+        prompt_message_ids=prompt_message_ids,
+        prompt_message_revisions=prompt_message_revisions,
+        output_model=InitialTaskSessionOutput,
+        task_background=rebuild.summary,
+    )
 
 
 def _require_valid_run(result: TaskSessionRunResult, *, stage: str) -> None:
@@ -283,6 +336,7 @@ def _turn_report(
             "output_model": result.plan.output_model.__name__,
         },
         "session_id_returned": bool(result.result and result.result.session_id),
+        "prompt_chars": len(result.prompt),
         "raw_model_json": None if result.result is None else result.result.json_data,
         "output": None
         if result.output is None

@@ -57,9 +57,11 @@ class NoSessionBackend:
 class StatefulNoReplyBackend(NoSessionBackend):
     def __init__(self) -> None:
         self.session_ids: list[str | None] = []
+        self.prompts: list[str] = []
 
     def task_session(self, prompt: str, *, session_id=None, cwd=None):
         self.session_ids.append(session_id)
+        self.prompts.append(prompt)
         payload: dict[str, Any] = {
             "answerability": "no_reply",
             "decision_reason": "no_response_needed",
@@ -446,6 +448,56 @@ def test_resume_replays_multiple_targets_and_scores_final_turn(tmp_path: Path) -
     assert trial["intermediate_targets"][0]["plan"]["prompt_message_ids"] == ["om_2"]
     assert trial["target"]["current_message_id"] == "om_3"
     assert trial["target"]["plan"]["prompt_message_ids"] == ["om_3"]
+
+
+def test_resume_can_rebuild_final_turn_with_bounded_context(tmp_path: Path) -> None:
+    loaded = _loaded(tmp_path)
+    case = _golden_case(
+        tmp_path,
+        loaded.path,
+        "task-session-final-rebuild",
+        [
+            _message("om_1", minute=1),
+            _message("om_2", minute=2),
+            _message("om_3", minute=3),
+            _message("om_4", minute=4),
+        ],
+        {
+            "schema_version": "eval_case_v1",
+            "case_type": "task-session",
+            "mode": "resume",
+            "setup_message_ids": ["om_1"],
+            "target_message_ids": ["om_2", "om_3", "om_4"],
+            "final_rebuild": {
+                "recent_messages": 2,
+                "summary": "已确认事实：早期事实 A。",
+            },
+            "resources": [],
+        },
+        {
+            "schema_version": "task_session_labels_v1",
+            "answerability": "no_reply",
+            "watch_action": "keep_watching",
+        },
+    )
+    backend = StatefulNoReplyBackend()
+
+    run_dir, exit_code = EvalService(
+        loaded=loaded, backend_factory=lambda _: backend
+    ).run_task_session(case_dir=case, label=None, dry_run_backend=False)
+
+    assert exit_code == 0
+    assert backend.session_ids == [None, "session-1", "session-1", None]
+    assert "已确认事实：早期事实 A。" in backend.prompts[-1]
+    trial = read_yaml(run_dir / "trials/001/report.yaml")
+    assert trial["target"]["plan"]["session_resumed"] is False
+    assert trial["target"]["plan"]["prompt_message_ids"] == [
+        "om_1",
+        "om_3",
+        "om_4",
+    ]
+    assert trial["target"]["plan"]["output_model"] == "InitialTaskSessionOutput"
+    assert trial["target"]["prompt_chars"] > 0
 
 
 def test_resume_setup_preserves_same_minute_message_position_order(

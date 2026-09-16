@@ -23,6 +23,32 @@ def test_task_session_scenario_accepts_multiple_resume_targets() -> None:
     assert scenario.target_message_ids == ["om_2", "om_3"]
 
 
+def test_task_session_scenario_accepts_final_rebuild_for_resume() -> None:
+    scenario = TaskSessionScenario.model_validate(
+        {
+            "mode": "resume",
+            "setup_message_ids": ["om_1"],
+            "target_message_id": "om_2",
+            "final_rebuild": {"recent_messages": 4, "summary": "摘要"},
+        }
+    )
+
+    assert scenario.final_rebuild is not None
+    assert scenario.final_rebuild.recent_messages == 4
+    assert scenario.final_rebuild.summary == "摘要"
+
+
+def test_task_session_scenario_rejects_final_rebuild_for_initial() -> None:
+    with pytest.raises(ValidationError):
+        TaskSessionScenario.model_validate(
+            {
+                "mode": "initial",
+                "message_ids": ["om_1"],
+                "final_rebuild": {"recent_messages": 4},
+            }
+        )
+
+
 @pytest.mark.parametrize(
     "targets",
     [
