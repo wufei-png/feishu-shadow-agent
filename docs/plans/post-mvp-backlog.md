@@ -29,7 +29,7 @@
 
 依赖：已完成的 S6、S8。交付：可复现的评测基线、失败分类与优化准入结论。
 
-当前下一步：先只读清点本机可用的运行记录、feedback、capture/golden 与报告；真实模型评测在 backend/model、样本集合、repeat 和预算明确前保持阻塞，不以历史结果代替。
+当前进展：已完成 [2026-09-16 取证检查点](s9-answer-quality-baseline.md)。5 个当前 owner 的既有真实 golden 在固定 `gpt-5.6-luna/xhigh/read_only`、`repeat=1` 条件下为 0/5；该结果只证明当前失败信号，不完成 P22 对照。新长会话采集阻塞于 `lark-cli` user token 缺失，bot 又不在任何 chat。下一步是完成 `lark-cli auth login`，采集并人工 promotion 一个 5–10+ 轮、后续依赖早期事实的真实线程，再按 P22 三个变体逐项评测；S9 与 S10 在此之前保持未完成。
 
 - 先只读清点本机运行记录、feedback、capture/golden、报告的版本、覆盖范围与可用性；历史结果不能冒充当前基线。
 - 按路由、入口漏收、资源阻塞、证据不足、fresh/resumed 上下文、回复表达分类，区分代码拒绝、模型判断与真实发送结果。
