@@ -7,6 +7,7 @@
 
 - Ruleset ID：`23727358`（[GitHub ruleset](https://github.com/wufei-png/feishu-shadow-agent/rules/23727358)）。
 - 名称：`main pull-request CI gate`；target：`refs/heads/main`；enforcement：`active`。
+- 启用时间：2026-09-20T18:54:14.992+08:00（GitHub ruleset `created_at`）。
 - `pull_request` 规则要求经 PR 合入，但 `required_approving_review_count` 为 `0`，适合
   single-owner 仓库。
 - `required_status_checks` 为严格模式，包含[运维说明](main-merge-gate.md)列出的九项
