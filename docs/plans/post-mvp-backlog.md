@@ -28,6 +28,7 @@
   因为本会话不发送真实资源或回复。
 - 本机 `config.yaml` 配置的 `.venv/node_modules/.bin/lark-cli` 可执行，2026-09-20 版本为 1.0.56；下载命令 help 可用，真实合并转发资源与 container-ID 契约未验证。
 - 会话 05 于 2026-09-21 完成 capability preflight 及复验：后续提供的当前合并转发容器可由 user 读取，bot 通过 container ID 成功下载 image；同一容器的 file 直接下载两次为 network `500`，且 bot `mget --download-resources` 仅列出 image。file 仍不是可交给资源链的实际资源，故未写推测性接入代码。详见会话计划、ADR-0013 和[运行时验收记录](../operations/runtime-acceptance.md)。
+- 会话 05 将 runtime CLI 从 1.0.56 升级到 1.0.96 后，在同一容器复验仍得到 image 成功、file network `500`、`mget --download-resources` 仅列 image；升级未解除 file acquisition blocker。
 - [S9 记录](s9-answer-quality-baseline.md)中五个旧样本的当次失败仍可作为待复核线索。[P22 六轮 case](p22-task-session-context-budget-evidence.md)漏掉参考答案依赖的原始 owner 答复；旧三组 `0/1` 不能用于调参。生产上下文策略保持现状，S10 仍开放。
 
 ## 需求触发的扩展

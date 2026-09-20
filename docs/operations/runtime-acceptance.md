@@ -39,6 +39,12 @@ dry-run。临时库在进程结束时删除，未写入项目的 `data/`、`logs
 - 同一 container 的 file 下载连续两次均返回 network `500`，没有保存文件。bot `+messages-mget --download-resources` 诊断只返回一个 image 资源、没有资源级 error，并只保存一个 image 文件。
 - 这证明当前 image 可通过 container acquisition path 进入资源链，但转发 file 尚未由 CLI/API 作为可下载容器资源暴露。保持现有 placeholder/fail-closed 降级；不创建子项任务、不改变 reply target，也不写入原始消息、ID、资源键、路径或下载文件。
 
+## 2026-09-21 CLI 1.0.96 revalidation
+
+- runtime 配置指向的本地 CLI 已由 1.0.56 更新到 1.0.96，并在同一路径完成版本校验。
+- 对同一获准容器重新以 bot 下载 image/file：image 成功并完成单一文件 size/SHA-256 核对；file 仍为 network `500`，没有保存文件。
+- bot `+messages-mget --download-resources` 在 ignored 诊断目录仍只声明并保存一个 image 资源。版本更新未解除 forwarded-file acquisition blocker，因而不进入接入或端到端持久化阶段。
+
 ## 运行库与执行界限
 
 原 `data/agent.sqlite3` 的 `PRAGMA user_version` 为 `1`，当前 runtime schema 为 `7`，

@@ -10,6 +10,8 @@
 
 2026-09-21 revalidation：owner 提供了当前 image + file 容器。user 能从其可见内容识别两种键；bot 用同一 container ID 下载 image 成功并完成 size/hash 核对。file 的直接下载连续两次返回 network `500`、没有输出文件；在 ignored 临时目录运行 bot `+messages-mget --download-resources` 时，返回的资源数组只包含 image，且只保存一个 image 文件。当前 blocker 因而从“缺少样本”收敛为“转发 file 没有可下载的 container 资源表示”。在 CLI/API 将该 file 暴露为可下载资源前，保留 fail-closed 占位，不进入阶段 2。
 
+升级复验：运行时配置指向的 CLI 已从 1.0.56 升级到 1.0.96。对同一容器重新执行 bot image/file 下载和 `+messages-mget --download-resources`，仍得到 image 成功、file network `500` 且诊断资源数组仅含 image。升级未改变 blocker；不再把版本更新作为继续阶段 2 的前置。
+
 ## 边界
 
 合并转发是当前 chat 的一个容器消息。转发子项不产生独立 task、reply target 或跨源 chat fetch。资源键只能来自当前可见的容器内容；下载、配额、hash、目录隔离、原子发布和失败占位仍由现有 `ResourceProcessor` 处理。原始资源、路径、ID 和消息正文不进入 tracked 证据。
