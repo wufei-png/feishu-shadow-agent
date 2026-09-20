@@ -4,6 +4,8 @@
 
 **2026-09-20 复核附注：**以下六轮 P22 技术样本的 `eval_case.yaml` 只有 1 条 setup 和 5 条 target，遗漏了最终参考答案依赖的原始 owner 答复。重放用模型中间回答替代了这些事实，因此该样本三策略 `0/1` 和由它推出的质量比较只保留为历史运行记录，**不能作为有效对照或调参依据**。五个既有样本的当次结果与此问题分开；新评测须先复核其可见上下文。当前生产上下文仍保持原状，原因是尚无有效证据支持替换。修复/替换样本及重跑路径见[Task Session golden 计划](post-mvp/06-s10-golden.md)。
 
+**2026-09-21 fixture 审计：**已实现有序 `context` / `target` replay，且只允许 initial prompt 中真实可见的前置 context，避免在 resumed provider session 中伪造历史。旧 P22 fixture 的 6 条引用消息中没有 owner 消息；忽略的同 chat、同时间窗本地来源也没有可恢复的 owner 事实。生产路由会将关联任务的 owner 回复处理为 `human_taken_over` 并关闭任务，因此旧 P22 不能忠实重放，已移出 active golden suite。现场候选查询在有界时间内未完成分页，尚未采集可人工标注的替代样本；五个旧 S9 样本也尚未以新可见性审计重跑，不能形成新的质量基线。
+
 ## 范围与样本
 
 - 当前运行库只有 3 条消息、1 个任务，且没有可用的 feedback、agent audit 或 processing failure，不能作为当前质量基线。
