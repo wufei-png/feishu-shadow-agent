@@ -65,7 +65,7 @@ def test_normalizer_records_message_type_variants() -> None:
     assert _normalize(_raw("om_4")).message_type is None
 
 
-def test_merge_forward_is_a_container_with_placeholder_resources() -> None:
+def test_merge_forward_uses_container_id_for_leaf_resources_not_folder_keys() -> None:
     message = _normalize(
         _raw(
             "om_fwd",
@@ -75,13 +75,34 @@ def test_merge_forward_is_a_container_with_placeholder_resources() -> None:
                 "<forwarded_messages>\n"
                 "[2026-07-08T15:24:09+08:00] A:\n  deployment question\n"
                 "[Image: img_fwd_1]\n"
+                '<file key="file_fwd_1" name="report.pdf"/>\n'
+                '<file key="file_fwd_1" name="report.pdf"/>\n'
+                '<folder key="file_folder_1" name="assets"/>\n'
                 "</forwarded_messages>"
             ),
         )
     )
     assert message.message_type == "merge_forward"
-    assert message.resources == []
+    assert len(message.resources) == 2
+    assert {
+        (resource.message_id, resource.resource_type, resource.file_key)
+        for resource in message.resources
+    } == {
+        ("om_fwd", "image", "img_fwd_1"),
+        ("om_fwd", "file", "file_fwd_1"),
+    }
     assert "deployment question" in message.text
+
+
+def test_normalizer_ignores_structured_folder_resource() -> None:
+    message = _normalize(
+        _raw(
+            "om_folder",
+            content={"file_key": "file_folder_1", "is_folder": True},
+        )
+    )
+
+    assert message.resources == []
 
 
 def test_reaction_payload_is_not_a_signal() -> None:

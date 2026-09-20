@@ -45,6 +45,14 @@ dry-run。临时库在进程结束时删除，未写入项目的 `data/`、`logs
 - 对同一获准容器重新以 bot 下载 image/file：image 成功并完成单一文件 size/SHA-256 核对；file 仍为 network `500`，没有保存文件。
 - bot `+messages-mget --download-resources` 在 ignored 诊断目录仍只声明并保存一个 image 资源。版本更新未解除 forwarded-file acquisition blocker，因而不进入接入或端到端持久化阶段。
 
+## 2026-09-21 合并转发 folder 根因与资源链验收
+
+- 进一步读取同一 container 的渲染结构后，唯一可见 `file_` 键属于 `<folder>`，不是可直接下载的 leaf file；没有顶层 `<file>` 标签。因此此前 bot 请求把 collection handle 当 `--type file` 传入。
+- 该错误调用稳定返回 CLI `network/server_error`：HTTP `500`、上游 code `40009`、`internal server error`。响应含 log ID 和 troubleshooter URL；原值只保留在本次脱敏诊断上下文，未写入 tracked 文件。这个 `500` 不是“不支持转发 file”的证据。
+- bot 用相同 container ID 调 `im files folder` 成功，返回的 collection 为 4 个一级子项（2 个 leaf file、2 个 folder；递归计数 163）。再用同一 container ID 分别下载两个一级 leaf file 均成功，并完成 size/SHA-256 核对；临时内容已删除。
+- 运行时修复移除了对 `merge_forward` 的全量资源屏蔽：direct image/file marker 现在进入既有 `ResourceProcessor`，仍以 container ID 下载；`<folder>` 和结构化 `is_folder` 键明确排除，避免重试错误的 root-folder 下载或静默递归获取 collection 内容。
+- 隔离的真实资源链（临时 SQLite、临时资源目录和只含测试 chat 的 policy）以当前 CLI 执行 `LarkCliClient → ResourceProcessor → Operator message detail`。同一 container 的 image 与一个已枚举 leaf file 都显示 `downloaded`、路径存在、size/hash 一致；临时库、日志和资源随后清理。未修改运行中 Product Policy 或保存真实资源。
+
 ## 运行库与执行界限
 
 原 `data/agent.sqlite3` 的 `PRAGMA user_version` 为 `1`，当前 runtime schema 为 `7`，

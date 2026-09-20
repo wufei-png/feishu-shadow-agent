@@ -1,6 +1,6 @@
 # 05 · 合并转发子资源
 
-状态：阻塞，container image 已验证可下载，但转发 file 尚未由 CLI/API 暴露。前置：会话 03 的 membership 分类已完成；会话 04 的资源/身份现场条件已核对。真实资源能力测试是代码接入的门槛。
+状态：已完成（direct leaf image/file）。转发 collection folder 不自动递归下载，保持显式、安全降级。前置：会话 03 的 membership 分类已完成；会话 04 的资源/身份现场条件已核对。
 
 ## 目标与现有证据
 
@@ -11,6 +11,8 @@
 2026-09-21 revalidation：owner 提供了当前 image + file 容器。user 能从其可见内容识别两种键；bot 用同一 container ID 下载 image 成功并完成 size/hash 核对。file 的直接下载连续两次返回 network `500`、没有输出文件；在 ignored 临时目录运行 bot `+messages-mget --download-resources` 时，返回的资源数组只包含 image，且只保存一个 image 文件。当前 blocker 因而从“缺少样本”收敛为“转发 file 没有可下载的 container 资源表示”。在 CLI/API 将该 file 暴露为可下载资源前，保留 fail-closed 占位，不进入阶段 2。
 
 升级复验：运行时配置指向的 CLI 已从 1.0.56 升级到 1.0.96。对同一容器重新执行 bot image/file 下载和 `+messages-mget --download-resources`，仍得到 image 成功、file network `500` 且诊断资源数组仅含 image。升级未改变 blocker；不再把版本更新作为继续阶段 2 的前置。
+
+2026-09-21 根因闭环：该 container 的可见 `file_` 其实是 `<folder>` collection key，且没有顶层 `<file>` tag；把 folder 作为 `--type file` 请求才得到 HTTP `500` / upstream `40009`。bot 以同一 container ID 成功列出该 folder 的 4 个一级子项（2 个 leaf file、2 个 folder），并成功下载两个一级 leaf file。`mget --download-resources` 不自动收集 folder children 与此相符。runtime 现在从 merge_forward 提取 direct leaf image/file marker、以 container ID 交给现有 `ResourceProcessor`，并排除文本 `<folder>` 及结构化 `is_folder` 键，既避免错误 500，也不在没有独立集合限额/产品策略时递归下载 163 个候选项。聚焦测试覆盖 direct leaf、text folder、structured folder、去重和既有资源失败/配额链；隔离真实资源链已确认同一 container 的 image 和一个 folder leaf 都在 Operator message detail 中为 `downloaded`。真实 message、chat、resource key、log ID、文件和临时 store 均未写入 tracked 证据。
 
 ## 边界
 

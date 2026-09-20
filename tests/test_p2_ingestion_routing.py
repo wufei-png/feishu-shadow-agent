@@ -323,6 +323,8 @@ def test_normalizer_marks_mentions_sender_roles_and_resources() -> None:
                 text=(
                     "<forwarded_messages>\n"
                     "[Image: img_v3_0212t_forwarded-123]\n"
+                    "[file](file_v2_forwarded-456)\n"
+                    '<folder key="file_v2_folder-789" name="assets"/>\n'
                     "RuntimeError: engine failed\n"
                     "</forwarded_messages>"
                 ),
@@ -353,7 +355,13 @@ def test_normalizer_marks_mentions_sender_roles_and_resources() -> None:
         ("file", "file_v2_xyz-456"),
     }
     assert "RuntimeError: engine failed" in merge_forward.text
-    assert merge_forward.resources == []
+    assert {
+        (resource.message_id, resource.resource_type, resource.file_key)
+        for resource in merge_forward.resources
+    } == {
+        ("om_7", "image", "img_v3_0212t_forwarded-123"),
+        ("om_7", "file", "file_v2_forwarded-456"),
+    }
 
 
 def test_raw_batch_time_helpers_treat_naive_lark_timestamps_as_china_time() -> None:

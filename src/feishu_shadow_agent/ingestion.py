@@ -104,6 +104,10 @@ IMAGE_KEY_PATTERN = re.compile(
 FILE_KEY_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])(file_[A-Za-z0-9_-]+)(?![A-Za-z0-9_-])"
 )
+FOLDER_KEY_PATTERN = re.compile(
+    r"<folder\b[^>]*\bkey=[\"'](file_[A-Za-z0-9_-]+)[\"'][^>]*>",
+    re.IGNORECASE,
+)
 AT_USER_ID_PATTERN = re.compile(
     r"<at\s+[^>]*user_id=[\"']([^\"']+)[\"'][^>]*>", re.IGNORECASE
 )
@@ -2214,11 +2218,7 @@ def _message_type(raw: dict[str, Any], content: dict[str, Any]) -> str | None:
 def _resources(
     message_id: str, raw: dict[str, Any], content: dict[str, Any]
 ) -> list[ResourceRef]:
-    message_type = _message_type(raw, content)
-    if message_type == "merge_forward":
-        # Feishu renders forwarded child resources as text placeholders, but the
-        # message resource API cannot reliably download them from the container.
-        return []
+    folder_keys = _folder_keys(raw, content)
     resources: dict[tuple[str, str], ResourceRef] = {}
     for node in _walk([raw, content]):
         if isinstance(node, dict):
@@ -2229,7 +2229,7 @@ def _resources(
                     message_id, image_key, "image", node_map
                 )
             file_key = _first_string(node_map, "file_key", "fileKey")
-            if file_key:
+            if file_key and file_key not in folder_keys and not _is_folder(node_map):
                 resources[("file", file_key)] = ResourceRef(
                     message_id, file_key, "file", node_map
                 )
@@ -2245,6 +2245,8 @@ def _resources(
                     ),
                 )
             for file_key in FILE_KEY_PATTERN.findall(node):
+                if file_key in folder_keys:
+                    continue
                 resources.setdefault(
                     ("file", file_key),
                     ResourceRef(
@@ -2255,6 +2257,23 @@ def _resources(
                     ),
                 )
     return list(resources.values())
+
+
+def _folder_keys(raw: dict[str, Any], content: dict[str, Any]) -> set[str]:
+    keys: set[str] = set()
+    for node in _walk([raw, content]):
+        if isinstance(node, str):
+            keys.update(FOLDER_KEY_PATTERN.findall(node))
+        elif isinstance(node, dict):
+            node_map = cast(dict[str, Any], node)
+            file_key = _first_string(node_map, "file_key", "fileKey")
+            if file_key and _is_folder(node_map):
+                keys.add(file_key)
+    return keys
+
+
+def _is_folder(value: dict[str, Any]) -> bool:
+    return value.get("is_folder") is True or value.get("isFolder") is True
 
 
 def _walk(value: Any) -> list[Any]:
