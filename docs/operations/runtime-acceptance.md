@@ -32,6 +32,13 @@ dry-run。临时库在进程结束时删除，未写入项目的 `data/`、`logs
 - bot 对同一列举调用返回 API `230002`。没有 current container ID 可供 image/file 资源下载测试，因此没有执行下载调用、写入 runtime store 或保存文件。
 - 这不是 container-ID 能力失败的证据，也不推翻现有的 fail-closed 占位降级。需要在获准测试 chat 提供同时带 image 和 file 的当前合并转发容器，并以 container ID 由 bot 分别下载两种资源后，才能决定是否实施接入。
 
+## 2026-09-21 合并转发资源 revalidation
+
+- owner 在获准测试 chat 提供当前 image + file 合并转发容器；user 能读取容器并从可见内容识别两种资源键。
+- bot 对同一 top-level container ID 下载 image 成功，保存的单一文件完成 size 和 SHA-256 核对。
+- 同一 container 的 file 下载连续两次均返回 network `500`，没有保存文件。bot `+messages-mget --download-resources` 诊断只返回一个 image 资源、没有资源级 error，并只保存一个 image 文件。
+- 这证明当前 image 可通过 container acquisition path 进入资源链，但转发 file 尚未由 CLI/API 作为可下载容器资源暴露。保持现有 placeholder/fail-closed 降级；不创建子项任务、不改变 reply target，也不写入原始消息、ID、资源键、路径或下载文件。
+
 ## 运行库与执行界限
 
 原 `data/agent.sqlite3` 的 `PRAGMA user_version` 为 `1`，当前 runtime schema 为 `7`，
