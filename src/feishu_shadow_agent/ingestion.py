@@ -140,9 +140,9 @@ class ProcessingCursor:
     """A replay-safe prefix of one fetched drain batch.
 
     The cursor contains no raw message content.  The next tick re-fetches the
-    batch from the same page token and only skips this prefix after checking
-    the digest again.  A changed result is replayed from its beginning rather
-    than risk skipping a message.
+    batch from the same page token and only skips this prefix after checking a
+    digest of its normalized routing inputs again.  A changed result is
+    replayed from its beginning rather than risk skipping a message.
     """
 
     completed_items: int
@@ -1295,17 +1295,24 @@ class IngestionService:
             ordered,
             resume_cursor=resume_cursor,
             source=source,
+            default_chat_type=default_chat_type,
             run_id=run_id,
         )
         processed = 0
         for raw in ordered[completed_items:]:
             if self.monotonic() >= self.ingest_deadline:
+                prefix_sha256 = self._processing_prefix_sha256(
+                    ordered[:completed_items],
+                    default_chat_type=default_chat_type,
+                )
                 return RawBatchResult(
                     processed=processed,
                     complete=False,
                     cursor=ProcessingCursor(
-                        completed_items=completed_items,
-                        prefix_sha256=_raw_prefix_sha256(ordered[:completed_items]),
+                        completed_items=(
+                            completed_items if prefix_sha256 is not None else 0
+                        ),
+                        prefix_sha256=prefix_sha256 or sha256(b"").hexdigest(),
                     ),
                 )
             result = self.process_raw_message(
@@ -1379,13 +1386,20 @@ class IngestionService:
         *,
         resume_cursor: ProcessingCursor | None,
         source: str,
+        default_chat_type: str | None,
         run_id: str,
     ) -> int:
         if resume_cursor is None or resume_cursor.completed_items == 0:
             return 0
         if resume_cursor.completed_items <= len(raws):
             prefix = raws[: resume_cursor.completed_items]
-            if _raw_prefix_sha256(prefix) == resume_cursor.prefix_sha256:
+            prefix_sha256 = self._processing_prefix_sha256(
+                prefix, default_chat_type=default_chat_type
+            )
+            if (
+                prefix_sha256 is not None
+                and prefix_sha256 == resume_cursor.prefix_sha256
+            ):
                 return resume_cursor.completed_items
         self.logger.warning(
             "ingestion_processing_cursor_reset",
@@ -1398,6 +1412,32 @@ class IngestionService:
             },
         )
         return 0
+
+    def _processing_prefix_sha256(
+        self,
+        raws: list[dict[str, Any]],
+        *,
+        default_chat_type: str | None,
+    ) -> str | None:
+        digest = sha256()
+        for raw in raws:
+            try:
+                message = self.normalizer.normalize(
+                    raw, default_chat_type=default_chat_type
+                )
+            except Exception:  # noqa: BLE001
+                # A malformed item has no stable normalized identity.  Do not
+                # skip an earlier prefix on the next replay.
+                return None
+            encoded = json.dumps(
+                _processing_replay_identity(message),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            digest.update(len(encoded).to_bytes(8, byteorder="big"))
+            digest.update(encoded)
+        return digest.hexdigest()
 
     def process_raw_message(
         self,
@@ -2237,19 +2277,29 @@ def _raw_sort_key(raw: dict[str, Any]) -> tuple[float, str]:
     )
 
 
-def _raw_prefix_sha256(raws: list[dict[str, Any]]) -> str:
-    digest = sha256()
-    for raw in raws:
-        encoded = json.dumps(
-            raw,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        ).encode()
-        digest.update(len(encoded).to_bytes(8, byteorder="big"))
-        digest.update(encoded)
-    return digest.hexdigest()
+def _processing_replay_identity(message: NormalizedMessage) -> dict[str, Any]:
+    """Return exactly the normalized fields that can affect replay behavior."""
+    return {
+        "message_id": message.message_id,
+        "sent_at": message.sent_at,
+        "chat_id": message.chat_id,
+        "chat_type": message.chat_type,
+        "sender_id": message.sender_id,
+        "sender_type": message.sender_type,
+        "sender_role": message.sender_role,
+        "thread_id": message.thread_id,
+        "reply_to_message_id": message.reply_to_message_id,
+        "text": message.text,
+        "direct_mention": message.direct_mention,
+        "at_all": message.at_all,
+        "mentions": sorted(message.mentions),
+        "message_type": message.message_type,
+        "resources": sorted(
+            (resource.file_key, resource.resource_type)
+            for resource in message.resources
+        ),
+        "is_deleted": message.is_deleted,
+    }
 
 
 def _filter_raws_in_window(

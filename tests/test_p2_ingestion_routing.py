@@ -734,6 +734,58 @@ def test_processing_cursor_replays_from_start_when_the_fetched_prefix_changes(
     )
 
 
+def test_processing_cursor_ignores_nonsemantic_replay_enrichment(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    first = _message(
+        "om_1",
+        chat_type="p2p",
+        create_time="2026-06-22T10:01:00+08:00",
+    )
+    second = _message(
+        "om_2",
+        chat_type="p2p",
+        create_time="2026-06-22T10:02:00+08:00",
+    )
+    fake.search_pages[("p2p", False, None)] = MessagePage([first, second])
+    config = _config(daemon=DaemonConfig(ingest_tick_budget_seconds=1))
+
+    first_clock = iter([0.0, 0.0, 0.0, 1.0])
+    IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+        monotonic=lambda: next(first_clock, 1.0),
+    ).ingest_p2p(run_id="run_1")
+
+    replayed_first = dict(first)
+    replayed_first["reactions"] = [{"reaction_type": {"emoji_type": "THUMBSUP"}}]
+    fake.search_pages[("p2p", False, None)] = MessagePage([replayed_first, second])
+    second_clock = iter([0.0, 0.0, 0.0])
+    IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+        monotonic=lambda: next(second_clock, 0.0),
+    ).ingest_p2p(run_id="run_2")
+
+    with store.connect() as conn:
+        routes = [
+            row["route"]
+            for row in conn.execute("SELECT route FROM routing_audits ORDER BY id")
+        ]
+    assert routes == ["new_task", "attach_task"]
+    assert "ingestion_processing_cursor_reset" not in (
+        tmp_path / "agent.jsonl"
+    ).read_text(encoding="utf-8")
+
+
 def test_fetch_reserve_leaves_time_to_process_before_the_tick_deadline(
     tmp_path: Path,
 ) -> None:
