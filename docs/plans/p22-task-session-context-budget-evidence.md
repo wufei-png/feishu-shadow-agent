@@ -6,6 +6,8 @@
 
 **2026-09-21 处置：**本地结构审计只找到该一个 `1 setup + 5 target` fixture。它的 6 条引用消息没有 owner 事实，忽略目录内同 chat、同时间窗也没有可恢复来源。关联 active task 的 owner 回复在生产中触发 `human_taken_over` 并关闭任务，不能被标为不调用后端的 resumed context。该 private case 已移出 active golden suite，旧三组结果不再可运行或计分。替代样本必须先完成真实可见性核对和人工标签，再以固定 backend、model、reasoning、工具权限与配置 hash 的 `repeat=1` 重跑。
 
+本次只对 2 个不含 owner intervention 的既有 S9 case 完成固定条件重跑；它们都不能替代缺失的 P22 长会话对照。新 P22 case 在 promotion 前必须证明每个目标答案只依赖该目标前且 production-visible 的事实；不能把 owner takeover、后续事实或模型中间回答作为 `context` 注入。
+
 ## 当前策略与原假设
 
 当前 `TaskSessionRunner` 在 resumed session 只显式发送当前消息，历史由 provider session 自持；fresh session 则重放该 task 的全部消息。原假设是把 fresh 重建改为 root + 最近 N 条 + 可选的系统组合 summary，并让 live follow-up 保持当前单条模式。
