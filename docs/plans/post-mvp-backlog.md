@@ -8,7 +8,7 @@
 
 | 会话 | 交付 | 前置 | 状态 |
 | --- | --- | --- | --- |
-| [01 · 恢复 CI 基线](post-mvp/01-ci-baseline.md) | 修正过期 schema 测试与依赖审计，确认远端 CI | 无 | 待执行 |
+| [01 · 恢复 CI 基线](post-mvp/01-ci-baseline.md) | 修正过期 schema 测试与依赖审计，确认远端 CI | 无 | 已完成 |
 | [02 · main 合并门禁](post-mvp/02-main-protection.md) | PR、必需检查与紧急绕过 | 01 CI 全绿 | 待执行 |
 | [03 · membership 错误归因](post-mvp/03-membership-errors.md) | endpoint 专属分类与回归 | 01 | 待执行 |
 | [04 · 运行时现场验收](post-mvp/04-runtime-acceptance.md) | S4 ingest 追赶与 S5 离群/重入时间线 | 03、获准测试 chat | 待执行 |
@@ -19,7 +19,7 @@
 
 ## 当前证据
 
-- `9c342dd` 上的 [CI run 35502877321](https://github.com/wufei-png/feishu-shadow-agent/actions/runs/35502877321) 因旧 schema v5 断言与 `anyio 4.14.1` 审计失败；执行会话 01 时须核对最新状态。
+- 会话 01 已完成：`e6d2f14` 修正当前 schema 生命周期契约，`f141afc` 阻止迟到轮询回滚编辑，`c830b1d` 将 anyio 升级至 4.15.1；[CI run 35505846110](https://github.com/wufei-png/feishu-shadow-agent/actions/runs/35505846110) 的所有阻断 job 和非阻断 Coverage 均通过。
 - S4 ingest、S5 runtime membership、S6 路由、S7 统一处理重试、S8 owner background 已实现。现场高流量与离群/重入尚无本轮验收；membership 仍把通用 `234002` 子串当作缺席证据。
 - 本机 `config.yaml` 配置的 `.venv/node_modules/.bin/lark-cli` 可执行，2026-09-20 版本为 1.0.56；下载命令 help 可用，真实合并转发资源与 container-ID 契约未验证。
 - [S9 记录](s9-answer-quality-baseline.md)中五个旧样本的当次失败仍可作为待复核线索。[P22 六轮 case](p22-task-session-context-budget-evidence.md)漏掉参考答案依赖的原始 owner 答复；旧三组 `0/1` 不能用于调参。生产上下文策略保持现状，S10 仍开放。
