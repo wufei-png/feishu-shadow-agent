@@ -46,6 +46,7 @@ class FakeFeishuClient:
         self.downloads: list[dict[str, str]] = []
         self.calls: list[str] = []
         self.search_page_sizes: list[int] = []
+        self.search_page_limits: list[int] = []
         self.write_download_files = True
 
     def version(self) -> LarkCliResult:
@@ -76,9 +77,11 @@ class FakeFeishuClient:
         page_token: str | None = None,
         query: str = "",
         page_size: int = 50,
+        page_limit: int = 1,
     ) -> MessagePage:
         self.calls.append(f"search:{chat_type}:{is_at_me}:{page_token}")
         self.search_page_sizes.append(page_size)
+        self.search_page_limits.append(page_limit)
         value = self.search_pages.get(
             (chat_type, is_at_me, page_token), MessagePage([])
         )
@@ -519,6 +522,37 @@ def test_bounded_fixed_window_resumes_across_more_than_two_page_caps(
     ]
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"] == 3
+
+
+def test_search_batch_preserves_page_cap_and_resume_token(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    fake.search_pages[("p2p", False, None)] = MessagePage(
+        [
+            _message("om_1", chat_type="p2p"),
+            _message("om_2", chat_type="p2p"),
+        ],
+        next_page_token="p3",
+        has_more=True,
+        page_count=2,
+    )
+    config = _config(daemon=DaemonConfig(ingest_search_max_pages=2))
+
+    IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    ).ingest_p2p(run_id="run_1")
+
+    checkpoint = store.get_checkpoint("ingest.p2p")
+    assert checkpoint is not None
+    assert checkpoint["backlog"]["reason"] == "page_cap_exhausted"
+    assert checkpoint["backlog"]["next_page_token"] == "p3"
+    assert checkpoint["backlog"]["pages_fetched"] == 2
+    assert checkpoint["backlog"]["messages_fetched"] == 2
+    assert fake.search_page_limits == [2]
 
 
 def test_ingestion_sources_rotate_first_chance_across_ticks(tmp_path: Path) -> None:

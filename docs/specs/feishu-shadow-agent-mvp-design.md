@@ -253,7 +253,7 @@ checkpoint: active_watch.thread.<thread_id>
 
 每个入口只在对应阶段“拉取 + 入库 + 初步归属处理”成功后推进 checkpoint。
 
-ingest 分页必须在 fetch、入库和初步归属处理都完成后才推进 `last_success_at`，且 tick 共享时间预算覆盖这三个阶段。已取得至少一页后，fetch 会在总预算前预留最多 5 秒（且不超过预算的一半）给处理阶段；这不改变 page/message cap 或总预算。页数、消息数或时间预算耗尽时，固定窗口、下一页 token 和累计进度作为 backlog 保留到后续 tick；若时间在已取回批次的消息边界耗尽，则保留该批次起始 token 与不含原文、但包含 message ID、排序时间和所有路由语义字段的已完成归一化前缀摘要，后续 tick 重拉并仅在摘要匹配时跳过此前完成的前缀；易变的搜索 enrichment 不影响匹配。处理失败、摘要不匹配或恢复 token 首次请求失败都不保存更晚的下一页进度；token 失败清除 cursor 并从同一固定窗口重拉，依靠 message revision 与 routing audit 幂等去重。详细恢复契约见 [ADR-0016](../adr/0016-ingest-caps-defer-not-truncate.md)。
+ingest 分页必须在 fetch、入库和初步归属处理都完成后才推进 `last_success_at`，且 tick 共享时间预算覆盖这三个阶段。cross-chat search 可在单次 CLI `--page-all` 调用中读取剩余 page cap 内的页数，但聚合结果仍按实际页数计入既有 cap 并保留末页 token。已取得至少一页后，fetch 会在总预算前预留最多 5 秒（且不超过预算的一半）给处理阶段；这不改变 page/message cap 或总预算。页数、消息数或时间预算耗尽时，固定窗口、下一页 token 和累计进度作为 backlog 保留到后续 tick；若时间在已取回批次的消息边界耗尽，则保留该批次起始 token 与不含原文、但包含 message ID、排序时间和所有路由语义字段的已完成归一化前缀摘要，后续 tick 重拉并仅在摘要匹配时跳过此前完成的前缀；易变的搜索 enrichment 不影响匹配。处理失败、摘要不匹配或恢复 token 首次请求失败都不保存更晚的下一页进度；token 失败清除 cursor 并从同一固定窗口重拉，依靠 message revision 与 routing audit 幂等去重。详细恢复契约见 [ADR-0016](../adr/0016-ingest-caps-defer-not-truncate.md)。
 
 同一 chat/thread 在同一 tick 拉到多条消息时，按 `create_time asc, message_id asc` 逐条处理。每条消息完成 normalize、去重、归属和必要的 task 状态更新后，再处理下一条，避免后到消息先被错误 attach 到 active task。
 

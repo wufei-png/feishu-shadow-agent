@@ -60,6 +60,7 @@ class IngestionFeishuClient(Protocol):
         page_token: str | None = None,
         query: str = "",
         page_size: int = 50,
+        page_limit: int = 1,
     ) -> MessagePage: ...
 
     def list_chat_messages(
@@ -1097,7 +1098,7 @@ class IngestionService:
             raise RuntimeError("bot open_id is missing from lark-cli auth status")
         window = self._window("approval_inbox", source="approval_inbox", run_id=run_id)
         drain = self._drain(
-            lambda token, page_size: self.feishu_client.list_p2p_messages(
+            lambda token, page_size, _page_limit: self.feishu_client.list_p2p_messages(
                 user_id=bot_open_id,
                 start=window.start,
                 end=window.end,
@@ -1176,7 +1177,7 @@ class IngestionService:
                 key = f"active_watch.thread.{thread_id}"
                 window = self._window(key, source="active_watch", run_id=run_id)
                 drain = self._drain(
-                    lambda token, page_size, thread_id=thread_id: (
+                    lambda token, page_size, _page_limit, thread_id=thread_id: (
                         self.feishu_client.list_thread_messages(
                             thread_id=thread_id,
                             page_token=token,
@@ -1198,7 +1199,7 @@ class IngestionService:
                 window_start = window.start
                 window_end = window.end
                 drain = self._drain(
-                    lambda token, page_size, chat_id=chat_id, start=window_start, end=window_end: (
+                    lambda token, page_size, _page_limit, chat_id=chat_id, start=window_start, end=window_end: (
                         self.feishu_client.list_chat_messages(
                             chat_id=chat_id,
                             start=start,
@@ -1249,7 +1250,7 @@ class IngestionService:
     ) -> StageResult:
         window = self._window(checkpoint_key, source=name, run_id=run_id)
         drain = self._drain(
-            lambda token, page_size: self.feishu_client.search_messages(
+            lambda token, page_size, page_limit: self.feishu_client.search_messages(
                 chat_type=chat_type,
                 is_at_me=is_at_me,
                 start=window.start,
@@ -1257,6 +1258,7 @@ class IngestionService:
                 page_token=token,
                 query="",
                 page_size=page_size,
+                page_limit=page_limit,
             ),
             window=window,
             run_id=run_id,
@@ -1960,7 +1962,7 @@ class IngestionService:
 
     def _drain(
         self,
-        fetch_page: Callable[[str | None, int], MessagePage],
+        fetch_page: Callable[[str | None, int, int], MessagePage],
         *,
         window: DrainWindow,
         max_pages: int,
@@ -1990,9 +1992,11 @@ class IngestionService:
                 return DrainResult(
                     items, False, page_token, page_number, "tick_budget_exhausted"
                 )
-            page_size = min(PAGE_SIZE, max_messages - len(items))
+            remaining_messages = max_messages - len(items)
+            remaining_pages = max_pages - page_number
+            page_size = min(PAGE_SIZE, remaining_messages)
             try:
-                page = fetch_page(page_token, page_size)
+                page = fetch_page(page_token, page_size, remaining_pages)
             except Exception as exc:
                 if page_number == 0 and window.page_token is not None:
                     self._reset_resumed_token(window, run_id=run_id, source=source)
@@ -2020,17 +2024,24 @@ class IngestionService:
                     data=data,
                 )
                 raise
-            if len(page.items) > page_size:
+            if len(page.items) > remaining_messages:
                 raise RuntimeError(
-                    f"message page returned {len(page.items)} items above requested {page_size}"
+                    "message page returned "
+                    f"{len(page.items)} items above remaining {remaining_messages}"
                 )
-            page_number += 1
+            if page.page_count < 1 or page.page_count > remaining_pages:
+                raise RuntimeError(
+                    "message page reported "
+                    f"{page.page_count} pages outside remaining {remaining_pages}"
+                )
+            page_number += page.page_count
             self.logger.debug(
                 "message_page_fetched",
                 run_id=run_id,
                 data={
                     "source": source,
                     "page_number": page_number,
+                    "page_count": page.page_count,
                     "items": len(page.items),
                     "has_more": page.has_more,
                     "has_next_page_token": bool(page.next_page_token),

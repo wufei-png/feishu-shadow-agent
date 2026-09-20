@@ -427,7 +427,10 @@ class LarkCliClient:
         page_token: str | None = None,
         query: str = "",
         page_size: int = 50,
+        page_limit: int = 1,
     ) -> MessagePage:
+        if page_limit < 1:
+            raise ValueError("page_limit must be at least 1")
         result = self.run_json(
             self.build_messages_search(
                 chat_id=chat_id,
@@ -438,9 +441,25 @@ class LarkCliClient:
                 page_token=page_token,
                 query=query,
                 page_size=page_size,
+                page_all=page_limit > 1,
+                page_limit=page_limit if page_limit > 1 else None,
             )
         )
-        return _message_page_from_result(result)
+        page = _message_page_from_result(result)
+        if page_limit == 1:
+            return page
+        page_count = (
+            page_limit
+            if page.has_more
+            else max(1, (len(page.items) + page_size - 1) // page_size)
+        )
+        return MessagePage(
+            items=page.items,
+            next_page_token=page.next_page_token,
+            has_more=page.has_more,
+            raw=page.raw,
+            page_count=page_count,
+        )
 
     def search_owner_messages(
         self,

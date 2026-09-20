@@ -252,6 +252,39 @@ def test_search_messages_returns_message_page() -> None:
     assert page.next_page_token == "next"
 
 
+def test_search_messages_batches_within_requested_page_limit() -> None:
+    seen: list[list[str]] = []
+
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        seen.append(argv)
+        return LarkCliResult(
+            argv=argv,
+            exit_code=0,
+            json_data={
+                "data": {
+                    "messages": [{"message_id": f"om_{index}"} for index in range(100)],
+                    "page_token": "next",
+                    "has_more": True,
+                }
+            },
+        )
+
+    page = LarkCliClient(path="lark-cli", runner=runner).search_messages(
+        chat_type="group",
+        is_at_me=True,
+        start="2026-06-22T00:00:00+08:00",
+        end="2026-06-22T01:00:00+08:00",
+        page_size=50,
+        page_limit=2,
+    )
+
+    assert len(page.items) == 100
+    assert page.page_count == 2
+    assert page.next_page_token == "next"
+    assert "--page-all" in seen[0]
+    assert seen[0][seen[0].index("--page-limit") + 1] == "2"
+
+
 def test_search_owner_messages_uses_sender_time_filters_page_all_and_no_reactions() -> (
     None
 ):
