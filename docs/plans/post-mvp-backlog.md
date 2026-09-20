@@ -14,7 +14,7 @@
 | [04 · 运行时现场验收](post-mvp/04-runtime-acceptance.md) | S4 ingest 追赶与 S5 离群/重入时间线 | 03、获准测试 chat | S4 已通过；S5 部分通过（dry-run 边界保留，见 `docs/operations/runtime-acceptance.md`） |
 | [05 · 合并转发子资源](post-mvp/05-merge-forward-resources.md) | 真实 CLI 能力验证、条件接入、现场验收 | 03、04 的资源/身份条件 | 已完成：container direct leaf image/file 接入；folder collection 保持不自动递归下载 |
 | [06 · S10 golden 修复](post-mvp/06-s10-golden.md) | 有效时间线、人工标签、S9/P22 重跑 | 01 | 部分完成：时间线契约已落地，失效 P22 已废弃，2 个有效 S9 case 固定重跑均未通过；待重采有效样本和人工标签 |
-| [07 · 单变量候选筛选](post-mvp/07-s10-candidate.md) | 固定条件下的回答质量对照 | 06 | 待执行 |
+| [07 · 单变量候选筛选](post-mvp/07-s10-candidate.md) | 固定条件下的回答质量对照 | 06 | 已完成：一个事实归属候选出现语义回归，未采用；不进入 08，S10 保持开放（见筛选记录） |
 | [08 · 扩样本与生产判定](post-mvp/08-s10-validation.md) | 独立真实样本复验、条件推广 | 07 | 待执行 |
 
 ## 当前证据
@@ -31,6 +31,7 @@
 - [S9 记录](s9-answer-quality-baseline.md)中五个旧样本的当次失败仍可作为待复核线索。[P22 六轮 case](p22-task-session-context-budget-evidence.md)漏掉参考答案依赖的原始 owner 答复；旧三组 `0/1` 不能用于调参。生产上下文策略保持现状，S10 仍开放。
 - 会话 06 的本地结构审计确认旧 P22 fixture 仅有 1 条 setup、5 条 target，未保存 owner 事实，且忽略的同窗来源没有可补充的 owner 消息。生产中关联任务的 owner 回复会触发 `human_taken_over`，不能作为 resumed Task Session 上下文补入；该 private golden 已从 active suite 移至 retired 区，不再进入任何 P22 重跑。新的真实样本仍需人工选择、核对可见性并完成标签。
 - active Task Session suite 的 16 个 case 中，6 个匹配当前 owner；其中 4 个带 owner intervention，不能模拟为活跃 Task Session。剩余 2 个在 Codex / `gpt-5.6-luna`、`xhigh`、`read_only`、固定配置 hash 和 `repeat=1` 下重跑：1 个结构失败，1 个结构通过后 semantic judge 判出各 1 个 minor omission 与 minor unsupported addition，均未通过。P22 没有有效 case，以上不是完整质量基线或生产变更依据。
+- 会话 07 固定一个带标签的事实归属 case，仅增加“可用时检查 read-only 证据、使事实可追溯”的 Task Session 指令作为候选变量。候选仍为 `auto_reply`，但 semantic judge 从 1 个 minor omission + 1 个 minor unsupported addition 恶化为 1 个 major contradiction + 1 个 major omission + 1 个 minor unsupported addition，且 prompt 增加 238 字符；候选未采用，不能触发会话 08。脱敏条件、hash、指标和下一假设见[筛选记录](s10-candidate-screening.md)。
 
 ## 需求触发的扩展
 
