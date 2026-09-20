@@ -7,7 +7,7 @@ from feishu_shadow_agent.config import AppConfig, OwnerConfig, ReplyPolicyConfig
 from feishu_shadow_agent.ingestion import MessageNormalizer
 from feishu_shadow_agent.operator_queries.message_detail import MessageDetailQuery
 from feishu_shadow_agent.routing import CandidateCollector, MessageRouter
-from feishu_shadow_agent.store.sqlite_store import SQLiteStore
+from feishu_shadow_agent.store.sqlite_store import SQLITE_SCHEMA_VERSION, SQLiteStore
 from feishu_shadow_agent.types import NormalizedMessage
 
 
@@ -125,13 +125,13 @@ def test_store_updates_message_type_on_reupsert(tmp_path: Path) -> None:
     assert row["message_type"] == "file"
 
 
-def test_schema_version_5_includes_message_type_column(tmp_path: Path) -> None:
+def test_current_schema_includes_message_lifecycle_columns(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.initialize()
     with store.connect() as conn:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
-    assert version == 5
+    assert version == SQLITE_SCHEMA_VERSION
     assert "message_type" in columns
     assert "is_deleted" in columns
     assert "revision" in columns

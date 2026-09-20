@@ -245,7 +245,10 @@ def test_schema_v2_migrates_to_current_baseline_without_fake_edits(
     with store.connect() as conn:
         schema_version = conn.execute("PRAGMA user_version").fetchone()[0]
         message = conn.execute(
-            "SELECT revision, semantic_hash, is_deleted FROM messages WHERE message_id = ?",
+            """
+            SELECT message_type, revision, semantic_hash, is_deleted
+            FROM messages WHERE message_id = ?
+            """,
             ("om_1",),
         ).fetchone()
         action = conn.execute(
@@ -278,11 +281,12 @@ def test_schema_v2_migrates_to_current_baseline_without_fake_edits(
         )
 
     assert schema_version == SQLITE_SCHEMA_VERSION
-    assert (message["revision"], message["semantic_hash"], message["is_deleted"]) == (
-        1,
-        "",
-        0,
-    )
+    assert (
+        message["message_type"],
+        message["revision"],
+        message["semantic_hash"],
+        message["is_deleted"],
+    ) == (None, 1, "", 0)
     assert (action["source_message_id"], action["source_revision"]) == ("om_1", 1)
     assert (approval["source_message_id"], approval["source_revision"]) == ("om_1", 1)
     assert "UNIQUE (message_id, revision, stage)" in " ".join(processing_sql.split())
