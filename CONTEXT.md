@@ -165,7 +165,7 @@ A lightweight emoji-only user action on a Feishu message. A Pure Reaction never 
 _Avoid_: follow-up, watch extension, acknowledgement signal, reaction command
 
 **Merged Forward**:
-A Feishu message of type merge_forward whose content embeds child messages — including their senders, timestamps, and bodies, possibly originating in other chats — as one expanded text block in the current chat. Child images and files are not downloadable from the container and are treated as undownloadable placeholders that never block processing; fetching them by child id is deferred until the acquisition chain exposes child message ids (an external lark-cli dependency, see ADR-0013).
+A Feishu message of type merge_forward whose content embeds child messages — including their senders, timestamps, and bodies, possibly originating in other chats — as one expanded text block in the current chat. The current runtime treats every child resource as a placeholder and does not create a child task or fetch by child ID. A 2026-09-21 runtime probe verified that an image can download through the top-level container ID, but the same container's forwarded file was not exposed in the CLI resource list and its direct download returned network `500`; the image path is not yet integrated and the file remains an undownloadable placeholder. No child-ID or origin-chat fetch is permitted (see ADR-0013).
 _Avoid_: sub-message ingestion, per-child resource download, cross-chat fetch
 
 **Cross-Chat Reference**:
