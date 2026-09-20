@@ -25,6 +25,13 @@ dry-run。临时库在进程结束时删除，未写入项目的 `data/`、`logs
 `test_dispatcher.py`、`test_operator_query.py`）。该结果只证明 fixture 契约，不替代
 下面的现场证据。
 
+## 2026-09-21 合并转发资源 capability preflight
+
+- 本机 `.venv/node_modules/.bin/lark-cli` 仍为 `1.0.56`；user 与 bot 凭据均已完成服务端验证。
+- user 对唯一受控 chat 的降序读取成功，返回 8 条消息，未找到 `merge_forward` 容器。
+- bot 对同一列举调用返回 API `230002`。没有 current container ID 可供 image/file 资源下载测试，因此没有执行下载调用、写入 runtime store 或保存文件。
+- 这不是 container-ID 能力失败的证据，也不推翻现有的 fail-closed 占位降级。需要在获准测试 chat 提供同时带 image 和 file 的当前合并转发容器，并以 container ID 由 bot 分别下载两种资源后，才能决定是否实施接入。
+
 ## 运行库与执行界限
 
 原 `data/agent.sqlite3` 的 `PRAGMA user_version` 为 `1`，当前 runtime schema 为 `7`，

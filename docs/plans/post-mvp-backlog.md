@@ -12,7 +12,7 @@
 | [02 · main 合并门禁](post-mvp/02-main-protection.md) | PR、必需检查与紧急绕过 | 01 CI 全绿 | 已完成 |
 | [03 · membership 错误归因](post-mvp/03-membership-errors.md) | endpoint 专属分类与回归 | 01 | 已完成 |
 | [04 · 运行时现场验收](post-mvp/04-runtime-acceptance.md) | S4 ingest 追赶与 S5 离群/重入时间线 | 03、获准测试 chat | S4 已通过；S5 部分通过（dry-run 边界保留，见 `docs/operations/runtime-acceptance.md`） |
-| [05 · 合并转发子资源](post-mvp/05-merge-forward-resources.md) | 真实 CLI 能力验证、条件接入、现场验收 | 03、04 的资源/身份条件 | 待执行 |
+| [05 · 合并转发子资源](post-mvp/05-merge-forward-resources.md) | 真实 CLI 能力验证、条件接入、现场验收 | 03、04 的资源/身份条件 | 阻塞：等待获准的当前 image + file 合并转发容器样本 |
 | [06 · S10 golden 修复](post-mvp/06-s10-golden.md) | 有效时间线、人工标签、S9/P22 重跑 | 01 | 待执行 |
 | [07 · 单变量候选筛选](post-mvp/07-s10-candidate.md) | 固定条件下的回答质量对照 | 06 | 待执行 |
 | [08 · 扩样本与生产判定](post-mvp/08-s10-validation.md) | 独立真实样本复验、条件推广 | 07 | 待执行 |
@@ -27,6 +27,7 @@
   推进和全量追赶；详见[运行时验收记录](../operations/runtime-acceptance.md)。S5 保持部分通过，
   因为本会话不发送真实资源或回复。
 - 本机 `config.yaml` 配置的 `.venv/node_modules/.bin/lark-cli` 可执行，2026-09-20 版本为 1.0.56；下载命令 help 可用，真实合并转发资源与 container-ID 契约未验证。
+- 会话 05 于 2026-09-21 完成 capability preflight：同一受控 chat 的 user 读取成功但仅有 8 条消息、无 `merge_forward` 容器；bot 列举返回 API `230002`。没有符合条件的当前 container ID，因而没有调用资源下载接口，也没有写推测性接入代码。详见会话计划和[运行时验收记录](../operations/runtime-acceptance.md)。
 - [S9 记录](s9-answer-quality-baseline.md)中五个旧样本的当次失败仍可作为待复核线索。[P22 六轮 case](p22-task-session-context-budget-evidence.md)漏掉参考答案依赖的原始 owner 答复；旧三组 `0/1` 不能用于调参。生产上下文策略保持现状，S10 仍开放。
 
 ## 需求触发的扩展
