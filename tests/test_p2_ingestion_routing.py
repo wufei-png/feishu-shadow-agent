@@ -675,6 +675,7 @@ def test_processing_budget_replays_current_page_without_skipping_or_duplicates(
     assert checkpoint is not None
     assert "last_success_at" not in checkpoint
     assert checkpoint["backlog"]["reason"] == "tick_budget_exhausted"
+    assert checkpoint["backlog"]["fetch_reason"] == "page_cap_exhausted"
     assert checkpoint["backlog"]["next_page_token"] == "p2"
     assert checkpoint["backlog"]["processing"]["completed_items"] == 1
 

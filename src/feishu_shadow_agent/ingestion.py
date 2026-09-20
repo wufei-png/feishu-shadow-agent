@@ -134,6 +134,7 @@ class DrainResult:
     next_page_token: str | None
     pages: int
     reason: str | None = None
+    fetch_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1355,6 +1356,7 @@ class IngestionService:
                 complete=False,
                 next_page_token=window.page_token,
                 reason="tick_budget_exhausted",
+                fetch_reason=drain.reason,
             ),
             batch,
         )
@@ -1881,6 +1883,8 @@ class IngestionService:
                 else 0
             ),
         }
+        if drain.fetch_reason is not None:
+            backlog["fetch_reason"] = drain.fetch_reason
         if processing_cursor is not None:
             backlog["processing"] = {
                 "completed_items": processing_cursor.completed_items,
@@ -1901,6 +1905,7 @@ class IngestionService:
                 "messages_fetched": len(drain.items),
                 "has_next_page_token": drain.next_page_token is not None,
                 "reason": drain.reason,
+                "fetch_reason": drain.fetch_reason,
                 "checkpoint_advanced": False,
                 "processing_items_completed": (
                     processing_cursor.completed_items
