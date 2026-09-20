@@ -734,6 +734,56 @@ def test_processing_cursor_replays_from_start_when_the_fetched_prefix_changes(
     )
 
 
+def test_fetch_reserve_leaves_time_to_process_before_the_tick_deadline(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    fake.search_pages[("p2p", False, None)] = MessagePage(
+        [_message("om_1", chat_type="p2p")],
+        next_page_token="p2",
+        has_more=True,
+    )
+    fake.search_pages[("p2p", False, "p2")] = MessagePage(
+        [_message("om_2", chat_type="p2p")]
+    )
+    config = _config(daemon=DaemonConfig(ingest_tick_budget_seconds=10))
+
+    # The soft fetch deadline is five seconds before the ten-second deadline.
+    # It stops before p2, leaving enough time to route the first fetched page.
+    first_clock = iter([0.0, 0.0, 5.0, 5.0])
+    first = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+        monotonic=lambda: next(first_clock, 5.0),
+    ).ingest_p2p(run_id="run_1")
+
+    assert first.processed == 1
+    checkpoint = store.get_checkpoint("ingest.p2p")
+    assert checkpoint is not None
+    assert checkpoint["backlog"]["reason"] == "tick_budget_exhausted"
+    assert checkpoint["backlog"]["next_page_token"] == "p2"
+    assert "processing" not in checkpoint["backlog"]
+
+    second_clock = iter([0.0, 0.0, 0.0])
+    second = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+        monotonic=lambda: next(second_clock, 0.0),
+    ).ingest_p2p(run_id="run_2")
+
+    assert second.processed == 1
+    checkpoint = store.get_checkpoint("ingest.p2p")
+    assert checkpoint is not None and "backlog" not in checkpoint
+    assert fake.calls == ["search:p2p:False:None", "search:p2p:False:p2"]
+
+
 def test_invalid_resumed_page_token_restarts_fixed_window_without_duplicates(
     tmp_path: Path,
 ) -> None:

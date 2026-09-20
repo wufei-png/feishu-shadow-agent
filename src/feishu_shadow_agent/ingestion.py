@@ -95,6 +95,7 @@ class IngestionFeishuClient(Protocol):
 
 
 PAGE_SIZE = 50
+MAX_PROCESSING_RESERVE_SECONDS = 5.0
 FEISHU_MESSAGE_TIMEZONE = ZoneInfo("Asia/Shanghai")
 IMAGE_KEY_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])(img_[A-Za-z0-9_-]+)(?![A-Za-z0-9_-])"
@@ -910,6 +911,13 @@ class IngestionService:
         self.monotonic = monotonic or time.monotonic
         self.ingest_deadline = (
             self.monotonic() + config.daemon.ingest_tick_budget_seconds
+        )
+        # Do not let a sequence of individually successful page calls consume
+        # the entire shared tick.  A bounded reserve lets the already-fetched
+        # batch reach a durable processing boundary in the same tick.
+        self.ingest_fetch_deadline = self.ingest_deadline - min(
+            MAX_PROCESSING_RESERVE_SECONDS,
+            config.daemon.ingest_tick_budget_seconds / 2,
         )
 
     def run_approval_inbox_placeholder(self, *, run_id: str) -> StageResult:
@@ -1933,7 +1941,12 @@ class IngestionService:
                 return DrainResult(
                     items, False, page_token, page_number, "message_cap_exhausted"
                 )
-            if self.monotonic() >= self.ingest_deadline:
+            now = self.monotonic()
+            if now >= self.ingest_deadline:
+                return DrainResult(
+                    items, False, page_token, page_number, "tick_budget_exhausted"
+                )
+            if items and now >= self.ingest_fetch_deadline:
                 return DrainResult(
                     items, False, page_token, page_number, "tick_budget_exhausted"
                 )
