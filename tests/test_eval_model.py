@@ -456,10 +456,14 @@ def test_resume_timeline_seeds_context_without_an_extra_backend_call(
     loaded = _loaded(tmp_path)
     context = _message("om_context", minute=1)
     context["text"] = "已确认的前置事实"
+    context["source_revision"] = 1
+    context["source_task_membership"] = True
     first = _message("om_1", minute=2)
     first["text"] = "第一个需要回答的问题"
+    first["source_revision"] = 1
     target = _message("om_2", minute=3)
     target["text"] = "最终需要回答的问题"
+    target["source_revision"] = 1
     case = _golden_case(
         tmp_path,
         loaded.path,
@@ -507,11 +511,13 @@ def test_resume_timeline_seeds_context_without_an_extra_backend_call(
 
 def test_resume_timeline_rejects_mismatched_source_revision(tmp_path: Path) -> None:
     loaded = _loaded(tmp_path)
+    message = _message("om_1", minute=1)
+    message["source_revision"] = 1
     case = _golden_case(
         tmp_path,
         loaded.path,
         "task-session-timeline-revision",
-        [_message("om_1", minute=1)],
+        [message],
         {
             "schema_version": "eval_case_v1",
             "case_type": "task-session",
@@ -533,6 +539,38 @@ def test_resume_timeline_rejects_mismatched_source_revision(tmp_path: Path) -> N
     assert exit_code == 2
     assert (
         "source_revision does not match" in read_yaml(run_dir / "report.yaml")["error"]
+    )
+
+
+def test_resume_timeline_requires_captured_source_revision(tmp_path: Path) -> None:
+    loaded = _loaded(tmp_path)
+    case = _golden_case(
+        tmp_path,
+        loaded.path,
+        "task-session-missing-revision",
+        [_message("om_1", minute=1)],
+        {
+            "schema_version": "eval_case_v1",
+            "case_type": "task-session",
+            "mode": "resume",
+            "turns": [{"message_id": "om_1", "kind": "target", "source_revision": 1}],
+            "resources": [],
+        },
+        {
+            "schema_version": "task_session_labels_v1",
+            "answerability": "no_reply",
+            "watch_action": "keep_watching",
+        },
+    )
+
+    run_dir, exit_code = EvalService(loaded=loaded).run_task_session(
+        case_dir=case, label=None, dry_run_backend=True
+    )
+
+    assert exit_code == 2
+    assert (
+        "missing source_revision from capture"
+        in read_yaml(run_dir / "report.yaml")["error"]
     )
 
 
@@ -577,6 +615,55 @@ def test_resume_timeline_rejects_owner_context(tmp_path: Path) -> None:
 
     assert exit_code == 2
     assert "cannot be an owner message" in read_yaml(run_dir / "report.yaml")["error"]
+
+
+def test_resume_timeline_requires_captured_task_membership_for_context(
+    tmp_path: Path,
+) -> None:
+    loaded = _loaded(tmp_path)
+    context = _message("om_context", minute=1)
+    context["source_revision"] = 1
+    target = _message("om_target", minute=2)
+    target["source_revision"] = 1
+    case = _golden_case(
+        tmp_path,
+        loaded.path,
+        "task-session-context-membership",
+        [context, target],
+        {
+            "schema_version": "eval_case_v1",
+            "case_type": "task-session",
+            "mode": "resume",
+            "turns": [
+                {
+                    "message_id": "om_context",
+                    "kind": "context",
+                    "source_revision": 1,
+                },
+                {
+                    "message_id": "om_target",
+                    "kind": "target",
+                    "source_revision": 1,
+                },
+            ],
+            "resources": [],
+        },
+        {
+            "schema_version": "task_session_labels_v1",
+            "answerability": "no_reply",
+            "watch_action": "keep_watching",
+        },
+    )
+
+    run_dir, exit_code = EvalService(loaded=loaded).run_task_session(
+        case_dir=case, label=None, dry_run_backend=True
+    )
+
+    assert exit_code == 2
+    assert (
+        "capture task-membership provenance"
+        in read_yaml(run_dir / "report.yaml")["error"]
+    )
 
 
 def test_resume_can_rebuild_final_turn_with_bounded_context(tmp_path: Path) -> None:

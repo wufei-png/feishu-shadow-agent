@@ -321,8 +321,11 @@ def test_capture_reads_minimal_task_fixture_from_production_store(
     store.initialize()
     normalized = MessageNormalizer(owner_open_id="ou_owner").normalize(first)
     store.upsert_message(normalized)
+    revised = first | {"text": "@Owner revised task"}
+    revised_normalized = MessageNormalizer(owner_open_id="ou_owner").normalize(revised)
+    assert store.upsert_message_with_revision(revised_normalized).revision == 2
     store.create_task_for_message(
-        normalized,
+        revised_normalized,
         watch_until="2026-07-10T12:00:00+08:00",
         task_label="captured task",
     )
@@ -345,6 +348,10 @@ def test_capture_reads_minimal_task_fixture_from_production_store(
             "message_ids": ["om_1"],
         }
     }
+    captured = {row["message_id"]: row for row in read_jsonl(case / "messages.jsonl")}
+    assert captured["om_1"]["source_revision"] == 2
+    assert captured["om_1"]["source_task_membership"] is True
+    assert "source_revision" not in captured["om_2"]
 
 
 def test_promote_rechecks_sensitive_source_config(tmp_path: Path) -> None:

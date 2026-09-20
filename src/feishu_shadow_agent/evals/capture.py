@@ -110,6 +110,7 @@ class CaptureService:
             raw_by_id.values(),
             key=lambda raw: (_raw_sent_at(raw) or "", message_id_from_raw(raw)),
         )
+        self._record_message_provenance(raws)
         _, case_dir = reserve_run_dir(
             evals_base_dir(self.loaded) / "captured", "capture", label
         )
@@ -191,6 +192,49 @@ class CaptureService:
         )
         _write_review_markdown(case_dir, resource_errors=resource_errors)
         return case_dir
+
+    def _record_message_provenance(self, raws: list[dict[str, Any]]) -> None:
+        database = resolve_relative_path(
+            self.loaded.config.storage.sqlite_path, self.loaded.base_dir
+        )
+        if not database.is_file():
+            return
+        message_ids = sorted(
+            {message_id for raw in raws if (message_id := message_id_from_raw(raw))}
+        )
+        if not message_ids:
+            return
+        placeholders = ",".join("?" for _ in message_ids)
+        try:
+            with sqlite3.connect(
+                f"{database.as_uri()}?mode=ro", uri=True
+            ) as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    # Placeholders are generated from message IDs; values remain bound.
+                    f"""
+                    SELECT m.message_id, m.revision,
+                           EXISTS(
+                             SELECT 1 FROM task_messages tm
+                             WHERE tm.message_id = m.message_id
+                           ) AS task_member
+                    FROM messages m
+                    WHERE m.message_id IN ({placeholders})
+                    """,  # noqa: S608
+                    message_ids,
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise EvalError(
+                f"failed to record capture message provenance: {exc}"
+            ) from exc
+        provenance = {str(row["message_id"]): row for row in rows}
+        for raw in raws:
+            message_id = message_id_from_raw(raw)
+            row = provenance.get(message_id)
+            if row is None:
+                continue
+            raw["source_revision"] = int(row["revision"])
+            raw["source_task_membership"] = bool(row["task_member"])
 
     def _resolve_source(self, seed: dict[str, Any]) -> str:
         message = self.normalizer.normalize(seed)

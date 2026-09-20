@@ -265,6 +265,10 @@ def _validate_task_session_context_roles(
                 "task-session context cannot be an owner message because "
                 "production routes owner replies to takeover"
             )
+        if raw_messages[turn.message_id].get("source_task_membership") is not True:
+            raise EvalError(
+                "task-session context must record capture task-membership provenance"
+            )
 
 
 def _validate_scenario_time_order(
@@ -400,11 +404,12 @@ def _message_position(raw: dict[str, Any]) -> int:
 
 
 def _source_revision(raw: dict[str, Any]) -> int:
-    value = raw.get("source_revision", 1)
+    message_id = message_id_from_raw(raw)
+    if "source_revision" not in raw:
+        raise EvalError(f"message {message_id} is missing source_revision from capture")
+    value = raw["source_revision"]
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise EvalError(
-            f"message {message_id_from_raw(raw)} has invalid source_revision"
-        )
+        raise EvalError(f"message {message_id} has invalid source_revision")
     return value
 
 
