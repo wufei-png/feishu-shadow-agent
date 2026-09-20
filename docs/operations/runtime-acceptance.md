@@ -27,16 +27,21 @@ dry-run。临时库在进程结束时删除，未写入项目的 `data/`、`logs
 
 ## 当前阻塞条件
 
-现有 `data/agent.sqlite3` 的 `PRAGMA user_version` 为 `1`，而当前 runtime schema 为
-`7`。当前迁移路径只接受 v2、v3、v5 或 v6 的升级；因此普通
-`doctor --config config.yaml` 在 health checks 前以
-`SQLite database is not the current schema baseline; configure an empty database`
-失败。该库未被迁移、清空或修改。
+原 `data/agent.sqlite3` 的 `PRAGMA user_version` 为 `1`，而当前 runtime schema 为
+`7`。当前迁移路径只接受 v2、v3、v5 或 v6 的升级。经 owner 明确授权放弃该库的历史后，
+它已移动到同一 ignored `data/` 目录的带日期归档名；配置路径现在使用新建的 v7 库。
+新库已执行 `policy import-config`，有一条 global policy 和一个 chat policy，import
+source 回读为 `matches`；正式 `doctor --config config.yaml` 的所有 13 项 critical 和 4
+项 warning 均通过。
 
-当前 CLI 的 daemon 是持续运行模式；它没有计划中示例的 `--once` 参数。因此未在这个
-旧库上启动 daemon dry-run，也没有收集或写入实际 ingest checkpoint。没有证据表明配置
-中的 chat 是获准的离群/重入测试 chat，故未变更 bot membership，未发送真实回复，也未
-触发 owner notification。
+新库当前没有 ingest source、backlog、active task、pending action 或 membership fact。
+以 user identity 对现有配置 chat 做了一次只读 `chat.members bots` 探测：调用成功，列表
+中有一个 bot，但不是当前认证的 bot identity。该 chat 尚未被明确指定为可离群/重入的
+测试 chat，因此没有把探测写为 runtime fact、没有改 Product Policy、没有创建 owner
+notification，也没有发送消息。
+
+当前 CLI 的 daemon 是持续运行模式；它没有计划中示例的 `--once` 参数。因此尚未启动
+持续 daemon dry-run，也没有收集实际 ingest checkpoint。
 
 ## 验收状态
 
@@ -46,6 +51,5 @@ dry-run。临时库在进程结束时删除，未写入项目的 `data/`、`logs
 | S5 membership 恢复 | 未验收 | 获准测试 chat 上的 `present → absent → unknown/过期 → recovered` 时间线、Effective Policy/资源与回复降级、episode 通知以及 Product Policy 未变化的回读。 |
 
 后续现场验收前，owner 需要提供或确认：可恢复的测试 chat 及临时移除/重新加入 bot 的
-授权、受控高流量测试源，以及可安全初始化并导入策略的当前 schema runtime store（或对
-现有 v1 数据的单独迁移/替换决定）。满足这些条件后，使用真实 daemon tick、status、
-checkpoint 和脱敏日志计数补全本记录；不得把本次预检或 fixture 测试标作现场通过。
+授权，以及受控高流量测试源。满足这些条件后，使用真实 daemon tick、status、checkpoint
+和脱敏日志计数补全本记录；不得把本次预检、fixture 测试或未授权 chat 探测标作现场通过。
