@@ -536,6 +536,49 @@ def test_resume_timeline_rejects_mismatched_source_revision(tmp_path: Path) -> N
     )
 
 
+def test_resume_timeline_rejects_owner_context(tmp_path: Path) -> None:
+    loaded = _loaded(tmp_path)
+    context = _message("om_context", minute=1)
+    context["sender_id"] = "ou_owner"
+    target = _message("om_target", minute=2)
+    case = _golden_case(
+        tmp_path,
+        loaded.path,
+        "task-session-owner-context",
+        [context, target],
+        {
+            "schema_version": "eval_case_v1",
+            "case_type": "task-session",
+            "mode": "resume",
+            "turns": [
+                {
+                    "message_id": "om_context",
+                    "kind": "context",
+                    "source_revision": 1,
+                },
+                {
+                    "message_id": "om_target",
+                    "kind": "target",
+                    "source_revision": 1,
+                },
+            ],
+            "resources": [],
+        },
+        {
+            "schema_version": "task_session_labels_v1",
+            "answerability": "no_reply",
+            "watch_action": "keep_watching",
+        },
+    )
+
+    run_dir, exit_code = EvalService(loaded=loaded).run_task_session(
+        case_dir=case, label=None, dry_run_backend=True
+    )
+
+    assert exit_code == 2
+    assert "cannot be an owner message" in read_yaml(run_dir / "report.yaml")["error"]
+
+
 def test_resume_can_rebuild_final_turn_with_bounded_context(tmp_path: Path) -> None:
     loaded = _loaded(tmp_path)
     case = _golden_case(

@@ -222,6 +222,13 @@ def _validate_case_relationships(
     raw_messages: dict[str, dict[str, Any]],
     run_config: LoadedConfig,
 ) -> None:
+    if isinstance(scenario, TaskSessionScenario):
+        _validate_task_session_context_roles(
+            scenario,
+            raw_messages=raw_messages,
+            owner_open_id=run_config.config.owner.open_id,
+        )
+        return
     if not isinstance(scenario, RouterScenario):
         return
     if labels is not None:
@@ -238,6 +245,26 @@ def _validate_case_relationships(
         last_message_time = _message_datetime(raw_messages[fixture.message_ids[-1]])
         if last_message_time + timedelta(minutes=watch_minutes) <= target_time:
             raise EvalError(f"watching task fixture is expired at target: {alias}")
+
+
+def _validate_task_session_context_roles(
+    scenario: TaskSessionScenario,
+    *,
+    raw_messages: dict[str, dict[str, Any]],
+    owner_open_id: str,
+) -> None:
+    if scenario.turns is None:
+        return
+    normalizer = MessageNormalizer(owner_open_id=owner_open_id)
+    for turn in scenario.turns:
+        if turn.kind != "context":
+            continue
+        message = normalizer.normalize(raw_messages[turn.message_id])
+        if message.sender_role == "owner_message":
+            raise EvalError(
+                "task-session context cannot be an owner message because "
+                "production routes owner replies to takeover"
+            )
 
 
 def _validate_scenario_time_order(
