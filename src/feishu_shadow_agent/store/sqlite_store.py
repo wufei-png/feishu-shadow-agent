@@ -4983,7 +4983,11 @@ class SQLiteStore:
         now: str,
     ) -> MessageUpsertResult:
         existing = conn.execute(
-            "SELECT revision, semantic_hash, is_deleted FROM messages WHERE message_id = ?",
+            """
+            SELECT revision, semantic_hash, is_deleted, normalized_json
+            FROM messages
+            WHERE message_id = ?
+            """,
             (message.message_id,),
         ).fetchone()
         semantic_hash = _message_semantic_hash(message)
@@ -4999,6 +5003,7 @@ class SQLiteStore:
                     "message_type": message.message_type,
                     "sender_name": message.sender_name,
                     "is_deleted": message.is_deleted,
+                    "semantic_hash_history": [semantic_hash],
                 },
                 ensure_ascii=False,
                 default=str,
@@ -5056,9 +5061,27 @@ class SQLiteStore:
                 is_deleted=True,
                 semantic_hash=previous_hash,
             )
+        uninitialized_hash = previous_hash == ""
+        semantic_hash_history = (
+            []
+            if uninitialized_hash
+            else _message_semantic_hash_history(
+                existing["normalized_json"], current_hash=previous_hash
+            )
+        )
+        # Poll windows may overlap, so an older snapshot can arrive after a
+        # newer edit. Without an upstream revision token, never let a snapshot
+        # that this store has already accepted roll the message back.
+        if semantic_hash in semantic_hash_history:
+            return MessageUpsertResult(
+                inserted=False,
+                changed=False,
+                revision=previous_revision,
+                is_deleted=False,
+                semantic_hash=previous_hash,
+            )
         # Migrated v2 rows keep semantic_hash=''. Stamp the live snapshot
         # without creating a revision so the first poll is not an edit.
-        uninitialized_hash = previous_hash == ""
         changed = previous_hash != semantic_hash or message.is_deleted
         if not changed:
             return MessageUpsertResult(
@@ -5086,6 +5109,7 @@ class SQLiteStore:
                 "message_type": message.message_type,
                 "sender_name": message.sender_name,
                 "is_deleted": effective_deleted,
+                "semantic_hash_history": [*semantic_hash_history, semantic_hash],
             },
             ensure_ascii=False,
             default=str,
@@ -5551,6 +5575,18 @@ def _message_semantic_hash(message: NormalizedMessage) -> str:
     }
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
     return sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _message_semantic_hash_history(value: Any, *, current_hash: str) -> list[str]:
+    history_value = _loads_json_object(value).get("semantic_hash_history")
+    history = (
+        [item for item in cast(list[object], history_value) if isinstance(item, str)]
+        if isinstance(history_value, list)
+        else []
+    )
+    if current_hash and current_hash not in history:
+        history.append(current_hash)
+    return history
 
 
 def _parse_datetime_or_none(value: Any) -> datetime | None:

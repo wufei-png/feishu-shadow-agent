@@ -1140,6 +1140,21 @@ def test_concurrent_stale_poll_cannot_revive_tombstone(tmp_path: Path) -> None:
     assert stored["text"] == ""
 
 
+def test_late_seen_snapshot_cannot_roll_back_edit(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    source = _message("old source")
+    store.upsert_message(source)
+
+    edited = store.upsert_message_with_revision(replace(source, text="new source"))
+    stale = store.upsert_message_with_revision(source)
+
+    assert (edited.changed, edited.revision) == (True, 2)
+    assert (stale.changed, stale.revision) == (False, 2)
+    stored = store.get_message(source.message_id)
+    assert stored is not None
+    assert stored["text"] == "new source"
+
+
 def test_concurrent_stale_poll_cannot_roll_back_edit(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     source = _message("old source")
@@ -1173,8 +1188,5 @@ def test_concurrent_stale_poll_cannot_roll_back_edit(tmp_path: Path) -> None:
     stored = store.get_message(source.message_id)
     assert stored is not None
     assert stored["is_deleted"] == 0
-    if stored["revision"] == 1:
-        assert stored["text"] == "old source"
-    else:
-        assert stored["revision"] == 2
-        assert stored["text"] == "new source"
+    assert stored["revision"] == 2
+    assert stored["text"] == "new source"
