@@ -15,6 +15,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from .config import AppConfig
+from .feishu.lark_cli import LarkCliCommandError
 from .jsonl import JSONLLogger
 from .membership import (
     classify_bot_membership_absence,
@@ -138,6 +139,29 @@ class ResourceQuotaDecision:
     allow: bool
     status: str | None = None
     raw: dict[str, Any] | None = None
+
+
+def _token_fingerprint(token: str | None) -> str | None:
+    return None if token is None else sha256(token.encode()).hexdigest()[:16]
+
+
+def _json_error_summary(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        key: value[key]
+        for key in ("code", "msg", "message", "request_id")
+        if isinstance(value.get(key), (str, int))
+    }
+
+
+def _redacted_cli_argv(argv: list[str]) -> list[str]:
+    sensitive = {"--page-token", "--chat-id", "--user-id"}
+    result = list(argv)
+    for index, value in enumerate(result[:-1]):
+        if value in sensitive:
+            result[index + 1] = "<redacted>"
+    return result
 
 
 def normalize_message_sent_at(value: str | None) -> str | None:
@@ -1765,15 +1789,28 @@ class IngestionService:
             except Exception as exc:
                 if page_number == 0 and window.page_token is not None:
                     self._reset_resumed_token(window, run_id=run_id, source=source)
+                data: dict[str, Any] = {
+                    "source": source,
+                    "page_number": page_number + 1,
+                    "has_page_token": page_token is not None,
+                    "page_token_sha256": _token_fingerprint(page_token),
+                    "error": str(exc),
+                }
+                if isinstance(exc, LarkCliCommandError):
+                    result = exc.result
+                    data.update(
+                        {
+                            "cli_exit_code": result.exit_code,
+                            "cli_timed_out": result.timed_out,
+                            "cli_stderr": result.stderr[:500],
+                            "cli_json_error": _json_error_summary(result.json_data),
+                            "cli_argv": _redacted_cli_argv(result.argv),
+                        }
+                    )
                 self.logger.error(
                     "message_page_fetch_failed",
                     run_id=run_id,
-                    data={
-                        "source": source,
-                        "page_number": page_number + 1,
-                        "has_page_token": page_token is not None,
-                        "error": str(exc),
-                    },
+                    data=data,
                 )
                 raise
             if len(page.items) > page_size:

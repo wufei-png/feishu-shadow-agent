@@ -11,6 +11,14 @@ from ..types import LarkCliResult, MessagePage
 Runner = Callable[[list[str], int], LarkCliResult]
 
 
+class LarkCliCommandError(RuntimeError):
+    """Preserve a failed CLI result for boundary-specific recovery and audit."""
+
+    def __init__(self, result: LarkCliResult):
+        super().__init__(result.error or "lark-cli command failed")
+        self.result = result
+
+
 class LarkCliClient:
     def __init__(
         self,
@@ -662,7 +670,7 @@ def _json_stdout(stdout: str) -> str:
 
 def _message_page_from_result(result: LarkCliResult) -> MessagePage:
     if not result.ok:
-        raise RuntimeError(result.error or "lark-cli command failed")
+        raise LarkCliCommandError(result)
     return _extract_message_page(result.json_data)
 
 
