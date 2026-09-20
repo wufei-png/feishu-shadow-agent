@@ -77,6 +77,22 @@ def test_list_chat_bots_uses_installed_read_only_command_shape() -> None:
     ]
 
 
+def test_run_json_preserves_structured_error_envelope_from_failed_command() -> None:
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        return LarkCliResult(
+            argv=argv,
+            exit_code=1,
+            stdout='{"code":10002,"msg":"bot is not in the chat"}',
+            error="command failed",
+        )
+
+    result = LarkCliClient(path="lark-cli", runner=runner).run_json(["lark-cli", "x"])
+
+    assert not result.ok
+    assert result.error == "command failed"
+    assert result.json_data == {"code": 10002, "msg": "bot is not in the chat"}
+
+
 def test_list_p2p_messages_uses_user_identity_and_user_id() -> None:
     seen: list[list[str]] = []
 

@@ -32,6 +32,19 @@ class BotMembershipRefreshSummary:
     notifications: int = 0
 
 
+@dataclass(frozen=True)
+class BotMembershipAbsence:
+    endpoint: str
+    error_code: int
+
+
+_BOT_MEMBERSHIP_ABSENCE_ENDPOINTS = {
+    ("im", "+messages-resources-download"): "resource_download",
+    ("im", "+messages-reply"): "message_reply",
+}
+_BOT_NOT_IN_CHAT_ERROR_CODE = 10002
+
+
 class BotMembershipService:
     def __init__(
         self,
@@ -217,11 +230,17 @@ def _record_observation(
     return notification_id is not None
 
 
-def bot_membership_error(result: LarkCliResult) -> bool:
-    text = "\n".join(
-        part for part in (result.error, result.stderr, result.stdout) if part
-    )
-    return "234002" in text or "234040" in text or "invisible" in text.lower()
+def classify_bot_membership_absence(
+    result: LarkCliResult,
+) -> BotMembershipAbsence | None:
+    """Return confirmed bot absence only for a supported structured API error."""
+    if result.ok or not _command_uses_bot(result):
+        return None
+    endpoint = _BOT_MEMBERSHIP_ABSENCE_ENDPOINTS.get(tuple(result.argv[1:3]))
+    error_code = _structured_error_code(result.json_data)
+    if endpoint is None or error_code != _BOT_NOT_IN_CHAT_ERROR_CODE:
+        return None
+    return BotMembershipAbsence(endpoint=endpoint, error_code=error_code)
 
 
 def effective_membership_status(
@@ -256,6 +275,29 @@ def _bot_ids(value: Any) -> set[str]:
         for item in [cast(dict[str, Any], raw_item)]
         if item.get("bot_id")
     }
+
+
+def _command_uses_bot(result: LarkCliResult) -> bool:
+    return any(
+        result.argv[index : index + 2] == ["--as", "bot"]
+        for index in range(max(0, len(result.argv) - 1))
+    )
+
+
+def _structured_error_code(value: Any) -> int | None:
+    if not isinstance(value, dict):
+        return None
+    source = cast(dict[str, Any], value)
+    code = source.get("code")
+    if code is None:
+        error = source.get("error")
+        if isinstance(error, dict):
+            code = cast(dict[str, Any], error).get("code")
+    if isinstance(code, int) and not isinstance(code, bool):
+        return code
+    if isinstance(code, str) and code.isdecimal():
+        return int(code)
+    return None
 
 
 def _bot_open_id_from_auth(value: Any) -> str | None:
