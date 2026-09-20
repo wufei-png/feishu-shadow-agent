@@ -252,11 +252,15 @@ def seed_task_session_scenario(
     *, runtime: TrialRuntime, case: LoadedEvalCase, loaded: LoadedConfig
 ) -> tuple[TaskRecord, NormalizedMessage, list[NormalizedMessage]]:
     scenario = _task_session_scenario(case)
-    message_ids = (
-        list(scenario.message_ids or [])
-        if scenario.mode == "initial"
-        else list(scenario.setup_message_ids or [])
-    )
+    if scenario.mode == "initial":
+        message_ids = list(scenario.message_ids or [])
+    elif scenario.turns is not None:
+        first_target = next(
+            index for index, turn in enumerate(scenario.turns) if turn.kind == "target"
+        )
+        message_ids = [turn.message_id for turn in scenario.turns[: first_target + 1]]
+    else:
+        message_ids = list(scenario.setup_message_ids or [])
     normalizer = MessageNormalizer(owner_open_id=loaded.config.owner.open_id)
     messages = [normalizer.normalize(case.raw_messages[item]) for item in message_ids]
     task = _seed_task_messages(

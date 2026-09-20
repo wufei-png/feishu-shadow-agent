@@ -157,6 +157,8 @@ def scenario_message_ids(scenario: EvalModel) -> list[str]:
     if isinstance(scenario, TaskSessionScenario):
         if scenario.mode == "initial":
             return list(scenario.message_ids or [])
+        if scenario.turns is not None:
+            return [turn.message_id for turn in scenario.turns]
         targets = (
             [scenario.target_message_id]
             if scenario.target_message_id is not None
@@ -264,6 +266,14 @@ def _validate_scenario_time_order(
             _require_increasing_message_order(
                 raws, "task-session setup and target message ids"
             )
+            if scenario.turns is not None:
+                for turn in scenario.turns:
+                    actual_revision = _source_revision(raw_messages[turn.message_id])
+                    if turn.source_revision != actual_revision:
+                        raise EvalError(
+                            "task-session turn source_revision does not match "
+                            f"captured message: {turn.message_id}"
+                        )
         _validate_task_session_chat(scenario, raw_messages)
         return
     if isinstance(scenario, FullChainScenario):
@@ -360,6 +370,15 @@ def _message_position(raw: dict[str, Any]) -> int:
     if isinstance(value, str) and value.isdigit():
         return int(value)
     return 0
+
+
+def _source_revision(raw: dict[str, Any]) -> int:
+    value = raw.get("source_revision", 1)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise EvalError(
+            f"message {message_id_from_raw(raw)} has invalid source_revision"
+        )
+    return value
 
 
 def _safe_path_part(value: str) -> str:

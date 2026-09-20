@@ -450,6 +450,92 @@ def test_resume_replays_multiple_targets_and_scores_final_turn(tmp_path: Path) -
     assert trial["target"]["plan"]["prompt_message_ids"] == ["om_3"]
 
 
+def test_resume_timeline_seeds_context_without_an_extra_backend_call(
+    tmp_path: Path,
+) -> None:
+    loaded = _loaded(tmp_path)
+    context = _message("om_context", minute=1)
+    context["text"] = "已确认的前置事实"
+    first = _message("om_1", minute=2)
+    first["text"] = "第一个需要回答的问题"
+    target = _message("om_2", minute=3)
+    target["text"] = "最终需要回答的问题"
+    case = _golden_case(
+        tmp_path,
+        loaded.path,
+        "task-session-timeline",
+        [context, first, target],
+        {
+            "schema_version": "eval_case_v1",
+            "case_type": "task-session",
+            "mode": "resume",
+            "turns": [
+                {
+                    "message_id": "om_context",
+                    "kind": "context",
+                    "source_revision": 1,
+                },
+                {"message_id": "om_1", "kind": "target", "source_revision": 1},
+                {"message_id": "om_2", "kind": "target", "source_revision": 1},
+            ],
+            "resources": [],
+        },
+        {
+            "schema_version": "task_session_labels_v1",
+            "answerability": "no_reply",
+            "watch_action": "keep_watching",
+        },
+    )
+    backend = StatefulNoReplyBackend()
+
+    run_dir, exit_code = EvalService(
+        loaded=loaded, backend_factory=lambda _: backend
+    ).run_task_session(case_dir=case, label=None, dry_run_backend=False)
+
+    assert exit_code == 0
+    assert backend.session_ids == [None, "session-1"]
+    assert "已确认的前置事实" in backend.prompts[0]
+    trial = read_yaml(run_dir / "trials/001/report.yaml")
+    assert trial["timeline"] == [
+        {"message_id": "om_context", "kind": "context", "source_revision": 1},
+        {"message_id": "om_1", "kind": "target", "source_revision": 1},
+        {"message_id": "om_2", "kind": "target", "source_revision": 1},
+    ]
+    assert trial["intermediate_targets"][0]["current_message_id"] == "om_1"
+    assert trial["target"]["current_message_id"] == "om_2"
+
+
+def test_resume_timeline_rejects_mismatched_source_revision(tmp_path: Path) -> None:
+    loaded = _loaded(tmp_path)
+    case = _golden_case(
+        tmp_path,
+        loaded.path,
+        "task-session-timeline-revision",
+        [_message("om_1", minute=1)],
+        {
+            "schema_version": "eval_case_v1",
+            "case_type": "task-session",
+            "mode": "resume",
+            "turns": [{"message_id": "om_1", "kind": "target", "source_revision": 2}],
+            "resources": [],
+        },
+        {
+            "schema_version": "task_session_labels_v1",
+            "answerability": "no_reply",
+            "watch_action": "keep_watching",
+        },
+    )
+
+    run_dir, exit_code = EvalService(loaded=loaded).run_task_session(
+        case_dir=case, label=None, dry_run_backend=True
+    )
+
+    assert exit_code == 2
+    assert (
+        "source_revision does not match" in read_yaml(run_dir / "report.yaml")["error"]
+    )
+
+
 def test_resume_can_rebuild_final_turn_with_bounded_context(tmp_path: Path) -> None:
     loaded = _loaded(tmp_path)
     case = _golden_case(

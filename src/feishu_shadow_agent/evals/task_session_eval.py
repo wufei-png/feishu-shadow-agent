@@ -62,7 +62,47 @@ def run_task_session_trial(
     setup_report: dict[str, Any] | None = None
     intermediate_reports: list[dict[str, Any]] = []
     target_run: TaskSessionRunResult | None = None
-    if case.scenario.mode == "resume":
+    if case.scenario.turns is not None:
+        target_ids = _target_message_ids(case.scenario)
+        if current.message_id != target_ids[0]:
+            raise EvalError("task-session timeline did not seed its first target")
+        for index, target_id in enumerate(target_ids):
+            if index:
+                current = attach_task_session_target(
+                    runtime=runtime,
+                    case=case,
+                    loaded=loaded,
+                    task=task,
+                    message_id=target_id,
+                )
+                task = runtime.store.get_task_by_id(task.id)
+            target_run = _run_turn(
+                runner=runner,
+                runtime=runtime,
+                loaded=loaded,
+                backend=backend,
+                task=task,
+                current=current,
+                run_id=f"{run_id}-target-{index + 1:03d}",
+            )
+            _require_valid_run(target_run, stage="task-session target")
+            if target_run.result and target_run.result.session_id:
+                runtime.store.set_task_agent_session_id(
+                    task.id,
+                    target_run.result.session_id,
+                    backend_provider=str(backend.provider),
+                )
+            if index < len(target_ids) - 1:
+                intermediate_reports.append(
+                    _turn_report(target_run, current.message_id)
+                )
+                _apply_intermediate_output(
+                    runtime=runtime,
+                    task=task,
+                    run=target_run,
+                )
+                task = runtime.store.get_task_by_id(task.id)
+    elif case.scenario.mode == "resume":
         setup_run = _run_turn(
             runner=runner,
             runtime=runtime,
@@ -188,6 +228,9 @@ def run_task_session_trial(
         "schema_version": "task_session_trial_report_v1",
         "label_status": case.status,
         "mode": case.scenario.mode,
+        "timeline": None
+        if case.scenario.turns is None
+        else [turn.model_dump(mode="json") for turn in case.scenario.turns],
         "setup": setup_report,
         "intermediate_targets": intermediate_reports,
         "target": target_report,
@@ -436,6 +479,28 @@ def _judge_context(
                 case.raw_messages[item] for item in scenario.message_ids or []
             ]
         }
+    if scenario.turns is not None:
+        replies = {
+            str(report["current_message_id"]): report.get("output", {}).get(
+                "proposed_reply"
+            )
+            for report in intermediate_reports
+        }
+        return {
+            "turns": [
+                {
+                    "kind": turn.kind,
+                    "source_revision": turn.source_revision,
+                    "message": case.raw_messages[turn.message_id],
+                    **(
+                        {"model_reply": replies[turn.message_id]}
+                        if turn.kind == "target" and turn.message_id in replies
+                        else {}
+                    ),
+                }
+                for turn in scenario.turns
+            ]
+        }
     setup_ids = list(scenario.setup_message_ids or [])
     context = {
         "setup_messages": [case.raw_messages[item] for item in setup_ids],
@@ -456,6 +521,8 @@ def _judge_context(
 
 
 def _target_message_ids(scenario: TaskSessionScenario) -> list[str]:
+    if scenario.turns is not None:
+        return [turn.message_id for turn in scenario.turns if turn.kind == "target"]
     if scenario.target_message_id is not None:
         return [scenario.target_message_id]
     return list(scenario.target_message_ids or [])

@@ -187,6 +187,25 @@ resources: []
 
 Resume 会把全部 setup messages 作为一个真实 initial turn 执行。只有拿到真实 provider session id 后才 attach target，并按生产规则只把 target 送入 resume prompt；setup 失败不会回退为 initial。
 
+需要记录在 initial prompt 中真实可见、但本身不应触发后端调用的前置消息时，resume 可以使用有序 `turns`。每项都记录 capture 的 `source_revision`（缺省为 1）；loader 会与 `messages.jsonl` 中的同名字段核对。`context` 只能出现在第一个 `target` 之前：它们与第一个 target 一起进入 initial prompt，因此不会产生额外调用。第一个 target 之后的 context 在生产 resumed session 中不会自动传给 provider，评测不得把这种不可见上下文伪装为可重放事实。
+
+```yaml
+schema_version: eval_case_v1
+case_type: task-session
+mode: resume
+turns:
+  - message_id: om_1
+    kind: context
+    source_revision: 1
+  - message_id: om_2
+    kind: target
+    source_revision: 1
+  - message_id: om_3
+    kind: target
+    source_revision: 1
+resources: []
+```
+
 Golden labels：
 
 ```yaml
