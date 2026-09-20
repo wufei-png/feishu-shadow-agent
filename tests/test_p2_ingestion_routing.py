@@ -162,6 +162,23 @@ class PartialFailureFeishuClient(FakeFeishuClient):
         )
 
 
+class BotNotInChatFeishuClient(FakeFeishuClient):
+    def download_resource(self, **kwargs: Any) -> LarkCliResult:
+        super().download_resource(**kwargs)
+        return LarkCliResult(
+            [
+                "lark-cli",
+                "im",
+                "+messages-resources-download",
+                "--as",
+                "bot",
+            ],
+            1,
+            json_data={"code": 10002, "msg": "Bot can NOT be out of the chat"},
+            error="download failed",
+        )
+
+
 class FailingOnceRouter:
     def __init__(self, store: SQLiteStore):
         self.inner = MessageRouter(store=store)
@@ -2391,6 +2408,45 @@ def test_failed_resource_download_never_publishes_partial_file(
     assert resource["download_status"] == "failed"
     assert resource["path"] is None
     assert not list((tmp_path / "data/resources").rglob("*.*"))
+
+
+def test_confirmed_bot_not_in_chat_download_records_runtime_absence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake = BotNotInChatFeishuClient()
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(bot_joined=True)})
+    _seed_policy(store, cfg)
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+    )
+
+    service.process_raw_message(
+        _message(
+            "om_missing_bot",
+            mentions=[{"open_id": "ou_owner"}],
+            image_key="img_missing_bot",
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        resource = conn.execute(
+            "SELECT download_status FROM resources WHERE file_key = ?",
+            ("img_missing_bot",),
+        ).fetchone()
+    fact = store.get_bot_membership_fact("oc_1")
+    assert resource["download_status"] == "bot_invisible"
+    assert fact is not None
+    assert fact["status"] == "absent"
+    assert fact["error_code"] == 10002
+    assert fact["error_endpoint"] == "resource_download"
 
 
 def test_resource_quota_guard_removes_only_stale_managed_partial_downloads(

@@ -16,7 +16,10 @@ from zoneinfo import ZoneInfo
 
 from .config import AppConfig
 from .jsonl import JSONLLogger
-from .membership import bot_membership_error, record_bot_membership_failure
+from .membership import (
+    classify_bot_membership_absence,
+    record_bot_membership_absence,
+)
 from .message_eligibility import MessageEligibilityPolicy
 from .paths import resolve_agent_working_dir
 from .policy import PolicyResolver
@@ -579,8 +582,8 @@ class ResourceProcessor:
                 )
             else:
                 self.quota.delete_downloaded_file(temporary_path)
-                membership_failure = _bot_invisible_error(result)
-                status = "bot_invisible" if membership_failure else "failed"
+                membership_absence = classify_bot_membership_absence(result)
+                status = "bot_invisible" if membership_absence else "failed"
                 self.store.upsert_resource(
                     resource,
                     download_status=status,
@@ -604,15 +607,17 @@ class ResourceProcessor:
                         "timed_out": result.timed_out,
                     },
                 )
-                if membership_failure:
-                    record_bot_membership_failure(
+                if membership_absence:
+                    record_bot_membership_absence(
                         store=self.store,
                         config=self.config,
                         logger=self.logger,
                         chat_id=message.chat_id,
+                        chat_type=message.chat_type,
                         run_id=run_id,
                         source="resource_download_failure",
                         error=result.error or result.stderr,
+                        absence=membership_absence,
                     )
 
     def _verified_existing_download(
@@ -2143,7 +2148,3 @@ def _normalized_download_result(
     if result_map.get("output") != temporary_output:
         return result_map
     return result_map | {"output": final_output}
-
-
-def _bot_invisible_error(result: Any) -> bool:
-    return isinstance(result, LarkCliResult) and bot_membership_error(result)

@@ -403,6 +403,8 @@ class OperatorQueryService:
                     "next_probe_at": fact.get("next_probe_at"),
                     "source": fact.get("source"),
                     "error": fact.get("error"),
+                    "error_code": fact.get("error_code"),
+                    "error_endpoint": fact.get("error_endpoint"),
                     "updated_at": row["updated_at"],
                 }
             )
@@ -420,6 +422,8 @@ class OperatorQueryService:
                     "next_probe_at": None,
                     "source": None,
                     "error": None,
+                    "error_code": None,
+                    "error_endpoint": None,
                     "updated_at": None,
                 }
             )
