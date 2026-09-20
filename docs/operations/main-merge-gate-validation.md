@@ -20,8 +20,15 @@
   返回“Changes must be made through a pull request”和“9 of 9 required status checks are
   expected”。该对象未进入远端分支。
 
-## 进行中的 PR 验收
+## PR 验收
 
-本文件所在 PR 在全部 checks 未完成时先尝试 merge，以记录门禁拒绝；等待完整 CI 成功
-后再由同一 PR 验证允许 merge。完成后在本节补充 PR 链接、拒绝结果、允许合入结果和
-对应 CI run。
+- 测试 PR：[\#27](https://github.com/wufei-png/feishu-shadow-agent/pull/27)。
+- 在该 PR 的 checks 仍为 `IN_PROGRESS` 时运行 `gh pr merge 27 --merge` 被拒绝，CLI
+  返回“the base branch policy prohibits the merge”，PR 状态为 `BLOCKED`。未使用
+  `--admin` 或 `--auto` 绕过门禁。
+- 首轮 push 与 pull-request CI 分别为
+  [35506441568](https://github.com/wufei-png/feishu-shadow-agent/actions/runs/35506441568) 和
+  [35506443733](https://github.com/wufei-png/feishu-shadow-agent/actions/runs/35506443733)，
+  九项 required checks 和 non-blocking Coverage 都成功。
+- 本次最终验收记录的提交再次触发同一 PR 的 required checks；在它们成功后，使用普通
+  merge 合入 #27。该 merge commit、PR checks 与本记录共同证明完整 checks 可以合并。
