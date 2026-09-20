@@ -47,8 +47,24 @@ notification，也没有发送消息。
 
 | 链路 | 状态 | 缺少的现场证据 |
 | --- | --- | --- |
-| S4 有界 ingest 追赶 | 未验收 | 获准的受控高流量源、跨 tick 的 page/message cap 与 deadline 计数、固定窗口 checkpoint/backlog、重启 overlap 去重和最终追赶结果。 |
-| S5 membership 恢复 | 未验收 | 获准测试 chat 上的 `present → absent → unknown/过期 → recovered` 时间线、Effective Policy/资源与回复降级、episode 通知以及 Product Policy 未变化的回读。 |
+| S4 有界 ingest 追赶 | 失败，待诊断 | 获准测试群的 1,001 条 `group_at_me` 测试消息已分页确认（21 页），但 daemon 分别在第 6、3、1 页收到未分类的 `command failed`；未到 page/message cap，故没有可验证的 backlog/checkpoint 追赶或重启去重证据。 |
+| S5 membership 恢复 | 部分通过 | 已得到 `present → absent → unknown（过期）→ recovered` 的真实 daemon/Effective Policy 时间线和 episode 通知预览；未以真实资源或真实回复发送来验证降级，因为本会话明确保持 dry-run。 |
+
+## 2026-09-20 现场结果
+
+- 测试群由 owner 创建并授权；测试策略在 Product Policy Store 中以 `auto_reply=false`、
+  `bot_preferred` 和 user fallback 写入。该一次 owner 操作将 Policy Audit 基线设为 3。
+- 使用 bot identity 发送了 1,001 条带稳定 idempotency key 的直接 mention 测试消息；分页
+  回读为 21 页、1,001 条。30 次初始发送失败经过只重试缺失 id 后补齐，没有重复计数。
+- 三次 dry-run daemon 读取该窗口时，`group_at_me` 分别在第 6、3、1 页以 `command failed`
+  失败。该错误发生在 bounded drain 完成前，不能推断为 page cap、message cap 或 tick budget
+  耗尽；必须先保留/分类 lark-cli 失败 envelope，再重跑固定窗口。
+- membership 主动探测先记录 `present`。owner 移除 bot、确认 TTL 到期后再次探测记录
+  `absent`，Effective Policy 的 `bot_joined=false`；停止刷新超过 TTL 后只读 Effective Policy
+  得到 `unknown` 且回退为 `bot_joined=true`；owner 重新加入 bot 后探测记录 `present` 并创建
+  recovery notification。全过程 Policy Audit 保持 3。
+- 所有 daemon 运行均为 dry-run，未传 `--send-owner-notifications`；notification 仅预览，
+  `send_reply` 的 production count 为 0。
 
 后续现场验收前，owner 需要提供或确认：可恢复的测试 chat 及临时移除/重新加入 bot 的
 授权，以及受控高流量测试源。满足这些条件后，使用真实 daemon tick、status、checkpoint
