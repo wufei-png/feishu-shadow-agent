@@ -12,14 +12,17 @@
   single-owner 仓库。
 - `required_status_checks` 为严格模式，包含[运维说明](main-merge-gate.md)列出的九项
   checks；`Coverage (non-blocking)` 未列入。
-- `bypass_actors` 为空，规则读取结果的 `current_user_can_bypass` 为 `never`；紧急路径
-  只能依照运维说明中有记录的临时 enforcement 调整和恢复执行。
+- 2026-09-20 策略更新后，`bypass_actors` 仅包含 GitHub users `wufei-png`
+  （ID `63766429`）和 `wufei2`（ID `72655761`），两者的 `bypass_mode` 均为 `always`。
+  这两人可放行 GH013；其余 actor 仍须走 PR 与必需检查。该更新不改变九项 required
+  checks、target 或 enforcement。为避免引入仅用于验收的 `main` 提交，本次以 ruleset API
+  回读确认 actor 配置，未追加直推测试提交。
 
 ## 已完成的行为证据
 
 - 2026-09-20，临时 Git commit object 尝试更新 `refs/heads/main` 被远端 `GH013` 拒绝；
   返回“Changes must be made through a pull request”和“9 of 9 required status checks are
-  expected”。该对象未进入远端分支。
+  expected”。该对象未进入远端分支。此证据发生在上述两个 user bypass actor 加入前。
 
 ## PR 验收
 
