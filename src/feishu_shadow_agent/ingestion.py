@@ -153,7 +153,16 @@ class ProcessingCursor:
 
 @dataclass(frozen=True)
 class RawBatchResult:
+    """Outcome of a bounded raw-message pass.
+
+    ``processed`` follows the routing-stage convention: it counts calls that
+    produced a routing result.  Some consumers, notably approval inbox, handle
+    a raw command successfully without producing one, so ``handled_items``
+    retains the independent safe-boundary count for their stage result.
+    """
+
     processed: int
+    handled_items: int
     complete: bool
     cursor: ProcessingCursor | None = None
 
@@ -1130,7 +1139,7 @@ class IngestionService:
         return StageResult(
             "approval_inbox",
             ok=drain.complete,
-            processed=batch.processed,
+            processed=batch.handled_items,
             error=None
             if drain.complete
             else f"approval inbox deferred: {drain.reason}",
@@ -1302,6 +1311,7 @@ class IngestionService:
             run_id=run_id,
         )
         processed = 0
+        handled_items = 0
         for raw in ordered[completed_items:]:
             if self.monotonic() >= self.ingest_deadline:
                 prefix_sha256 = self._processing_prefix_sha256(
@@ -1310,6 +1320,7 @@ class IngestionService:
                 )
                 return RawBatchResult(
                     processed=processed,
+                    handled_items=handled_items,
                     complete=False,
                     cursor=ProcessingCursor(
                         completed_items=(
@@ -1325,9 +1336,14 @@ class IngestionService:
                 run_id=run_id,
             )
             completed_items += 1
+            handled_items += 1
             if result is not None:
                 processed += 1
-        return RawBatchResult(processed=processed, complete=True)
+        return RawBatchResult(
+            processed=processed,
+            handled_items=handled_items,
+            complete=True,
+        )
 
     def _process_drain_batch(
         self,
