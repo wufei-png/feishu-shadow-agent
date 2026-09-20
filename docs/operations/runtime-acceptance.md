@@ -25,29 +25,23 @@ dry-run。临时库在进程结束时删除，未写入项目的 `data/`、`logs
 `test_dispatcher.py`、`test_operator_query.py`）。该结果只证明 fixture 契约，不替代
 下面的现场证据。
 
-## 当前阻塞条件
+## 运行库与执行界限
 
-原 `data/agent.sqlite3` 的 `PRAGMA user_version` 为 `1`，而当前 runtime schema 为
-`7`。当前迁移路径只接受 v2、v3、v5 或 v6 的升级。经 owner 明确授权放弃该库的历史后，
-它已移动到同一 ignored `data/` 目录的带日期归档名；配置路径现在使用新建的 v7 库。
-新库已执行 `policy import-config`，有一条 global policy 和一个 chat policy，import
-source 回读为 `matches`；正式 `doctor --config config.yaml` 的所有 13 项 critical 和 4
-项 warning 均通过。
+原 `data/agent.sqlite3` 的 `PRAGMA user_version` 为 `1`，当前 runtime schema 为 `7`，
+且迁移路径不接受 v1。经 owner 明确授权放弃历史后，旧库已归档在 ignored `data/` 目录，
+配置使用新的 v7 runtime store。新库已执行 `policy import-config`；一条 global policy 和
+一条 chat policy 回读为 `matches`，`doctor --config config.yaml` 的 13 项 critical 与 4 项
+warning 均通过。
 
-新库当前没有 ingest source、backlog、active task、pending action 或 membership fact。
-以 user identity 对现有配置 chat 做了一次只读 `chat.members bots` 探测：调用成功，列表
-中有一个 bot，但不是当前认证的 bot identity。该 chat 尚未被明确指定为可离群/重入的
-测试 chat，因此没有把探测写为 runtime fact、没有改 Product Policy、没有创建 owner
-notification，也没有发送消息。
-
-当前 CLI 的 daemon 是持续运行模式；它没有计划中示例的 `--once` 参数。因此尚未启动
-持续 daemon dry-run，也没有收集实际 ingest checkpoint。
+所有现场运行均为 `daemon --dry-run`，未传 `--send-owner-notifications`，未发送真实回复。
+每个 daemon 运行期间只有它一个 SQLite 写者；运行状态只通过 JSONL 读取，SQLite 的脱敏
+检查均在该 daemon 正常停止后进行。
 
 ## 验收状态
 
 | 链路 | 状态 | 缺少的现场证据 |
 | --- | --- | --- |
-| S4 有界 ingest 追赶 | 失败，待诊断 | 获准测试群的 1,001 条 `group_at_me` 测试消息已分页确认（21 页），但 daemon 分别在第 6、3、1 页收到未分类的 `command failed`；未到 page/message cap，故没有可验证的 backlog/checkpoint 追赶或重启去重证据。 |
+| S4 有界 ingest 追赶 | 通过 | 已在获准测试群以 1,001 条 `group_at_me` 消息验证固定窗口的 20 页 / 1,000 条 cap、处理 cursor、跨 tick 与干净重启恢复、终端 checkpoint 推进及全量追赶。 |
 | S5 membership 恢复 | 部分通过 | 已得到 `present → absent → unknown（过期）→ recovered` 的真实 daemon/Effective Policy 时间线和 episode 通知预览；未以真实资源或真实回复发送来验证降级，因为本会话明确保持 dry-run。 |
 
 ## 2026-09-20 现场结果
@@ -57,8 +51,9 @@ notification，也没有发送消息。
 - 使用 bot identity 发送了 1,001 条带稳定 idempotency key 的直接 mention 测试消息；分页
   回读为 21 页、1,001 条。30 次初始发送失败经过只重试缺失 id 后补齐，没有重复计数。
 - 三次 dry-run daemon 读取该窗口时，`group_at_me` 分别在第 6、3、1 页以 `command failed`
-  失败。该错误发生在 bounded drain 完成前，不能推断为 page cap、message cap 或 tick budget
-  耗尽；必须先保留/分类 lark-cli 失败 envelope，再重跑固定窗口。
+  失败。结构化 envelope 后续确认这些调用均为受控外层中断：`exit_code=-2`、
+  `timed_out=false`，且没有 stderr 或 JSON 错误；不是 CLI、认证/scope、限流、page token
+  或 ingest 处理错误。
 - membership 主动探测先记录 `present`。owner 移除 bot、确认 TTL 到期后再次探测记录
   `absent`，Effective Policy 的 `bot_joined=false`；停止刷新超过 TTL 后只读 Effective Policy
   得到 `unknown` 且回退为 `bot_joined=true`；owner 重新加入 bot 后探测记录 `present` 并创建
@@ -66,6 +61,37 @@ notification，也没有发送消息。
 - 所有 daemon 运行均为 dry-run，未传 `--send-owner-notifications`；notification 仅预览，
   `send_reply` 的 production count 为 0。
 
-后续现场验收前，owner 需要提供或确认：可恢复的测试 chat 及临时移除/重新加入 bot 的
-授权，以及受控高流量测试源。满足这些条件后，使用真实 daemon tick、status、checkpoint
-和脱敏日志计数补全本记录；不得把本次预检、fixture 测试或未授权 chat 探测标作现场通过。
+## S4 修复与复验（通过）
+
+### 根因与最小修复
+
+- 实际代码缺陷不是上述外层中断：旧路径的 tick deadline 只限制了获取，逐页启动
+  `lark-cli` 可以耗尽 30 秒预算，随后已获取批次的 normalize/routing 没有可恢复的处理边界。
+- `7bf19db` 将 deadline 覆盖到逐消息处理，在边界保存当前批次起始 page token、已完成数量
+  和不含原文的 replay-prefix digest；不会把 checkpoint 越过未处理尾部。
+- `b8d48b3` 在同一预算内保留最多 5 秒给处理；`2c17fbf` 将 digest 收紧为语义字段，避免
+  易变的搜索 enrichment 让安全重放错误重置。
+- `aa2ec03` 在剩余原 page cap 内使用一次 `--page-all --page-limit` 请求，返回的聚合页数仍
+  计入原 20 页 / 1,000 条 cap；它减少相同 cap 内的 CLI 子进程开销，不提高 cap 或预算。
+  真实 capability probe 在 18.82 秒返回 1,000 条、仍带后续 token。
+- `ef4a205` 在处理耗尽预算时保留原获取原因。因此 backlog 同时记录
+  `reason=tick_budget_exhausted` 与 `fetch_reason=page_cap_exhausted`，不会掩盖 cap 事实。
+
+### 脱敏现场时间线（UTC）
+
+- `16:05:47`，同一固定窗口首次以 20 页 / 1,000 条触发 deferred backlog；处理 cursor 为
+  22。随后 cursor 依次推进至 74、129、169，checkpoint 没有推进。
+- 在 `16:10:48` 的完整 tick 后正常停止并重启。重启后 cursor 从 169 继续至 204、232，
+  JSONL 没有 `ingestion_processing_cursor_reset`；重启段新增 63 个路由审计记录恰好对应
+  cursor 的 63 项前进，未重放已完成前缀。
+- 后续同一单写者追赶持续将 cursor 推进至 984。`16:44:49` 首批处理完成，backlog 为
+  `page_cap_exhausted`、存在后续 token、没有 processing cursor，且 checkpoint 仍未推进。
+- `16:45:39` 终端页（一页、一条）完成；`last_success_at` 推进到固定窗口的
+  `2026-09-20T15:20:51+00:00`，group checkpoint 不再有 backlog。
+- 停止 daemon 后，受控 marker 消息为 `1,001 / 1,001`，缺失为 0；routing audit 的不同
+  `message_id` 同为 1,001。总 audit 行数包含此前运行的审计轨迹，不能当作唯一消息数。
+  从 `16:05:00+00:00` 至终端完成没有新的 `message_page_fetch_failed`。
+
+`last_drain` 的 `651 pages / 32,501 messages` 是 processing cursor 重放时的累计获取尝试，
+不是单 tick cap 或唯一源消息数；每个发生 cap 的 tick 仍严格为 20 页 / 1,000 条。所有停机
+均在 `retention_skipped`（dry-run tick 完成）后执行，未将受控中断写成 CLI 故障。
