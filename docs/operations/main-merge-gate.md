@@ -1,7 +1,8 @@
 # main 合并门禁
 
-`main` 只接受通过 Pull Request 合入的变更。规则由 GitHub repository ruleset
-管理；ruleset 没有永久 bypass actor，因此 repository admin 也必须走正常 PR
+`main` 默认只接受通过 Pull Request 合入的变更。规则由 GitHub repository ruleset
+管理；仅 GitHub users `wufei-png` 和 `wufei2` 是永久 bypass actors（`always`），可在
+需要时绕过 PR 和必需检查。除此以外的 actor（包括其他 repository admin）必须走正常 PR
 流程。单 owner 仓库不要求第二位审批人。
 
 ## 必需检查
@@ -32,8 +33,10 @@
 3. owner 自行审阅；本仓库不配置无法满足的第二审批人。
 4. 使用 GitHub PR merge 完成合入，保留 PR、check 和 merge commit 作为审计记录。
 
-禁止通过管理员直推绕过该流程。直推被拒绝时，应创建或修正 PR，而不是添加永久
-bypass actor。
+除 `wufei-png` 和 `wufei2` 外，禁止通过管理员直推绕过该流程。其他 actor 的直推被
+拒绝时，应创建或修正 PR。两个 bypass actor 直推 `main` 时，必须先在 GitHub issue 或
+PR comment 中记录原因、授权 owner、目标 SHA、时间和对应 CI run；不得把 bypass 用作
+常规合入路径。
 
 ## 紧急绕过与恢复
 
@@ -54,16 +57,17 @@ bypass actor。
      -f enforcement=disabled
    ```
 
-3. 仅推送已记录的紧急 SHA；立即恢复原 ruleset，而不是添加或保留 bypass actor：
+3. 仅推送已记录的紧急 SHA；立即恢复原 ruleset。不得新增或扩大既有 `wufei-png`、
+   `wufei2` 以外的 bypass actor：
 
    ```bash
    gh api --method PATCH repos/wufei-png/feishu-shadow-agent/rulesets/$RULESET_ID \
      -f enforcement=active
    ```
 
-4. 读取 ruleset，确认 `enforcement` 为 `active`、`bypass_actors` 为空、必需 check
-   与本表一致；随后记录恢复时间、紧急 SHA 和对应 CI run。若恢复失败，停止后续直推
-   并在同一记录中标记为未恢复。
+4. 读取 ruleset，确认 `enforcement` 为 `active`、`bypass_actors` 仅包含
+   `wufei-png` 和 `wufei2`、必需 check 与本表一致；随后记录恢复时间、紧急 SHA 和
+   对应 CI run。若恢复失败，停止后续直推并在同一记录中标记为未恢复。
 
 紧急提交仍须触发 CI。事后修复或补充测试通过普通 PR 合入；“API 调用成功”不等于
 门禁已恢复或提交行为已验证。
