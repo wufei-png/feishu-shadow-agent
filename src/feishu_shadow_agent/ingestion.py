@@ -135,6 +135,27 @@ class DrainResult:
 
 
 @dataclass(frozen=True)
+class ProcessingCursor:
+    """A replay-safe prefix of one fetched drain batch.
+
+    The cursor contains no raw message content.  The next tick re-fetches the
+    batch from the same page token and only skips this prefix after checking
+    the digest again.  A changed result is replayed from its beginning rather
+    than risk skipping a message.
+    """
+
+    completed_items: int
+    prefix_sha256: str
+
+
+@dataclass(frozen=True)
+class RawBatchResult:
+    processed: int
+    complete: bool
+    cursor: ProcessingCursor | None = None
+
+
+@dataclass(frozen=True)
 class ResourceQuotaDecision:
     allow: bool
     status: str | None = None
@@ -148,10 +169,11 @@ def _token_fingerprint(token: str | None) -> str | None:
 def _json_error_summary(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
+    error = cast(dict[str, Any], value)
     return {
-        key: value[key]
+        key: error[key]
         for key in ("code", "msg", "message", "request_id")
-        if isinstance(value.get(key), (str, int))
+        if isinstance(error.get(key), (str, int))
     }
 
 
@@ -1080,17 +1102,25 @@ class IngestionService:
             max_pages=self.config.daemon.ingest_search_max_pages,
             max_messages=self.config.daemon.ingest_search_max_messages,
         )
-        self._process_raw_batch(
-            drain.items,
+        drain, batch = self._process_drain_batch(
+            window=window,
+            drain=drain,
+            raws=drain.items,
             source="approval_inbox",
             default_chat_type="p2p",
             run_id=run_id,
         )
-        self._record_drain(window, drain, run_id=run_id, source="approval_inbox")
+        self._record_drain(
+            window,
+            drain,
+            run_id=run_id,
+            source="approval_inbox",
+            processing_cursor=batch.cursor,
+        )
         return StageResult(
             "approval_inbox",
             ok=drain.complete,
-            processed=len(drain.items),
+            processed=batch.processed,
             error=None
             if drain.complete
             else f"approval inbox deferred: {drain.reason}",
@@ -1180,17 +1210,21 @@ class IngestionService:
                     default_chat_type=target["chat_type"],
                     now=now,
                 )
-            processed += self._process_raw_batch(
-                raws,
+            drain, batch = self._process_drain_batch(
+                window=window,
+                drain=drain,
+                raws=raws,
                 source="active_watch",
                 default_chat_type=target["chat_type"],
                 run_id=run_id,
             )
+            processed += batch.processed
             self._record_drain(
                 window,
                 drain,
                 run_id=run_id,
                 source="active_watch_thread" if thread_id else "active_watch_chat",
+                processing_cursor=batch.cursor,
             )
             if not drain.complete and drain.reason == "tick_budget_exhausted":
                 break
@@ -1222,14 +1256,22 @@ class IngestionService:
             max_pages=self.config.daemon.ingest_search_max_pages,
             max_messages=self.config.daemon.ingest_search_max_messages,
         )
-        processed = self._process_raw_batch(
-            drain.items,
+        drain, batch = self._process_drain_batch(
+            window=window,
+            drain=drain,
+            raws=drain.items,
             source=name,
             default_chat_type=chat_type,
             run_id=run_id,
         )
-        self._record_drain(window, drain, run_id=run_id, source=name)
-        return StageResult(name, ok=True, processed=processed)
+        self._record_drain(
+            window,
+            drain,
+            run_id=run_id,
+            source=name,
+            processing_cursor=batch.cursor,
+        )
+        return StageResult(name, ok=True, processed=batch.processed)
 
     def _process_raw_batch(
         self,
@@ -1238,18 +1280,116 @@ class IngestionService:
         source: str,
         default_chat_type: str | None,
         run_id: str,
-    ) -> int:
+        resume_cursor: ProcessingCursor | None = None,
+    ) -> RawBatchResult:
+        ordered = sorted(raws, key=_raw_sort_key)
+        completed_items = self._validated_processing_prefix(
+            ordered,
+            resume_cursor=resume_cursor,
+            source=source,
+            run_id=run_id,
+        )
         processed = 0
-        for raw in sorted(raws, key=_raw_sort_key):
+        for raw in ordered[completed_items:]:
+            if self.monotonic() >= self.ingest_deadline:
+                return RawBatchResult(
+                    processed=processed,
+                    complete=False,
+                    cursor=ProcessingCursor(
+                        completed_items=completed_items,
+                        prefix_sha256=_raw_prefix_sha256(ordered[:completed_items]),
+                    ),
+                )
             result = self.process_raw_message(
                 raw,
                 source=source,
                 default_chat_type=default_chat_type,
                 run_id=run_id,
             )
+            completed_items += 1
             if result is not None:
                 processed += 1
-        return processed
+        return RawBatchResult(processed=processed, complete=True)
+
+    def _process_drain_batch(
+        self,
+        *,
+        window: DrainWindow,
+        drain: DrainResult,
+        raws: list[dict[str, Any]],
+        source: str,
+        default_chat_type: str | None,
+        run_id: str,
+    ) -> tuple[DrainResult, RawBatchResult]:
+        batch = self._process_raw_batch(
+            raws,
+            source=source,
+            default_chat_type=default_chat_type,
+            run_id=run_id,
+            resume_cursor=self._processing_cursor(window),
+        )
+        if batch.complete:
+            return drain, batch
+        # The fetched tail has not completed routing.  Replay this same batch
+        # next tick instead of persisting the later token, which would skip it.
+        return (
+            replace(
+                drain,
+                complete=False,
+                next_page_token=window.page_token,
+                reason="tick_budget_exhausted",
+            ),
+            batch,
+        )
+
+    def _processing_cursor(self, window: DrainWindow) -> ProcessingCursor | None:
+        backlog_value = window.checkpoint.get("backlog")
+        if not isinstance(backlog_value, dict):
+            return None
+        backlog = cast(dict[str, Any], backlog_value)
+        processing_value = backlog.get("processing")
+        if not isinstance(processing_value, dict):
+            return None
+        processing = cast(dict[str, Any], processing_value)
+        completed_items = processing.get("completed_items")
+        prefix_sha256 = processing.get("prefix_sha256")
+        if (
+            not isinstance(completed_items, int)
+            or completed_items < 0
+            or not isinstance(prefix_sha256, str)
+            or len(prefix_sha256) != 64
+        ):
+            return None
+        return ProcessingCursor(
+            completed_items=completed_items,
+            prefix_sha256=prefix_sha256,
+        )
+
+    def _validated_processing_prefix(
+        self,
+        raws: list[dict[str, Any]],
+        *,
+        resume_cursor: ProcessingCursor | None,
+        source: str,
+        run_id: str,
+    ) -> int:
+        if resume_cursor is None or resume_cursor.completed_items == 0:
+            return 0
+        if resume_cursor.completed_items <= len(raws):
+            prefix = raws[: resume_cursor.completed_items]
+            if _raw_prefix_sha256(prefix) == resume_cursor.prefix_sha256:
+                return resume_cursor.completed_items
+        self.logger.warning(
+            "ingestion_processing_cursor_reset",
+            run_id=run_id,
+            data={
+                "source": source,
+                "completed_items": resume_cursor.completed_items,
+                "available_items": len(raws),
+                "reason": "replayed_prefix_changed",
+            },
+        )
+        return 0
 
     def process_raw_message(
         self,
@@ -1627,6 +1767,7 @@ class IngestionService:
         *,
         run_id: str,
         source: str,
+        processing_cursor: ProcessingCursor | None = None,
     ) -> None:
         previous_backlog_value = window.checkpoint.get("backlog")
         previous_backlog = (
@@ -1671,12 +1812,12 @@ class IngestionService:
                 },
             )
             return
-        value = {
+        value: dict[str, Any] = {
             key: value
             for key, value in window.checkpoint.items()
             if key not in {"backlog", "last_drain"}
         }
-        value["backlog"] = {
+        backlog: dict[str, Any] = {
             "start": window.start,
             "end": window.end,
             "next_page_token": drain.next_page_token,
@@ -1690,6 +1831,12 @@ class IngestionService:
                 else 0
             ),
         }
+        if processing_cursor is not None:
+            backlog["processing"] = {
+                "completed_items": processing_cursor.completed_items,
+                "prefix_sha256": processing_cursor.prefix_sha256,
+            }
+        value["backlog"] = backlog
         self.store.set_checkpoint(window.checkpoint_key, value)
         self.logger.emit(
             "warning",
@@ -1705,6 +1852,12 @@ class IngestionService:
                 "has_next_page_token": drain.next_page_token is not None,
                 "reason": drain.reason,
                 "checkpoint_advanced": False,
+                "processing_items_completed": (
+                    processing_cursor.completed_items
+                    if processing_cursor is not None
+                    else None
+                ),
+                "processing_cursor_saved": processing_cursor is not None,
             },
         )
 
@@ -1717,6 +1870,7 @@ class IngestionService:
         backlog = cast(dict[str, Any], backlog_value)
         reset_backlog = dict(backlog)
         reset_backlog["next_page_token"] = None
+        reset_backlog.pop("processing", None)
         reset_backlog["reason"] = "page_token_reset_after_fetch_failure"
         reset_backlog["updated_at"] = self.clock()
         reset_backlog["restart_count"] = int(backlog.get("restart_count", 0)) + 1
@@ -2068,6 +2222,21 @@ def _raw_sort_key(raw: dict[str, Any]) -> tuple[float, str]:
         parsed.timestamp() if parsed is not None else float("-inf"),
         _first_string(raw, "message_id", "messageId", "id") or "",
     )
+
+
+def _raw_prefix_sha256(raws: list[dict[str, Any]]) -> str:
+    digest = sha256()
+    for raw in raws:
+        encoded = json.dumps(
+            raw,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode()
+        digest.update(len(encoded).to_bytes(8, byteorder="big"))
+        digest.update(encoded)
+    return digest.hexdigest()
 
 
 def _filter_raws_in_window(

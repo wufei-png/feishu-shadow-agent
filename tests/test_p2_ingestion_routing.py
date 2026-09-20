@@ -573,6 +573,167 @@ def test_message_cap_is_applied_as_page_size_and_resumes(tmp_path: Path) -> None
     assert checkpoint is not None and "backlog" not in checkpoint
 
 
+def test_processing_budget_replays_current_page_without_skipping_or_duplicates(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    fake.search_pages[("p2p", False, None)] = MessagePage(
+        [
+            _message(
+                "om_1",
+                chat_type="p2p",
+                create_time="2026-06-22T10:01:00+08:00",
+            )
+        ],
+        next_page_token="p2",
+        has_more=True,
+    )
+    fake.search_pages[("p2p", False, "p2")] = MessagePage(
+        [
+            _message(
+                "om_3",
+                chat_type="p2p",
+                create_time="2026-06-22T10:03:00+08:00",
+            ),
+            _message(
+                "om_2",
+                chat_type="p2p",
+                create_time="2026-06-22T10:02:00+08:00",
+            ),
+        ],
+        next_page_token="p3",
+        has_more=True,
+    )
+    fake.search_pages[("p2p", False, "p3")] = MessagePage(
+        [
+            _message(
+                "om_4",
+                chat_type="p2p",
+                create_time="2026-06-22T10:04:00+08:00",
+            )
+        ]
+    )
+    config = _config(
+        daemon=DaemonConfig(
+            ingest_tick_budget_seconds=1,
+            ingest_search_max_pages=1,
+        )
+    )
+
+    def service_with_clock(values: list[float]) -> IngestionService:
+        iterator = iter(values)
+        return IngestionService(
+            store=store,
+            feishu_client=fake,
+            config=config,
+            logger=JSONLLogger(tmp_path / "agent.jsonl"),
+            clock=lambda: "2026-06-22T10:10:00+08:00",
+            monotonic=lambda: next(iterator, values[-1]),
+        )
+
+    service_with_clock([0.0, 0.0, 0.0]).ingest_p2p(run_id="run_1")
+
+    # The second page reaches its page cap, but deadline exhaustion while
+    # routing om_3 must replay p2 rather than advance to p3.
+    service_with_clock([0.0, 0.0, 0.0, 1.0]).ingest_p2p(run_id="run_2")
+    checkpoint = store.get_checkpoint("ingest.p2p")
+    assert checkpoint is not None
+    assert "last_success_at" not in checkpoint
+    assert checkpoint["backlog"]["reason"] == "tick_budget_exhausted"
+    assert checkpoint["backlog"]["next_page_token"] == "p2"
+    assert checkpoint["backlog"]["processing"]["completed_items"] == 1
+
+    service_with_clock([0.0, 0.0, 0.0]).ingest_p2p(run_id="run_3")
+    checkpoint = store.get_checkpoint("ingest.p2p")
+    assert checkpoint is not None
+    assert checkpoint["backlog"]["reason"] == "page_cap_exhausted"
+    assert checkpoint["backlog"]["next_page_token"] == "p3"
+    assert "processing" not in checkpoint["backlog"]
+
+    service_with_clock([0.0, 0.0, 0.0]).ingest_p2p(run_id="run_4")
+
+    checkpoint = store.get_checkpoint("ingest.p2p")
+    assert checkpoint is not None
+    assert checkpoint["last_success_at"] == "2026-06-22T02:10:00+00:00"
+    assert "backlog" not in checkpoint
+    assert fake.calls[-4:] == [
+        "search:p2p:False:None",
+        "search:p2p:False:p2",
+        "search:p2p:False:p2",
+        "search:p2p:False:p3",
+    ]
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"] == 4
+        routes = [
+            row["route"]
+            for row in conn.execute("SELECT route FROM routing_audits ORDER BY id")
+        ]
+    assert routes == ["new_task", "attach_task", "attach_task", "attach_task"]
+
+
+def test_processing_cursor_replays_from_start_when_the_fetched_prefix_changes(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    original = _message(
+        "om_2",
+        chat_type="p2p",
+        create_time="2026-06-22T10:02:00+08:00",
+    )
+    later = _message(
+        "om_3",
+        chat_type="p2p",
+        create_time="2026-06-22T10:03:00+08:00",
+    )
+    fake.search_pages[("p2p", False, None)] = MessagePage([original, later])
+    config = _config(daemon=DaemonConfig(ingest_tick_budget_seconds=1))
+
+    first_clock = iter([0.0, 0.0, 0.0, 1.0])
+    IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+        monotonic=lambda: next(first_clock, 1.0),
+    ).ingest_p2p(run_id="run_1")
+
+    checkpoint = store.get_checkpoint("ingest.p2p")
+    assert checkpoint is not None
+    assert checkpoint["backlog"]["processing"]["completed_items"] == 1
+
+    # A late earlier message changes the replayed prefix.  Replaying all items
+    # is safe; trusting only the old item count would skip om_2 instead.
+    early = _message(
+        "om_1",
+        chat_type="p2p",
+        create_time="2026-06-22T10:01:00+08:00",
+    )
+    fake.search_pages[("p2p", False, None)] = MessagePage([early, original, later])
+    second_clock = iter([0.0, 0.0, 0.0, 0.0, 0.0])
+    IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+        monotonic=lambda: next(second_clock, 0.0),
+    ).ingest_p2p(run_id="run_2")
+
+    checkpoint = store.get_checkpoint("ingest.p2p")
+    assert checkpoint is not None and "backlog" not in checkpoint
+    with store.connect() as conn:
+        message_ids = {
+            row["message_id"] for row in conn.execute("SELECT message_id FROM messages")
+        }
+    assert message_ids == {"om_1", "om_2", "om_3"}
+    assert "ingestion_processing_cursor_reset" in (tmp_path / "agent.jsonl").read_text(
+        encoding="utf-8"
+    )
+
+
 def test_invalid_resumed_page_token_restarts_fixed_window_without_duplicates(
     tmp_path: Path,
 ) -> None:
