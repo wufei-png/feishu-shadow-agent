@@ -256,6 +256,7 @@ def _validate_task_session_context_roles(
     if scenario.turns is None:
         return
     normalizer = MessageNormalizer(owner_open_id=owner_open_id)
+    context_task_ids: list[set[int]] = []
     for turn in scenario.turns:
         if turn.kind != "context":
             continue
@@ -269,6 +270,36 @@ def _validate_task_session_context_roles(
             raise EvalError(
                 "task-session context must record capture task-membership provenance"
             )
+        context_task_ids.append(_source_task_ids(raw_messages[turn.message_id]))
+    if context_task_ids:
+        shared_task_ids = context_task_ids[0].copy()
+        for task_ids in context_task_ids[1:]:
+            shared_task_ids.intersection_update(task_ids)
+        for turn in scenario.turns:
+            if turn.kind == "target":
+                shared_task_ids.intersection_update(
+                    _source_task_ids(raw_messages[turn.message_id])
+                )
+        if not shared_task_ids:
+            raise EvalError(
+                "task-session context and targets must share a captured source task"
+            )
+
+
+def _source_task_ids(raw: dict[str, Any]) -> set[int]:
+    value: object = raw.get("source_task_ids")
+    if (
+        not isinstance(value, list)
+        or not value
+        or any(
+            isinstance(item, bool) or not isinstance(item, int) or item < 1
+            for item in cast(list[object], value)
+        )
+    ):
+        raise EvalError(
+            f"message {message_id_from_raw(raw)} has no valid source_task_ids"
+        )
+    return set(cast(list[int], value))
 
 
 def _validate_scenario_time_order(

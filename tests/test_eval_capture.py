@@ -351,7 +351,32 @@ def test_capture_reads_minimal_task_fixture_from_production_store(
     captured = {row["message_id"]: row for row in read_jsonl(case / "messages.jsonl")}
     assert captured["om_1"]["source_revision"] == 2
     assert captured["om_1"]["source_task_membership"] is True
+    assert captured["om_1"]["source_task_ids"] == [1]
     assert "source_revision" not in captured["om_2"]
+
+
+def test_capture_omits_provenance_when_live_content_differs_from_store(
+    tmp_path: Path,
+) -> None:
+    loaded = _loaded_config(tmp_path)
+    original = _message("om_mismatch", minute=1, direct=True)
+    stored = original | {"text": "@Owner current revision"}
+    store = SQLiteStore(tmp_path / "data/test.sqlite3")
+    store.upsert_message(MessageNormalizer(owner_open_id="ou_owner").normalize(stored))
+    service = EvalService(loaded=loaded, lark_client=FakeLarkClient([original]))
+
+    case = service.capture_case(
+        message_id="om_mismatch",
+        context_before=0,
+        context_after=0,
+        lookback_days=2,
+        label=None,
+        allow_sensitive_config=False,
+    )
+
+    captured = read_jsonl(case / "messages.jsonl")[0]
+    assert "source_revision" not in captured
+    assert "source_task_membership" not in captured
 
 
 def test_promote_rechecks_sensitive_source_config(tmp_path: Path) -> None:

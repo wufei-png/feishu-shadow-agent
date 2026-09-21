@@ -458,12 +458,15 @@ def test_resume_timeline_seeds_context_without_an_extra_backend_call(
     context["text"] = "已确认的前置事实"
     context["source_revision"] = 1
     context["source_task_membership"] = True
+    context["source_task_ids"] = [17]
     first = _message("om_1", minute=2)
     first["text"] = "第一个需要回答的问题"
     first["source_revision"] = 1
+    first["source_task_ids"] = [17]
     target = _message("om_2", minute=3)
     target["text"] = "最终需要回答的问题"
     target["source_revision"] = 1
+    target["source_task_ids"] = [17]
     case = _golden_case(
         tmp_path,
         loaded.path,
@@ -540,6 +543,42 @@ def test_resume_timeline_rejects_mismatched_source_revision(tmp_path: Path) -> N
     assert (
         "source_revision does not match" in read_yaml(run_dir / "report.yaml")["error"]
     )
+
+
+def test_resume_timeline_rejects_context_from_different_task(tmp_path: Path) -> None:
+    loaded = _loaded(tmp_path)
+    context = _message("om_context", minute=1)
+    context.update(source_revision=1, source_task_membership=True, source_task_ids=[11])
+    target = _message("om_target", minute=2)
+    target.update(source_revision=1, source_task_ids=[12])
+    case = _golden_case(
+        tmp_path,
+        loaded.path,
+        "task-session-cross-task-context",
+        [context, target],
+        {
+            "schema_version": "eval_case_v1",
+            "case_type": "task-session",
+            "mode": "resume",
+            "turns": [
+                {"message_id": "om_context", "kind": "context", "source_revision": 1},
+                {"message_id": "om_target", "kind": "target", "source_revision": 1},
+            ],
+            "resources": [],
+        },
+        {
+            "schema_version": "task_session_labels_v1",
+            "answerability": "no_reply",
+            "watch_action": "keep_watching",
+        },
+    )
+
+    run_dir, exit_code = EvalService(loaded=loaded).run_task_session(
+        case_dir=case, label=None, dry_run_backend=True
+    )
+
+    assert exit_code == 2
+    assert "share a captured source task" in read_yaml(run_dir / "report.yaml")["error"]
 
 
 def test_resume_timeline_requires_captured_source_revision(tmp_path: Path) -> None:

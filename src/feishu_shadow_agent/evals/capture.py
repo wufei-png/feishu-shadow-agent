@@ -10,6 +10,7 @@ from typing import Any, Protocol, cast
 from ..config import LoadedConfig
 from ..ingestion import MessageNormalizer, normalize_message_sent_at
 from ..paths import resolve_relative_path
+from ..revision import message_semantic_hash
 from ..time_utils import format_instant, parse_instant_or_none, utc_now
 from ..types import LarkCliResult, MessagePage, NormalizedMessage
 from .artifacts import (
@@ -213,13 +214,17 @@ class CaptureService:
                 rows = connection.execute(
                     # Placeholders are generated from message IDs; values remain bound.
                     f"""
-                    SELECT m.message_id, m.revision,
-                           EXISTS(
-                             SELECT 1 FROM task_messages tm
-                             WHERE tm.message_id = m.message_id
-                           ) AS task_member
+                    SELECT m.message_id, m.revision, m.semantic_hash
                     FROM messages m
                     WHERE m.message_id IN ({placeholders})
+                    """,  # noqa: S608
+                    message_ids,
+                ).fetchall()
+                memberships = connection.execute(
+                    f"""
+                    SELECT message_id, task_id FROM task_messages
+                    WHERE message_id IN ({placeholders})
+                    ORDER BY message_id, task_id
                     """,  # noqa: S608
                     message_ids,
                 ).fetchall()
@@ -228,13 +233,22 @@ class CaptureService:
                 f"failed to record capture message provenance: {exc}"
             ) from exc
         provenance = {str(row["message_id"]): row for row in rows}
+        task_ids: dict[str, list[int]] = {}
+        for membership in memberships:
+            task_ids.setdefault(str(membership["message_id"]), []).append(
+                int(membership["task_id"])
+            )
         for raw in raws:
             message_id = message_id_from_raw(raw)
             row = provenance.get(message_id)
             if row is None:
                 continue
+            message = self.normalizer.normalize(raw)
+            if message_semantic_hash(message) != row["semantic_hash"]:
+                continue
             raw["source_revision"] = int(row["revision"])
-            raw["source_task_membership"] = bool(row["task_member"])
+            raw["source_task_ids"] = task_ids.get(message_id, [])
+            raw["source_task_membership"] = bool(raw["source_task_ids"])
 
     def _resolve_source(self, seed: dict[str, Any]) -> str:
         message = self.normalizer.normalize(seed)
