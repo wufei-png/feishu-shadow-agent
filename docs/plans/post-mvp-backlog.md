@@ -11,7 +11,7 @@
 | [01 · 恢复 CI 基线](post-mvp/01-ci-baseline.md) | 修正过期 schema 测试与依赖审计，确认远端 CI | 无 | 已完成 |
 | [02 · main 合并门禁](post-mvp/02-main-protection.md) | PR、必需检查与紧急绕过 | 01 CI 全绿 | 已完成 |
 | [03 · membership 错误归因](post-mvp/03-membership-errors.md) | endpoint 专属分类与回归 | 01 | 已完成 |
-| [04 · 运行时现场验收](post-mvp/04-runtime-acceptance.md) | S4 ingest 追赶与 S5 离群/重入时间线 | 03、获准测试 chat | S4 已通过；S5 部分通过（dry-run 边界保留，见 `docs/operations/runtime-acceptance.md`） |
+| [04 · 运行时现场验收](post-mvp/04-runtime-acceptance.md) | S4 ingest 追赶与 S5 离群/重入时间线 | 03、获准测试 chat | 已完成：S4、S5 均通过；S5 补验真实 user fallback 回复和恢复后资源下载 |
 | [05 · 合并转发子资源](post-mvp/05-merge-forward-resources.md) | 真实 CLI 能力验证、条件接入、现场验收 | 03、04 的资源/身份条件 | 已完成：container direct leaf image/file 接入；folder collection 保持不自动递归下载 |
 | [06 · S10 golden 修复](post-mvp/06-s10-golden.md) | 有效时间线、人工标签、S9/P22 重跑 | 01 | 部分完成：时间线契约已落地，失效 P22 已废弃，2 个有效 S9 case 固定重跑均未通过；待重采有效样本和人工标签 |
 | [07 · 单变量候选筛选](post-mvp/07-s10-candidate.md) | 固定条件下的回答质量对照 | 06 | 已完成：一个事实归属候选出现语义回归，未采用；不进入 08，S10 保持开放（见筛选记录） |
@@ -24,8 +24,9 @@
 - 会话 03 已完成：`84d79d0` 将 lark-cli 失败 JSON 和 membership 分类收紧为 bot 身份、受支持 endpoint 的结构化 `10002`；`234002`、`234040`、scope、资源不匹配、纯文本和解析失败都不再写入 `absent`。ingest/dispatch 只对确认缺席写入带 `error_code`/`error_endpoint` 的 runtime fact；产品策略、Policy Audit 和不确定发送恢复语义保持不变。
 - 会话 04：S4 已完成现场验收。修复后在受控 1,001 条 `group_at_me` 源上保持 `30s` budget 与
   `20 pages / 1000 messages` cap，验证 deferred backlog、跨 tick/重启 cursor 恢复、checkpoint
-  推进和全量追赶；详见[运行时验收记录](../operations/runtime-acceptance.md)。S5 保持部分通过，
-  因为本会话不发送真实资源或回复。
+  推进和全量追赶；详见[运行时验收记录](../operations/runtime-acceptance.md)。S5 经后续授权
+  补验通过：测试群短时离群期间资源被 gate 拦截、一条手动回复以 user fallback 真实发送并
+  读回，重入后资源真实下载；原 `unknown`/TTL 和通知时间线继续作为 S5 证据。
 - 本机 `config.yaml` 配置的 `.venv/node_modules/.bin/lark-cli` 当前为 1.0.96；最初 capability preflight 使用的 1.0.56 已完成升级复验。
 - 会话 05 已完成：后续根因检查表明可见 `file_` 是 `<folder>` collection key，不是 leaf file；直接下载该 root 才得到 HTTP `500` / code `40009`。bot 能以同一 container ID 枚举 folder，并下载两个一级 leaf file。`_resources()` 已接入 merge_forward 的 direct leaf image/file（container ID），同时排除 `<folder>` / `is_folder` collection 键，避免错误调用和未受限递归获取。隔离真实资源链已在 Operator message detail 中验证 image 与一个 leaf file 都为 `downloaded`；详见会话计划、ADR-0013 和[运行时验收记录](../operations/runtime-acceptance.md)。
 - [S9 记录](s9-answer-quality-baseline.md)中五个旧样本的当次失败仍可作为待复核线索。[P22 六轮 case](p22-task-session-context-budget-evidence.md)漏掉参考答案依赖的原始 owner 答复；旧三组 `0/1` 不能用于调参。生产上下文策略保持现状，S10 仍开放。

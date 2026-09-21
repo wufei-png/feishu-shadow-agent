@@ -1,6 +1,6 @@
 # 04 · ingest 与 membership 现场验收
 
-状态：S4 已完成（通过）；S5 部分通过。前置：会话 03 的错误归因已验收；使用获准的测试 chat 与可恢复的 bot membership。
+状态：S4、S5 均已完成（通过）。前置：会话 03 的错误归因已验收；使用获准的测试 chat 与可恢复的 bot membership。
 
 ## 目标
 
@@ -30,3 +30,11 @@ S4 的有界 ingest 与 S5 的 runtime membership 已在代码和 fixture 中实
   和 `ef4a205` 记录。
 - S5 保持部分通过：真实 `present → absent → unknown → recovered` 时间线和通知预览已验证，
   但本会话始终 dry-run，未验证真实资源或真实回复发送。
+
+## 2026-09-21 授权补验
+
+owner 后续明确授权在 `FSA-runtime-acceptance-20260920` 群短时移除并重新加入 bot，
+经 doctor、dry-run 后执行受控真实资源下载与一条测试回复。该授权扩展了上文原计划的
+dry-run 边界。补验确认缺席时资源 gate 为 `bot_not_joined`、Dispatcher 对一条手动测试
+回复采用 user fallback 并真实发送及读回、重入后资源真实下载成功。S5 由部分通过改为
+通过；脱敏时间线、隔离边界及复原检查见[运行时验收记录](../../operations/runtime-acceptance.md)。

@@ -70,7 +70,7 @@ warning 均通过。
 | 链路 | 状态 | 缺少的现场证据 |
 | --- | --- | --- |
 | S4 有界 ingest 追赶 | 通过 | 已在获准测试群以 1,001 条 `group_at_me` 消息验证固定窗口的 20 页 / 1,000 条 cap、处理 cursor、跨 tick 与干净重启恢复、终端 checkpoint 推进及全量追赶。 |
-| S5 membership 恢复 | 部分通过 | 已得到 `present → absent → unknown（过期）→ recovered` 的真实 daemon/Effective Policy 时间线和 episode 通知预览；未以真实资源或真实回复发送来验证降级，因为本会话明确保持 dry-run。 |
+| S5 membership 恢复 | 通过 | 原时间线与通知预览见下文；2026-09-21 在同一获准测试群补验真实 user fallback 回复与恢复后的资源下载，见末节。 |
 
 ## 2026-09-20 现场结果
 
@@ -123,3 +123,25 @@ warning 均通过。
 `last_drain` 的 `651 pages / 32,501 messages` 是 processing cursor 重放时的累计获取尝试，
 不是单 tick cap 或唯一源消息数；每个发生 cap 的 tick 仍严格为 20 页 / 1,000 条。所有停机
 均在 `retention_skipped`（dry-run tick 完成）后执行，未将受控中断写成 CLI 故障。
+
+## 2026-09-21 S5 真实降级补验（通过）
+
+- 在 owner 已授权的 `FSA-runtime-acceptance-20260920` 测试群执行。配置 SHA-256 为
+  `9b36317085cae9640ed299b5a62befdc784e91dcf1bc0cea245cfaf3c154578e`，
+  `lark-cli` 为 1.0.96；测试前后 `doctor` 均无 critical failure 或 warning。测试群
+  Product Policy 为 `auto_reply=false`、`bot_joined=true`、`bot_preferred`、允许 user fallback
+  和资源下载。未启用自动回复或 owner notification 真实发送。
+- 精确匹配测试群、唯一 bot 和 direct image 资源后，先对离群/重入命令做 CLI dry-run。
+  owner 以 user 身份暂时移除 bot，成员列表确认缺席；隔离 runtime store 的主动探测由
+  `present` 转为 `absent`，资源处理将该 image 记为 `bot_not_joined`，没有发起下载。
+- 在 bot 缺席期间，向测试群写入受控 marker，在隔离 store 中创建一条手动测试回复动作。
+  Dispatcher dry-run 成功后仅真实发送这一条回复；发送参数使用 `user` fallback，
+  Feishu 读回及动作终态均为 `sent`。第一次预演脚本误将 membership notification 也计入
+  回复预览数量而中止；该次没有真实回复，bot 已在 `finally` 中恢复。修正断言后的复验
+  得到上述唯一真实回复。
+- bot 重新入群后，成员列表及主动探测均确认 `present`；相同来源的一项 image 通过
+  `ResourceProcessor` 真实下载，临时文件存在且非空。隔离 SQLite、日志和下载文件在
+  测试结束后删除；本机运行库的测试群 Product Policy 保持原值，Policy Audit 计数为 3。
+  最终再探测本机运行库，测试群 Effective Membership 为 `present`。
+- `unknown`/TTL 过期及 episode 通知的现场证据沿用上文 2026-09-20 时间线；本次补验
+  聚焦缺席时的资源与发送降级、重入后的资源恢复。未向其他群发送回复或下载资源。
