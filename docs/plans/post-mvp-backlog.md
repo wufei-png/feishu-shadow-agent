@@ -1,56 +1,44 @@
 # Post-MVP Backlog
 
-状态：2026-09-16 起按已确认顺序实施。本文件只记录当前未完成工作；S1–S9 已在独立验收和提交后移除。P22 已完成证据对照并保留为不采用结论的引用。
+当前范围遵循[架构边界](../architecture/current-boundaries.md)：本地、single-owner、polling ingest，由代码控制策略、审批和发送。S1–S8 的功能及 S9 评测工具已在 `9c342dd` 前落地；以下只列尚未完成的交付与现场验收。各会话的实施、停止条件和检查在各自文件中，执行时只需读取选中的计划。
 
-## 已确认的范围与决策
+## 执行队列
 
-- 当前产品内的可靠性、前端体验、运维能力和回答效果优化全部纳入，按依赖与独立交付的顺畅程度推进。
-- 保持单 owner、本地助手定位及[当前架构边界](../architecture/current-boundaries.md)。远程 console、多用户、部署安装器等扩展单独决策。
-- 前端重组为中文“待我处理”工作台，技术 ID、错误码和必要术语保留原文；聚合发送结果不确定、阻塞/失败、待审批事项，保留专业详情入口。
-- 草稿按审批 ID 在当前页面会话内隔离保存，切回时恢复，刷新后不保证保留。提交绑定审批对象及有效版本；过期草稿须重新核对，后台刷新不得覆盖编辑内容。
-- 后续会话可只读分析本机运行记录与评测产物；tracked 文档仅保存脱敏结论和可复现方法，真实消息、配置、数据库及原始报告不入库。S9 已获准执行新消息采集和候选/judge 模型评测，所有运行固定 `repeat=1`；仍未授权 Dispatcher 或真实发送。
-- 以下阶段继续独立验收并提交；实际证据要求超过 10 阶段时报告原因，调整未完成计划，不强行拼接无关工作。
+状态截至 2026-09-21。编号是默认顺序；会话 06 可在会话 01 后与现场验收并行安排，07 必须等 06，08 必须等 07。状态和证据在完成该会话时更新。
 
-## 检查基线与证据分级
+| 会话 | 交付 | 前置 | 状态 |
+| --- | --- | --- | --- |
+| [01 · 恢复 CI 基线](post-mvp/01-ci-baseline.md) | 修正过期 schema 测试与依赖审计，确认远端 CI | 无 | 已完成 |
+| [02 · main 合并门禁](post-mvp/02-main-protection.md) | PR、必需检查与紧急绕过 | 01 CI 全绿 | 已完成 |
+| [03 · membership 错误归因](post-mvp/03-membership-errors.md) | endpoint 专属分类与回归 | 01 | 已完成 |
+| [04 · 运行时现场验收](post-mvp/04-runtime-acceptance.md) | S4 ingest 追赶与 S5 离群/重入时间线 | 03、获准测试 chat | 已完成：S4、S5 均通过；S5 补验真实 user fallback 回复和恢复后资源下载 |
+| [05 · 合并转发子资源](post-mvp/05-merge-forward-resources.md) | 真实 CLI 能力验证、条件接入、现场验收 | 03、04 的资源/身份条件 | 已完成：container direct leaf image/file 接入；folder collection 保持不自动递归下载 |
+| [06 · S10 golden 修复](post-mvp/06-s10-golden.md) | 有效时间线、人工标签、S9/P22 重跑 | 01 | 部分完成：已盘点 16 个 golden（2 个当前回归、9 个历史配置回归、5 个无法忠实重放），失效 P22 已废弃；待新的多轮来源、人工标签和固定基线 |
+| [07 · 单变量候选筛选](post-mvp/07-s10-candidate.md) | 固定条件下的回答质量对照 | 06 | 已完成两次有界筛选：两个事实归属候选均出现语义回归，未采用；无生产候选，S10 保持开放 |
+| [08 · 扩样本与生产判定](post-mvp/08-s10-validation.md) | 独立真实样本复验、条件推广 | 07 | 部分推进：已盘点准入，缺三条新增有效样本且无合格候选；不推广，S10 保持开放 |
 
-本轮实施前基线：`1dbd4c2`。未拉取远端，未检查线上健康，未操作生产记录。
+## 当前证据
 
-| 类别 | 当前证据 | 阶段 |
-| --- | --- | --- |
-| 已证伪的效果假设 | P22 的 root + 最近 N 与静态 summary 在有效真实样本上均为 0/1，未降低显式输入，也未改善质量；生产上下文策略保持不变 | S10 |
-| 已确认的回答失败 | 既有样本存在过度转交、遗漏、矛盾及无依据扩展；P22 样本再次出现过度转交和语义方向错误 | S10 |
+- 会话 01 已完成：`e6d2f14` 修正当前 schema 生命周期契约，`f141afc` 阻止迟到轮询回滚编辑，`c830b1d` 将 anyio 升级至 4.15.1；[CI run 35505846110](https://github.com/wufei-png/feishu-shadow-agent/actions/runs/35505846110) 的所有阻断 job 和非阻断 Coverage 均通过。
+- 会话 02 已完成：active ruleset [23727358](https://github.com/wufei-png/feishu-shadow-agent/rules/23727358) 仅匹配 `main`，要求 PR 和九项 CI checks；当前仅 `wufei-png` 与 `wufei2` 为 `always` bypass actors，日常仍按[合并门禁契约](../operations/main-merge-gate.md)走 PR。 [PR #26](https://github.com/wufei-png/feishu-shadow-agent/pull/26) 合入运维契约，[PR #27](https://github.com/wufei-png/feishu-shadow-agent/pull/27) 记录加入 bypass actors 之前的直推拒绝、缺 check 拒绝及完整 checks 后的普通合入验收；见[门禁验收记录](../operations/main-merge-gate-validation.md)。
+- 会话 03 已完成：`84d79d0` 将 lark-cli 失败 JSON 和 membership 分类收紧为 bot 身份、受支持 endpoint 的结构化 `10002`；`234002`、`234040`、scope、资源不匹配、纯文本和解析失败都不再写入 `absent`。ingest/dispatch 只对确认缺席写入带 `error_code`/`error_endpoint` 的 runtime fact；产品策略、Policy Audit 和不确定发送恢复语义保持不变。
+- 会话 04：S4 已完成现场验收。修复后在受控 1,001 条 `group_at_me` 源上保持 `30s` budget 与
+  `20 pages / 1000 messages` cap，验证 deferred backlog、跨 tick/重启 cursor 恢复、checkpoint
+  推进和全量追赶；详见[运行时验收记录](../operations/runtime-acceptance.md)。S5 经后续授权
+  补验通过：测试群短时离群期间资源被 gate 拦截、一条手动回复以 user fallback 真实发送并
+  读回，重入后资源真实下载；原 `unknown`/TTL 和通知时间线继续作为 S5 证据。
+- 本机 `config.yaml` 配置的 `.venv/node_modules/.bin/lark-cli` 当前为 1.0.96；最初 capability preflight 使用的 1.0.56 已完成升级复验。
+- 会话 05 已完成：后续根因检查表明可见 `file_` 是 `<folder>` collection key，不是 leaf file；直接下载该 root 才得到 HTTP `500` / code `40009`。bot 能以同一 container ID 枚举 folder，并下载两个一级 leaf file。`_resources()` 已接入 merge_forward 的 direct leaf image/file（container ID），同时排除 `<folder>` / `is_folder` collection 键，避免错误调用和未受限递归获取。隔离真实资源链已在 Operator message detail 中验证 image 与一个 leaf file 都为 `downloaded`；详见会话计划、ADR-0013 和[运行时验收记录](../operations/runtime-acceptance.md)。
+- [S9 记录](s9-answer-quality-baseline.md)中五个旧样本的当次失败仍可作为待复核线索。[P22 六轮 case](p22-task-session-context-budget-evidence.md)漏掉参考答案依赖的原始 owner 答复；旧三组 `0/1` 不能用于调参。生产上下文策略保持现状，S10 仍开放。
+- 会话 06 的本地结构审计确认旧 P22 fixture 仅有 1 条 setup、5 条 target，未保存 owner 事实，且忽略的同窗来源没有可补充的 owner 消息。生产中关联任务的 owner 回复会触发 `human_taken_over`，不能作为 resumed Task Session 上下文补入；该 private golden 已从 active suite 移至 retired 区，不再进入任何 P22 重跑。新的真实样本仍需人工选择、核对可见性并完成标签。
+- active Task Session suite 的 16 个 case 中，6 个匹配当前 owner；其中 4 个带 owner intervention，不能模拟为活跃 Task Session。剩余 2 个在 Codex / `gpt-5.6-luna`、`xhigh`、`read_only`、固定配置 hash 和 `repeat=1` 下重跑：1 个结构失败，1 个结构通过后 semantic judge 判出各 1 个 minor omission 与 minor unsupported addition，均未通过。P22 没有有效 case，以上不是完整质量基线或生产变更依据。
+- 2026-09-21 来源核查后，capture 仅对 Feishu 快照与存储语义 hash 一致的消息记录修订，并记录具体生产 task ID；带 context 的 Task Session 必须与全部 target 共享 task ID。本机新运行库没有生产 task，无法为旧 P22 补造来源。已新捕一个单轮真实技术问题作为 ignored review draft，结构检查通过；标准答案尚无独立核验，未 promotion。06 继续标为部分完成。
+- 来源校验修复后的两条有效 S9 case 固定条件复跑仍为 `0/2`；一条结构失败，一条结构通过后有两项 minor 语义差异。后者报告中的 `invalid_jsonl` 已定位为 U+0085 被错误切行的 parser 缺陷；同一保存会话经修复后重建为 `available`，不改变结构或语义结论。详见[S9 记录](s9-answer-quality-baseline.md)。
+- active suite 的 16 个 golden 全部早于 revision/task 来源绑定：2 个匹配当前 owner 且无接管，可做当前 S9 回归；9 个仅能在归档 owner/config 下做历史回归；5 个含 owner intervention，不能按生产 Task Session 忠实重放。06 仍需新的生产多轮来源和人工标准答案；07 需先有固定有效 baseline，08 还需通过候选及至少 3 个独立有效会话。
+- 会话 07 固定一个带标签的事实归属 case，仅增加“可用时检查 read-only 证据、使事实可追溯”的 Task Session 指令作为首个候选变量。候选仍为 `auto_reply`，但 semantic judge 从 1 个 minor omission + 1 个 minor unsupported addition 恶化为 1 个 major contradiction + 1 个 major omission + 1 个 minor unsupported addition，且 prompt 增加 238 字符；候选未采用，不能触发会话 08 的候选对照或推广。脱敏条件、hash、指标和下一假设见[筛选记录](s10-candidate-screening.md)。
+- 第二次有界筛选只要求具体源码路径有已查看证据；同一 case 仍新增 1 个 major contradiction，并保留 minor omission、unsupported addition，显式 prompt 增加 198 字符。候选未采用；两轮均无可推广生产改动，详见[筛选记录](s10-candidate-screening.md)。
+- 会话 08 已检查扩样本准入：当前只有两条旧有效 S9 case 与一条未标注的新 review draft，未达到三条新增独立有效样本，也没有通过 07 筛选的候选。生产判定为不推广；后续先补真实来源及人工标签，再重新筛选并复验，见[08 计划](post-mvp/08-s10-validation.md)。
 
-当前使用 `uv 0.12.4` 和 locked 环境。实施前 Python 全量为 **705 passed, 1 skipped**；S9 新增多轮 replay、eval-only fresh 重建变体及 prompt 字符记录，本阶段指定契约为 **86 passed**，Ruff lint/format 与 Pyright 均通过。最近前端检查为 **11 passed** 且 lint/typecheck/build 通过。S9 的真实消息、配置和报告均保持 ignored，未运行 Dispatcher 或真实发送。
+## 需求触发的扩展
 
-## 实施阶段
-
-依赖表示技术前置；编号表示默认实施顺序。每阶段包含必要的 UI/API/命令/存储纵向改动与测试，不能把阶段是否正确推迟到后续证明。PY、FE 检查缩写见文末。
-
-### S10 — 证据支持的后端效果优化
-
-依赖：S9。交付：针对已归因问题、经对照验证的优化，或有证据支持的不采用结论。
-
-- 根据 [S9 基线](s9-answer-quality-baseline.md) 选择资源证据组织、回复表达和回答/转交判定等实际有效改动；每次改变一个可归因变量，保留安全、路由、审批回归。
-- [P22 对照](p22-task-session-context-budget-evidence.md) 已否定当前 root+最近 N 和静态 summary 候选；生产上下文保持现状，除非新的单变量对照证明收益。
-- 验收同时报告质量和成本：不能靠沉默或转交更多任务给 owner 来制造“误答减少”，不能把输入缩短直接视作效果改善。
-- 收益未证实时保留现状并记录不采用结论；证据缺失则继续阻塞，不能以“无收益”关闭。其他已确认失败项未处理时不得整体关闭效果待办。
-- 如归因产生多个独立改动或需要超过本计划的阶段数，报告证据并重排未完成阶段，不把所有效果工作塞入一个不可审阅提交。
-- 检查：相关 PY/FE 契约测试、与 S9 相同条件的对照评测、最终完整检查；prompt/schema 改动覆盖字段形状与旧库升级。
-
-当前下一步：新证据推翻了原先的上下文优化方向，先确认 S10 是在保持上下文不变的前提下，直接以现有有效 golden 对“过度转交/证据使用”做单变量 prompt 实验，还是先扩大真实技术样本覆盖；确认后再改代码。未完成项继续保留，不能用 P22 的不采用结论关闭整个效果待办。
-
-## 外部依赖与独立待决策项
-
-| 条目 | 状态及启动条件 | 完成条件 |
-| --- | --- | --- |
-| 合并转发子资源下载 | 外部依赖：lark-cli 暴露 merge_forward 原始 message_list/子消息 ID；先核验工具链能力 | 使用当前消息可见的子消息标识尽力下载，缺失或失败保留占位符；遵守 ADR-0013，不跨源 chat 抓取 |
-| 通用配置编辑和 per-user policy | 独立待决策；当前 Policy/Settings 沿用，任意配置写入不纳入本轮 | 先定义配置变更审批、审计、回滚及用户语义，再单独设计实施 |
-| 部署与外部集成扩展 | 独立待决策：LaunchAgent/systemd/Windows service、桌面/远程 console、SDK/OAuth、向量检索及细粒度资源分析 | 明确产品需求后逐项决策，必要时更新当前架构边界；本表不代表实施授权 |
-
-## 执行检查与新会话交接
-
-- **PY `<paths>`**：`uv run --locked pytest -q <paths>`，按阶段覆盖新增行为与实际变更的相邻契约。
-- **FE**：`npm --prefix frontend/operator-console run lint`、`npm --prefix frontend/operator-console test`、`npm --prefix frontend/operator-console run build`。build 包含 TypeScript 检查并刷新 console_static，产物随对应阶段检查和提交。
-- 每阶段运行 `git diff --check`，Python 改动补 Ruff lint/format 与 Pyright；只暂存该阶段明确路径，检查 staged diff 后提交。
-- 最终运行 `uv run --locked pytest -q`、`uv run --locked ruff check .`、`uv run --locked ruff format --check .`、`uv run --locked --extra cards pyright` 及 FE。发布/打包改动追加 `uv run --locked python -m build` 和 wheel 静态资源验证。
-- 用 `uv 0.12.4` 与 `uv sync --locked --extra cards` 校准环境，先复核既有格式问题；修正文档中与现行迁移能力冲突的说明，历史计划不重写。
+通用配置编辑、per-user policy、部署安装器、远程 Console、SDK/OAuth 主通道与向量检索不属于上述队列。启动前分别明确产品需求及配置变更、身份授权、审计和回滚语义，必要时更新架构边界。

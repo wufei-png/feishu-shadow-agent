@@ -14,9 +14,9 @@ from .feishu.client import FeishuClient
 from .ingestion import MessageNormalizer
 from .jsonl import JSONLLogger
 from .membership import (
-    bot_membership_error,
+    classify_bot_membership_absence,
     effective_membership_status,
-    record_bot_membership_failure,
+    record_bot_membership_absence,
 )
 from .policy import PolicyResolver
 from .store.sqlite_store import SQLiteStore
@@ -42,13 +42,6 @@ READBACK_BLOCKING_WARNINGS = {
     "readback_mentions_mismatch",
     "readback_mentions_unavailable",
 }
-
-
-def _command_used_bot(result: LarkCliResult) -> bool:
-    return any(
-        result.argv[index : index + 2] == ["--as", "bot"]
-        for index in range(max(0, len(result.argv) - 1))
-    )
 
 
 @dataclass(frozen=True)
@@ -497,21 +490,25 @@ class Dispatcher:
         result["send"] = _command_result(send)
         if not send.ok:
             result["error_stage"] = "send"
-            if bot_membership_error(send) and _command_used_bot(send):
-                chat_id = None
+            membership_absence = classify_bot_membership_absence(send)
+            if membership_absence:
+                task = None
                 if action.task_id is not None:
                     with suppress(KeyError):
-                        chat_id = self.store.get_task_by_id(action.task_id).chat_id
-                record_bot_membership_failure(
-                    store=self.store,
-                    config=self.config,
-                    logger=self.logger,
-                    chat_id=chat_id,
-                    run_id=run_id,
-                    source="dispatch_failure",
-                    error=send.error or send.stderr,
-                    execution_mode=action.execution_mode,
-                )
+                        task = self.store.get_task_by_id(action.task_id)
+                if task is not None:
+                    record_bot_membership_absence(
+                        store=self.store,
+                        config=self.config,
+                        logger=self.logger,
+                        chat_id=task.chat_id,
+                        chat_type=task.chat_type,
+                        run_id=run_id,
+                        source="dispatch_failure",
+                        error=send.error or send.stderr,
+                        absence=membership_absence,
+                        execution_mode=action.execution_mode,
+                    )
             attempt_status = _send_failure_attempt_status(send)
             action_status = (
                 ActionStatus.FAILED_NEEDS_REVIEW.value

@@ -357,7 +357,7 @@ python -m feishu_shadow_agent replay --config config.yaml --message-id <message_
 tail -n 100 logs/agent.jsonl
 ```
 
-资源下载失败时，优先看 `status` 和日志中的 `bot_not_joined`、`bot_invisible`、`resource_download_failed`。这类问题通常需要确认 bot 是否在群里，以及该群的 `bot_joined` / `resource_download` 配置。
+资源下载失败时，优先看 `status` 和日志中的 `bot_not_joined`、`bot_invisible`、`resource_download_failed`。仅 bot 身份、受支持 endpoint 的结构化 `error_code=10002` 会将 runtime membership 写为 `absent`；`234002`、`234040`、scope、资源不匹配和文本错误仍是普通下载失败。Operator status 的 membership fact 会显示 `error_code` 和 `error_endpoint`，再据此确认 bot 是否在群里以及该群的 `bot_joined` / `resource_download` 配置。
 
 资源被本地磁盘安全策略挡住时，会看到 `too_large` 或 `quota_exceeded`。这两类状态表示文件已被删除、`resources.path` 已置空，并且 task session agent 默认不会被调用；先调整 `storage.max_resource_bytes` / `storage.max_resource_dir_bytes` 或清理 `storage.resource_dir`，再人工决定是否重放相关消息。
 
