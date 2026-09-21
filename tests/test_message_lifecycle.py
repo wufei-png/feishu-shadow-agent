@@ -7,7 +7,7 @@ from feishu_shadow_agent.config import AppConfig, OwnerConfig, ReplyPolicyConfig
 from feishu_shadow_agent.ingestion import MessageNormalizer
 from feishu_shadow_agent.operator_queries.message_detail import MessageDetailQuery
 from feishu_shadow_agent.routing import CandidateCollector, MessageRouter
-from feishu_shadow_agent.store.sqlite_store import SQLiteStore
+from feishu_shadow_agent.store.sqlite_store import SQLITE_SCHEMA_VERSION, SQLiteStore
 from feishu_shadow_agent.types import NormalizedMessage
 
 
@@ -65,7 +65,7 @@ def test_normalizer_records_message_type_variants() -> None:
     assert _normalize(_raw("om_4")).message_type is None
 
 
-def test_merge_forward_is_a_container_with_placeholder_resources() -> None:
+def test_merge_forward_uses_container_id_for_leaf_resources_not_folder_keys() -> None:
     message = _normalize(
         _raw(
             "om_fwd",
@@ -75,13 +75,34 @@ def test_merge_forward_is_a_container_with_placeholder_resources() -> None:
                 "<forwarded_messages>\n"
                 "[2026-07-08T15:24:09+08:00] A:\n  deployment question\n"
                 "[Image: img_fwd_1]\n"
+                '<file key="file_fwd_1" name="report.pdf"/>\n'
+                '<file key="file_fwd_1" name="report.pdf"/>\n'
+                '<folder key="file_folder_1" name="assets"/>\n'
                 "</forwarded_messages>"
             ),
         )
     )
     assert message.message_type == "merge_forward"
-    assert message.resources == []
+    assert len(message.resources) == 2
+    assert {
+        (resource.message_id, resource.resource_type, resource.file_key)
+        for resource in message.resources
+    } == {
+        ("om_fwd", "image", "img_fwd_1"),
+        ("om_fwd", "file", "file_fwd_1"),
+    }
     assert "deployment question" in message.text
+
+
+def test_normalizer_ignores_structured_folder_resource() -> None:
+    message = _normalize(
+        _raw(
+            "om_folder",
+            content={"file_key": "file_folder_1", "is_folder": True},
+        )
+    )
+
+    assert message.resources == []
 
 
 def test_reaction_payload_is_not_a_signal() -> None:
@@ -125,13 +146,13 @@ def test_store_updates_message_type_on_reupsert(tmp_path: Path) -> None:
     assert row["message_type"] == "file"
 
 
-def test_schema_version_5_includes_message_type_column(tmp_path: Path) -> None:
+def test_current_schema_includes_message_lifecycle_columns(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     store.initialize()
     with store.connect() as conn:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
-    assert version == 5
+    assert version == SQLITE_SCHEMA_VERSION
     assert "message_type" in columns
     assert "is_deleted" in columns
     assert "revision" in columns

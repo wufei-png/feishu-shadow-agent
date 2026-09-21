@@ -228,6 +228,7 @@ class MessagePage:
     next_page_token: str | None = None
     has_more: bool = False
     raw: Any | None = None
+    page_count: int = 1
 
 
 @dataclass(frozen=True)
@@ -272,6 +273,7 @@ class MessageUpsertResult:
     revision: int
     is_deleted: bool
     semantic_hash: str
+    requires_confirmation: bool = False
 
 
 @dataclass(frozen=True)

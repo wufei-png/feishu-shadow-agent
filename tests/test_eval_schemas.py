@@ -23,6 +23,47 @@ def test_task_session_scenario_accepts_multiple_resume_targets() -> None:
     assert scenario.target_message_ids == ["om_2", "om_3"]
 
 
+def test_task_session_scenario_accepts_ordered_context_then_targets() -> None:
+    scenario = TaskSessionScenario.model_validate(
+        {
+            "mode": "resume",
+            "turns": [
+                {"message_id": "om_1", "kind": "context", "source_revision": 1},
+                {"message_id": "om_2", "kind": "target", "source_revision": 1},
+                {"message_id": "om_3", "kind": "target", "source_revision": 2},
+            ],
+        }
+    )
+
+    assert [turn.kind for turn in scenario.turns or []] == [
+        "context",
+        "target",
+        "target",
+    ]
+
+
+@pytest.mark.parametrize(
+    "turns",
+    [
+        [],
+        [{"message_id": "om_1", "kind": "context"}],
+        [
+            {"message_id": "om_1", "kind": "target"},
+            {"message_id": "om_2", "kind": "context"},
+        ],
+        [
+            {"message_id": "om_1", "kind": "target"},
+            {"message_id": "om_1", "kind": "target"},
+        ],
+    ],
+)
+def test_task_session_scenario_rejects_invalid_timeline_turns(
+    turns: list[dict[str, object]],
+) -> None:
+    with pytest.raises(ValidationError):
+        TaskSessionScenario.model_validate({"mode": "resume", "turns": turns})
+
+
 def test_task_session_scenario_accepts_final_rebuild_for_resume() -> None:
     scenario = TaskSessionScenario.model_validate(
         {

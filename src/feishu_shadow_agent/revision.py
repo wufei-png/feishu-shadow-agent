@@ -1,12 +1,39 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Literal
 
 from .decision import DecisionReason
+from .types import NormalizedMessage
 
 RevisionImpact = Literal["none", "low", "high", "uncertain"]
+
+
+def message_semantic_hash(message: NormalizedMessage) -> str:
+    payload = {
+        "chat_id": message.chat_id,
+        "chat_type": message.chat_type,
+        "sender_id": message.sender_id,
+        "sender_type": message.sender_type,
+        "sender_role": message.sender_role,
+        "thread_id": message.thread_id,
+        "reply_to_message_id": message.reply_to_message_id,
+        "text": message.text,
+        "direct_mention": message.direct_mention,
+        "at_all": message.at_all,
+        "mentions": sorted(message.mentions),
+        "resources": sorted(
+            (resource.file_key, resource.resource_type)
+            for resource in message.resources
+        ),
+        "is_deleted": message.is_deleted,
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return sha256(serialized.encode("utf-8")).hexdigest()
+
 
 HIGH_IMPACT_DECISION_REASONS = frozenset(
     {
