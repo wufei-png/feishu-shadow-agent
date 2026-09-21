@@ -25,6 +25,7 @@ from .message_eligibility import MessageEligibilityPolicy
 from .paths import resolve_agent_working_dir
 from .policy import PolicyResolver
 from .processing import ApprovalService, TaskProcessingService
+from .revision import message_semantic_hash
 from .routing import MessageRouter, RoutingResult
 from .store.sqlite_store import SQLiteStore
 from .time_utils import (
@@ -49,6 +50,10 @@ from .types import (
 
 class IngestionFeishuClient(Protocol):
     def auth_status(self, *, verify: bool = True) -> LarkCliResult: ...
+
+    def get_messages(
+        self, *, as_identity: str, message_ids: list[str]
+    ) -> MessagePage: ...
 
     def search_messages(
         self,
@@ -1524,6 +1529,40 @@ class IngestionService:
             )
             raise
         upsert = self.store.upsert_message_with_revision(message)
+        if upsert.requires_confirmation:
+            page = self.feishu_client.get_messages(
+                as_identity="user", message_ids=[message.message_id]
+            )
+            current_raw = next(
+                (
+                    item
+                    for item in page.items
+                    if _first_string(item, "message_id", "messageId", "id")
+                    == message.message_id
+                ),
+                None,
+            )
+            if current_raw is None:
+                raise RuntimeError(
+                    f"could not verify current message snapshot: {message.message_id}"
+                )
+            current = self.normalizer.normalize(
+                current_raw, default_chat_type=message.chat_type
+            )
+            self.logger.info(
+                "message_current_snapshot_refetched",
+                run_id=run_id,
+                data={
+                    "message_id": message.message_id,
+                    "polled_snapshot_current": (
+                        message_semantic_hash(current) == message_semantic_hash(message)
+                    ),
+                },
+            )
+            message = current
+            upsert = self.store.upsert_message_with_revision(
+                message, confirmed_current=True
+            )
         message = replace(
             message,
             revision=upsert.revision,

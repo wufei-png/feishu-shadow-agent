@@ -273,6 +273,7 @@ class MessageUpsertResult:
     revision: int
     is_deleted: bool
     semantic_hash: str
+    requires_confirmation: bool = False
 
 
 @dataclass(frozen=True)

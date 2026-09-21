@@ -47,6 +47,8 @@ class FakeFeishuClient:
         self.calls: list[str] = []
         self.search_page_sizes: list[int] = []
         self.search_page_limits: list[int] = []
+        self.current_messages: dict[str, dict[str, Any]] = {}
+        self.current_message_error: Exception | None = None
         self.write_download_files = True
 
     def version(self) -> LarkCliResult:
@@ -56,6 +58,18 @@ class FakeFeishuClient:
 
     def auth_status(self, *, verify: bool = True) -> LarkCliResult:
         return LarkCliResult(["lark-cli", "auth"], 0, json_data={})
+
+    def get_messages(self, *, as_identity: str, message_ids: list[str]) -> MessagePage:
+        self.calls.append(f"mget:{as_identity}")
+        if self.current_message_error is not None:
+            raise self.current_message_error
+        return MessagePage(
+            [
+                self.current_messages[item]
+                for item in message_ids
+                if item in self.current_messages
+            ]
+        )
 
     def owner_message(
         self,
@@ -1633,6 +1647,95 @@ def test_cross_chat_reply_reference_cannot_attach_foreign_task(tmp_path: Path) -
     assert result.task.chat_id == "oc_local"
     assert result.task.id != foreign_task.id
     assert store.find_task_ids_for_message("om_local") == [result.task.id]
+
+
+def test_edited_message_can_return_to_earlier_content_after_current_readback(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+    )
+    original = _message("om_reverted", text="A")
+    edited = _message("om_reverted", text="B")
+    service.process_raw_message(
+        original, source="group_at_me", default_chat_type="group", run_id="run_1"
+    )
+    service.process_raw_message(
+        edited, source="group_at_me", default_chat_type="group", run_id="run_2"
+    )
+    fake.current_messages["om_reverted"] = original
+
+    service.process_raw_message(
+        original, source="group_at_me", default_chat_type="group", run_id="run_3"
+    )
+
+    stored = store.get_message("om_reverted")
+    assert stored is not None
+    assert (stored["text"], stored["revision"]) == ("A", 3)
+    assert fake.calls.count("mget:user") == 1
+
+
+def test_older_poll_snapshot_uses_current_readback_without_rolling_back(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+    )
+    original = _message("om_stale", text="A")
+    edited = _message("om_stale", text="B")
+    for raw in (original, edited):
+        service.process_raw_message(
+            raw, source="group_at_me", default_chat_type="group", run_id="run_1"
+        )
+    fake.current_messages["om_stale"] = edited
+
+    service.process_raw_message(
+        original, source="group_at_me", default_chat_type="group", run_id="run_2"
+    )
+
+    stored = store.get_message("om_stale")
+    assert stored is not None
+    assert (stored["text"], stored["revision"]) == ("B", 2)
+    assert fake.calls.count("mget:user") == 1
+
+
+def test_historical_snapshot_readback_failure_preserves_current_revision(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+    )
+    original = _message("om_retry", text="A")
+    edited = _message("om_retry", text="B")
+    for raw in (original, edited):
+        service.process_raw_message(
+            raw, source="group_at_me", default_chat_type="group", run_id="run_1"
+        )
+    fake.current_message_error = RuntimeError("readback unavailable")
+
+    with pytest.raises(RuntimeError, match="readback unavailable"):
+        service.process_raw_message(
+            original, source="group_at_me", default_chat_type="group", run_id="run_2"
+        )
+
+    stored = store.get_message("om_retry")
+    assert stored is not None
+    assert (stored["text"], stored["revision"]) == ("B", 2)
 
 
 def test_revision_keeps_original_task_despite_new_conflicting_signals(
