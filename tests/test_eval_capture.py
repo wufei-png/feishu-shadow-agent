@@ -316,13 +316,18 @@ def test_capture_reads_minimal_task_fixture_from_production_store(
 ) -> None:
     loaded = _loaded_config(tmp_path)
     first = _message("om_1", minute=1, direct=True)
+    first.pop("chat_type")  # Feishu mget often omits chat_type.
     target = _message("om_2", minute=2, direct=True)
     store = SQLiteStore(tmp_path / "data/test.sqlite3")
     store.initialize()
-    normalized = MessageNormalizer(owner_open_id="ou_owner").normalize(first)
+    normalized = MessageNormalizer(owner_open_id="ou_owner").normalize(
+        first, default_chat_type="group"
+    )
     store.upsert_message(normalized)
     revised = first | {"text": "@Owner revised task"}
-    revised_normalized = MessageNormalizer(owner_open_id="ou_owner").normalize(revised)
+    revised_normalized = MessageNormalizer(owner_open_id="ou_owner").normalize(
+        revised, default_chat_type="group"
+    )
     assert store.upsert_message_with_revision(revised_normalized).revision == 2
     store.create_task_for_message(
         revised_normalized,

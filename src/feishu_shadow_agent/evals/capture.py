@@ -214,7 +214,7 @@ class CaptureService:
                 rows = connection.execute(
                     # Placeholders are generated from message IDs; values remain bound.
                     f"""
-                    SELECT m.message_id, m.revision, m.semantic_hash
+                    SELECT m.message_id, m.revision, m.semantic_hash, m.chat_type
                     FROM messages m
                     WHERE m.message_id IN ({placeholders})
                     """,  # noqa: S608
@@ -243,7 +243,7 @@ class CaptureService:
             row = provenance.get(message_id)
             if row is None:
                 continue
-            message = self.normalizer.normalize(raw)
+            message = self.normalizer.normalize(raw, default_chat_type=row["chat_type"])
             if message_semantic_hash(message) != row["semantic_hash"]:
                 continue
             raw["source_revision"] = int(row["revision"])
