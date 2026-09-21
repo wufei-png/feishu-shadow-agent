@@ -19,3 +19,10 @@ S9 的五个旧样本曾给出过度转交、事实遗漏等当次失败；另�
 ## 验收
 
 运行 eval schema/replay、prompt 形状及相邻测试，Ruff、Pyright、全量 pytest。检查新 case 的目标答案只依赖其时间点前可见事实，context-only 不额外调用模型，旧 case 保持有效。有效 case、人工标签和可复现固定条件齐备后才标记完成；否则保留阻断条件与 S10 待办。
+
+## 2026-09-21 来源与新增样本核查
+
+- capture 现在先校验 Feishu 当前快照和 SQLite 当前语义 hash，再写 `source_revision`，同时记录具体 `source_task_ids`；带 context 的 replay 要求 context 与所有 target 共享生产 task ID。旧的只有布尔 membership 的私有捕获需重新采集，不能手动补 ID。
+- 当前运行库以新 schema 重建后含 1,001 条受控测试消息，但没有生产 task 或 `task_messages`。因此不能从该库为旧 P22 生成可信的多轮 task 来源证明。active suite 中匹配当前 owner 的 6 个 case，4 个含 owner 接管；另外 2 个维持既有有效 S9 基线资格。
+- 从真实飞书消息中补捕一个当前 owner 的独立单轮技术问题，保存为 ignored `data/evals/captured/` 的 review draft；`run-task-session --dry-run-backend` 通过结构检查。其唯一目标发生在 owner 后续回复之前，但缺少可独立核验的标准答案，未 promotion，也未用于调参或候选通过判定。原始消息和配置不进入 Git。
+- 06 仍为部分完成：需要新的生产 Task Session 多轮来源和经审核的人工标签，才能建立有效 P22 基线；不得把测试群 marker、接管后的 owner 事实或模型中间回答填作生产可见上下文。
