@@ -13,7 +13,7 @@
 | [03 · membership 错误归因](post-mvp/03-membership-errors.md) | endpoint 专属分类与回归 | 01 | 已完成 |
 | [04 · 运行时现场验收](post-mvp/04-runtime-acceptance.md) | S4 ingest 追赶与 S5 离群/重入时间线 | 03、获准测试 chat | 已完成：S4、S5 均通过；S5 补验真实 user fallback 回复和恢复后资源下载 |
 | [05 · 合并转发子资源](post-mvp/05-merge-forward-resources.md) | 真实 CLI 能力验证、条件接入、现场验收 | 03、04 的资源/身份条件 | 已完成：container direct leaf image/file 接入；folder collection 保持不自动递归下载 |
-| [06 · S10 golden 修复](post-mvp/06-s10-golden.md) | 有效时间线、人工标签、S9/P22 重跑 | 01 | 部分完成：时间线契约已落地，失效 P22 已废弃，2 个有效 S9 case 固定重跑均未通过；待重采有效样本和人工标签 |
+| [06 · S10 golden 修复](post-mvp/06-s10-golden.md) | 有效时间线、人工标签、S9/P22 重跑 | 01 | 部分完成：已盘点 16 个 golden（2 个当前回归、9 个历史配置回归、5 个无法忠实重放），失效 P22 已废弃；待新的多轮来源、人工标签和固定基线 |
 | [07 · 单变量候选筛选](post-mvp/07-s10-candidate.md) | 固定条件下的回答质量对照 | 06 | 已完成两次有界筛选：两个事实归属候选均出现语义回归，未采用；无生产候选，S10 保持开放 |
 | [08 · 扩样本与生产判定](post-mvp/08-s10-validation.md) | 独立真实样本复验、条件推广 | 07 | 部分推进：已盘点准入，缺三条新增有效样本且无合格候选；不推广，S10 保持开放 |
 
@@ -33,7 +33,8 @@
 - 会话 06 的本地结构审计确认旧 P22 fixture 仅有 1 条 setup、5 条 target，未保存 owner 事实，且忽略的同窗来源没有可补充的 owner 消息。生产中关联任务的 owner 回复会触发 `human_taken_over`，不能作为 resumed Task Session 上下文补入；该 private golden 已从 active suite 移至 retired 区，不再进入任何 P22 重跑。新的真实样本仍需人工选择、核对可见性并完成标签。
 - active Task Session suite 的 16 个 case 中，6 个匹配当前 owner；其中 4 个带 owner intervention，不能模拟为活跃 Task Session。剩余 2 个在 Codex / `gpt-5.6-luna`、`xhigh`、`read_only`、固定配置 hash 和 `repeat=1` 下重跑：1 个结构失败，1 个结构通过后 semantic judge 判出各 1 个 minor omission 与 minor unsupported addition，均未通过。P22 没有有效 case，以上不是完整质量基线或生产变更依据。
 - 2026-09-21 来源核查后，capture 仅对 Feishu 快照与存储语义 hash 一致的消息记录修订，并记录具体生产 task ID；带 context 的 Task Session 必须与全部 target 共享 task ID。本机新运行库没有生产 task，无法为旧 P22 补造来源。已新捕一个单轮真实技术问题作为 ignored review draft，结构检查通过；标准答案尚无独立核验，未 promotion。06 继续标为部分完成。
-- 来源校验修复后的两条有效 S9 case 固定条件复跑仍为 `0/2`；一条结构失败，一条结构通过后有两项 minor 语义差异。后者 skill trace 导出 `invalid_jsonl`，不能当作技能可用性证据；详见[S9 记录](s9-answer-quality-baseline.md)。
+- 来源校验修复后的两条有效 S9 case 固定条件复跑仍为 `0/2`；一条结构失败，一条结构通过后有两项 minor 语义差异。后者报告中的 `invalid_jsonl` 已定位为 U+0085 被错误切行的 parser 缺陷；同一保存会话经修复后重建为 `available`，不改变结构或语义结论。详见[S9 记录](s9-answer-quality-baseline.md)。
+- active suite 的 16 个 golden 全部早于 revision/task 来源绑定：2 个匹配当前 owner 且无接管，可做当前 S9 回归；9 个仅能在归档 owner/config 下做历史回归；5 个含 owner intervention，不能按生产 Task Session 忠实重放。06 仍需新的生产多轮来源和人工标准答案；07 需先有固定有效 baseline，08 还需通过候选及至少 3 个独立有效会话。
 - 会话 07 固定一个带标签的事实归属 case，仅增加“可用时检查 read-only 证据、使事实可追溯”的 Task Session 指令作为首个候选变量。候选仍为 `auto_reply`，但 semantic judge 从 1 个 minor omission + 1 个 minor unsupported addition 恶化为 1 个 major contradiction + 1 个 major omission + 1 个 minor unsupported addition，且 prompt 增加 238 字符；候选未采用，不能触发会话 08 的候选对照或推广。脱敏条件、hash、指标和下一假设见[筛选记录](s10-candidate-screening.md)。
 - 第二次有界筛选只要求具体源码路径有已查看证据；同一 case 仍新增 1 个 major contradiction，并保留 minor omission、unsupported addition，显式 prompt 增加 198 字符。候选未采用；两轮均无可推广生产改动，详见[筛选记录](s10-candidate-screening.md)。
 - 会话 08 已检查扩样本准入：当前只有两条旧有效 S9 case 与一条未标注的新 review draft，未达到三条新增独立有效样本，也没有通过 07 筛选的候选。生产判定为不推广；后续先补真实来源及人工标签，再重新筛选并复验，见[08 计划](post-mvp/08-s10-validation.md)。

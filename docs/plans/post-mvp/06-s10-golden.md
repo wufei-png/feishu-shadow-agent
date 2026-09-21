@@ -26,4 +26,27 @@ S9 的五个旧样本曾给出过度转交、事实遗漏等当次失败；另�
 - 当前运行库以新 schema 重建后含 1,001 条受控测试消息，但没有生产 task 或 `task_messages`。因此不能从该库为旧 P22 生成可信的多轮 task 来源证明。active suite 中匹配当前 owner 的 6 个 case，4 个含 owner 接管；另外 2 个维持既有有效 S9 基线资格。
 - 从真实飞书消息中补捕一个当前 owner 的独立单轮技术问题，保存为 ignored `data/evals/captured/` 的 review draft；`run-task-session --dry-run-backend` 通过结构检查。其唯一目标发生在 owner 后续回复之前，但缺少可独立核验的标准答案，未 promotion，也未用于调参或候选通过判定。原始消息和配置不进入 Git。
 - 06 仍为部分完成：需要新的生产 Task Session 多轮来源和经审核的人工标签，才能建立有效 P22 基线；不得把测试群 marker、接管后的 owner 事实或模型中间回答填作生产可见上下文。
-- 同两条有效 S9 case 在固定 `repeat=1` 条件下再运行，仍为 `0/2`：1 个结构失败，1 个结构通过但有 1 minor omission 与 1 minor unsupported addition；后一条 skill trace 导出为 `invalid_jsonl`，不能据此确认 skill 加载。见[S9 脱敏记录](../s9-answer-quality-baseline.md)。
+- 同两条有效 S9 case 在固定 `repeat=1` 条件下再运行，仍为 `0/2`：1 个结构失败，1 个结构通过但有 1 minor omission 与 1 minor unsupported addition；后一条报告最初记录 `invalid_jsonl`，后续已从同一保存会话确认是 parser 缺陷并恢复 skill trace。见[S9 脱敏记录](../s9-answer-quality-baseline.md)。
+
+## 2026-09-21 现有 golden 可复用性盘点
+
+active Task Session suite 共 16 个已 promotion case，均有历史 capture provenance 和人工标签，但都早于当前 `source_revision` / `source_task_ids` 契约；因此“已 promotion”本身不能满足新的生产来源门槛。
+
+| 分类 | 数量 | 当前可用范围 | 限制 |
+| --- | ---: | --- | --- |
+| 当前 owner、无 owner intervention | 2 | 可做当前固定条件 S9 回归；本轮已重跑 | 1 个 initial、1 个 legacy resume；缺新的 revision/task 绑定，不能作为 P22 多轮来源证明 |
+| 当前 owner、含 owner intervention | 4 | 不进入当前回归 | 生产会接管或忽略，按 Task Session target/context 重放不忠实 |
+| 其他 owner、无 owner intervention | 9 | 仅可在各自归档 owner/config 下做历史代码回归 | 当前 runner 会因 owner 不匹配拒绝；同样缺新的 revision/task 绑定，不能计入当前质量基线 |
+| 其他 owner、含 owner intervention | 1 | 不进入回归 | 同时存在 owner 不匹配和生产接管语义，无法忠实重放 |
+
+两条当前可回归 case 只能回答“现有实现对这两份旧标签的本次表现”，不能证明长会话上下文有效、来源完整或质量稳定。其余 14 条不能扩充当前分母：9 条只保留历史配置回归价值，5 条因 owner intervention 失去 Task Session 重放资格。
+
+`skill_trace` 的 `invalid_jsonl` 已用原产物定位为 parser 把 JSON 字符串内 U+0085 误当换行的工具缺陷。底层 JSONL 按 LF 逐行全部有效；修复后同一保存会话可重建为 `available`，无需重新调用模型。该修复只恢复技能证据，不改变当次结构或语义得分。
+
+## 06–08 剩余准入条件
+
+- **06：**至少取得 1 个可忠实重放的生产多轮 Task Session，所有 timeline 消息带匹配的 `source_revision`，context 与 targets 共享具体生产 task ID，且不含 owner 接管；参考答案和结构标签须由人依据目标时点前可见事实审核。随后在固定 backend/model/reasoning/工具权限/config/标签下重建 S9/P22 baseline。
+- **07：**只在 06 的有效 golden 与固定 baseline 就绪后重开。每轮只改一个变量，预先定义目标失败和拒绝条件；此前两个候选均新增 major contradiction，不能作为后续候选或正证据。
+- **08：**除 07 有通过筛选的候选外，还需至少 3 个相互独立、来源完整且完成人工标签的真实技术会话。固定 paired run 必须覆盖旧有效样本和新增样本；没有新增重大矛盾、无依据扩展或靠更多 owner 转交形成的表面收益，才具备生产推广资格。
+
+在这些输入就绪前，06 保持部分完成，07 只保留两次拒绝记录，08 的当前判定保持不推广。
