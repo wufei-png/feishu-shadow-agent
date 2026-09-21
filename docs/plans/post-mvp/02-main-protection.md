@@ -1,6 +1,6 @@
 # 02 · main 合并门禁
 
-状态：待执行。前置：会话 01 的最新 CI 全绿。
+状态：已完成。前置：会话 01 的最新 CI 全绿。
 
 ## 目标与现有证据
 
@@ -14,3 +14,7 @@
 ## 验收
 
 记录规则 ID、必需 job 名、测试 PR、拒绝/允许结果、紧急绕过配置与启用时间。GitHub 规则是仓库外部状态；文档提交与远端验收共同构成本会话完成条件。若平台权限或规则能力不足，保持未完成并记录具体限制。更新[当前待办](../post-mvp-backlog.md)的状态和证据链接。
+
+## 实际配置
+
+2026-09-21 读取 active ruleset `23727358`，确认 `main` 的 PR 与九项必需检查仍生效；`wufei-png`、`wufei2` 两名 user 是 `always` bypass actors。上文第 2 步是原计划，实际配置采用了[运维契约](../../operations/main-merge-gate.md)所记录的有审计要求的永久 bypass。直推拒绝的行为证据取自加入这两名 actor 之前；不应推断当前两名 actor 也会被规则拒绝。详见[验收记录](../../operations/main-merge-gate-validation.md)。

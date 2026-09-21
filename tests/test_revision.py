@@ -576,6 +576,9 @@ class _UnusedFeishu:
     def search_messages(self, **kwargs: object) -> MessagePage:
         return MessagePage(items=[])
 
+    def get_messages(self, **kwargs: object) -> MessagePage:
+        raise AssertionError("unexpected canonical message readback")
+
     def list_chat_messages(self, **kwargs: object) -> MessagePage:
         return MessagePage(items=[])
 

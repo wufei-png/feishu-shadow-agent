@@ -1,8 +1,12 @@
 # P22 Task Session Context Budget — 对照结论
 
-状态：**2026-09-20 复核发现原对照样本无效，待修复后重跑**。生产 Task Session 上下文策略保持不变。
+状态：**2026-09-21 确认原对照样本不可忠实重放，已废弃，待重采后重跑**。生产 Task Session 上下文策略保持不变。
 
 **复核附注：**该六轮 golden 漏掉最终参考答案依赖的原始 owner 答复；replay 中的模型中间回答不能替代原对话事实。下列 `0/1` 是当时的运行记录，不再支持“候选方案已被证伪”或“现状更好”的质量结论。先核实 owner 发言在生产 Task Session 中是否真正可见，能忠实重放才修复 fixture，否则弃用该 case、重采有效样本；见[Task Session golden 计划](post-mvp/06-s10-golden.md)。
+
+**2026-09-21 处置：**本地结构审计只找到该一个 `1 setup + 5 target` fixture。它的 6 条引用消息没有 owner 事实，忽略目录内同 chat、同时间窗也没有可恢复来源。关联 active task 的 owner 回复在生产中触发 `human_taken_over` 并关闭任务，不能被标为不调用后端的 resumed context。该 private case 已移出 active golden suite，旧三组结果不再可运行或计分。替代样本必须先完成真实可见性核对和人工标签，再以固定 backend、model、reasoning、工具权限与配置 hash 的 `repeat=1` 重跑。
+
+本次只对 2 个不含 owner intervention 的既有 S9 case 完成固定条件重跑；它们都不能替代缺失的 P22 长会话对照。新 P22 case 在 promotion 前必须证明每个目标答案只依赖该目标前且 production-visible 的事实；不能把 owner takeover、后续事实或模型中间回答作为 `context` 注入。
 
 ## 当前策略与原假设
 

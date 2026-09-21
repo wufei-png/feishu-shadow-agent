@@ -544,8 +544,10 @@ def test_dashboard_exposes_fresh_and_expired_bot_membership_facts(
             "status": "absent",
             "checked_at": "2026-06-22T09:59:00+00:00",
             "next_probe_at": "2026-06-22T10:04:00+00:00",
-            "source": "active_probe",
-            "error": None,
+            "source": "resource_download_failure",
+            "error": "download failed",
+            "error_code": 10002,
+            "error_endpoint": "resource_download",
         },
     )
     store.set_bot_membership_fact(
@@ -573,6 +575,8 @@ def test_dashboard_exposes_fresh_and_expired_bot_membership_facts(
         ("oc_stale", "unknown"),
         ("oc_unobserved", "unobserved"),
     ]
+    assert membership["facts"][0]["error_code"] == 10002
+    assert membership["facts"][0]["error_endpoint"] == "resource_download"
 
 
 def test_operator_query_derives_overdue_approval_without_mutating_db(

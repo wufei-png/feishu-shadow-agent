@@ -263,6 +263,36 @@ def test_skill_trace_export_command_always_requests_redaction(monkeypatch) -> No
     ]
 
 
+def test_skill_trace_preserves_unicode_line_separator_inside_json_string(
+    monkeypatch,
+) -> None:
+    exported = {
+        "model": "gpt-test",
+        "messages": [{"role": "assistant", "content": "first\u0085second"}],
+    }
+    monkeypatch.setattr(
+        "feishu_shadow_agent.evals.skill_trace._export_session",
+        lambda **_: AgentRunResult(
+            argv=["hermes"],
+            exit_code=0,
+            stdout=json.dumps(exported, ensure_ascii=False) + "\n",
+        ),
+    )
+
+    trace = build_skill_trace(
+        backend_provider="hermes",
+        session_ids=["session-1"],
+        expected_skills=[],
+        hermes_path="hermes",
+        timeout_seconds=1,
+        dry_run_backend=False,
+        catalog_paths=[],
+    )
+
+    assert trace["status"] == "available"
+    assert trace["session_models"] == ["gpt-test"]
+
+
 def test_non_traceable_skill_backend_is_explicitly_unsupported(monkeypatch) -> None:
     monkeypatch.setattr(
         "feishu_shadow_agent.evals.skill_trace._export_session",

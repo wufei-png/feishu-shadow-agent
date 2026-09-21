@@ -4,6 +4,14 @@
 
 **2026-09-20 复核附注：**以下六轮 P22 技术样本的 `eval_case.yaml` 只有 1 条 setup 和 5 条 target，遗漏了最终参考答案依赖的原始 owner 答复。重放用模型中间回答替代了这些事实，因此该样本三策略 `0/1` 和由它推出的质量比较只保留为历史运行记录，**不能作为有效对照或调参依据**。五个既有样本的当次结果与此问题分开；新评测须先复核其可见上下文。当前生产上下文仍保持原状，原因是尚无有效证据支持替换。修复/替换样本及重跑路径见[Task Session golden 计划](post-mvp/06-s10-golden.md)。
 
+**2026-09-21 fixture 审计：**已实现有序 `context` / `target` replay，且只允许 initial prompt 中真实可见的前置 context，避免在 resumed provider session 中伪造历史。旧 P22 fixture 的 6 条引用消息中没有 owner 消息；忽略的同 chat、同时间窗本地来源也没有可恢复的 owner 事实。生产路由会将关联任务的 owner 回复处理为 `human_taken_over` 并关闭任务，因此旧 P22 不能忠实重放，已移出 active golden suite。现场候选查询在有界时间内未完成分页，尚未采集可人工标注的替代样本；五个旧 S9 样本也尚未以新可见性审计重跑，不能形成新的质量基线。
+
+**2026-09-21 固定条件重跑（不完整）：**active suite 的 16 个 case 只有 6 个匹配当前 owner，其中 4 个含 owner intervention 而不能忠实 replay；剩余 2 个（1 initial、1 legacy resume）在 Codex / `gpt-5.6-luna`、`xhigh`、`read_only`、`repeat=1` 和 run config hash `9b36317085cae9640ed299b5a62befdc784e91dcf1bc0cea245cfaf3c154578e` 下运行。2/2 未通过：1 个结构失败且不进入 semantic judge；1 个结构通过但被判各 1 个 minor omission 与 minor unsupported addition。两次最终显式 prompt 分别为 3105、3149 字符，运行时 skill trace 均可用。P22 尚无有效替代样本，且没有结构化 token、费用或端到端 duration，因此这些结果只保留为当次失败证据，不构成完整 S10 基线、稳定性结论或生产上下文变更依据。
+
+**2026-09-21 来源校验修复后复跑：**同两条有效 case、同一 run config hash、Codex / `gpt-5.6-luna`、`xhigh`、`read_only`、`repeat=1` 下，结果仍为 `0/2`。legacy resume 的结构失败字段为 `answerability` 和 `decision_reason`，显式最终 prompt 为 3105 字符；initial 的结构通过、semantic `partial`，包含 1 个 minor omission 和 1 个 minor unsupported addition，显式 prompt 为 3149 字符。initial 的原报告记录 `invalid_jsonl`，当时不能据此确认 skill 加载；另一条 trace 为 available。case config hash 分别为 `9b36317085cae9640ed299b5a62befdc784e91dcf1bc0cea245cfaf3c154578e`、`98634ab11429d5c831f96ad30ed339973cb84cd7bcd0bf74d9104130e287ed46`。没有有效 P22 golden，以上仍不是完整 S10 基线；原始报告只留在 ignored `data/evals/runs/`。
+
+**2026-09-21 skill trace 排查：**未重新调用模型。失败报告引用的底层 Codex rollout 有 145 个 LF 分隔记录，逐条均为合法 JSON object；其中 JSON 字符串含 10 个合法 U+0085 字符。旧 parser 的 `str.splitlines()` 将这些字符额外切成 10 段，产生伪 `invalid_jsonl`。改为只按 JSONL 的 LF 边界解析后，同一保存会话的 trace 重建为 `available`，并恢复预期技能、model 与 provider 证据。原报告保留历史错误码；当次结构和语义结论不变。
+
 ## 范围与样本
 
 - 当前运行库只有 3 条消息、1 个任务，且没有可用的 feedback、agent audit 或 processing failure，不能作为当前质量基线。
