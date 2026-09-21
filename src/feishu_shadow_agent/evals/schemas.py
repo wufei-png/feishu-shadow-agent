@@ -89,6 +89,27 @@ class RouterScenario(EvalModel):
         return self
 
 
+class TaskSessionFinalRebuild(EvalModel):
+    recent_messages: int = Field(gt=0)
+    summary: str | None = None
+
+    @field_validator("summary")
+    @classmethod
+    def validate_summary(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("final rebuild summary must not be blank")
+        return cleaned
+
+
+class TaskSessionTimelineTurn(EvalModel):
+    message_id: str = Field(min_length=1)
+    kind: Literal["context", "target"]
+    source_revision: int = Field(default=1, gt=0)
+
+
 class TaskSessionScenario(EvalModel):
     schema_version: Literal["eval_case_v1"] = "eval_case_v1"
     case_type: Literal["task-session"] = "task-session"
@@ -96,6 +117,9 @@ class TaskSessionScenario(EvalModel):
     message_ids: list[str] | None = None
     setup_message_ids: list[str] | None = None
     target_message_id: str | None = None
+    target_message_ids: list[str] | None = None
+    turns: list[TaskSessionTimelineTurn] | None = None
+    final_rebuild: TaskSessionFinalRebuild | None = None
     resources: list[ResourceFixture] = Field(
         default_factory=lambda: list[ResourceFixture]()
     )
@@ -105,19 +129,68 @@ class TaskSessionScenario(EvalModel):
         if self.mode == "initial":
             if not self.message_ids:
                 raise ValueError("initial mode requires non-empty message_ids")
-            if self.setup_message_ids is not None or self.target_message_id is not None:
+            if (
+                self.setup_message_ids is not None
+                or self.target_message_id is not None
+                or self.target_message_ids is not None
+                or self.turns is not None
+                or self.final_rebuild is not None
+            ):
                 raise ValueError(
-                    "initial mode does not accept setup_message_ids or target_message_id"
+                    "initial mode does not accept setup_message_ids, "
+                    "target_message_id, target_message_ids, turns, or final_rebuild"
                 )
             _require_unique(self.message_ids, "message_ids")
             return self
-        if not self.setup_message_ids or not self.target_message_id:
-            raise ValueError(
-                "resume mode requires setup_message_ids and target_message_id"
-            )
         if self.message_ids is not None:
             raise ValueError("resume mode does not accept message_ids")
-        ids = [*self.setup_message_ids, self.target_message_id]
+        if self.turns is not None:
+            if (
+                self.setup_message_ids is not None
+                or self.target_message_id is not None
+                or self.target_message_ids is not None
+                or self.final_rebuild is not None
+            ):
+                raise ValueError(
+                    "resume turns cannot be combined with legacy resume fields "
+                    "or final_rebuild"
+                )
+            if not self.turns:
+                raise ValueError("resume turns must not be empty")
+            _require_unique(
+                [turn.message_id for turn in self.turns], "resume turn message ids"
+            )
+            first_target = next(
+                (
+                    index
+                    for index, turn in enumerate(self.turns)
+                    if turn.kind == "target"
+                ),
+                None,
+            )
+            if first_target is None:
+                raise ValueError("resume turns require at least one target")
+            if any(turn.kind == "context" for turn in self.turns[first_target:]):
+                raise ValueError(
+                    "resume context turns must precede the first target so they "
+                    "are visible in the initial production prompt"
+                )
+            return self
+        if not self.setup_message_ids:
+            raise ValueError("resume mode requires non-empty setup_message_ids")
+        if (self.target_message_id is None) == (self.target_message_ids is None):
+            raise ValueError(
+                "resume mode requires exactly one of target_message_id "
+                "or target_message_ids"
+            )
+        targets = (
+            [self.target_message_id]
+            if self.target_message_id is not None
+            else list(self.target_message_ids or [])
+        )
+        if not targets:
+            raise ValueError("resume target_message_ids must not be empty")
+        ids = [*self.setup_message_ids, *targets]
         _require_unique(ids, "resume message ids")
         return self
 

@@ -24,9 +24,10 @@ Use this order when documents disagree:
 2. `CONTEXT.md` for product language
 3. `docs/adr/*.md` for accepted architectural decisions
 4. `docs/specs/*.md` for current product and API contracts
-5. `docs/plans/*.md` for historical phased implementation context
+5. `docs/plans/post-mvp-backlog.md` for the current active/deferred post-MVP index
+6. other `docs/plans/*.md` files for historical phased implementation context
 
-Plans can still be useful for rationale, acceptance commands, and old edge cases, but they are not the live contract once the corresponding phase has landed.
+Other phase plans can still be useful for rationale, acceptance commands, and old edge cases, but they are not the live contract once the corresponding phase has landed. The backlog is only an index for current work and cannot override this boundary.
 
 ## Code-Owned Rules
 
@@ -34,15 +35,17 @@ These rules belong in deterministic code and tests. Do not delegate them to prom
 
 - Feishu identity selection: user reads, user P2P replies, bot owner notifications, bot-preferred group replies, and bot resource downloads.
 - Message ingress eligibility: group `@owner`, P2P, `@All` suppression, sender role classification, and loop guard.
-- Deterministic routing shortcuts: reply-to, thread, and burst-window attachment.
+- Deterministic routing ownership and shortcuts: a revision stays with its original active task; otherwise reply-to, thread, and burst-window attachment are evaluated in that order before TaskRouter. Every structural lookup remains scoped to the current chat.
 - Product Policy resolution: Product Policy Store as runtime truth, explicit Policy Import Source comparison, and fail-closed behavior when global policy is missing.
 - Resource gates: bot joined, resource download enabled, size/quota checks, retryable download failures, and owner notification on blocked resources.
+- Bot membership facts: active probes and attributed bot send/download failures may derive present, absent, or unknown runtime state; they never mutate owner-authored Product Policy or auto-join a chat.
 - Reply gates: answerability/decision-reason combination validation, direct group mention requirement, empty reply rejection, forbidden mention cleanup, and identity fallback rules.
 - Dispatch safety: dry-run before send, idempotency key reuse, single active send constraint, readback verification, owner notification for failed/uncertain reply sends, and manual recovery for uncertain sends.
+- Processing recovery: only terminal or externally blocked `task_router`, `resource_download`, and `task_session` stages may be manually queued. Each retry has a fresh claim token, remains bound to the source revision and task ownership, and never turns uncertain dispatch into an automatic resend.
 - Operator mutations: all state-changing owner actions, including card callbacks, go through Operator Command services and return `CommandResult`.
 - Operator read models: CLI status and console reads go through `OperatorQueryService`, not direct store DTO snapshots.
 - Approval provenance: dry-run approvals/actions never become production sends; production requires a fresh production approval.
-- Full-chain retention: after the configured content window, messages, inactive task state, approvals, actions, dispatch results, resources, agent audits, approval commands/feedback, processing errors, and log payloads are scrubbed in place. Minimal audit rows remain; only a watching task whose `watch_until` is still in the future delays scrubbing.
+- Full-chain retention: after the configured content window, messages, inactive task state, task background content/reasons, approvals, actions, dispatch results, resources, agent audits, approval commands/feedback, processing errors, and log payloads are scrubbed in place. Minimal audit rows remain; only a watching task whose `watch_until` is still in the future delays scrubbing.
 
 ## Agent Prompt Architecture And Trust Boundary
 
@@ -54,6 +57,8 @@ Runtime prompt responsibilities are split by authority:
 - The runtime prompt catalog is `router`, `task_session`, `reply_postprocess`, and `owner_style_refresh`; production `agent_audits` currently persist the first three, while owner-style refresh has no production audit row. Evaluation adds `ingress_judge`, `semantic_judge`, and the generic `structured_output` fallback. `agent_audits.request_type` is the persisted prompt kind. Audit rows and eval artifacts record the catalog version and SHA-256 of the exact backend-neutral business prompt, before provider-specific wrapper injection; full prompt text remains debug-only.
 
 Context Access has an intentionally narrow trust boundary. Its URI, allowed tables, and query scope are logically read-only, enforced primarily by the model-visible instructions and the model's instruction following. This remains true when `tool_permissions: full_access` gives the backend other local write-capable tools; it is not a filesystem or security sandbox. Stronger local isolation requires `read_only` or an external sandbox. Feishu writes are a separate code-owned boundary and remain protected by schema validation, policy, approval, dry-run, idempotency, and dispatch gates regardless of backend permissions.
+
+Owner-provided task background is a separate, explicit evidence channel. Operator Command appends a task-scoped version for set, replace, or clear; it does not reset `agent_session_id` or change task ownership. `TaskSessionRunner` reads only the latest non-cleared value and injects it only when building a fresh provider session. Resumed sessions never receive it again. The prompt labels it as owner-supplied evidence rather than an instruction and tells the model to prefer newer Feishu messages on conflict.
 
 ## Agent-Owned Judgement
 
@@ -73,12 +78,14 @@ If an agent output crosses these bounds, the code should reject it, downgrade to
 
 - `routing.py`: deterministic routing, owner takeover, duplicate route recovery, and the boundary that decides whether Hermes TaskRouter is needed.
 - `policy.py`: Product Policy resolution for resource and reply decisions. Keep chat policy fallback rules here instead of copying them into processing, UI, or store code.
+- `membership.py`: active bot-membership probes, fact expiry, failure attribution, and episode-level owner notification deduplication. Unknown and expired facts must not be treated as confirmed absence.
 - `processing.py`: task-level orchestration from route result to task session, postprocess, reply gate, approval, or send action. New feature branches should prefer extracting helpers over adding more nested branches here.
+- `ingestion.py`: ingress orchestration, resource acquisition, and claimed manual processing retries. A task-router retry must recover the original deterministic placeholder rather than treating the later failure audit as a final route.
 - `dispatcher.py`: dispatch claiming, dry-run, actual send, readback, stale sending detection, and manual recovery.
 - `approval_cards.py`: deterministic Card JSON construction. Cards bind one concrete approval and expose only the supported resolution actions.
 - `card_actions.py`: owner-only `card.action.trigger` parsing, event-id idempotency, atomic command/feedback application, callback connection health, and daemon wake-up.
 - `operator_queries/`: read-only operator DTOs. It may derive status, overdue fields, feedback metrics, health issues, and recommended actions, but it must not mutate state.
-- `operator_commands.py`: explicit operator mutations. Console and CLI commands should call this facade instead of reaching into store transactions directly.
+- `operator_commands.py`: explicit operator mutations, including auditable processing and dispatch recovery. Console and CLI commands should call this facade instead of reaching into store transactions directly.
 - `store/sqlite_store.py`: SQLite persistence and transactional primitives. Avoid adding new product-facing read models here.
 - `prompt.py` and `context_access.py`: agent input contracts. Every model-visible field must have a current decision purpose.
 - `console_api.py`: local HTTP adapter only. Keep business decisions in query/command services.

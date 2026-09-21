@@ -90,6 +90,8 @@ class PolicyQuery:
             "policy_source": policy.policy_source,
             "auto_reply": policy.auto_reply,
             "bot_joined": policy.bot_joined,
+            "configured_bot_joined": policy.configured_bot_joined,
+            "bot_membership_status": policy.bot_membership_status,
             "reply_identity": policy.reply_identity,
             "allow_user_fallback": policy.allow_user_fallback,
             "resource_download": policy.resource_download,
@@ -143,6 +145,17 @@ class PolicyQuery:
 
     def get_chat_product_policy(self, chat_id: str) -> dict[str, Any] | None:
         return self._get_chat_product_policy(chat_id)
+
+    def get_bot_membership_fact(self, chat_id: str) -> dict[str, Any] | None:
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT value_json FROM checkpoints WHERE key = ?",
+                    (f"runtime.bot_membership.{chat_id}",),
+                ).fetchone()
+        except ReadStoreUnavailable:
+            return None
+        return None if row is None else loads_json_object(row["value_json"])
 
     def list_chat_product_policies(self, *, limit: int = 100) -> list[dict[str, Any]]:
         return self._list_chat_product_policies(limit=limit)
@@ -287,6 +300,9 @@ class _ReadOnlyProductPolicyRepository:
 
     def get_chat_product_policy(self, chat_id: str) -> dict[str, Any] | None:
         return self.query.get_chat_product_policy(chat_id)
+
+    def get_bot_membership_fact(self, chat_id: str) -> dict[str, Any] | None:
+        return self.query.get_bot_membership_fact(chat_id)
 
 
 def _policy_audit_dto(row: sqlite3.Row) -> dict[str, Any]:

@@ -5,12 +5,12 @@ from dataclasses import dataclass
 from typing import Final
 
 PROMPT_VERSIONS: Final[dict[str, str]] = {
-    "router": "v1",
-    "task_session": "v1",
-    "reply_postprocess": "v1",
-    "owner_style_refresh": "v1",
-    "ingress_judge": "v1",
-    "semantic_judge": "v1",
+    "router": "v2",
+    "task_session": "v2",
+    "reply_postprocess": "v2",
+    "owner_style_refresh": "v2",
+    "ingress_judge": "v2",
+    "semantic_judge": "v2",
     "structured_output": "v1",
 }
 

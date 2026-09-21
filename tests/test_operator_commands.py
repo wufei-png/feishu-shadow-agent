@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -11,11 +13,20 @@ from feishu_shadow_agent.config import (
     OwnerConfig,
     ReplyPolicyConfig,
 )
+from feishu_shadow_agent.ingestion import IngestionService
+from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.operator_commands import (
     OperatorCommandService,
     command_exit_code,
 )
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
+from feishu_shadow_agent.types import (
+    LarkCliResult,
+    NormalizedMessage,
+    ResourceRef,
+    RouteDecision,
+    RouteName,
+)
 
 
 def _store(tmp_path: Path) -> SQLiteStore:
@@ -75,6 +86,37 @@ def _config(
         owner=OwnerConfig(open_id="ou_owner"),
         reply_policy=reply_policy or ReplyPolicyConfig(),
         chats=chats or {},
+    )
+
+
+def _processing_message(message_id: str = "om_processing") -> NormalizedMessage:
+    return NormalizedMessage(
+        message_id=message_id,
+        chat_id="oc_1",
+        chat_type="group",
+        sender_id="ou_external",
+        sender_name="External",
+        sender_type="user",
+        sender_role="external_user_message",
+        sent_at="2026-06-22T10:00:00+08:00",
+        thread_id=None,
+        reply_to_message_id=None,
+        text="please help",
+        direct_mention=True,
+        at_all=False,
+        raw={
+            "message_id": message_id,
+            "chat_id": "oc_1",
+            "chat_type": "group",
+            "sender_id": "ou_external",
+            "sender_name": "External",
+            "sender_type": "user",
+            "create_time": "2026-06-22T10:00:00+08:00",
+            "content": {
+                "text": "please help",
+                "mentions": [{"open_id": "ou_owner"}],
+            },
+        },
     )
 
 
@@ -332,6 +374,373 @@ def test_operator_command_service_dispatch_retry_reports_validation_without_argp
     assert "only accepts failed or failed_needs_review" in output["result"]["error"]
 
 
+def test_processing_retry_dedupes_active_request_and_fences_claim_token(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    message = _processing_message()
+    store.upsert_message(message)
+    task, _ = store.create_task_for_message_and_audit(
+        message, watch_until="2999-06-22T12:00:00+00:00"
+    )
+    store.record_message_processing(
+        message_id=message.message_id,
+        task_id=task.id,
+        stage="task_session",
+        status="processing_failed_terminal",
+        attempt_count=3,
+        last_error="provider failed",
+        terminal_reason="agent_retry_exhausted",
+    )
+    service = OperatorCommandService(store)
+
+    queued = service.retry_processing(
+        message.message_id,
+        stage="task_session",
+        actor="owner",
+        reason="provider recovered",
+    )
+    duplicate = service.retry_processing(
+        message.message_id, stage="task_session", actor="owner"
+    )
+    claim = store.claim_next_processing_retry(run_id="run_retry_1")
+    competing_claim = store.claim_next_processing_retry(run_id="run_retry_competing")
+    in_flight = service.retry_processing(
+        message.message_id, stage="task_session", actor="owner"
+    )
+
+    assert queued.status == "applied"
+    assert queued.result["attempt"]["source_status"] == "processing_failed_terminal"
+    assert duplicate.status == "no_change"
+    assert claim is not None and claim["status"] == "claimed"
+    assert competing_claim is None
+    assert in_flight.status == "conflict"
+    assert "in flight" in in_flight.result["error"]
+    assert (
+        store.finish_processing_retry(
+            int(claim["id"]),
+            claim_token="stale-worker-token",
+            status="succeeded",
+        )
+        is False
+    )
+    assert store.finish_processing_retry(
+        int(claim["id"]),
+        claim_token=str(claim["claim_token"]),
+        status="failed",
+        error="still unavailable",
+    )
+
+    queued_again = service.retry_processing(
+        message.message_id, stage="task_session", actor="owner"
+    )
+    next_claim = store.claim_next_processing_retry(run_id="run_retry_2")
+    assert queued_again.status == "applied"
+    assert next_claim is not None
+    assert next_claim["claim_token"] != claim["claim_token"]
+    assert (
+        store.finish_processing_retry(
+            int(next_claim["id"]),
+            claim_token=str(claim["claim_token"]),
+            status="succeeded",
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_status", "error_fragment"),
+    [
+        ("processed", "validation_failed", "only accepts"),
+        ("stale_revision", "conflict", "stale message revision"),
+        ("owner_takeover", "conflict", "ownership or closure"),
+        ("sent", "conflict", "reply was sent"),
+    ],
+)
+def test_processing_retry_preserves_terminal_safety_gates(
+    tmp_path: Path,
+    mutation: str,
+    expected_status: str,
+    error_fragment: str,
+) -> None:
+    store = _store(tmp_path)
+    message = _processing_message()
+    store.upsert_message(message)
+    task, _ = store.create_task_for_message_and_audit(
+        message, watch_until="2999-06-22T12:00:00+00:00"
+    )
+    store.record_message_processing(
+        message_id=message.message_id,
+        task_id=task.id,
+        stage="task_session",
+        status=(
+            "processed" if mutation == "processed" else "processing_failed_terminal"
+        ),
+    )
+    if mutation == "stale_revision":
+        with store.connect() as conn:
+            conn.execute(
+                "UPDATE messages SET revision = 2 WHERE message_id = ?",
+                (message.message_id,),
+            )
+    elif mutation == "owner_takeover":
+        store.close_task_for_owner_takeover(task.id)
+    elif mutation == "sent":
+        action_id = store.create_send_reply_action(
+            task_id=task.id,
+            target_message_id=message.message_id,
+            payload={"text": "sent", "identity": "user"},
+        )
+        assert action_id is not None
+        store.finish_action(
+            action_id, status="sent", result={"sent_message_id": "om_sent"}
+        )
+
+    result = OperatorCommandService(store).retry_processing(
+        message.message_id, stage="task_session", actor="owner"
+    )
+
+    assert result.status == expected_status
+    assert error_fragment in result.result["error"]
+
+
+def test_processing_retry_worker_replays_bound_stage_and_finishes_attempt(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    message = _processing_message()
+    store.upsert_message(message)
+    task, _ = store.create_task_for_message_and_audit(
+        message, watch_until="2999-06-22T12:00:00+00:00"
+    )
+    store.record_message_processing(
+        message_id=message.message_id,
+        task_id=task.id,
+        stage="task_session",
+        status="processing_failed_terminal",
+    )
+    notification_id = store.create_owner_notification_action(
+        task_id=task.id,
+        payload={
+            "type": "processing_failed",
+            "source_message_id": message.message_id,
+            "source_revision": message.revision,
+            "stage": "task_session",
+        },
+    )
+    OperatorCommandService(store).retry_processing(
+        message.message_id, stage="task_session", actor="owner"
+    )
+
+    class FakeProcessor:
+        approvals = None
+
+        def set_resource_retry_func(self, func: Any) -> None:
+            self.retry_func = func
+
+        def process(self, **kwargs: Any) -> None:
+            current = cast(NormalizedMessage, kwargs["message"])
+            store.record_message_processing(
+                message_id=current.message_id,
+                revision=current.revision,
+                task_id=task.id,
+                stage="task_session",
+                status="processed",
+                attempt_count=1,
+            )
+
+    class FakeFeishu:
+        def download_resource(self, **kwargs: Any) -> LarkCliResult:
+            raise AssertionError("resource download is not expected")
+
+    service = IngestionService(
+        store=store,
+        feishu_client=cast(Any, FakeFeishu()),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        task_processor=cast(Any, FakeProcessor()),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+
+    summary = service.run_processing_retries(run_id="run_retry")
+
+    assert summary.ok is True and summary.processed == 1
+    with store.connect() as conn:
+        attempt = conn.execute(
+            "SELECT status, run_id, claim_token FROM processing_retry_attempts"
+        ).fetchone()
+    assert attempt["status"] == "succeeded"
+    assert attempt["run_id"] == "run_retry"
+    assert attempt["claim_token"].startswith("processing-retry-")
+    notification = store.get_action(notification_id)
+    assert notification is not None and notification.status == "cancelled"
+
+
+def test_processing_retry_worker_replays_task_router_from_original_placeholder(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    message = _processing_message("om_router_retry")
+    store.upsert_message(message)
+    store.record_routing_audit(
+        message_id=message.message_id,
+        revision=message.revision,
+        decision=RouteDecision(RouteName.AMBIGUOUS, reason="router_placeholder"),
+    )
+    store.record_routing_audit(
+        message_id=message.message_id,
+        revision=message.revision,
+        decision=RouteDecision(RouteName.AMBIGUOUS, reason="task_router_failed"),
+    )
+    store.record_message_processing(
+        message_id=message.message_id,
+        stage="task_router",
+        status="processing_failed_terminal",
+    )
+    OperatorCommandService(store).retry_processing(
+        message.message_id, stage="task_router", actor="owner"
+    )
+
+    class FakeProcessor:
+        approvals = None
+
+        def set_resource_retry_func(self, func: Any) -> None:
+            self.retry_func = func
+
+        def run_task_router(self, **kwargs: Any) -> None:
+            assert kwargs["reason"] == "router_placeholder"
+            current = cast(NormalizedMessage, kwargs["message"])
+            store.record_message_processing(
+                message_id=current.message_id,
+                revision=current.revision,
+                stage="task_router",
+                status="processed",
+                attempt_count=1,
+            )
+
+        def process(self, **kwargs: Any) -> None:
+            raise AssertionError("router returned no task to continue")
+
+    class FakeFeishu:
+        def download_resource(self, **kwargs: Any) -> LarkCliResult:
+            raise AssertionError("resource download is not expected")
+
+    service = IngestionService(
+        store=store,
+        feishu_client=cast(Any, FakeFeishu()),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        task_processor=cast(Any, FakeProcessor()),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+
+    summary = service.run_processing_retries(run_id="run_router_retry")
+
+    assert summary.ok is True and summary.processed == 1
+    with store.connect() as conn:
+        attempt = conn.execute(
+            "SELECT status FROM processing_retry_attempts"
+        ).fetchone()
+    assert attempt["status"] == "succeeded"
+
+
+def test_processing_retry_worker_recovers_resource_before_task_processing(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    base = _processing_message("om_resource_retry")
+    raw = dict(base.raw)
+    raw["content"] = dict(cast(dict[str, Any], raw["content"])) | {
+        "image_key": "img_retry"
+    }
+    resource = ResourceRef(
+        message_id=base.message_id,
+        file_key="img_retry",
+        resource_type="image",
+        raw={"image_key": "img_retry"},
+    )
+    message = replace(base, raw=raw, resources=[resource])
+    store.upsert_message(message)
+    task, _ = store.create_task_for_message_and_audit(
+        message, watch_until="2999-06-22T12:00:00+00:00"
+    )
+    store.upsert_resource(resource, download_status="failed", raw={"error": "down"})
+    store.record_message_processing(
+        message_id=message.message_id,
+        task_id=task.id,
+        stage="resource_download",
+        status="blocked_waiting_external",
+        terminal_reason="resource_unavailable",
+    )
+    config = _config(
+        chats={
+            "oc_1": ChatPolicyConfig(
+                name="resource retry",
+                auto_reply=False,
+                bot_joined=True,
+                resource_download=True,
+            )
+        }
+    )
+    store.import_product_policy_from_config(config)
+    OperatorCommandService(store).retry_processing(
+        message.message_id, stage="resource_download", actor="owner"
+    )
+
+    class FakeProcessor:
+        approvals = None
+
+        def set_resource_retry_func(self, func: Any) -> None:
+            self.retry_func = func
+
+        def process(self, **kwargs: Any) -> None:
+            current = cast(NormalizedMessage, kwargs["message"])
+            resources = store.list_resources_for_messages([current.message_id])
+            assert resources[0]["download_status"] == "downloaded"
+            store.record_message_processing(
+                message_id=current.message_id,
+                revision=current.revision,
+                task_id=task.id,
+                stage="resource_download",
+                status="processed",
+                attempt_count=1,
+            )
+
+    class FakeFeishu:
+        calls = 0
+
+        def download_resource(self, **kwargs: Any) -> LarkCliResult:
+            self.calls += 1
+            output = tmp_path / str(kwargs["output"])
+            output.write_bytes(b"recovered-image")
+            return LarkCliResult(
+                ["lark-cli", "im", "+messages-resources-download"],
+                0,
+                json_data={"path": str(kwargs["output"])},
+            )
+
+    feishu = FakeFeishu()
+    service = IngestionService(
+        store=store,
+        feishu_client=cast(Any, feishu),
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        task_processor=cast(Any, FakeProcessor()),
+        resource_base_dir=tmp_path,
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+
+    summary = service.run_processing_retries(run_id="run_resource_retry")
+
+    assert summary.ok is True and summary.processed == 1
+    assert feishu.calls == 1
+    with store.connect() as conn:
+        attempt = conn.execute(
+            "SELECT status FROM processing_retry_attempts"
+        ).fetchone()
+    assert attempt["status"] == "succeeded"
+
+
 def test_operator_command_service_cancel_sent_action_reports_conflict(
     tmp_path: Path,
 ) -> None:
@@ -358,6 +767,68 @@ def test_operator_command_service_cancel_sent_action_reports_conflict(
     assert output["status"] == "conflict"
     assert output["changed"] is False
     assert "sent actions cannot be cancelled" in output["result"]["error"]
+
+
+def test_task_background_versions_set_replace_clear_and_isolate_tasks(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    first_id = _insert_task(store, "t_background_1", "om_background_1")
+    second_id = _insert_task(store, "t_background_2", "om_background_2")
+    store.set_task_agent_session_id(first_id, "session-live", backend_provider="hermes")
+    service = OperatorCommandService(store)
+
+    created = service.update_task_background(
+        "t_background_1",
+        content=" Customer only accepts a Friday release. ",
+        actor="owner",
+        reason="customer constraint",
+    )
+    unchanged = service.update_task_background(
+        "t_background_1",
+        content="Customer only accepts a Friday release.",
+        actor="owner",
+    )
+    replaced = service.update_task_background(
+        "t_background_1",
+        content="Customer approved a Monday release.",
+        actor="owner",
+    )
+    other = service.update_task_background(
+        "t_background_2",
+        content="This belongs only to the second task.",
+        actor="owner",
+    )
+    cleared = service.update_task_background(
+        "t_background_1", content=None, actor="owner", reason="no longer needed"
+    )
+
+    assert created.status == "applied"
+    assert created.result["background"]["version"] == 1
+    assert created.result["background"]["content"] == (
+        "Customer only accepts a Friday release."
+    )
+    assert unchanged.status == "no_change"
+    assert replaced.result["background"]["version"] == 2
+    assert other.result["background"]["version"] == 1
+    assert cleared.result["background"]["version"] == 3
+    assert cleared.result["background"]["operation"] == "clear"
+    assert cleared.result["background"]["content"] is None
+    assert store.get_task_background(first_id) is None
+    assert store.get_task_background(second_id) == (
+        "This belongs only to the second task."
+    )
+    assert store.get_task_by_id(first_id).agent_session_id == "session-live"
+    with store.connect() as conn:
+        versions = conn.execute(
+            "SELECT version, operation, actor, reason FROM task_background_versions "
+            "WHERE task_id = ? ORDER BY version",
+            (first_id,),
+        ).fetchall()
+    assert [row["version"] for row in versions] == [1, 2, 3]
+    assert [row["operation"] for row in versions] == ["set", "set", "clear"]
+    assert versions[0]["actor"] == "owner"
+    assert versions[0]["reason"] == "customer constraint"
 
 
 def test_operator_command_service_expire_approvals_reports_no_change(

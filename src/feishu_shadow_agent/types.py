@@ -29,6 +29,13 @@ FeedbackReason: TypeAlias = Literal[
 ]
 
 
+@dataclass(frozen=True)
+class ApprovalTargetBinding:
+    task_id: int | None
+    source_message_id: str | None
+    source_revision: int | None
+
+
 class TaskStatus(StrEnum):
     WATCHING = "watching"
     CLOSED = "closed"
@@ -221,6 +228,7 @@ class MessagePage:
     next_page_token: str | None = None
     has_more: bool = False
     raw: Any | None = None
+    page_count: int = 1
 
 
 @dataclass(frozen=True)
@@ -248,11 +256,24 @@ class NormalizedMessage:
     at_all: bool
     mentions: list[str] = field(default_factory=lambda: list[str]())
     resources: list[ResourceRef] = field(default_factory=lambda: list[ResourceRef]())
+    message_type: str | None = None
     raw: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
+    is_deleted: bool = False
+    revision: int = 1
 
     @property
     def is_self_message(self) -> bool:
         return self.sender_role in {"bot_message", "agent_message"}
+
+
+@dataclass(frozen=True)
+class MessageUpsertResult:
+    inserted: bool
+    changed: bool
+    revision: int
+    is_deleted: bool
+    semantic_hash: str
+    requires_confirmation: bool = False
 
 
 @dataclass(frozen=True)
@@ -286,6 +307,8 @@ class ActionRecord:
     result: dict[str, Any]
     created_at: str
     updated_at: str
+    source_message_id: str | None = None
+    source_revision: int | None = None
 
 
 @dataclass(frozen=True)

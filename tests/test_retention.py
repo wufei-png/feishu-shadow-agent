@@ -260,6 +260,7 @@ def test_retention_scrubs_full_chain_except_effective_watch(tmp_path: Path) -> N
     expected = {
         "messages",
         "tasks",
+        "task_background_versions",
         "task_watch_keys",
         "approvals",
         "actions",
@@ -269,6 +270,7 @@ def test_retention_scrubs_full_chain_except_effective_watch(tmp_path: Path) -> N
         "approval_commands",
         "approval_feedback",
         "message_processing",
+        "processing_retry_attempts",
     }
     assert set(preview.content_candidates) == expected
     assert set(applied.content_scrubbed) == expected
@@ -318,6 +320,18 @@ def test_retention_scrubs_full_chain_except_effective_watch(tmp_path: Path) -> N
                 "SELECT * FROM message_processing ORDER BY message_id"
             )
         }
+        processing_retries = {
+            row["message_id"]: dict(row)
+            for row in conn.execute(
+                "SELECT * FROM processing_retry_attempts ORDER BY message_id"
+            )
+        }
+        task_backgrounds = {
+            row["task_id"]: dict(row)
+            for row in conn.execute(
+                "SELECT * FROM task_background_versions ORDER BY task_id"
+            )
+        }
         watch_keys = {
             row["task_id"]: row["key"]
             for row in conn.execute("SELECT * FROM task_watch_keys ORDER BY task_id")
@@ -341,6 +355,12 @@ def test_retention_scrubs_full_chain_except_effective_watch(tmp_path: Path) -> N
         assert commands[f"cmd_{suffix}"]["command"] == "[retention_pruned]"
         assert feedback[f"cmd_{suffix}"]["suggested_reply"] is None
         assert processing[f"om_{suffix}"]["last_error"] is None
+        assert processing_retries[f"om_{suffix}"]["reason"] is None
+        assert processing_retries[f"om_{suffix}"]["error"] is None
+        assert processing_retries[f"om_{suffix}"]["content_expired_at"] is not None
+        assert task_backgrounds[task["id"]]["content"] is None
+        assert task_backgrounds[task["id"]]["reason"] is None
+        assert task_backgrounds[task["id"]]["content_expired_at"] is not None
         assert watch_keys[task["id"]].startswith("retention-pruned:")
 
     active = tasks["t_active"]
@@ -350,14 +370,22 @@ def test_retention_scrubs_full_chain_except_effective_watch(tmp_path: Path) -> N
     assert commands["cmd_active"]["command"] == "/approve secret active"
     assert feedback["cmd_active"]["suggested_reply"] == "secret suggested active"
     assert processing["om_active"]["last_error"] == "secret error active"
+    assert processing_retries["om_active"]["reason"] == "secret reason active"
+    assert processing_retries["om_active"]["content_expired_at"] is None
+    assert task_backgrounds[active["id"]]["content"] == "secret background active"
+    assert task_backgrounds[active["id"]]["content_expired_at"] is None
     assert watch_keys[active["id"]] == "secret-key-active"
 
     recent = tasks["t_recent"]
     assert messages["om_recent"]["text"] == "secret recent"
     assert recent["task_label"] == "secret label recent"
+    assert processing_retries["om_recent"]["reason"] == "secret reason recent"
+    assert task_backgrounds[recent["id"]]["content"] == "secret background recent"
     assert len(messages) == len(tasks) == len(approvals) == len(actions) == 4
     assert len(resources) == len(audits) == len(commands) == len(feedback) == 4
     assert len(processing) == len(watch_keys) == 4
+    assert len(processing_retries) == 4
+    assert len(task_backgrounds) == 4
 
 
 def test_retention_scrubs_jsonl_and_text_log_payloads_atomically(
@@ -732,6 +760,19 @@ def _insert_sensitive_chain(
             "INSERT INTO task_watch_keys(task_id, key, created_at) VALUES (?, ?, ?)",
             (task_id, f"secret-key-{suffix}", created_at),
         )
+        conn.execute(
+            """
+            INSERT INTO task_background_versions(
+              task_id, version, content, operation, actor, reason, created_at
+            ) VALUES (?, 1, ?, 'set', 'owner', ?, ?)
+            """,
+            (
+                task_id,
+                f"secret background {suffix}",
+                f"secret background reason {suffix}",
+                created_at,
+            ),
+        )
         approval = conn.execute(
             """
             INSERT INTO approvals(
@@ -861,6 +902,27 @@ def _insert_sensitive_chain(
                       'attempts_exhausted', ?, ?)
             """,
             (message_id, task_id, f"secret error {suffix}", created_at, created_at),
+        )
+        conn.execute(
+            """
+            INSERT INTO processing_retry_attempts(
+              message_id, revision, task_id, stage, source_status, status,
+              claim_token, run_id, actor, reason, error, created_at, claimed_at,
+              finished_at
+            ) VALUES (?, 1, ?, 'task_session', 'processing_failed_terminal',
+                      'failed', ?, ?, 'owner', ?, ?, ?, ?, ?)
+            """,
+            (
+                message_id,
+                task_id,
+                f"secret-claim-{suffix}",
+                f"secret-run-{suffix}",
+                f"secret reason {suffix}",
+                f"secret retry error {suffix}",
+                created_at,
+                created_at,
+                created_at,
+            ),
         )
 
 

@@ -422,6 +422,163 @@ def test_dashboard_snapshot_health_summary_matches_open_health_issues(
     assert snapshot["health_issue_summary"]["open_issue_count"] == 1
 
 
+def test_dashboard_attention_counts_are_not_limited_by_preview_size(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    first_task = _insert_task(store, "t_attention_1", root_message_id="om_a1")
+    second_task = _insert_task(store, "t_attention_2", root_message_id="om_a2")
+    _insert_approval(store, task_id=first_task, short_id="a_attention_1")
+    _insert_approval(store, task_id=second_task, short_id="a_attention_2")
+    failed_action = store.create_send_reply_action(
+        task_id=first_task,
+        target_message_id="om_a1",
+        payload={"reply_target_message_id": "om_a1", "text": "reply one"},
+    )
+    uncertain_action = store.create_send_reply_action(
+        task_id=second_task,
+        target_message_id="om_a2",
+        payload={"reply_target_message_id": "om_a2", "text": "reply two"},
+    )
+    assert failed_action is not None and uncertain_action is not None
+    store.finish_action(failed_action, status="failed", result={"error": "send"})
+    store.finish_action(
+        uncertain_action,
+        status="failed_needs_review",
+        result={"error": "readback"},
+    )
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO message_processing(
+              message_id, revision, task_id, stage, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "om_blocked",
+                1,
+                first_task,
+                "resource_download",
+                "blocked_waiting_external",
+                "2026-06-22T09:00:00+08:00",
+                "2026-06-22T09:00:00+08:00",
+            ),
+        )
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:00:00+08:00")
+
+    snapshot = query.dashboard_snapshot(limit=1)
+
+    assert len(snapshot["pending_approvals"]) == 1
+    assert len(snapshot["failed_or_needs_review_actions"]) == 1
+    assert snapshot["attention_summary"] == {
+        "pending_approval_count": 2,
+        "overdue_approval_count": 0,
+        "failed_action_count": 1,
+        "uncertain_action_count": 1,
+        "blocked_processing_count": 1,
+        "failed_processing_count": 0,
+        "affected_task_count": 2,
+        "total_item_count": 5,
+    }
+    assert len(snapshot["attention_tasks"]) == 1
+    assert snapshot["attention_tasks"][0]["task_short_id"] in {
+        "t_attention_1",
+        "t_attention_2",
+    }
+
+
+def test_dashboard_ingestion_status_exposes_backlog_and_checkpoint_age(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.set_checkpoint(
+        "ingest.group_at_me",
+        {
+            "last_success_at": "2026-06-22T08:00:00+00:00",
+            "last_drain": {"pages_fetched": 2, "messages_fetched": 40},
+        },
+    )
+    store.set_checkpoint(
+        "ingest.p2p",
+        {
+            "last_success_at": "2026-06-22T09:00:00+00:00",
+            "backlog": {
+                "start": "2026-06-22T08:58:00+00:00",
+                "end": "2026-06-22T10:00:00+00:00",
+                "next_page_token": "opaque",
+                "pages_fetched": 3,
+                "messages_fetched": 150,
+                "reason": "tick_budget_exhausted",
+            },
+        },
+    )
+    store.set_checkpoint("ingest.scheduler.sources", {"next_index": 1})
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:00:00+00:00")
+
+    status = query.dashboard_snapshot()["ingestion_status"]
+
+    assert status["summary"] == {
+        "source_count": 2,
+        "backlog_count": 1,
+        "budget_exhausted_count": 1,
+        "oldest_checkpoint_age_seconds": 7200,
+    }
+    assert [source["checkpoint_key"] for source in status["sources"]] == [
+        "ingest.group_at_me",
+        "ingest.p2p",
+    ]
+    assert status["sources"][1]["drain_complete"] is False
+    assert status["sources"][1]["backlog"]["messages_fetched"] == 150
+
+
+def test_dashboard_exposes_fresh_and_expired_bot_membership_facts(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.import_product_policy_from_config(
+        _config(chats={"oc_unobserved": ChatPolicyConfig(bot_joined=True)})
+    )
+    store.set_bot_membership_fact(
+        "oc_absent",
+        {
+            "status": "absent",
+            "checked_at": "2026-06-22T09:59:00+00:00",
+            "next_probe_at": "2026-06-22T10:04:00+00:00",
+            "source": "resource_download_failure",
+            "error": "download failed",
+            "error_code": 10002,
+            "error_endpoint": "resource_download",
+        },
+    )
+    store.set_bot_membership_fact(
+        "oc_stale",
+        {
+            "status": "present",
+            "checked_at": "2026-06-22T09:00:00+00:00",
+            "next_probe_at": "2026-06-22T09:05:00+00:00",
+            "source": "active_probe",
+            "error": None,
+        },
+    )
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:00:00+00:00")
+
+    membership = query.dashboard_snapshot()["bot_membership_status"]
+
+    assert membership["summary"] == {
+        "present": 0,
+        "absent": 1,
+        "unknown": 1,
+        "unobserved": 1,
+    }
+    assert [(fact["chat_id"], fact["status"]) for fact in membership["facts"]] == [
+        ("oc_absent", "absent"),
+        ("oc_stale", "unknown"),
+        ("oc_unobserved", "unobserved"),
+    ]
+    assert membership["facts"][0]["error_code"] == 10002
+    assert membership["facts"][0]["error_endpoint"] == "resource_download"
+
+
 def test_operator_query_derives_overdue_approval_without_mutating_db(
     tmp_path: Path,
 ) -> None:
@@ -510,6 +667,32 @@ def test_approval_dto_exposes_postprocess_badge_fields_without_full_payload(
     assert detail["payload"]["keep_watching_on_reject"] is True
 
 
+def test_approval_list_combines_statuses_with_stable_pagination(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    task_id = _insert_task(store)
+    approved_id = _insert_approval(store, task_id=task_id, short_id="a_approved")
+    rejected_id = _insert_approval(store, task_id=task_id, short_id="a_rejected")
+    _insert_approval(store, task_id=task_id, short_id="a_pending")
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE approvals SET status = 'approved' WHERE id = ?", (approved_id,)
+        )
+        conn.execute(
+            "UPDATE approvals SET status = 'rejected' WHERE id = ?", (rejected_id,)
+        )
+    query = OperatorQueryService(store)
+
+    first_page = query.list_approvals(
+        statuses=("approved", "rejected"), limit=1, offset=0
+    )
+    second_page = query.list_approvals(
+        statuses=("approved", "rejected"), limit=1, offset=1
+    )
+
+    assert [item["approval_id"] for item in first_page] == ["a_rejected"]
+    assert [item["approval_id"] for item in second_page] == ["a_approved"]
+
+
 def test_task_detail_returns_related_read_models_and_effective_policy(
     tmp_path: Path,
 ) -> None:
@@ -566,6 +749,25 @@ def test_task_detail_returns_related_read_models_and_effective_policy(
         },
     )
     assert action_id is not None
+    store.record_message_processing(
+        message_id="om_root",
+        task_id=task_id,
+        stage="resource_download",
+        status="blocked_waiting_external",
+        terminal_reason="bot_not_joined",
+    )
+    store.request_processing_retry(
+        message_id="om_root",
+        stage="resource_download",
+        actor="local_console",
+        reason="bot restored",
+    )
+    store.update_task_background(
+        task_id,
+        content="Customer requires a Friday release.",
+        actor="local_console",
+        reason="owner note",
+    )
     query = OperatorQueryService(
         store,
         policy_import_source=config,
@@ -590,10 +792,41 @@ def test_task_detail_returns_related_read_models_and_effective_policy(
     }
     assert detail["pending_approvals"][0]["approval_id"] == "a_review"
     assert detail["actions"][0]["action_id"] == action_id
+    assert detail["processing"] == [
+        {
+            "id": detail["processing"][0]["id"],
+            "message_id": "om_root",
+            "revision": 1,
+            "task_id": task_id,
+            "stage": "resource_download",
+            "status": "blocked_waiting_external",
+            "attempt_count": 0,
+            "last_error": None,
+            "terminal_reason": "bot_not_joined",
+            "created_at": detail["processing"][0]["created_at"],
+            "updated_at": detail["processing"][0]["updated_at"],
+            "latest_retry": {
+                "id": detail["processing"][0]["latest_retry"]["id"],
+                "status": "queued",
+                "actor": "local_console",
+                "reason": "bot restored",
+                "error": None,
+                "created_at": detail["processing"][0]["latest_retry"]["created_at"],
+                "finished_at": None,
+            },
+        }
+    ]
+    assert detail["task_background"]["version"] == 1
+    assert detail["task_background"]["content"] == (
+        "Customer requires a Friday release."
+    )
+    assert detail["task_background_history"] == [detail["task_background"]]
     assert detail["effective_policy"] == {
         "policy_source": "explicit_chat",
         "auto_reply": True,
         "bot_joined": True,
+        "configured_bot_joined": True,
+        "bot_membership_status": "unobserved",
         "reply_identity": "bot",
         "allow_user_fallback": False,
         "resource_download": False,
@@ -717,10 +950,10 @@ def test_message_detail_returns_processing_context_without_preview_side_effects(
                 "om_root",
                 task_id,
                 "resource_download",
-                "processed",
+                "blocked_waiting_external",
                 1,
-                None,
-                None,
+                "bot unavailable",
+                "bot_not_joined",
                 "2026-06-22T08:00:00+08:00",
                 "2026-06-22T08:01:00+08:00",
             ),
@@ -796,6 +1029,12 @@ def test_message_detail_returns_processing_context_without_preview_side_effects(
             "WHERE request_type = 'router' AND input_message_ids_json = ?",
             ("v1", "router-hash", json.dumps(["om_root"])),
         )
+    store.request_processing_retry(
+        message_id="om_root",
+        stage="resource_download",
+        actor="local_console",
+        reason="bot restored",
+    )
     action_id = store.create_send_reply_action(
         task_id=task_id,
         target_message_id="om_root",
@@ -821,7 +1060,10 @@ def test_message_detail_returns_processing_context_without_preview_side_effects(
     assert detail["task_summaries"][0]["task_id"] == "t_1"
     assert detail["routing_audits"][0]["route"] == "new_task"
     assert detail["processing"][0]["stage"] == "resource_download"
-    assert detail["processing"][0]["status"] == "processed"
+    assert detail["processing"][0]["status"] == "blocked_waiting_external"
+    assert detail["processing"][0]["latest_retry"]["status"] == "queued"
+    assert detail["processing"][0]["latest_retry"]["actor"] == "local_console"
+    assert detail["processing"][0]["latest_retry"]["reason"] == "bot restored"
     assert detail["resources"][0]["file_key"] == "file_1"
     assert detail["resources"][0]["path_exists"] is True
     assert detail["resources"][0]["raw_summary"] == {"reason": "ok"}

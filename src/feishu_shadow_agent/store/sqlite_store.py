@@ -8,8 +8,10 @@ from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 from ..config import AppConfig, ChatPolicyConfig, ReplyPolicyConfig
+from ..revision import message_semantic_hash
 from ..time_utils import normalize_instant, parse_instant_or_none, shift_instant
 from ..types import (
     ActionKind,
@@ -18,6 +20,7 @@ from ..types import (
     ApprovalKind,
     ApprovalOutcome,
     ApprovalStatus,
+    ApprovalTargetBinding,
     DispatchAttemptRecord,
     DispatchAttemptStatus,
     DispatchClaim,
@@ -26,6 +29,7 @@ from ..types import (
     FeedbackReason,
     HealthCheckResult,
     LifecycleStatePolicy,
+    MessageUpsertResult,
     NormalizedMessage,
     ResourceRef,
     RouteDecision,
@@ -36,10 +40,11 @@ from ..types import (
     new_run_id,
     utc_now_iso,
 )
+from .migrate import migrate_schema
 
 SQLITE_BUSY_TIMEOUT_MS = 5000
 SQLITE_APPLICATION_ID = 1179861319
-SQLITE_SCHEMA_VERSION = 2
+SQLITE_SCHEMA_VERSION = 7
 RUN_HEARTBEAT_STALE_AFTER_SECONDS = 300
 PRODUCT_POLICY_KEY = "reply_policy"
 LATEST_NON_OK_HEALTH_CHECKS_SQL = """
@@ -96,18 +101,26 @@ class SQLiteStore:
                         """
                     ).fetchone()
                 )
-                if has_schema and (
-                    conn.execute("PRAGMA application_id").fetchone()[0]
-                    != SQLITE_APPLICATION_ID
-                    or conn.execute("PRAGMA user_version").fetchone()[0]
-                    != SQLITE_SCHEMA_VERSION
-                ):
-                    raise RuntimeError(
-                        "SQLite database is not the current schema baseline; "
-                        "configure an empty database"
-                    )
-                schema = Path(__file__).with_name("schema.sql")
-                conn.executescript(schema.read_text(encoding="utf-8"))
+                if not has_schema:
+                    schema = Path(__file__).with_name("schema.sql")
+                    conn.executescript(schema.read_text(encoding="utf-8"))
+                else:
+                    application_id = conn.execute("PRAGMA application_id").fetchone()[0]
+                    schema_version = conn.execute("PRAGMA user_version").fetchone()[0]
+                    if application_id != SQLITE_APPLICATION_ID:
+                        raise RuntimeError(
+                            "SQLite database is not the current schema baseline; "
+                            "configure an empty database"
+                        )
+                    if schema_version != SQLITE_SCHEMA_VERSION:
+                        migrate_schema(
+                            conn,
+                            current_version=int(schema_version),
+                            target_version=SQLITE_SCHEMA_VERSION,
+                        )
+                    else:
+                        schema = Path(__file__).with_name("schema.sql")
+                        conn.executescript(schema.read_text(encoding="utf-8"))
             self._initialized = True
 
     def health_probe(self) -> None:
@@ -669,11 +682,38 @@ class SQLiteStore:
             return None
         return json.loads(row["value_json"])
 
+    def get_bot_membership_fact(self, chat_id: str) -> dict[str, Any] | None:
+        return self.get_checkpoint(f"runtime.bot_membership.{chat_id}")
+
+    def set_bot_membership_fact(self, chat_id: str, value: dict[str, Any]) -> None:
+        self.set_checkpoint(f"runtime.bot_membership.{chat_id}", value)
+
+    def list_bot_membership_candidate_chats(self) -> list[str]:
+        self.initialize()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT chat_id FROM chat_policies
+                UNION
+                SELECT chat_id FROM tasks
+                WHERE chat_type = 'group' AND chat_id IS NOT NULL
+                ORDER BY chat_id
+                """
+            ).fetchall()
+        return [str(row["chat_id"]) for row in rows if row["chat_id"]]
+
     def upsert_message(self, message: NormalizedMessage) -> bool:
+        return self.upsert_message_with_revision(message).inserted
+
+    def upsert_message_with_revision(
+        self, message: NormalizedMessage, *, confirmed_current: bool = False
+    ) -> MessageUpsertResult:
         self.initialize()
         now = self.clock()
         with self.connect() as conn:
-            return self._upsert_message_locked(conn, message, now=now)
+            return self._upsert_message_revision_locked(
+                conn, message, now=now, confirmed_current=confirmed_current
+            )
 
     def get_message(self, message_id: str) -> sqlite3.Row | None:
         self.initialize()
@@ -698,31 +738,46 @@ class SQLiteStore:
         by_id = {row["message_id"]: row for row in rows}
         return [by_id[message_id] for message_id in ids if message_id in by_id]
 
-    def message_has_routing_audit(self, message_id: str) -> bool:
+    def message_has_routing_audit(
+        self, message_id: str, *, revision: int | None = None
+    ) -> bool:
         self.initialize()
         with self.connect() as conn:
+            predicate = "message_id = ?"
+            params: list[Any] = [message_id]
+            if revision is not None:
+                predicate += " AND revision = ?"
+                params.append(revision)
             row = conn.execute(
-                "SELECT 1 FROM routing_audits WHERE message_id = ? LIMIT 1",
-                (message_id,),
+                f"SELECT 1 FROM routing_audits WHERE {predicate} LIMIT 1",  # noqa: S608
+                params,
             ).fetchone()
         return row is not None
 
     def get_latest_non_duplicate_routing_decision(
         self,
         message_id: str,
+        *,
+        revision: int | None = None,
     ) -> tuple[RouteDecision, TaskRecord | None] | None:
         self.initialize()
         with self.connect() as conn:
+            revision_filter = ""
+            params: list[Any] = [message_id]
+            if revision is not None:
+                revision_filter = " AND revision = ?"
+                params.append(revision)
             row = conn.execute(
-                """
+                f"""
                 SELECT *
                 FROM routing_audits
                 WHERE message_id = ?
+                  {revision_filter}
                   AND NOT (route = 'ignore' AND route_reason = 'duplicate_message')
                 ORDER BY id DESC
                 LIMIT 1
-                """,
-                (message_id,),
+                """,  # noqa: S608
+                params,
             ).fetchone()
             if row is None:
                 return None
@@ -746,25 +801,61 @@ class SQLiteStore:
             )
         return decision, task
 
-    def message_processing_is_final(self, message_id: str, *, stage: str) -> bool:
-        return self.message_processing_status(message_id, stage=stage) in {
+    def get_task_router_placeholder_reason(
+        self, message_id: str, *, revision: int
+    ) -> str | None:
+        """Recover the deterministic route that originally invoked task-router."""
+
+        self.initialize()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT route_reason
+                FROM routing_audits
+                WHERE message_id = ? AND revision = ?
+                  AND route = 'ambiguous'
+                  AND route_reason IN (
+                    'router_placeholder',
+                    'closed_recall_router_placeholder'
+                  )
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (message_id, revision),
+            ).fetchone()
+        return None if row is None else str(row["route_reason"])
+
+    def message_processing_is_final(
+        self, message_id: str, *, stage: str, revision: int | None = None
+    ) -> bool:
+        return self.message_processing_status(
+            message_id, stage=stage, revision=revision
+        ) in {
             "processed",
             "processing_failed_terminal",
             "blocked_waiting_external",
         }
 
-    def message_processing_status(self, message_id: str, *, stage: str) -> str | None:
+    def message_processing_status(
+        self, message_id: str, *, stage: str, revision: int | None = None
+    ) -> str | None:
         self.initialize()
         with self.connect() as conn:
+            revision_filter = ""
+            params: list[Any] = [message_id, stage]
+            if revision is not None:
+                revision_filter = " AND revision = ?"
+                params.append(revision)
             row = conn.execute(
-                """
+                f"""
                 SELECT status
                 FROM message_processing
                 WHERE message_id = ?
                   AND stage = ?
+                  {revision_filter}
                 LIMIT 1
-                """,
-                (message_id, stage),
+                """,  # noqa: S608
+                params,
             ).fetchone()
         return None if row is None else str(row["status"])
 
@@ -772,6 +863,7 @@ class SQLiteStore:
         self,
         *,
         message_id: str,
+        revision: int = 1,
         stage: str,
         status: str,
         task_id: int | None = None,
@@ -785,10 +877,10 @@ class SQLiteStore:
             conn.execute(
                 """
                 INSERT INTO message_processing(
-                  message_id, task_id, stage, status, attempt_count, last_error,
+                  message_id, revision, task_id, stage, status, attempt_count, last_error,
                   terminal_reason, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(message_id, stage) DO UPDATE SET
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(message_id, revision, stage) DO UPDATE SET
                   task_id = COALESCE(excluded.task_id, message_processing.task_id),
                   status = excluded.status,
                   attempt_count = excluded.attempt_count,
@@ -798,6 +890,7 @@ class SQLiteStore:
                 """,
                 (
                     message_id,
+                    revision,
                     task_id,
                     stage,
                     status,
@@ -808,6 +901,189 @@ class SQLiteStore:
                     now,
                 ),
             )
+
+    def request_processing_retry(
+        self,
+        *,
+        message_id: str,
+        stage: str,
+        actor: str,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Queue one manual retry from a terminal or externally blocked stage."""
+
+        self.initialize()
+        now = self.clock()
+        with self.connect() as conn:
+            processing = conn.execute(
+                """
+                SELECT mp.*, m.revision AS current_revision, m.is_deleted,
+                       t.status AS task_status
+                FROM message_processing mp
+                JOIN messages m ON m.message_id = mp.message_id
+                LEFT JOIN tasks t ON t.id = mp.task_id
+                WHERE mp.message_id = ? AND mp.stage = ?
+                ORDER BY mp.revision DESC, mp.id DESC
+                LIMIT 1
+                """,
+                (message_id, stage),
+            ).fetchone()
+            if processing is None:
+                raise ValueError(f"processing stage not found: {message_id} {stage}")
+            if processing["status"] not in {
+                "processing_failed_terminal",
+                "blocked_waiting_external",
+            }:
+                raise ValueError(
+                    "processing retry only accepts terminal or externally blocked stages"
+                )
+            if bool(processing["is_deleted"]) or int(
+                processing["current_revision"]
+            ) != int(processing["revision"]):
+                raise ValueError(
+                    "processing retry is bound to a stale message revision"
+                )
+            if (
+                processing["task_id"] is not None
+                and processing["task_status"] != "watching"
+            ):
+                raise ValueError(
+                    "processing retry is blocked by task ownership or closure"
+                )
+            already_sent = conn.execute(
+                """
+                SELECT 1 FROM actions
+                WHERE kind = 'send_reply' AND status = 'sent'
+                  AND source_message_id = ? AND source_revision = ?
+                LIMIT 1
+                """,
+                (message_id, int(processing["revision"])),
+            ).fetchone()
+            if already_sent is not None:
+                raise ValueError(
+                    "processing retry is blocked because the reply was sent"
+                )
+            active = conn.execute(
+                """
+                SELECT * FROM processing_retry_attempts
+                WHERE message_id = ? AND revision = ? AND stage = ?
+                  AND status IN ('queued', 'claimed')
+                ORDER BY id DESC LIMIT 1
+                """,
+                (message_id, int(processing["revision"]), stage),
+            ).fetchone()
+            if active is not None:
+                if active["status"] == "claimed":
+                    raise ValueError("processing retry is already in flight")
+                return {"changed": False, "attempt": _row_dict(active)}
+            cursor = conn.execute(
+                """
+                INSERT INTO processing_retry_attempts(
+                  message_id, revision, task_id, stage, source_status, status,
+                  actor, reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+                """,
+                (
+                    message_id,
+                    int(processing["revision"]),
+                    processing["task_id"],
+                    stage,
+                    processing["status"],
+                    actor,
+                    None if reason is None else _truncate(reason),
+                    now,
+                ),
+            )
+            attempt = conn.execute(
+                "SELECT * FROM processing_retry_attempts WHERE id = ?",
+                (_cursor_lastrowid(cursor),),
+            ).fetchone()
+        if attempt is None:
+            raise ValueError("processing retry queue write failed")
+        return {"changed": True, "attempt": _row_dict(attempt)}
+
+    def claim_next_processing_retry(self, *, run_id: str) -> dict[str, Any] | None:
+        self.initialize()
+        now = self.clock()
+        claim_token = f"processing-retry-{uuid4()}"
+        with self.connect() as conn:
+            candidate = conn.execute(
+                """
+                SELECT id FROM processing_retry_attempts
+                WHERE status = 'queued'
+                ORDER BY created_at, id
+                LIMIT 1
+                """
+            ).fetchone()
+            if candidate is None:
+                return None
+            cursor = conn.execute(
+                """
+                UPDATE processing_retry_attempts
+                SET status = 'claimed', claim_token = ?, run_id = ?, claimed_at = ?
+                WHERE id = ? AND status = 'queued'
+                """,
+                (claim_token, run_id, now, int(candidate["id"])),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = conn.execute(
+                "SELECT * FROM processing_retry_attempts WHERE id = ?",
+                (int(candidate["id"]),),
+            ).fetchone()
+        return None if row is None else _row_dict(row)
+
+    def finish_processing_retry(
+        self,
+        attempt_id: int,
+        *,
+        claim_token: str,
+        status: str,
+        error: str | None = None,
+    ) -> bool:
+        if status not in {"succeeded", "failed", "cancelled"}:
+            raise ValueError(f"invalid processing retry completion status: {status}")
+        self.initialize()
+        with self.connect() as conn:
+            attempt = conn.execute(
+                "SELECT message_id, revision, task_id, stage FROM processing_retry_attempts WHERE id = ?",
+                (attempt_id,),
+            ).fetchone()
+            cursor = conn.execute(
+                """
+                UPDATE processing_retry_attempts
+                SET status = ?, error = ?, finished_at = ?
+                WHERE id = ? AND status = 'claimed' AND claim_token = ?
+                """,
+                (
+                    status,
+                    None if error is None else _truncate(error),
+                    self.clock(),
+                    attempt_id,
+                    claim_token,
+                ),
+            )
+            if cursor.rowcount == 1 and status == "succeeded" and attempt is not None:
+                conn.execute(
+                    """
+                    UPDATE actions
+                    SET status = 'cancelled', updated_at = ?
+                    WHERE kind = 'owner_notification' AND status = 'pending'
+                      AND (? IS NULL OR task_id = ?)
+                      AND json_extract(payload_json, '$.source_message_id') = ?
+                      AND json_extract(payload_json, '$.source_revision') = ?
+                      AND json_extract(payload_json, '$.stage') = ?
+                    """,
+                    (
+                        self.clock(),
+                        attempt["task_id"],
+                        attempt["task_id"],
+                        attempt["message_id"],
+                        int(attempt["revision"]),
+                        attempt["stage"],
+                    ),
+                )
+        return cursor.rowcount == 1
 
     def upsert_resource(
         self,
@@ -909,6 +1185,19 @@ class SQLiteStore:
                   status = 'watching' AND watch_until IS NOT NULL
                   AND julianday(watch_until) > julianday(?)
                 )
+                """,
+                (cutoff, now),
+            ),
+            (
+                "task_background_versions",
+                "task_background_versions",
+                "content = NULL, reason = NULL, content_expired_at = ?",
+                (now,),
+                f"""
+                content_expired_at IS NULL
+                AND julianday(created_at) <= julianday(?)
+                AND (content IS NOT NULL OR reason IS NOT NULL)
+                AND {active_task_by_id.format(table="task_background_versions")}
                 """,
                 (cutoff, now),
             ),
@@ -1050,6 +1339,19 @@ class SQLiteStore:
                     AND t.status = 'watching' AND t.watch_until IS NOT NULL
                     AND julianday(t.watch_until) > julianday(?)
                 )
+                """,
+                (cutoff, now),
+            ),
+            (
+                "processing_retry_attempts",
+                "processing_retry_attempts",
+                "reason = NULL, error = NULL, content_expired_at = ?",
+                (now,),
+                f"""
+                content_expired_at IS NULL
+                AND julianday(COALESCE(finished_at, created_at)) <= julianday(?)
+                AND (reason IS NOT NULL OR error IS NOT NULL)
+                AND {active_task_by_id.format(table="processing_retry_attempts")}
                 """,
                 (cutoff, now),
             ),
@@ -1259,7 +1561,10 @@ class SQLiteStore:
                 matched_by=matched_by,
             )
             self._record_routing_audit(
-                conn, message_id=message.message_id, decision=decision
+                conn,
+                message_id=message.message_id,
+                decision=decision,
+                revision=message.revision,
             )
         return task, decision
 
@@ -1299,7 +1604,10 @@ class SQLiteStore:
                 conn, task.id, message, watch_until=watch_until, now=now
             )
             self._record_routing_audit(
-                conn, message_id=message.message_id, decision=decision
+                conn,
+                message_id=message.message_id,
+                decision=decision,
+                revision=message.revision,
             )
         return decision
 
@@ -1442,6 +1750,94 @@ class SQLiteStore:
             "previous_status": task.status,
         }
 
+    def update_task_background(
+        self,
+        task_id: int | str,
+        *,
+        content: str | None,
+        actor: str,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Append one auditable task-background version without resetting sessions."""
+
+        self.initialize()
+        normalized_content = None
+        if content is not None and content.strip():
+            normalized_content = content.strip()
+        normalized_actor = actor.strip()
+        if not normalized_actor:
+            raise ValueError("task background actor is required")
+        normalized_reason = None if reason is None else reason.strip() or None
+        now = self.clock()
+        with self.connect() as conn:
+            task = self._get_task_by_lookup(conn, task_id)
+            if task is None:
+                raise KeyError(f"task not found: {task_id}")
+            current = conn.execute(
+                """
+                SELECT * FROM task_background_versions
+                WHERE task_id = ?
+                ORDER BY version DESC
+                LIMIT 1
+                """,
+                (task.id,),
+            ).fetchone()
+            current_content = None if current is None else current["content"]
+            if current_content == normalized_content:
+                return {
+                    "changed": False,
+                    "task": _task_command_summary(task),
+                    "background": _task_background_version(current),
+                }
+            version = 1 if current is None else int(current["version"]) + 1
+            cursor = conn.execute(
+                """
+                INSERT INTO task_background_versions(
+                  task_id, version, content, operation, actor, reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task.id,
+                    version,
+                    normalized_content,
+                    "clear" if normalized_content is None else "set",
+                    normalized_actor,
+                    normalized_reason,
+                    now,
+                ),
+            )
+            conn.execute("UPDATE tasks SET updated_at = ? WHERE id = ?", (now, task.id))
+            row = conn.execute(
+                "SELECT * FROM task_background_versions WHERE id = ?",
+                (cursor.lastrowid,),
+            ).fetchone()
+            updated_task = self._get_task_by_id(conn, task.id)
+        return {
+            "changed": True,
+            "task": _task_command_summary(updated_task),
+            "background": _task_background_version(row),
+        }
+
+    def get_task_background(self, task_id: int) -> str | None:
+        """Return only the current non-cleared model-visible content."""
+
+        self.initialize()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT content
+                FROM task_background_versions
+                WHERE task_id = ?
+                ORDER BY version DESC
+                LIMIT 1
+                """,
+                (task_id,),
+            ).fetchone()
+        if row is None or row["content"] is None:
+            return None
+        content = str(row["content"]).strip()
+        return content or None
+
     def close_task_for_owner_takeover_and_audit(
         self,
         task: TaskRecord,
@@ -1460,7 +1856,10 @@ class SQLiteStore:
         with self.connect() as conn:
             self._close_task_for_owner_takeover(conn, task.id, now=now)
             self._record_routing_audit(
-                conn, message_id=message.message_id, decision=decision
+                conn,
+                message_id=message.message_id,
+                decision=decision,
+                revision=message.revision,
             )
         return decision
 
@@ -1643,7 +2042,7 @@ class SQLiteStore:
                 SELECT *
                 FROM tasks t
                 WHERE t.chat_id = ?
-                  AND t.status != 'watching'
+                  AND t.status = 'closed'
                   AND julianday(t.updated_at) >= julianday(?)
                   AND ({where_related})
                 ORDER BY t.updated_at DESC, t.id DESC
@@ -1724,7 +2123,10 @@ class SQLiteStore:
                 now=now,
             )
             self._record_routing_audit(
-                conn, message_id=message.message_id, decision=decision
+                conn,
+                message_id=message.message_id,
+                decision=decision,
+                revision=message.revision,
             )
         return decision
 
@@ -1772,10 +2174,21 @@ class SQLiteStore:
             for row in rows
         ]
 
-    def record_routing_audit(self, *, message_id: str, decision: RouteDecision) -> None:
+    def record_routing_audit(
+        self,
+        *,
+        message_id: str,
+        decision: RouteDecision,
+        revision: int | None = None,
+    ) -> None:
         self.initialize()
         with self.connect() as conn:
-            self._record_routing_audit(conn, message_id=message_id, decision=decision)
+            self._record_routing_audit(
+                conn,
+                message_id=message_id,
+                decision=decision,
+                revision=revision,
+            )
 
     def add_task_watch_keys(self, task_id: int, keys: Iterable[str]) -> None:
         self.initialize()
@@ -1785,17 +2198,25 @@ class SQLiteStore:
         with self.connect() as conn:
             self._add_watch_keys(conn, task_id, unique_keys, self.clock())
 
-    def has_resource_eligible_routing_audit(self, message_id: str) -> bool:
+    def has_resource_eligible_routing_audit(
+        self, message_id: str, *, revision: int | None = None
+    ) -> bool:
         self.initialize()
         with self.connect() as conn:
+            revision_filter = ""
+            params: list[Any] = [message_id]
+            if revision is not None:
+                revision_filter = " AND revision = ?"
+                params.append(revision)
             row = conn.execute(
-                """
+                f"""
                 SELECT 1 FROM routing_audits
                 WHERE message_id = ?
+                  {revision_filter}
                   AND route IN ('new_task', 'attach_task', 'reopen_task', 'ambiguous')
                 LIMIT 1
-                """,
-                (message_id,),
+                """,  # noqa: S608
+                params,
             ).fetchone()
         return row is not None
 
@@ -1866,6 +2287,71 @@ class SQLiteStore:
                 "SELECT * FROM actions WHERE id = ?", (action_id,)
             ).fetchone()
         return None if row is None else _action_from_row(row)
+
+    def action_revision_is_current(self, action: ActionRecord) -> bool:
+        """Return whether a revision-bound action may still cross the send boundary."""
+
+        if action.source_message_id is None or action.source_revision is None:
+            return True
+        self.initialize()
+        with self.connect() as conn:
+            return self._action_revision_is_current_locked(conn, action)
+
+    def revision_send_guard(self, action: ActionRecord) -> bool:
+        """Perform the final short-lived revision check before an adapter call.
+
+        The check must release its SQLite connection before the external send.
+        A provider call can take seconds, and holding SQLite's write lock for
+        that interval would block ingestion of edits or tombstones. If a
+        revision changes after this check, completion bookkeeping preserves any
+        successful provider result so the later revision can address it.
+        """
+
+        return self.action_revision_is_current(action)
+
+    def get_latest_sent_reply_for_source(
+        self, *, message_id: str, before_revision: int
+    ) -> dict[str, Any] | None:
+        self.initialize()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, source_revision, target_message_id, payload_json, result_json
+                FROM actions
+                WHERE kind = 'send_reply'
+                  AND status IN ('sent', 'sending', 'failed_needs_review')
+                  AND source_message_id = ?
+                  AND source_revision IS NOT NULL
+                  AND source_revision < ?
+                ORDER BY source_revision DESC, updated_at DESC, id DESC
+                LIMIT 1
+                """,
+                (message_id, before_revision),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = _loads_json_object(row["payload_json"])
+        return {
+            "action_id": int(row["id"]),
+            "source_revision": int(row["source_revision"]),
+            "target_message_id": row["target_message_id"],
+            "text": _payload_send_text(payload),
+            "payload": payload,
+            "result": _loads_json_object(row["result_json"]),
+        }
+
+    def _action_revision_is_current_locked(
+        self, conn: sqlite3.Connection, action: ActionRecord
+    ) -> bool:
+        row = conn.execute(
+            "SELECT revision, is_deleted FROM messages WHERE message_id = ?",
+            (action.source_message_id,),
+        ).fetchone()
+        return (
+            row is not None
+            and not bool(row["is_deleted"])
+            and int(row["revision"] or 1) == action.source_revision
+        )
 
     def claim_action_for_dispatch(
         self, action_id: int, *, run_id: str | None = None
@@ -2137,6 +2623,17 @@ class SQLiteStore:
                     "dispatch retry only accepts failed or failed_needs_review actions"
                 )
             if (
+                row["source_message_id"] is not None
+                and row["source_revision"] is not None
+            ):
+                payload = _loads_json_object(row["payload_json"])
+                payload.setdefault("source_message_id", row["source_message_id"])
+                payload.setdefault("source_revision", row["source_revision"])
+                if _source_payload_is_stale_locked(conn, payload):
+                    raise ValueError(
+                        "dispatch retry is bound to a stale message revision"
+                    )
+            if (
                 row["kind"] == ActionKind.SEND_REPLY.value
                 and row["task_id"] is not None
                 and row["target_message_id"] is not None
@@ -2146,6 +2643,8 @@ class SQLiteStore:
                     target_message_id=row["target_message_id"],
                     exclude_action_id=action_id,
                     execution_mode=row["execution_mode"],
+                    source_message_id=row["source_message_id"],
+                    source_revision=row["source_revision"],
                 )
             ):
                 raise ValueError(
@@ -2350,6 +2849,11 @@ class SQLiteStore:
             latest = _latest_dispatch_attempt_locked(conn, action_id=action_id)
             if latest is None or int(latest["id"]) != attempt_id:
                 return None
+            row = conn.execute(
+                "SELECT * FROM actions WHERE id = ?", (action_id,)
+            ).fetchone()
+            if row is None:
+                return None
             cursor = conn.execute(
                 """
                 UPDATE actions
@@ -2364,7 +2868,54 @@ class SQLiteStore:
                 ),
             )
             if cursor.rowcount != 1:
-                return None
+                # Revision invalidation may fence an in-flight send as
+                # failed_needs_review before the provider result is recorded.
+                # A persisted sent_message_id on the same dispatch attempt is
+                # authoritative evidence that the external side effect
+                # completed; preserve it as sent instead of losing the reply.
+                if not (
+                    status == ActionStatus.SENT.value
+                    and row["status"] == ActionStatus.FAILED_NEEDS_REVIEW.value
+                    and latest["sent_message_id"]
+                    and result.get("sent_message_id") == latest["sent_message_id"]
+                ):
+                    return None
+                existing_result = _loads_json_object(row["result_json"])
+                merged_result = {**existing_result, **result}
+                warnings = list(
+                    dict.fromkeys(
+                        [
+                            *(
+                                existing_result.get("warnings", [])
+                                if isinstance(existing_result.get("warnings"), list)
+                                else []
+                            ),
+                            *(
+                                result.get("warnings", [])
+                                if isinstance(result.get("warnings"), list)
+                                else []
+                            ),
+                        ]
+                    )
+                )
+                if warnings:
+                    merged_result["warnings"] = warnings
+                cursor = conn.execute(
+                    """
+                    UPDATE actions
+                    SET status = ?, result_json = ?, updated_at = ?
+                    WHERE id = ? AND status = ?
+                    """,
+                    (
+                        ActionStatus.SENT.value,
+                        json.dumps(merged_result, ensure_ascii=False, default=str),
+                        self.clock(),
+                        action_id,
+                        ActionStatus.FAILED_NEEDS_REVIEW.value,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    return None
             row = conn.execute(
                 "SELECT * FROM actions WHERE id = ?", (action_id,)
             ).fetchone()
@@ -2384,7 +2935,8 @@ class SQLiteStore:
         with self.connect() as conn:
             message = conn.execute(
                 """
-                SELECT message_id, chat_id, chat_type, sender_id, sender_role, sent_at, text
+                SELECT message_id, chat_id, chat_type, sender_id, sender_role, sent_at, text,
+                       is_deleted, revision
                 FROM messages
                 WHERE message_id = ?
                 """,
@@ -2394,7 +2946,7 @@ class SQLiteStore:
                 return None
             audits = conn.execute(
                 """
-                SELECT route, route_reason, candidates_count, shortcut_hit, router_called, matched_by,
+                SELECT revision, route, route_reason, candidates_count, shortcut_hit, router_called, matched_by,
                        target_task_id, created_at
                 FROM routing_audits
                 WHERE message_id = ?
@@ -2402,10 +2954,21 @@ class SQLiteStore:
                 """,
                 (message_id,),
             ).fetchall()
+            processing = conn.execute(
+                """
+                SELECT id, message_id, revision, task_id, stage, status, attempt_count,
+                       last_error, terminal_reason, created_at, updated_at
+                FROM message_processing
+                WHERE message_id = ?
+                ORDER BY revision, updated_at, id
+                """,
+                (message_id,),
+            ).fetchall()
             task_ids = self.find_task_ids_for_message(message_id)
             actions = conn.execute(
                 """
-                SELECT id, kind, status, task_id, target_message_id, payload_json, result_json, updated_at
+                SELECT id, kind, status, task_id, target_message_id,
+                       source_message_id, source_revision, payload_json, result_json, updated_at
                 FROM actions
                 WHERE target_message_id = ?
                    OR task_id IN (
@@ -2417,7 +2980,8 @@ class SQLiteStore:
             ).fetchall()
             approvals = conn.execute(
                 """
-                SELECT id, short_id, task_id, kind, status, preview, payload_json,
+                SELECT id, short_id, task_id, kind, status, preview,
+                       source_message_id, source_revision, payload_json,
                        created_at, expires_at, resolved_at
                 FROM approvals
                 WHERE task_id IN (
@@ -2430,6 +2994,7 @@ class SQLiteStore:
         return {
             "message": _row_dict(message),
             "routing_audits": [_row_dict(row) for row in audits],
+            "processing": [_row_dict(row) for row in processing],
             "task_ids": task_ids,
             "approvals": [
                 _approval_read_model(
@@ -2487,44 +3052,73 @@ class SQLiteStore:
             return {}
         limit = max(0, int(messages_per_task))
         self.initialize()
-        contexts: dict[int, dict[str, Any]] = {}
-        with self.connect() as conn:
-            for task_id in ids:
-                count_row = conn.execute(
-                    "SELECT COUNT(*) AS message_count FROM task_messages WHERE task_id = ?",
-                    (task_id,),
-                ).fetchone()
-                message_count = (
-                    0 if count_row is None else int(count_row["message_count"])
-                )
-                rows = conn.execute(
-                    """
-                    SELECT tm.message_id, tm.role, tm.created_at AS task_message_created_at,
-                           m.chat_id, m.chat_type, m.sender_id,
-                           m.sender_name, m.sender_role, m.sent_at, m.thread_id,
-                           m.reply_to_message_id, m.text
-                    FROM task_messages tm
-                    LEFT JOIN messages m ON m.message_id = tm.message_id
-                    WHERE tm.task_id = ?
-                    ORDER BY tm.created_at DESC, tm.message_id DESC
-                    LIMIT ?
-                    """,
-                    (task_id, limit),
-                ).fetchall()
-                contexts[task_id] = {
-                    "message_count": message_count,
-                    "truncated": message_count > len(rows),
-                    "recent_messages": [
-                        _task_context_message(row) for row in reversed(rows)
-                    ],
-                }
-        return {
-            task_id: contexts.get(
-                task_id,
-                {"message_count": 0, "truncated": False, "recent_messages": []},
-            )
+        placeholders = ",".join("?" for _ in ids)
+        contexts: dict[int, dict[str, Any]] = {
+            task_id: {
+                "message_count": 0,
+                "truncated": False,
+                "recent_messages": [],
+            }
             for task_id in ids
         }
+        with self.connect() as conn:
+            count_rows = conn.execute(
+                # `placeholders` is generated from integer task IDs.
+                f"""
+                SELECT task_id, COUNT(*) AS message_count
+                FROM task_messages
+                WHERE task_id IN ({placeholders})
+                GROUP BY task_id
+                """,  # noqa: S608
+                ids,
+            ).fetchall()
+            for row in count_rows:
+                contexts[int(row["task_id"])]["message_count"] = int(
+                    row["message_count"]
+                )
+
+            recent_rows: list[sqlite3.Row] = []
+            if limit > 0:
+                recent_rows = conn.execute(
+                    # `placeholders` is generated from integer task IDs.
+                    f"""
+                    SELECT task_id, message_id, role, task_message_created_at,
+                           chat_id, chat_type, sender_id, sender_name, sender_role,
+                           sent_at, thread_id, reply_to_message_id, text,
+                           context_rank
+                    FROM (
+                        SELECT tm.task_id, tm.message_id, tm.role,
+                               tm.created_at AS task_message_created_at,
+                               m.chat_id, m.chat_type, m.sender_id,
+                               m.sender_name, m.sender_role, m.sent_at, m.thread_id,
+                               m.reply_to_message_id, m.text,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY tm.task_id
+                                   ORDER BY COALESCE(m.sent_at, tm.created_at) DESC,
+                                            tm.created_at DESC,
+                                            tm.message_id DESC
+                               ) AS context_rank
+                        FROM task_messages tm
+                        LEFT JOIN messages m ON m.message_id = tm.message_id
+                        WHERE tm.task_id IN ({placeholders})
+                    ) AS ranked
+                    WHERE context_rank <= ?
+                    ORDER BY task_id, context_rank DESC
+                    """,  # noqa: S608
+                    [*ids, limit],
+                ).fetchall()
+
+        for row in recent_rows:
+            task_id = int(row["task_id"])
+            contexts[task_id]["recent_messages"].append(_task_context_message(row))
+
+        for task_id in ids:
+            context = contexts[task_id]
+            context["truncated"] = context["message_count"] > len(
+                context["recent_messages"]
+            )
+
+        return contexts
 
     def list_resources_for_messages(
         self, message_ids: Iterable[str]
@@ -2622,6 +3216,7 @@ class SQLiteStore:
         agent_session_id: str | None,
         input_message_ids: Iterable[str],
         input_resource_ids: Iterable[str],
+        input_message_revisions: Iterable[int] | None = None,
         prompt_version: str | None = None,
         prompt_hash: str | None = None,
         response: dict[str, Any] | None = None,
@@ -2631,14 +3226,26 @@ class SQLiteStore:
         tool_permissions_profile: str | None = None,
     ) -> None:
         self.initialize()
+        message_ids = list(input_message_ids)
         with self.connect() as conn:
+            if input_message_revisions is None:
+                revisions: list[int] = []
+                for message_id in message_ids:
+                    row = conn.execute(
+                        "SELECT revision FROM messages WHERE message_id = ?",
+                        (message_id,),
+                    ).fetchone()
+                    revisions.append(1 if row is None else int(row["revision"] or 1))
+            else:
+                revisions = list(input_message_revisions)
             conn.execute(
                 """
                 INSERT INTO agent_audits(
                   backend_provider, request_type, prompt_version, prompt_hash, task_id, agent_session_id, input_message_ids_json,
+                  input_message_revisions_json,
                   input_resource_ids_json, response_json, error, latency_ms, prompt_json,
                   tool_permissions_profile, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     backend_provider,
@@ -2647,9 +3254,8 @@ class SQLiteStore:
                     prompt_hash,
                     task_id,
                     agent_session_id,
-                    json.dumps(
-                        list(input_message_ids), ensure_ascii=False, default=str
-                    ),
+                    json.dumps(message_ids, ensure_ascii=False, default=str),
+                    json.dumps(revisions, ensure_ascii=False, default=str),
                     json.dumps(
                         list(input_resource_ids), ensure_ascii=False, default=str
                     ),
@@ -2678,6 +3284,9 @@ class SQLiteStore:
         self.initialize()
         now = self.clock()
         with self.connect() as conn:
+            payload = _bind_payload_to_latest_external_message_locked(
+                conn, task_id=task_id, payload=payload
+            )
             return self._create_send_reply_action_locked(
                 conn,
                 task_id=task_id,
@@ -2698,6 +3307,10 @@ class SQLiteStore:
         self.initialize()
         now = self.clock()
         with self.connect() as conn:
+            if task_id is not None:
+                payload = _bind_payload_to_latest_external_message_locked(
+                    conn, task_id=task_id, payload=payload
+                )
             return self._create_owner_notification_action_locked(
                 conn,
                 task_id=task_id,
@@ -2724,13 +3337,20 @@ class SQLiteStore:
             else _plus_hours(now, approval_timeout_hours)
         )
         with self.connect() as conn:
+            payload = _bind_payload_to_latest_external_message_locked(
+                conn, task_id=task_id, payload=payload
+            )
+            source_message_id = _payload_source_message_id(payload)
+            source_revision = _payload_source_revision(payload)
             short_id = self._unique_short_id_in_table(
                 conn, "approvals", "a", f"{task_id}:{preview}:{now}"
             )
             cursor = conn.execute(
                 """
-                INSERT INTO approvals(short_id, task_id, kind, status, payload_json, preview, created_at, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO approvals(
+                  short_id, task_id, kind, status, payload_json, preview,
+                  source_message_id, source_revision, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     short_id,
@@ -2739,6 +3359,8 @@ class SQLiteStore:
                     ApprovalStatus.PENDING.value,
                     json.dumps(payload, ensure_ascii=False, default=str),
                     preview,
+                    source_message_id,
+                    source_revision,
                     now,
                     expires_at,
                 ),
@@ -2759,6 +3381,114 @@ class SQLiteStore:
                 )
         return approval_id
 
+    def invalidate_stale_revision_side_effects(
+        self,
+        *,
+        message_id: str,
+        current_revision: int,
+        reason: str = "stale_revision",
+    ) -> dict[str, int]:
+        """Fence approvals/actions created by an older source-message revision."""
+
+        self.initialize()
+        now = self.clock()
+        cancelled_actions = 0
+        uncertain_actions = 0
+        expired_approvals = 0
+        with self.connect() as conn:
+            approval_rows = conn.execute(
+                """
+                SELECT id
+                FROM approvals
+                WHERE source_message_id = ?
+                  AND source_revision IS NOT NULL
+                  AND source_revision != ?
+                  AND status = 'pending'
+                """,
+                (message_id, current_revision),
+            ).fetchall()
+            for row in approval_rows:
+                cursor = conn.execute(
+                    """
+                    UPDATE approvals
+                    SET status = 'expired', resolved_at = ?
+                    WHERE id = ? AND status = 'pending'
+                    """,
+                    (now, row["id"]),
+                )
+                if cursor.rowcount != 1:
+                    continue
+                expired_approvals += 1
+                cancelled_actions += self._cancel_pending_actions_for_approvals_locked(
+                    conn, approval_ids=[int(row["id"])], now=now
+                )
+
+            pending_rows = conn.execute(
+                """
+                SELECT id
+                FROM actions
+                WHERE source_message_id = ?
+                  AND source_revision IS NOT NULL
+                  AND source_revision != ?
+                  AND status IN ('pending', 'failed')
+                """,
+                (message_id, current_revision),
+            ).fetchall()
+            for row in pending_rows:
+                cursor = conn.execute(
+                    """
+                    UPDATE actions
+                    SET status = 'cancelled',
+                        result_json = ?,
+                        updated_at = ?
+                    WHERE id = ? AND status IN ('pending', 'failed')
+                    """,
+                    (
+                        json.dumps(
+                            {"reason": reason, "source_message_id": message_id},
+                            ensure_ascii=False,
+                        ),
+                        now,
+                        row["id"],
+                    ),
+                )
+                cancelled_actions += int(cursor.rowcount)
+
+            sending_rows = conn.execute(
+                """
+                SELECT id, result_json
+                FROM actions
+                WHERE source_message_id = ?
+                  AND source_revision IS NOT NULL
+                  AND source_revision != ?
+                  AND status = 'sending'
+                """,
+                (message_id, current_revision),
+            ).fetchall()
+            for row in sending_rows:
+                result = _loads_json_object(row["result_json"])
+                result.update(
+                    {
+                        "reason": reason,
+                        "source_message_id": message_id,
+                        "no_retry": True,
+                    }
+                )
+                cursor = conn.execute(
+                    """
+                    UPDATE actions
+                    SET status = 'failed_needs_review', result_json = ?, updated_at = ?
+                    WHERE id = ? AND status = 'sending'
+                    """,
+                    (json.dumps(result, ensure_ascii=False), now, row["id"]),
+                )
+                uncertain_actions += int(cursor.rowcount)
+        return {
+            "expired_approvals": expired_approvals,
+            "cancelled_actions": cancelled_actions,
+            "uncertain_actions": uncertain_actions,
+        }
+
     def apply_approval_command(
         self,
         *,
@@ -2773,6 +3503,7 @@ class SQLiteStore:
         note: str | None = None,
         execution_mode: ExecutionMode = "production",
         requested_outcome: ApprovalOutcome | None = None,
+        expected_target_binding: ApprovalTargetBinding | None = None,
     ) -> dict[str, Any]:
         self.initialize()
         now = self.clock()
@@ -2812,6 +3543,7 @@ class SQLiteStore:
                     note=note,
                     execution_mode=execution_mode,
                     requested_outcome=requested_outcome,
+                    expected_target_binding=expected_target_binding,
                 )
             except Exception as exc:  # noqa: BLE001
                 # Approval handlers are isolated inside the transaction so the
@@ -2895,6 +3627,7 @@ class SQLiteStore:
         note: str | None,
         execution_mode: ExecutionMode,
         requested_outcome: ApprovalOutcome | None,
+        expected_target_binding: ApprovalTargetBinding | None,
     ) -> dict[str, Any]:
         if execution_mode not in {"dry_run", "production"}:
             raise ValueError(
@@ -2951,6 +3684,7 @@ class SQLiteStore:
                 raise ValueError(
                     f"pending approval not found or ambiguous: {target_id}"
                 )
+            _require_expected_approval_target(approval, expected_target_binding)
             resolved_status = (
                 ApprovalStatus.APPROVED.value
                 if verb == "approve"
@@ -2961,9 +3695,34 @@ class SQLiteStore:
                 task = conn.execute(
                     "SELECT * FROM tasks WHERE id = ?", (approval["task_id"],)
                 ).fetchone()
+            payload = _loads_json_object(approval["payload_json"])
+            if (
+                approval["source_message_id"] is not None
+                and approval["source_revision"] is not None
+            ):
+                payload.setdefault("source_message_id", approval["source_message_id"])
+                payload.setdefault("source_revision", approval["source_revision"])
+            if _source_payload_is_stale_locked(conn, payload):
+                conn.execute(
+                    """
+                    UPDATE approvals
+                    SET status = 'expired', resolved_at = ?
+                    WHERE id = ? AND status = 'pending'
+                    """,
+                    (now, approval["id"]),
+                )
+                cancelled_actions = self._cancel_pending_actions_for_approvals_locked(
+                    conn, approval_ids=[int(approval["id"])], now=now
+                )
+                return {
+                    "approval_id": approval["short_id"],
+                    "task_id": approval["task_id"],
+                    "action_id": None,
+                    "outcome": "stale_revision",
+                    "cancelled_actions": cancelled_actions,
+                }
             if verb == "approve" and not _task_is_watching(task):
                 raise ValueError("approval task is not watching")
-            payload = json.loads(approval["payload_json"] or "{}")
             conn.execute(
                 """
                 UPDATE approvals
@@ -2978,7 +3737,7 @@ class SQLiteStore:
                     if requested_outcome is not None
                     else payload.get("keep_watching_on_reject") is True
                 )
-                outcome: ApprovalOutcome = (
+                rejection_outcome: ApprovalOutcome = (
                     "no_send_keep_watching" if keep_watching else "no_send_end_task"
                 )
                 if keep_watching and approval["task_id"] is not None:
@@ -3009,7 +3768,7 @@ class SQLiteStore:
                         conn,
                         approval=approval,
                         command_id=command_id,
-                        outcome=outcome,
+                        outcome=rejection_outcome,
                         decision_reason=payload.get("decision_reason"),
                         suggested_reply=_payload_send_text(payload)
                         or approval["preview"],
@@ -3026,7 +3785,7 @@ class SQLiteStore:
                         "action_id": None,
                         "kept_watching": True,
                         "cancelled_actions": cancelled_actions,
-                        "outcome": outcome,
+                        "outcome": rejection_outcome,
                     }
                 if approval["task_id"] is not None:
                     self._close_task_after_reject_locked(
@@ -3039,7 +3798,7 @@ class SQLiteStore:
                     conn,
                     approval=approval,
                     command_id=command_id,
-                    outcome=outcome,
+                    outcome=rejection_outcome,
                     decision_reason=payload.get("decision_reason"),
                     suggested_reply=_payload_send_text(payload) or approval["preview"],
                     final_reply=None,
@@ -3053,7 +3812,7 @@ class SQLiteStore:
                     "approval_id": approval["short_id"],
                     "task_id": approval["task_id"],
                     "action_id": None,
-                    "outcome": outcome,
+                    "outcome": rejection_outcome,
                 }
             if payload.get("approvable") is False:
                 raise ValueError("approval requires /send final reply")
@@ -3081,12 +3840,12 @@ class SQLiteStore:
             self._mark_task_watching_after_send_locked(
                 conn, task_id=int(approval["task_id"]), now=now
             )
-            outcome = "suggestion_sent"
+            approval_outcome: ApprovalOutcome = "suggestion_sent"
             self._record_approval_feedback_locked(
                 conn,
                 approval=approval,
                 command_id=command_id,
-                outcome=outcome,
+                outcome=approval_outcome,
                 decision_reason=payload.get("decision_reason"),
                 suggested_reply=_payload_send_text(payload) or approval["preview"],
                 final_reply=_payload_send_text(payload),
@@ -3100,7 +3859,7 @@ class SQLiteStore:
                 "approval_id": approval["short_id"],
                 "task_id": approval["task_id"],
                 "action_id": action_id,
-                "outcome": outcome,
+                "outcome": approval_outcome,
             }
 
         if verb == "send":
@@ -3115,6 +3874,9 @@ class SQLiteStore:
                 )
                 if concrete_approval is None:
                     raise ValueError(f"pending approval not found: {target_id}")
+                _require_expected_approval_target(
+                    concrete_approval, expected_target_binding
+                )
                 if concrete_approval["task_id"] is None:
                     raise ValueError("approval is not attached to a task")
                 task = conn.execute(
@@ -3156,6 +3918,34 @@ class SQLiteStore:
                 if len(pending) == 1
                 else {}
             )
+            if len(pending) == 1 and pending[0]["source_message_id"] is not None:
+                original_payload.setdefault(
+                    "source_message_id", pending[0]["source_message_id"]
+                )
+                original_payload.setdefault(
+                    "source_revision", pending[0]["source_revision"]
+                )
+            if len(pending) == 1 and _source_payload_is_stale_locked(
+                conn, original_payload
+            ):
+                conn.execute(
+                    """
+                    UPDATE approvals
+                    SET status = 'expired', resolved_at = ?
+                    WHERE id = ? AND status = 'pending'
+                    """,
+                    (now, pending[0]["id"]),
+                )
+                cancelled_actions = self._cancel_pending_actions_for_approvals_locked(
+                    conn, approval_ids=[int(pending[0]["id"])], now=now
+                )
+                return {
+                    "approval_id": pending[0]["short_id"],
+                    "task_id": pending[0]["task_id"],
+                    "action_id": None,
+                    "outcome": "stale_revision",
+                    "cancelled_actions": cancelled_actions,
+                }
             suggested_reply = _payload_send_text(original_payload)
             target_message_id: Any
             approval_id: int
@@ -3175,17 +3965,32 @@ class SQLiteStore:
                 approval_id = 0
             if not isinstance(target_message_id, str) or not target_message_id:
                 raise ValueError("task does not have a reply target")
-            payload = {
+            payload: dict[str, Any] = {
                 "reply_target_message_id": target_message_id,
                 "text": reply_text,
                 "identity": "user",
                 "source": "owner_send",
             }
             if approval_id:
+                for key in ("source_message_id", "source_revision"):
+                    if key in original_payload:
+                        payload[key] = original_payload[key]
+            if (
+                _payload_source_message_id(payload) is None
+                or _payload_source_revision(payload) is None
+            ):
+                source_message = _latest_external_task_message_locked(
+                    conn, task_id=int(task["id"])
+                )
+                if source_message is not None:
+                    payload["source_message_id"] = source_message["message_id"]
+                    payload["source_revision"] = int(source_message["revision"] or 1)
+            if approval_id:
                 conn.execute(
                     """
                     UPDATE approvals
-                    SET status = ?, resolved_at = ?, payload_json = ?, preview = ?
+                    SET status = ?, resolved_at = ?, payload_json = ?, preview = ?,
+                        source_message_id = ?, source_revision = ?
                     WHERE id = ?
                     """,
                     (
@@ -3193,6 +3998,8 @@ class SQLiteStore:
                         now,
                         json.dumps(payload, ensure_ascii=False, default=str),
                         reply_text,
+                        _payload_source_message_id(payload),
+                        _payload_source_revision(payload),
                         approval_id,
                     ),
                 )
@@ -3200,8 +4007,9 @@ class SQLiteStore:
                 cursor = conn.execute(
                     """
                     INSERT INTO approvals(
-                      short_id, task_id, kind, status, payload_json, preview, created_at, resolved_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                      short_id, task_id, kind, status, payload_json, preview,
+                      source_message_id, source_revision, created_at, resolved_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         approval_short_id,
@@ -3210,6 +4018,8 @@ class SQLiteStore:
                         ApprovalStatus.APPROVED.value,
                         json.dumps(payload, ensure_ascii=False, default=str),
                         reply_text,
+                        _payload_source_message_id(payload),
+                        _payload_source_revision(payload),
                         now,
                         now,
                     ),
@@ -3502,6 +4312,30 @@ class SQLiteStore:
             ],
             "message": f"Multiple pending approvals exist for {task_short_id}; use a concrete a_ approval id.",
         }
+        source_pairs = {
+            (
+                row["source_message_id"],
+                int(row["source_revision"] or 1),
+            )
+            for row in pending
+            if row["source_message_id"] is not None
+            and row["source_revision"] is not None
+        }
+        if len(source_pairs) == 1:
+            source_message_id, source_revision = next(iter(source_pairs))
+            payload.update(
+                {
+                    "source_message_id": source_message_id,
+                    "source_revision": source_revision,
+                }
+            )
+        elif not source_pairs and root_message is not None:
+            payload.update(
+                {
+                    "source_message_id": root_message["message_id"],
+                    "source_revision": int(root_message["revision"] or 1),
+                }
+            )
         source = _owner_notification_source_payload(task, root_message)
         if any(value for value in source.values()):
             payload["source"] = source
@@ -3562,7 +4396,21 @@ class SQLiteStore:
         execution_mode: ExecutionMode,
         now: str,
     ) -> int | None:
-        # A sent action for the same task/target/text is terminal idempotency.
+        payload = _bind_payload_to_latest_external_message_locked(
+            conn, task_id=task_id, payload=payload
+        )
+        source_message_id = _payload_source_message_id(payload)
+        source_revision = _payload_source_revision(payload)
+        # Same task/target/text is terminal only for the same source revision.
+        # A later source revision may resend identical text when the owner
+        # explicitly authorizes it; stamp a warning for that duplicate bubble.
+        if _has_identical_sent_text_on_other_revision(
+            conn,
+            task_id=task_id,
+            target_message_id=target_message_id,
+            payload=payload,
+        ):
+            payload = _append_payload_warning(payload, "identical_correction_text")
         # Failed actions are revived to preserve the original idempotency key,
         # but only when no pending/sending action could race the same reply.
         if _has_sent_send_reply_action_for_payload(
@@ -3586,6 +4434,8 @@ class SQLiteStore:
                 target_message_id=target_message_id,
                 exclude_action_id=int(failed["id"]),
                 execution_mode=execution_mode,
+                source_message_id=source_message_id,
+                source_revision=source_revision,
             ):
                 return None
             _revive_failed_send_reply_action(
@@ -3600,6 +4450,17 @@ class SQLiteStore:
             )
             return int(failed["id"])
 
+        if _has_active_send_reply_action(
+            conn,
+            task_id=task_id,
+            target_message_id=target_message_id,
+            exclude_action_id=0,
+            execution_mode=execution_mode,
+            source_message_id=source_message_id,
+            source_revision=source_revision,
+        ):
+            return None
+
         idempotency_key = _action_idempotency_key(
             task_id, target_message_id, payload, execution_mode=execution_mode
         )
@@ -3608,8 +4469,9 @@ class SQLiteStore:
                 """
                 INSERT INTO actions(
                   idempotency_key, task_id, approval_id, kind, status, target_message_id,
-                  dry_run, execution_mode, payload_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  source_message_id, source_revision, dry_run, execution_mode,
+                  payload_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     idempotency_key,
@@ -3618,6 +4480,8 @@ class SQLiteStore:
                     ActionKind.SEND_REPLY.value,
                     ActionStatus.PENDING.value,
                     target_message_id,
+                    source_message_id,
+                    source_revision,
                     1,
                     execution_mode,
                     json.dumps(payload, ensure_ascii=False, default=str),
@@ -3642,6 +4506,8 @@ class SQLiteStore:
                 target_message_id=target_message_id,
                 exclude_action_id=int(row["id"]),
                 execution_mode=execution_mode,
+                source_message_id=source_message_id,
+                source_revision=source_revision,
             ):
                 return None
             _revive_failed_send_reply_action(
@@ -3684,12 +4550,15 @@ class SQLiteStore:
         )
         seed = f"{execution_mode}:{seed_value}"
         idempotency_key = f"owner-{sha256(seed.encode('utf-8')).hexdigest()[:16]}"
+        source_message_id = _payload_source_message_id(payload)
+        source_revision = _payload_source_revision(payload)
         cursor = conn.execute(
             """
             INSERT OR IGNORE INTO actions(
               idempotency_key, task_id, approval_id, kind, status, dry_run,
-              execution_mode, payload_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              source_message_id, source_revision, execution_mode, payload_json,
+              created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 idempotency_key,
@@ -3698,6 +4567,8 @@ class SQLiteStore:
                 ActionKind.OWNER_NOTIFICATION.value,
                 ActionStatus.PENDING.value,
                 1,
+                source_message_id,
+                source_revision,
                 execution_mode,
                 json.dumps(payload, ensure_ascii=False, default=str),
                 now,
@@ -3720,6 +4591,8 @@ class SQLiteStore:
                 UPDATE actions
                 SET status = ?,
                     approval_id = COALESCE(?, approval_id),
+                    source_message_id = ?,
+                    source_revision = ?,
                     dry_run = ?,
                     execution_mode = ?,
                     payload_json = ?,
@@ -3730,6 +4603,8 @@ class SQLiteStore:
                 (
                     ActionStatus.PENDING.value,
                     approval_id,
+                    source_message_id,
+                    source_revision,
                     1,
                     execution_mode,
                     json.dumps(payload, ensure_ascii=False, default=str),
@@ -4101,32 +4976,51 @@ class SQLiteStore:
         *,
         now: str,
     ) -> bool:
+        return self._upsert_message_revision_locked(conn, message, now=now).inserted
+
+    def _upsert_message_revision_locked(
+        self,
+        conn: sqlite3.Connection,
+        message: NormalizedMessage,
+        *,
+        now: str,
+        confirmed_current: bool = False,
+    ) -> MessageUpsertResult:
         existing = conn.execute(
-            "SELECT 1 FROM messages WHERE message_id = ?",
+            """
+            SELECT revision, semantic_hash, is_deleted, normalized_json
+            FROM messages
+            WHERE message_id = ?
+            """,
             (message.message_id,),
         ).fetchone()
-        normalized_json = json.dumps(
-            {
-                "mentions": message.mentions,
-                "resources": [resource.raw for resource in message.resources],
-                "thread_id": message.thread_id,
-                "reply_to_message_id": message.reply_to_message_id,
-                "direct_mention": message.direct_mention,
-                "at_all": message.at_all,
-                "sender_name": message.sender_name,
-            },
-            ensure_ascii=False,
-            default=str,
-        )
-        raw_json = json.dumps(message.raw, ensure_ascii=False, default=str)
+        semantic_hash = message_semantic_hash(message)
         if existing is None:
+            normalized_json = json.dumps(
+                {
+                    "mentions": message.mentions,
+                    "resources": [resource.raw for resource in message.resources],
+                    "thread_id": message.thread_id,
+                    "reply_to_message_id": message.reply_to_message_id,
+                    "direct_mention": message.direct_mention,
+                    "at_all": message.at_all,
+                    "message_type": message.message_type,
+                    "sender_name": message.sender_name,
+                    "is_deleted": message.is_deleted,
+                    "semantic_hash_history": [semantic_hash],
+                },
+                ensure_ascii=False,
+                default=str,
+            )
+            raw_json = json.dumps(message.raw, ensure_ascii=False, default=str)
             conn.execute(
                 """
                 INSERT INTO messages(
                   message_id, chat_id, chat_type, sender_id, sender_type, sent_at,
                   normalized_json, raw_json, inserted_at, thread_id, reply_to_message_id,
-                  sender_role, direct_mention, at_all, text, sender_name
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  sender_role, direct_mention, at_all, message_type, text, sender_name,
+                  is_deleted, revision, semantic_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message.message_id,
@@ -4143,18 +5037,99 @@ class SQLiteStore:
                     message.sender_role,
                     int(message.direct_mention),
                     int(message.at_all),
-                    message.text,
+                    message.message_type,
+                    "" if message.is_deleted else message.text,
                     message.sender_name,
+                    int(message.is_deleted),
+                    1,
+                    semantic_hash,
                 ),
             )
-            return True
-        conn.execute(
+            return MessageUpsertResult(
+                inserted=True,
+                changed=True,
+                revision=1,
+                is_deleted=message.is_deleted,
+                semantic_hash=semantic_hash,
+            )
+        previous_revision = int(existing["revision"] or 1)
+        previous_hash = str(existing["semantic_hash"] or "")
+        previous_deleted = bool(existing["is_deleted"])
+        # A tombstone is terminal for this message id. A later stale poll must
+        # not overwrite the tombstone's metadata or reopen its side effects.
+        if previous_deleted:
+            return MessageUpsertResult(
+                inserted=False,
+                changed=False,
+                revision=previous_revision,
+                is_deleted=True,
+                semantic_hash=previous_hash,
+            )
+        uninitialized_hash = previous_hash == ""
+        semantic_hash_history = (
+            []
+            if uninitialized_hash
+            else _message_semantic_hash_history(
+                existing["normalized_json"], current_hash=previous_hash
+            )
+        )
+        # Poll windows may overlap, so an older snapshot can arrive after a
+        # newer edit. Without an upstream revision token, never let a snapshot
+        # that this store has already accepted roll the message back.
+        if semantic_hash in semantic_hash_history and not confirmed_current:
+            return MessageUpsertResult(
+                inserted=False,
+                changed=False,
+                revision=previous_revision,
+                is_deleted=False,
+                semantic_hash=previous_hash,
+                requires_confirmation=semantic_hash != previous_hash,
+            )
+        # Migrated v2 rows keep semantic_hash=''. Stamp the live snapshot
+        # without creating a revision so the first poll is not an edit.
+        changed = previous_hash != semantic_hash or message.is_deleted
+        if not changed:
+            return MessageUpsertResult(
+                inserted=False,
+                changed=False,
+                revision=previous_revision,
+                is_deleted=False,
+                semantic_hash=previous_hash,
+            )
+        if uninitialized_hash and not message.is_deleted:
+            revision = previous_revision
+            result_changed = False
+        else:
+            revision = previous_revision + 1
+            result_changed = True
+        effective_deleted = message.is_deleted
+        if semantic_hash not in semantic_hash_history:
+            semantic_hash_history.append(semantic_hash)
+        normalized_json = json.dumps(
+            {
+                "mentions": message.mentions,
+                "resources": [resource.raw for resource in message.resources],
+                "thread_id": message.thread_id,
+                "reply_to_message_id": message.reply_to_message_id,
+                "direct_mention": message.direct_mention,
+                "at_all": message.at_all,
+                "message_type": message.message_type,
+                "sender_name": message.sender_name,
+                "is_deleted": effective_deleted,
+                "semantic_hash_history": semantic_hash_history,
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+        raw_json = json.dumps(message.raw, ensure_ascii=False, default=str)
+        cursor = conn.execute(
             """
             UPDATE messages
             SET chat_id = ?, chat_type = ?, sender_id = ?, sender_type = ?, sent_at = ?,
                 normalized_json = ?, raw_json = ?, thread_id = ?, reply_to_message_id = ?,
-                sender_role = ?, direct_mention = ?, at_all = ?, text = ?, sender_name = ?
-            WHERE message_id = ?
+                sender_role = ?, direct_mention = ?, at_all = ?, message_type = ?,
+                text = ?, sender_name = ?, is_deleted = ?, revision = ?, semantic_hash = ?
+            WHERE message_id = ? AND is_deleted = 0 AND revision = ?
             """,
             (
                 message.chat_id,
@@ -4169,12 +5144,47 @@ class SQLiteStore:
                 message.sender_role,
                 int(message.direct_mention),
                 int(message.at_all),
-                message.text,
+                message.message_type,
+                "" if effective_deleted else message.text,
                 message.sender_name,
+                int(effective_deleted),
+                revision,
+                semantic_hash,
                 message.message_id,
+                previous_revision,
             ),
         )
-        return False
+        if cursor.rowcount != 1:
+            current = conn.execute(
+                """
+                SELECT revision, semantic_hash, is_deleted
+                FROM messages
+                WHERE message_id = ?
+                """,
+                (message.message_id,),
+            ).fetchone()
+            if current is None:
+                return MessageUpsertResult(
+                    inserted=False,
+                    changed=False,
+                    revision=previous_revision,
+                    is_deleted=previous_deleted,
+                    semantic_hash=previous_hash,
+                )
+            return MessageUpsertResult(
+                inserted=False,
+                changed=False,
+                revision=int(current["revision"] or 1),
+                is_deleted=bool(current["is_deleted"]),
+                semantic_hash=str(current["semantic_hash"] or ""),
+            )
+        return MessageUpsertResult(
+            inserted=False,
+            changed=result_changed,
+            revision=revision,
+            is_deleted=effective_deleted,
+            semantic_hash=semantic_hash,
+        )
 
     def _record_routing_audit(
         self,
@@ -4182,16 +5192,24 @@ class SQLiteStore:
         *,
         message_id: str,
         decision: RouteDecision,
+        revision: int | None = None,
     ) -> None:
+        if revision is None:
+            message = conn.execute(
+                "SELECT revision FROM messages WHERE message_id = ?",
+                (message_id,),
+            ).fetchone()
+            revision = 1 if message is None else int(message["revision"] or 1)
         conn.execute(
             """
             INSERT INTO routing_audits(
-              message_id, task_id, route, route_reason, candidates_count, shortcut_hit,
+              message_id, revision, task_id, route, route_reason, candidates_count, shortcut_hit,
               router_called, matched_by, target_task_id, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message_id,
+                revision,
                 decision.target_task_id,
                 decision.route,
                 decision.reason,
@@ -4298,6 +5316,22 @@ def _task_command_summary(task: TaskRecord) -> dict[str, Any]:
     }
 
 
+def _task_background_version(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return {
+        "id": int(row["id"]),
+        "task_id": int(row["task_id"]),
+        "version": int(row["version"]),
+        "content": row["content"],
+        "operation": row["operation"],
+        "actor": row["actor"],
+        "reason": row["reason"],
+        "created_at": row["created_at"],
+        "content_expired_at": row["content_expired_at"],
+    }
+
+
 def _action_from_row(row: sqlite3.Row) -> ActionRecord:
     return ActionRecord(
         id=int(row["id"]),
@@ -4307,6 +5341,10 @@ def _action_from_row(row: sqlite3.Row) -> ActionRecord:
         kind=row["kind"],
         status=row["status"],
         target_message_id=row["target_message_id"],
+        source_message_id=row["source_message_id"],
+        source_revision=(
+            None if row["source_revision"] is None else int(row["source_revision"])
+        ),
         dry_run=bool(row["dry_run"]),
         execution_mode=row["execution_mode"],
         payload=_loads_json_object(row["payload_json"]),
@@ -4342,6 +5380,8 @@ def _action_record_dict(action: ActionRecord) -> dict[str, Any]:
         "kind": action.kind,
         "status": action.status,
         "target_message_id": action.target_message_id,
+        "source_message_id": action.source_message_id,
+        "source_revision": action.source_revision,
         "dry_run": action.dry_run,
         "execution_mode": action.execution_mode,
         "payload": action.payload,
@@ -4521,6 +5561,18 @@ def _loads_json_object(value: Any) -> dict[str, Any]:
     return cast(dict[str, Any], loaded) if isinstance(loaded, dict) else {}
 
 
+def _message_semantic_hash_history(value: Any, *, current_hash: str) -> list[str]:
+    history_value = _loads_json_object(value).get("semantic_hash_history")
+    history = (
+        [item for item in cast(list[object], history_value) if isinstance(item, str)]
+        if isinstance(history_value, list)
+        else []
+    )
+    if current_hash and current_hash not in history:
+        history.append(current_hash)
+    return history
+
+
 def _parse_datetime_or_none(value: Any) -> datetime | None:
     return parse_instant_or_none(value)
 
@@ -4577,6 +5629,8 @@ def _action_idempotency_key(
             "target_message_id": target_message_id,
             "text": payload.get("text") or payload.get("composed_text") or "",
             "source": payload.get("source") or "",
+            "source_message_id": payload.get("source_message_id") or "",
+            "source_revision": payload.get("source_revision") or 0,
             "execution_mode": execution_mode,
         },
         ensure_ascii=False,
@@ -4626,9 +5680,58 @@ def _has_sent_send_reply_action_for_payload(
     text = _payload_send_text(payload)
     if not text:
         return False
+    source_message_id = _payload_source_message_id(payload)
+    source_revision = _payload_source_revision(payload)
+    for row in _sent_send_reply_rows(
+        conn,
+        task_id=task_id,
+        target_message_id=target_message_id,
+        text=text,
+    ):
+        row_source, row_revision = _action_source_binding(row)
+        if source_message_id is None or source_revision is None:
+            return True
+        if row_source == source_message_id and row_revision == source_revision:
+            return True
+    return False
+
+
+def _has_identical_sent_text_on_other_revision(
+    conn: sqlite3.Connection,
+    *,
+    task_id: int,
+    target_message_id: str,
+    payload: dict[str, Any],
+) -> bool:
+    text = _payload_send_text(payload)
+    if not text:
+        return False
+    source_message_id = _payload_source_message_id(payload)
+    source_revision = _payload_source_revision(payload)
+    if source_message_id is None or source_revision is None:
+        return False
+    for row in _sent_send_reply_rows(
+        conn,
+        task_id=task_id,
+        target_message_id=target_message_id,
+        text=text,
+    ):
+        row_source, row_revision = _action_source_binding(row)
+        if row_source == source_message_id and row_revision != source_revision:
+            return True
+    return False
+
+
+def _sent_send_reply_rows(
+    conn: sqlite3.Connection,
+    *,
+    task_id: int,
+    target_message_id: str,
+    text: str,
+) -> list[sqlite3.Row]:
     rows = conn.execute(
         """
-        SELECT payload_json
+        SELECT payload_json, source_message_id, source_revision
         FROM actions
         WHERE task_id = ?
           AND target_message_id = ?
@@ -4637,10 +5740,37 @@ def _has_sent_send_reply_action_for_payload(
         """,
         (task_id, target_message_id),
     ).fetchall()
-    return any(
-        _payload_send_text(_loads_json_object(row["payload_json"])) == text
+    return [
+        row
         for row in rows
+        if _payload_send_text(_loads_json_object(row["payload_json"])) == text
+    ]
+
+
+def _action_source_binding(row: sqlite3.Row) -> tuple[str | None, int | None]:
+    payload = _loads_json_object(row["payload_json"])
+    source_message_id = row["source_message_id"] or _payload_source_message_id(payload)
+    source_revision = (
+        None if row["source_revision"] is None else int(row["source_revision"])
     )
+    if source_revision is None:
+        source_revision = _payload_source_revision(payload)
+    return (
+        source_message_id if isinstance(source_message_id, str) else None,
+        source_revision,
+    )
+
+
+def _append_payload_warning(payload: dict[str, Any], warning: str) -> dict[str, Any]:
+    warnings = payload.get("warnings")
+    items = (
+        [str(item) for item in cast(list[Any], warnings)]
+        if isinstance(warnings, list)
+        else []
+    )
+    if warning not in items:
+        items.append(warning)
+    return payload | {"warnings": items}
 
 
 def _latest_dispatch_attempt_locked(
@@ -4711,9 +5841,20 @@ def _has_active_send_reply_action(
     target_message_id: str,
     exclude_action_id: int,
     execution_mode: ExecutionMode,
+    source_message_id: str | None = None,
+    source_revision: int | None = None,
 ) -> bool:
+    if source_message_id is None or source_revision is None:
+        source_predicate = "source_message_id IS NULL AND source_revision IS NULL"
+        source_params: tuple[Any, ...] = ()
+    else:
+        source_predicate = (
+            "(source_message_id IS NULL AND source_revision IS NULL) "
+            "OR (source_message_id = ? AND source_revision = ?)"
+        )
+        source_params = (source_message_id, source_revision)
     row = conn.execute(
-        """
+        f"""
         SELECT id
         FROM actions
         WHERE task_id = ?
@@ -4722,9 +5863,10 @@ def _has_active_send_reply_action(
           AND status IN ('pending', 'sending', 'failed_needs_review')
           AND execution_mode = ?
           AND id != ?
+          AND ({source_predicate})
         LIMIT 1
-        """,
-        (task_id, target_message_id, execution_mode, exclude_action_id),
+        """,  # noqa: S608
+        (task_id, target_message_id, execution_mode, exclude_action_id, *source_params),
     ).fetchone()
     return row is not None
 
@@ -4740,6 +5882,8 @@ def _revive_failed_send_reply_action(
     execution_mode: ExecutionMode,
     now: str,
 ) -> None:
+    source_message_id = _payload_source_message_id(payload)
+    source_revision = _payload_source_revision(payload)
     conn.execute(
         """
         UPDATE actions
@@ -4747,6 +5891,8 @@ def _revive_failed_send_reply_action(
             approval_id = ?,
             status = ?,
             target_message_id = ?,
+            source_message_id = ?,
+            source_revision = ?,
             dry_run = ?,
             execution_mode = ?,
             payload_json = ?,
@@ -4759,6 +5905,8 @@ def _revive_failed_send_reply_action(
             approval_id,
             "pending",
             target_message_id,
+            source_message_id,
+            source_revision,
             1,
             execution_mode,
             json.dumps(payload, ensure_ascii=False, default=str),
@@ -4771,6 +5919,93 @@ def _revive_failed_send_reply_action(
 def _payload_send_text(payload: dict[str, Any]) -> str:
     value = payload.get("text") or payload.get("composed_text") or ""
     return value if isinstance(value, str) else ""
+
+
+def _require_expected_approval_target(
+    approval: sqlite3.Row, expected: ApprovalTargetBinding | None
+) -> None:
+    if expected is None:
+        return
+    actual = ApprovalTargetBinding(
+        task_id=None if approval["task_id"] is None else int(approval["task_id"]),
+        source_message_id=approval["source_message_id"],
+        source_revision=(
+            None
+            if approval["source_revision"] is None
+            else int(approval["source_revision"])
+        ),
+    )
+    if actual != expected:
+        raise ValueError("approval target is stale: task or source revision changed")
+
+
+def _payload_source_message_id(payload: dict[str, Any]) -> str | None:
+    value = payload.get("source_message_id")
+    return value if isinstance(value, str) and value else None
+
+
+def _payload_source_revision(payload: dict[str, Any]) -> int | None:
+    value = payload.get("source_revision")
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        revision = int(value)
+    except (TypeError, ValueError):
+        return None
+    return revision if revision > 0 else None
+
+
+def _source_payload_is_stale_locked(
+    conn: sqlite3.Connection, payload: dict[str, Any]
+) -> bool:
+    message_id = _payload_source_message_id(payload)
+    revision = _payload_source_revision(payload)
+    if message_id is None or revision is None:
+        return False
+    row = conn.execute(
+        "SELECT revision, is_deleted FROM messages WHERE message_id = ?",
+        (message_id,),
+    ).fetchone()
+    return (
+        row is None or bool(row["is_deleted"]) or int(row["revision"] or 1) != revision
+    )
+
+
+def _latest_external_task_message_locked(
+    conn: sqlite3.Connection, *, task_id: int
+) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT m.message_id, m.revision, m.is_deleted
+        FROM task_messages tm
+        JOIN messages m ON m.message_id = tm.message_id
+        WHERE tm.task_id = ?
+          AND m.sender_role = 'external_user_message'
+          AND m.is_deleted = 0
+        ORDER BY julianday(m.sent_at) DESC, m.id DESC
+        LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+
+
+def _bind_payload_to_latest_external_message_locked(
+    conn: sqlite3.Connection, *, task_id: int, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Bind low-level task actions to the task's current external source."""
+
+    if (
+        _payload_source_message_id(payload) is not None
+        and _payload_source_revision(payload) is not None
+    ):
+        return payload
+    source = _latest_external_task_message_locked(conn, task_id=task_id)
+    if source is None:
+        return payload
+    return payload | {
+        "source_message_id": source["message_id"],
+        "source_revision": int(source["revision"] or 1),
+    }
 
 
 def _approval_notification_payload(
@@ -4793,6 +6028,9 @@ def _approval_notification_payload(
         )
         payload["commands"] = commands
     payload["approval_id"] = approval_short_id
+    for key in ("source_message_id", "source_revision"):
+        if key in approval_payload:
+            payload[key] = approval_payload[key]
     return payload
 
 

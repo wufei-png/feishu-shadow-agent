@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, cast
 
 from ..agent_backend import AgentBackend
@@ -10,8 +11,12 @@ from ..paths import resolve_agent_working_dir
 from ..processing import FORBIDDEN_MENTION_RE
 from ..prompt import InitialTaskSessionOutput
 from ..prompt_identity import identify_prompt
-from ..task_session_runner import TaskSessionRunner, TaskSessionRunResult
-from ..types import TaskRecord
+from ..task_session_runner import (
+    TaskSessionPromptPlan,
+    TaskSessionRunner,
+    TaskSessionRunResult,
+)
+from ..types import NormalizedMessage, TaskRecord
 from .artifacts import EvalError
 from .cases import LoadedEvalCase
 from .judge import run_semantic_judge
@@ -22,6 +27,7 @@ from .runtime import (
 )
 from .schemas import (
     DraftTaskSessionLabels,
+    TaskSessionFinalRebuild,
     TaskSessionLabels,
     TaskSessionScenario,
 )
@@ -54,7 +60,49 @@ def run_task_session_trial(
         ),
     )
     setup_report: dict[str, Any] | None = None
-    if case.scenario.mode == "resume":
+    intermediate_reports: list[dict[str, Any]] = []
+    target_run: TaskSessionRunResult | None = None
+    if case.scenario.turns is not None:
+        target_ids = _target_message_ids(case.scenario)
+        if current.message_id != target_ids[0]:
+            raise EvalError("task-session timeline did not seed its first target")
+        for index, target_id in enumerate(target_ids):
+            if index:
+                current = attach_task_session_target(
+                    runtime=runtime,
+                    case=case,
+                    loaded=loaded,
+                    task=task,
+                    message_id=target_id,
+                )
+                task = runtime.store.get_task_by_id(task.id)
+            target_run = _run_turn(
+                runner=runner,
+                runtime=runtime,
+                loaded=loaded,
+                backend=backend,
+                task=task,
+                current=current,
+                run_id=f"{run_id}-target-{index + 1:03d}",
+            )
+            _require_valid_run(target_run, stage="task-session target")
+            if target_run.result and target_run.result.session_id:
+                runtime.store.set_task_agent_session_id(
+                    task.id,
+                    target_run.result.session_id,
+                    backend_provider=str(backend.provider),
+                )
+            if index < len(target_ids) - 1:
+                intermediate_reports.append(
+                    _turn_report(target_run, current.message_id)
+                )
+                _apply_intermediate_output(
+                    runtime=runtime,
+                    task=task,
+                    run=target_run,
+                )
+                task = runtime.store.get_task_by_id(task.id)
+    elif case.scenario.mode == "resume":
         setup_run = _run_turn(
             runner=runner,
             runtime=runtime,
@@ -86,27 +134,66 @@ def run_task_session_trial(
             else None,
         )
         setup_report = _turn_report(setup_run, current.message_id)
-        current = attach_task_session_target(
-            runtime=runtime, case=case, loaded=loaded, task=task
+        target_ids = _target_message_ids(case.scenario)
+        for index, target_id in enumerate(target_ids):
+            current = attach_task_session_target(
+                runtime=runtime,
+                case=case,
+                loaded=loaded,
+                task=task,
+                message_id=target_id,
+            )
+            task = runtime.store.get_task_by_id(task.id)
+            target_run = _run_turn(
+                runner=runner,
+                runtime=runtime,
+                loaded=loaded,
+                backend=backend,
+                task=task,
+                current=current,
+                run_id=f"{run_id}-target-{index + 1:03d}",
+                final_rebuild=(
+                    case.scenario.final_rebuild
+                    if index == len(target_ids) - 1
+                    else None
+                ),
+            )
+            _require_valid_run(target_run, stage="task-session target")
+            if target_run.result and target_run.result.session_id:
+                runtime.store.set_task_agent_session_id(
+                    task.id,
+                    target_run.result.session_id,
+                    backend_provider=str(backend.provider),
+                )
+            if index < len(target_ids) - 1:
+                intermediate_reports.append(
+                    _turn_report(target_run, current.message_id)
+                )
+                _apply_intermediate_output(
+                    runtime=runtime,
+                    task=task,
+                    run=target_run,
+                )
+                task = runtime.store.get_task_by_id(task.id)
+    else:
+        target_run = _run_turn(
+            runner=runner,
+            runtime=runtime,
+            loaded=loaded,
+            backend=backend,
+            task=task,
+            current=current,
+            run_id=f"{run_id}-target",
         )
-        task = runtime.store.get_task_by_id(task.id)
-
-    target_run = _run_turn(
-        runner=runner,
-        runtime=runtime,
-        loaded=loaded,
-        backend=backend,
-        task=task,
-        current=current,
-        run_id=f"{run_id}-target",
-    )
-    _require_valid_run(target_run, stage="task-session target")
-    if target_run.result and target_run.result.session_id:
-        runtime.store.set_task_agent_session_id(
-            task.id,
-            target_run.result.session_id,
-            backend_provider=str(backend.provider),
-        )
+        _require_valid_run(target_run, stage="task-session target")
+        if target_run.result and target_run.result.session_id:
+            runtime.store.set_task_agent_session_id(
+                task.id,
+                target_run.result.session_id,
+                backend_provider=str(backend.provider),
+            )
+    if target_run is None:
+        raise EvalError("task-session scenario did not produce a target run")
     target_report = _turn_report(target_run, current.message_id)
     structure = _score_structure(case.labels, target_run)
     semantic: dict[str, Any] = {"status": "not_scored"}
@@ -124,6 +211,7 @@ def run_task_session_trial(
             visible_context=_judge_context(
                 case=case,
                 setup_report=setup_report,
+                intermediate_reports=intermediate_reports,
                 target_message_id=current.message_id,
             ),
             cwd=resolve_agent_working_dir(
@@ -140,7 +228,11 @@ def run_task_session_trial(
         "schema_version": "task_session_trial_report_v1",
         "label_status": case.status,
         "mode": case.scenario.mode,
+        "timeline": None
+        if case.scenario.turns is None
+        else [turn.model_dump(mode="json") for turn in case.scenario.turns],
         "setup": setup_report,
+        "intermediate_targets": intermediate_reports,
         "target": target_report,
         "structure": structure,
         "semantic": semantic,
@@ -158,8 +250,16 @@ def _run_turn(
     task: TaskRecord,
     current: Any,
     run_id: str,
+    final_rebuild: TaskSessionFinalRebuild | None = None,
 ) -> TaskSessionRunResult:
     plan = runner.build_plan(task=task, message=current)
+    if final_rebuild is not None:
+        plan = _final_rebuild_plan(
+            plan=plan,
+            runtime=runtime,
+            current=current,
+            rebuild=final_rebuild,
+        )
     resources = runtime.store.list_resources_for_messages(plan.prompt_message_ids)
     result = runner.run(
         task=task,
@@ -190,6 +290,7 @@ def _run_turn(
         if result.result is None
         else result.result.error,
         latency_ms=None if result.result is None else result.result.latency_ms,
+        input_message_revisions=plan.prompt_message_revisions,
         prompt_version=prompt_identity.version,
         prompt_hash=prompt_identity.sha256,
         prompt={"text": result.prompt}
@@ -198,6 +299,40 @@ def _run_turn(
         tool_permissions_profile=loaded.config.tool_permissions,
     )
     return result
+
+
+def _final_rebuild_plan(
+    *,
+    plan: TaskSessionPromptPlan,
+    runtime: TrialRuntime,
+    current: NormalizedMessage,
+    rebuild: TaskSessionFinalRebuild,
+) -> TaskSessionPromptPlan:
+    task_message_ids = list(plan.task_message_ids)
+    prompt_message_ids = list(
+        dict.fromkeys(
+            [
+                *task_message_ids[:1],
+                *task_message_ids[-rebuild.recent_messages :],
+            ]
+        )
+    )
+    rows = runtime.store.get_messages_by_ids(prompt_message_ids)
+    revisions = {str(row["message_id"]): int(row["revision"] or 1) for row in rows}
+    prompt_message_revisions = [
+        current.revision
+        if message_id == current.message_id
+        else revisions.get(message_id, 1)
+        for message_id in prompt_message_ids
+    ]
+    return replace(
+        plan,
+        session_id=None,
+        prompt_message_ids=prompt_message_ids,
+        prompt_message_revisions=prompt_message_revisions,
+        output_model=InitialTaskSessionOutput,
+        task_background=rebuild.summary,
+    )
 
 
 def _require_valid_run(result: TaskSessionRunResult, *, stage: str) -> None:
@@ -210,6 +345,25 @@ def _require_valid_run(result: TaskSessionRunResult, *, stage: str) -> None:
         raise EvalError(f"{stage} output schema was invalid: {result.validation_error}")
     if result.output is None:
         raise EvalError(f"{stage} returned no validated output")
+
+
+def _apply_intermediate_output(
+    *,
+    runtime: TrialRuntime,
+    task: TaskRecord,
+    run: TaskSessionRunResult,
+) -> None:
+    output = run.output
+    if output is None:
+        raise EvalError("cannot apply missing intermediate task-session output")
+    runtime.store.update_task_after_agent(
+        task_id=task.id,
+        task_label=getattr(output, "task_label", None),
+        status="closed" if output.watch_action == "close" else "watching",
+        watch_until=task.watch_until
+        if output.watch_action == "keep_watching"
+        else None,
+    )
 
 
 def _turn_report(
@@ -225,6 +379,7 @@ def _turn_report(
             "output_model": result.plan.output_model.__name__,
         },
         "session_id_returned": bool(result.result and result.result.session_id),
+        "prompt_chars": len(result.prompt),
         "raw_model_json": None if result.result is None else result.result.json_data,
         "output": None
         if result.output is None
@@ -312,6 +467,7 @@ def _judge_context(
     *,
     case: LoadedEvalCase,
     setup_report: dict[str, Any] | None,
+    intermediate_reports: list[dict[str, Any]],
     target_message_id: str,
 ) -> dict[str, Any]:
     scenario = case.scenario
@@ -323,11 +479,50 @@ def _judge_context(
                 case.raw_messages[item] for item in scenario.message_ids or []
             ]
         }
+    if scenario.turns is not None:
+        replies = {
+            str(report["current_message_id"]): report.get("output", {}).get(
+                "proposed_reply"
+            )
+            for report in intermediate_reports
+        }
+        return {
+            "turns": [
+                {
+                    "kind": turn.kind,
+                    "source_revision": turn.source_revision,
+                    "message": case.raw_messages[turn.message_id],
+                    **(
+                        {"model_reply": replies[turn.message_id]}
+                        if turn.kind == "target" and turn.message_id in replies
+                        else {}
+                    ),
+                }
+                for turn in scenario.turns
+            ]
+        }
     setup_ids = list(scenario.setup_message_ids or [])
-    return {
+    context = {
         "setup_messages": [case.raw_messages[item] for item in setup_ids],
         "setup_model_reply": None
         if setup_report is None
         else setup_report.get("output", {}).get("proposed_reply"),
         "target_message": case.raw_messages[target_message_id],
     }
+    if intermediate_reports:
+        context["intermediate_turns"] = [
+            {
+                "message": case.raw_messages[str(report["current_message_id"])],
+                "model_reply": report.get("output", {}).get("proposed_reply"),
+            }
+            for report in intermediate_reports
+        ]
+    return context
+
+
+def _target_message_ids(scenario: TaskSessionScenario) -> list[str]:
+    if scenario.turns is not None:
+        return [turn.message_id for turn in scenario.turns if turn.kind == "target"]
+    if scenario.target_message_id is not None:
+        return [scenario.target_message_id]
+    return list(scenario.target_message_ids or [])

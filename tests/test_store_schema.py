@@ -11,13 +11,18 @@ from feishu_shadow_agent.store.sqlite_store import (
     SQLITE_SCHEMA_VERSION,
     SQLiteStore,
 )
-from feishu_shadow_agent.types import HealthCheckResult, StateSchemaContract
+from feishu_shadow_agent.types import (
+    HealthCheckResult,
+    NormalizedMessage,
+    StateSchemaContract,
+)
 
 EXPECTED_TABLES = {
     "messages",
     "tasks",
     "task_messages",
     "task_watch_keys",
+    "task_background_versions",
     "approvals",
     "actions",
     "dispatch_attempts",
@@ -34,6 +39,7 @@ EXPECTED_TABLES = {
     "approval_commands",
     "approval_feedback",
     "message_processing",
+    "processing_retry_attempts",
 }
 
 
@@ -55,6 +61,55 @@ def test_schema_initialize_is_idempotent_and_creates_current_tables(
     assert "schema_migrations" not in {row["name"] for row in rows}
     assert application_id == SQLITE_APPLICATION_ID
     assert schema_version == SQLITE_SCHEMA_VERSION
+
+
+def test_schema_migrates_v5_processing_retry_table(tmp_path: Path) -> None:
+    path = tmp_path / "agent.sqlite3"
+    initial = SQLiteStore(path)
+    initial.initialize()
+    with initial.connect() as conn:
+        conn.execute("DROP TABLE processing_retry_attempts")
+        conn.execute("PRAGMA user_version = 5")
+
+    migrated = SQLiteStore(path)
+    migrated.initialize()
+
+    with migrated.connect() as conn:
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'processing_retry_attempts'"
+        ).fetchone()
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert table is not None
+    assert version == SQLITE_SCHEMA_VERSION
+
+
+def test_schema_migrates_v6_task_background_table(tmp_path: Path) -> None:
+    path = tmp_path / "agent.sqlite3"
+    initial = SQLiteStore(path)
+    initial.initialize()
+    with initial.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO tasks(short_id, status, created_at, updated_at)
+            VALUES ('t_preserved', 'watching', 'now', 'now')
+            """
+        )
+        conn.execute("DROP TABLE task_background_versions")
+        conn.execute("PRAGMA user_version = 6")
+
+    SQLiteStore(path).initialize()
+
+    with initial.connect() as conn:
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'task_background_versions'"
+        ).fetchone()
+        task = conn.execute(
+            "SELECT short_id, status FROM tasks WHERE short_id = 't_preserved'"
+        ).fetchone()
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert table is not None
+    assert dict(task) == {"short_id": "t_preserved", "status": "watching"}
+    assert version == SQLITE_SCHEMA_VERSION
 
 
 def test_schema_initialize_rejects_unmarked_existing_database(tmp_path: Path) -> None:
@@ -81,6 +136,187 @@ def test_schema_initialize_rejects_previous_version_database(tmp_path: Path) -> 
 
     with pytest.raises(RuntimeError, match="current schema baseline"):
         SQLiteStore(path).initialize()
+
+
+def test_schema_v2_migrates_to_current_baseline_without_fake_edits(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "agent.sqlite3"
+    schema_v2 = Path(__file__).parent / "fixtures" / "schema_v2.sql"
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.executescript(schema_v2.read_text(encoding="utf-8"))
+        conn.execute(
+            """
+            INSERT INTO messages(
+              message_id, chat_id, chat_type, sender_id, sender_name, sender_type,
+              sender_role, sent_at, text, normalized_json, raw_json, inserted_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "om_1",
+                "oc_1",
+                "group",
+                "ou_ext",
+                "Ext",
+                "user",
+                "external_user_message",
+                "2026-06-22T10:00:00+08:00",
+                "hello",
+                "{}",
+                "{}",
+                "now",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO tasks(
+              short_id, status, chat_id, root_message_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("t_old", "watching", "oc_1", "om_1", "now", "now"),
+        )
+        task_id = int(
+            conn.execute(
+                "SELECT id FROM tasks WHERE short_id = ?", ("t_old",)
+            ).fetchone()["id"]
+        )
+        conn.execute(
+            """
+            INSERT INTO task_messages(task_id, message_id, role, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (task_id, "om_1", "external_user_message", "now"),
+        )
+        conn.execute(
+            """
+            INSERT INTO actions(
+              idempotency_key, task_id, kind, status, target_message_id,
+              payload_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "reply-old",
+                task_id,
+                "send_reply",
+                "sent",
+                "om_1",
+                json.dumps(
+                    {
+                        "text": "old reply",
+                        "reply_target_message_id": "om_1",
+                        "source": "auto_reply",
+                    }
+                ),
+                "now",
+                "now",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO approvals(
+              short_id, task_id, kind, status, payload_json, preview, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "a_old",
+                task_id,
+                "send_reply",
+                "pending",
+                json.dumps({"reply_target_message_id": "om_1", "text": "pending"}),
+                "pending",
+                "now",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO message_processing(
+              message_id, task_id, stage, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("om_1", task_id, "task_session", "processed", "now", "now"),
+        )
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+
+    store = SQLiteStore(path)
+    store.initialize()
+    store.initialize()
+
+    with store.connect() as conn:
+        schema_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        message = conn.execute(
+            """
+            SELECT message_type, revision, semantic_hash, is_deleted
+            FROM messages WHERE message_id = ?
+            """,
+            ("om_1",),
+        ).fetchone()
+        action = conn.execute(
+            """
+            SELECT source_message_id, source_revision
+            FROM actions WHERE idempotency_key = ?
+            """,
+            ("reply-old",),
+        ).fetchone()
+        approval = conn.execute(
+            """
+            SELECT source_message_id, source_revision
+            FROM approvals WHERE short_id = ?
+            """,
+            ("a_old",),
+        ).fetchone()
+        processing_sql = conn.execute(
+            """
+            SELECT sql FROM sqlite_master
+            WHERE type = 'table' AND name = 'message_processing'
+            """
+        ).fetchone()["sql"]
+        conn.execute(
+            """
+            INSERT INTO message_processing(
+              message_id, revision, stage, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("om_1", 2, "task_session", "processed", "now", "now"),
+        )
+
+    assert schema_version == SQLITE_SCHEMA_VERSION
+    assert (
+        message["message_type"],
+        message["revision"],
+        message["semantic_hash"],
+        message["is_deleted"],
+    ) == (None, 1, "", 0)
+    assert (action["source_message_id"], action["source_revision"]) == ("om_1", 1)
+    assert (approval["source_message_id"], approval["source_revision"]) == ("om_1", 1)
+    assert "UNIQUE (message_id, revision, stage)" in " ".join(processing_sql.split())
+
+    incoming = NormalizedMessage(
+        message_id="om_1",
+        chat_id="oc_1",
+        chat_type="group",
+        sender_id="ou_ext",
+        sender_name="Ext",
+        sender_type="user",
+        sender_role="external_user_message",
+        sent_at="2026-06-22T10:00:00+08:00",
+        thread_id=None,
+        reply_to_message_id=None,
+        text="hello",
+        direct_mention=False,
+        at_all=False,
+    )
+    stamped = store.upsert_message_with_revision(incoming)
+    unchanged = store.upsert_message_with_revision(incoming)
+    previous = store.get_latest_sent_reply_for_source(
+        message_id="om_1", before_revision=2
+    )
+
+    assert (stamped.inserted, stamped.changed, stamped.revision) == (False, False, 1)
+    assert (unchanged.changed, unchanged.revision) == (False, 1)
+    assert previous is not None
+    assert previous["text"] == "old reply"
+    assert previous["source_revision"] == 1
 
 
 def test_unique_constraints_are_enforced(tmp_path: Path) -> None:

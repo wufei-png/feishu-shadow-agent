@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Activity, Bell, ClipboardList, Database, FileText, HeartPulse, Home, MessageSquareDiff, Send, Settings, ShieldCheck, Wrench } from "lucide-react";
 import { getDashboard } from "./api";
 import { Badge, EmptyState } from "./components/Primitives";
-import { bootstrapTokenFromHash } from "./consoleSession";
+import { bootstrapTokenFromHash, decodeHashSegment } from "./consoleSession";
 import { queryKeys } from "./queryKeys";
 import { ApprovalsScreen } from "./screens/ApprovalsScreen";
 import { DashboardScreen } from "./screens/DashboardScreen";
@@ -19,15 +19,15 @@ import type { DashboardSnapshot, RouteKey, Tone } from "./types";
 const TOKEN_STORAGE_KEY = "feishu_shadow_agent_console_token";
 
 const navItems: Array<{ key: RouteKey; label: string; icon: typeof Home }> = [
-  { key: "dashboard", label: "Dashboard", icon: Home },
-  { key: "approvals", label: "Approvals", icon: Bell },
-  { key: "tasks", label: "Tasks", icon: ClipboardList },
-  { key: "dispatch", label: "Dispatch", icon: Send },
-  { key: "feedback", label: "Feedback", icon: MessageSquareDiff },
-  { key: "policy", label: "Policy", icon: ShieldCheck },
-  { key: "settings", label: "Settings", icon: Settings },
-  { key: "health", label: "Health", icon: HeartPulse },
-  { key: "maintenance", label: "Maintenance", icon: Wrench }
+  { key: "dashboard", label: "待我处理", icon: Home },
+  { key: "approvals", label: "审批", icon: Bell },
+  { key: "tasks", label: "任务", icon: ClipboardList },
+  { key: "dispatch", label: "发送", icon: Send },
+  { key: "feedback", label: "反馈", icon: MessageSquareDiff },
+  { key: "policy", label: "策略", icon: ShieldCheck },
+  { key: "settings", label: "设置", icon: Settings },
+  { key: "health", label: "健康", icon: HeartPulse },
+  { key: "maintenance", label: "维护", icon: Wrench }
 ];
 
 export function App() {
@@ -60,7 +60,10 @@ export function App() {
     return () => window.removeEventListener("hashchange", handleHash);
   }, []);
 
-  const runtimeStatus = useMemo(() => runtimeStripStatus(dashboard.data), [dashboard.data]);
+  const runtimeStatus = useMemo(
+    () => runtimeStripStatus(dashboard.data, dashboard.error, dashboard.dataUpdatedAt),
+    [dashboard.data, dashboard.dataUpdatedAt, dashboard.error]
+  );
 
   function navigate(route: RouteKey, selectedId?: string) {
     window.location.hash = selectedId ? `${route}/${encodeURIComponent(selectedId)}` : route;
@@ -170,17 +173,19 @@ function currentLocation(): { route: RouteKey; selectedId: string | null } {
   const route = navItems.some((item) => item.key === routeText) ? (routeText as RouteKey) : "dashboard";
   return {
     route,
-    selectedId: selectedId ? decodeURIComponent(selectedId) : null
+    selectedId: decodeHashSegment(selectedId)
   };
 }
 
-function runtimeStripStatus(snapshot?: DashboardSnapshot) {
+function runtimeStripStatus(snapshot: DashboardSnapshot | undefined, error: unknown, updatedAt: number) {
   const daemon = String(snapshot?.daemon_liveness?.status ?? "unknown");
   const initialized = snapshot?.policy_status?.initialized;
   const importDiff = snapshot?.policy_status?.policy_import_diff?.status ?? "unknown";
+  const dataStale = updatedAt > 0 && Date.now() - updatedAt > 30_000;
   return [
     { label: "Daemon", value: daemon, tone: daemon === "live" ? "success" : daemon === "unknown" ? "muted" : "warning" },
-    { label: "Policy", value: initialized ? "initialized" : "missing", tone: initialized ? "success" : "warning" },
-    { label: "Import Diff", value: importDiff, tone: importDiff === "matches" ? "success" : "info" }
+    { label: "策略", value: initialized ? "已初始化" : "缺失", tone: initialized ? "success" : "warning" },
+    { label: "导入差异", value: importDiff, tone: importDiff === "matches" ? "success" : "info" },
+    { label: "数据", value: error ? "读取失败" : dataStale ? "缓存过期" : updatedAt ? "最新" : "等待中", tone: error ? "danger" : dataStale ? "warning" : updatedAt ? "success" : "muted" }
   ] satisfies Array<{ label: string; value: string; tone: Tone }>;
 }

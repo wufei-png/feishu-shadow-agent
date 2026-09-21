@@ -19,6 +19,10 @@ export type DashboardSnapshot = {
   daemon_liveness?: Record<string, unknown>;
   policy_status?: PolicyStatus;
   health_issue_summary?: HealthIssueSummary;
+  attention_summary?: AttentionSummary;
+  attention_tasks?: AttentionTask[];
+  ingestion_status?: IngestionStatus;
+  bot_membership_status?: BotMembershipStatus;
   pending_approvals?: ApprovalSummary[];
   active_tasks?: TaskSummary[];
   pending_actions?: DispatchActionSummary[];
@@ -31,6 +35,80 @@ export type DashboardSnapshot = {
     last_tick_started_at?: string | null;
     last_tick_finished_at?: string | null;
   } | null;
+};
+
+export type BotMembershipStatus = {
+  summary: {
+    present: number;
+    absent: number;
+    unknown: number;
+    unobserved: number;
+  };
+  facts: Array<{
+    chat_id: string;
+    status: "present" | "absent" | "unknown" | "unobserved";
+    observed_status: string | null;
+    checked_at: string | null;
+    next_probe_at: string | null;
+    source: string | null;
+    error: string | null;
+    updated_at: string | null;
+  }>;
+};
+
+export type IngestionStatus = {
+  summary: {
+    source_count: number;
+    backlog_count: number;
+    budget_exhausted_count: number;
+    oldest_checkpoint_age_seconds: number | null;
+  };
+  sources: Array<{
+    checkpoint_key: string;
+    updated_at: string | null;
+    last_success_at: string | null;
+    checkpoint_age_seconds: number | null;
+    drain_complete: boolean;
+    backlog: {
+      start?: string;
+      end?: string;
+      reason?: string;
+      pages_fetched?: number;
+      messages_fetched?: number;
+      restart_count?: number;
+    } | null;
+    last_drain: {
+      pages_fetched?: number;
+      messages_fetched?: number;
+      completed_at?: string;
+    } | null;
+  }>;
+};
+
+export type AttentionSummary = {
+  pending_approval_count: number;
+  overdue_approval_count: number;
+  failed_action_count: number;
+  uncertain_action_count: number;
+  blocked_processing_count: number;
+  failed_processing_count: number;
+  affected_task_count: number;
+  total_item_count: number;
+};
+
+export type AttentionTask = {
+  task_id: number;
+  task_short_id: string;
+  task_label: string | null;
+  chat_id: string | null;
+  status: TaskStatus;
+  pending_approval_count: number;
+  overdue_approval_count: number;
+  failed_action_count: number;
+  uncertain_action_count: number;
+  blocked_processing_count: number;
+  failed_processing_count: number;
+  latest_at: string | null;
 };
 
 export type HealthSeverity = "info" | "warning" | "error" | "critical";
@@ -150,6 +228,8 @@ export type ApprovalSummary = {
   short_id: string;
   task_id: number | null;
   task_short_id: string | null;
+  source_message_id: string | null;
+  source_revision: number | null;
   kind: string;
   status: ApprovalStatus;
   preview: string | null;
@@ -272,8 +352,23 @@ export type TaskDetail = TaskSummary & {
   pending_approvals: ApprovalSummary[];
   actions: DispatchActionSummary[];
   agent_audits: AgentAudit[];
+  processing?: MessageProcessing[];
+  task_background: TaskBackgroundVersion | null;
+  task_background_history: TaskBackgroundVersion[];
   effective_policy: EffectivePolicy;
   recommended_actions: string[];
+};
+
+export type TaskBackgroundVersion = {
+  id: number;
+  task_id: number;
+  version: number;
+  content: string | null;
+  operation: "set" | "clear";
+  actor: string;
+  reason: string | null;
+  created_at: string | null;
+  content_expired_at: string | null;
 };
 
 export type ActionStatus = "pending" | "sending" | "sent" | "failed" | "failed_needs_review" | "cancelled";
@@ -352,6 +447,7 @@ export type MessageDetail = {
 export type MessageProcessing = {
   id: number;
   message_id: string;
+  revision: number;
   task_id: number | null;
   stage: string;
   status: string;
@@ -360,6 +456,15 @@ export type MessageProcessing = {
   terminal_reason: string | null;
   created_at: string | null;
   updated_at: string | null;
+  latest_retry?: {
+    id: number;
+    status: "queued" | "claimed" | "succeeded" | "failed" | "cancelled";
+    actor: string;
+    reason: string | null;
+    error: string | null;
+    created_at: string | null;
+    finished_at: string | null;
+  } | null;
 };
 
 export type MessageResource = {

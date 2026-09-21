@@ -159,3 +159,55 @@ _Avoid_: Experimental provider, best-effort backend, partially supported backend
 **Settings Catalog**:
 A stable product field map that defines which settings the Operator Console exposes, how they are grouped, whether they are editable, and which source owns them. It is not a dynamic schema engine and should not mirror every raw config field.
 _Avoid_: Raw config schema, dynamic form engine, every setting is editable
+
+**Pure Reaction**:
+A lightweight emoji-only user action on a Feishu message. A Pure Reaction never triggers, continues, or extends a Task Session; the pipeline does not acquire reactions, and a reaction is not a follow-up signal.
+_Avoid_: follow-up, watch extension, acknowledgement signal, reaction command
+
+**Merged Forward**:
+A Feishu message of type merge_forward whose content embeds child messages — including their senders, timestamps, and bodies, possibly originating in other chats — as one expanded text block in the current chat. Directly addressable image and file markers are resource refs of the current top-level container, so the runtime downloads them using that container message ID; they never create a child task or trigger a child-ID/origin-chat fetch. A 2026-09-21 probe found that the apparent forwarded “file” was instead a `<folder>` collection key: downloading that key returned a server-mapped network `500`, while listing it and downloading its leaf files through the same container succeeded. Folder keys remain excluded from automatic resource downloads because recursively acquiring an entire collection needs its own limits and product policy. No child-ID or origin-chat fetch is permitted (see ADR-0013).
+_Avoid_: sub-message ingestion, automatic folder-child acquisition, cross-chat fetch
+
+**Cross-Chat Reference**:
+Content or reply/quote provenance that spans chats, typically carried into a chat by a Merged Forward. A Cross-Chat Reference is never a routing signal and never triggers fetching from the origin chat; it is context text of the current chat only.
+_Avoid_: cross-chat task matching, origin-chat context fetch, global reply target
+
+**Incidental Mention**:
+An @-mention of other people inside a message the owner authored. An Incidental Mention is never a task signal: owner-authored messages are routed only as owner takeover of an existing task or ignored, and never create or trigger a Task Session.
+_Avoid_: task trigger, direct mention, follow-up
+
+**Bot Membership Fact**:
+A runtime-derived fact about whether the bot identity is a member of a chat, obtained from send/download failure attribution (such as bot-invisible errors) and active membership probes. It layers into Effective Policy without mutating the Product Policy Store and never produces a Policy Audit; a confirmed absence degrades replies according to reply_identity and allow_user_fallback, blocks resource downloads, and notifies the owner to resolve membership.
+_Avoid_: bot_joined config, policy override, auto-mutated policy
+
+**Acquisition Drain**:
+One tick's fetch of a chat's message window through pagination. A Drain is complete only when every chat's window was fully fetched within the per-chat cap and the global per-tick budget; a partial drain never advances the checkpoint.
+_Avoid_: silent truncation, capped success, best-effort fetch
+
+**Ingest Backlog**:
+The unconsumed tail of a chat's acquisition window when a tick reaches its per-chat cap or time budget. It is represented by an un-advanced checkpoint and is re-fetched on the next tick, with overlap and message-id/revision deduplication; it is never silently truncated.
+_Avoid_: dropped messages, skipped window, silent recovery
+
+**Task Context Window**:
+The designed bounded set of task messages for a rebuilt Task Session prompt — the root message, the most recent N messages, and the Task Running Summary when one exists — proposed by P22 and pending validation from real long-conversation evidence. Current code still embeds all task messages on a fresh rebuild; follow-up prompts on a live provider session embed only the current message.
+_Avoid_: full replay (current behavior), unbounded task messages, metadata dump
+
+**Task Running Summary**:
+The designed system-composed compact digest of a task's state — label, recent messages, and recorded decisions, actions, and approvals — proposed by P22 to re-anchor a rebuilt long Task Session. It is not yet implemented, is not agent-written, and is never expanded with raw metadata inside production prompts.
+_Avoid_: agent-written summary, metadata-in-prompt, raw state dump
+
+**Activation Entrance**:
+A deterministic signal that can start or continue a Task Session: a direct mention of the owner, a reply to a task message, a thread id, a sender or watch-key follow-up, or a burst-attach window. Keyword-based entrances are explicitly out of scope.
+_Avoid_: keyword trigger, non-mention activation, any-message activation
+
+**Activation Priority**:
+The deterministic order in which Activation Entrances resolve: unique reply-to, then unique thread, then burst attach, then the Task Router for ambiguous multi-task cases or closed-task recall; otherwise a new task is created. A direct mention alone only contributes candidates and lets the Router decide when several active tasks are plausible; a topic switch is expressed by a new message or thread rather than by re-mentioning.
+_Avoid_: mention-first, free-for-all candidates, global priority queue
+
+**Task Background Supplement**:
+Owner-supplied context attached to an active task through an Operator Command. It is stored as task-level state, injected only when a fresh Task Session is rebuilt, and never changes the rule that owner-authored messages are takeover-or-ignore only.
+_Avoid_: owner-message-as-context, always-injected background, metadata-in-prompt
+
+**Operator Retry**:
+A state-machine-bounded re-execution of a failed terminal stage — task processing, resource download, or dispatch — requested by the owner. Only terminal or externally blocked states are retryable; a retry starts a new attempt or claim under the existing idempotency key and claim-token mechanism and never replays already-successful stages.
+_Avoid_: in-flight retry, arbitrary re-run, silent re-dispatch
