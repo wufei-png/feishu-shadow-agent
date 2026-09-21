@@ -20,7 +20,7 @@
 ## 当前证据
 
 - 会话 01 已完成：`e6d2f14` 修正当前 schema 生命周期契约，`f141afc` 阻止迟到轮询回滚编辑，`c830b1d` 将 anyio 升级至 4.15.1；[CI run 35505846110](https://github.com/wufei-png/feishu-shadow-agent/actions/runs/35505846110) 的所有阻断 job 和非阻断 Coverage 均通过。
-- 会话 02 已完成：active ruleset [23727358](https://github.com/wufei-png/feishu-shadow-agent/rules/23727358) 仅匹配 `main`，要求 PR 和九项 CI checks，且无 bypass actor；[PR #26](https://github.com/wufei-png/feishu-shadow-agent/pull/26) 合入运维契约，[PR #27](https://github.com/wufei-png/feishu-shadow-agent/pull/27) 记录直推拒绝、缺 check 拒绝及完整 checks 后的普通合入验收。
+- 会话 02 已完成：active ruleset [23727358](https://github.com/wufei-png/feishu-shadow-agent/rules/23727358) 仅匹配 `main`，要求 PR 和九项 CI checks；当前仅 `wufei-png` 与 `wufei2` 为 `always` bypass actors，日常仍按[合并门禁契约](../operations/main-merge-gate.md)走 PR。 [PR #26](https://github.com/wufei-png/feishu-shadow-agent/pull/26) 合入运维契约，[PR #27](https://github.com/wufei-png/feishu-shadow-agent/pull/27) 记录加入 bypass actors 之前的直推拒绝、缺 check 拒绝及完整 checks 后的普通合入验收；见[门禁验收记录](../operations/main-merge-gate-validation.md)。
 - 会话 03 已完成：`84d79d0` 将 lark-cli 失败 JSON 和 membership 分类收紧为 bot 身份、受支持 endpoint 的结构化 `10002`；`234002`、`234040`、scope、资源不匹配、纯文本和解析失败都不再写入 `absent`。ingest/dispatch 只对确认缺席写入带 `error_code`/`error_endpoint` 的 runtime fact；产品策略、Policy Audit 和不确定发送恢复语义保持不变。
 - 会话 04：S4 已完成现场验收。修复后在受控 1,001 条 `group_at_me` 源上保持 `30s` budget 与
   `20 pages / 1000 messages` cap，验证 deferred backlog、跨 tick/重启 cursor 恢复、checkpoint
