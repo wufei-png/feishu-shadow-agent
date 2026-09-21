@@ -55,6 +55,7 @@ class FeishuClient(Protocol):
         page_token: str | None = None,
         query: str = "",
         page_size: int = 50,
+        page_limit: int = 1,
     ) -> MessagePage: ...
 
     def search_owner_messages(
@@ -85,6 +86,10 @@ class FeishuClient(Protocol):
         page_token: str | None = None,
         page_size: int = 50,
     ) -> MessagePage: ...
+
+    def list_chat_bots(
+        self, *, chat_id: str, as_identity: str = "user"
+    ) -> LarkCliResult: ...
 
     def list_thread_messages(
         self,

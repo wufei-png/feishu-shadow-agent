@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from pydantic import ValidationError
 
 from .config import ChatPolicyConfig, ReplyPolicyConfig
+from .membership import effective_membership_status
 from .types import NormalizedMessage, TaskRecord
 
 PolicySource = Literal["explicit_chat", "unknown_group", "p2p", "default"]
@@ -33,6 +34,8 @@ class ResolvedChatPolicy:
     reply_identity: Literal["bot_preferred", "bot", "user"]
     allow_user_fallback: bool
     policy_source: PolicySource
+    configured_bot_joined: bool
+    bot_membership_status: Literal["present", "absent", "unknown", "unobserved"]
 
 
 @dataclass(frozen=True)
@@ -58,10 +61,46 @@ class PolicyResolver:
         self, chat_id: str | None, chat_type: str | None
     ) -> ResolvedChatPolicy:
         global_policy = self._global_product_policy()
+        resolved: ResolvedChatPolicy
         if chat_id:
             chat_policy = self.repository.get_chat_product_policy(chat_id)
             if chat_policy is not None:
-                return _resolved_from_policy(chat_policy, policy_source="explicit_chat")
+                resolved = _resolved_from_policy(
+                    chat_policy, policy_source="explicit_chat"
+                )
+            else:
+                resolved = self._resolve_default(global_policy, chat_type=chat_type)
+        else:
+            resolved = self._resolve_default(global_policy, chat_type=chat_type)
+        if chat_type != "group" or not chat_id:
+            return resolved
+        getter = getattr(self.repository, "get_bot_membership_fact", None)
+        fact_value = getter(chat_id) if callable(getter) else None
+        fact = (
+            cast(dict[str, Any], fact_value) if isinstance(fact_value, dict) else None
+        )
+        status = effective_membership_status(fact)
+        effective_joined = (
+            True
+            if status == "present"
+            else False
+            if status == "absent"
+            else resolved.configured_bot_joined
+        )
+        return ResolvedChatPolicy(
+            auto_reply=resolved.auto_reply,
+            resource_download=resolved.resource_download,
+            bot_joined=effective_joined,
+            reply_identity=resolved.reply_identity,
+            allow_user_fallback=resolved.allow_user_fallback,
+            policy_source=resolved.policy_source,
+            configured_bot_joined=resolved.configured_bot_joined,
+            bot_membership_status=status,
+        )
+
+    def _resolve_default(
+        self, global_policy: dict[str, Any], *, chat_type: str | None
+    ) -> ResolvedChatPolicy:
         reply_policy = _reply_policy_config(global_policy)
         default = _default_chat_policy_config(global_policy)
         if chat_type == "p2p":
@@ -169,6 +208,8 @@ def _resolved_from_config(
         reply_identity=config.reply_identity,
         allow_user_fallback=config.allow_user_fallback,
         policy_source=policy_source,
+        configured_bot_joined=config.bot_joined,
+        bot_membership_status="unobserved",
     )
 
 

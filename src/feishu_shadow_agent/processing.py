@@ -38,9 +38,10 @@ from .resource_preflight import (
     message_has_substantive_resource_text,
     resource_status_counts,
 )
+from .revision import assess_revision_impact
 from .routing import CandidateCollector, RoutingResult
 from .store.sqlite_store import SQLiteStore
-from .task_session_runner import TaskSessionRunner
+from .task_session_runner import RevisionReviewContext, TaskSessionRunner
 from .time_utils import shift_instant
 from .types import (
     ExecutionMode,
@@ -137,6 +138,7 @@ class ApprovalService:
         task: TaskRecord,
         reply_target_message_id: str,
         incoming_message_id: str | None = None,
+        incoming_message_revision: int | None = None,
         proposed_reply: str,
         reason: str,
         final_reply: str | None = None,
@@ -155,7 +157,7 @@ class ApprovalService:
         current_task = self.store.get_task_by_id(task.id)
         notification_message_id = incoming_message_id or reply_target_message_id
         source_message = self.store.get_message(notification_message_id)
-        payload = {
+        payload: dict[str, Any] = {
             "reply_target_message_id": reply_target_message_id,
             "text": payload_text,
             "identity": "user",
@@ -165,9 +167,13 @@ class ApprovalService:
             "decision_reason": decision_reason,
             "execution_mode": self.execution_mode,
         }
+        if incoming_message_id is not None:
+            payload["source_message_id"] = incoming_message_id
+        if incoming_message_revision is not None:
+            payload["source_revision"] = incoming_message_revision
         if payload_extra:
             payload.update(payload_extra)
-        notify = {
+        notify: dict[str, Any] = {
             "type": "approval_required",
             "task_id": task.short_id,
             "reason": reason,
@@ -183,6 +189,17 @@ class ApprovalService:
         }
         if notification_message_id != reply_target_message_id:
             notify["reply_target_message_id"] = reply_target_message_id
+        for key in (
+            "impact",
+            "impact_reasons",
+            "previous_reply",
+            "resolution_options",
+            "edit_supported",
+            "correction_delivery",
+            "requires_owner_approval",
+        ):
+            if key in payload:
+                notify[key] = payload[key]
         return self.store.create_send_reply_approval(
             task_id=task.id,
             preview=proposed_reply,
@@ -202,6 +219,11 @@ class ApprovalService:
         data = {"type": "owner_notification", "reason": reason} | (payload or {})
         current_task = self.store.get_task_by_id(task.id) if task is not None else None
         message_id = data.get("message_id")
+        if isinstance(message_id, str) and message_id:
+            source_message = self.store.get_message(message_id)
+            if source_message is not None:
+                data.setdefault("source_message_id", message_id)
+                data.setdefault("source_revision", int(source_message["revision"] or 1))
         source_message = (
             self.store.get_message(message_id)
             if isinstance(message_id, str) and message_id
@@ -243,6 +265,8 @@ class ApprovalService:
             "reason": reason,
             "task_id": task.short_id,
             "message_id": message.message_id,
+            "source_message_id": message.message_id,
+            "source_revision": message.revision,
             "incoming_message": _notification_message(
                 source_message, fallback_message_id=message.message_id
             ),
@@ -433,6 +457,7 @@ class TaskProcessingService:
     ) -> None:
         self.store.record_message_processing(
             message_id=message.message_id,
+            revision=message.revision,
             task_id=task_id,
             stage=stage,
             status="processed",
@@ -451,6 +476,7 @@ class TaskProcessingService:
     ) -> None:
         self.store.record_message_processing(
             message_id=message.message_id,
+            revision=message.revision,
             task_id=task_id,
             stage=stage,
             status="processing_failed_terminal",
@@ -471,6 +497,7 @@ class TaskProcessingService:
     ) -> None:
         self.store.record_message_processing(
             message_id=message.message_id,
+            revision=message.revision,
             task_id=task_id,
             stage=stage,
             status=MessageProcessingStatus.BLOCKED_WAITING_EXTERNAL.value,
@@ -495,11 +522,16 @@ class TaskProcessingService:
             payload={
                 "type": "processing_failed",
                 "message_id": message.message_id,
+                "source_message_id": message.message_id,
+                "source_revision": message.revision,
                 "stage": stage,
                 "attempt_count": attempt_count,
                 "error": truncate_error(last_error),
                 "message": "Agent processing failed; no reply was generated.",
-                "dedupe_key": f"owner-processing-failed:{message.message_id}:{stage}",
+                "dedupe_key": (
+                    f"owner-processing-failed:{message.message_id}:{stage}:"
+                    f"{message.revision}"
+                ),
             },
         )
 
@@ -519,12 +551,17 @@ class TaskProcessingService:
             payload={
                 "type": reason,
                 "message_id": message.message_id,
+                "source_message_id": message.message_id,
+                "source_revision": message.revision,
                 "stage": "resource_download",
                 "attempt_count": attempt_count,
                 "error": truncate_error(last_error),
                 "statuses": resource_status_counts(resources),
                 "message": "Message resources were not ready; task session agent was not called.",
-                "dedupe_key": f"owner-resource-download:{message.message_id}:{reason}",
+                "dedupe_key": (
+                    f"owner-resource-download:{message.message_id}:{reason}:"
+                    f"{message.revision}"
+                ),
             },
         )
 
@@ -542,6 +579,8 @@ class TaskProcessingService:
             payload={
                 "type": "agent_working_dir_unavailable",
                 "message_id": message.message_id,
+                "source_message_id": message.message_id,
+                "source_revision": message.revision,
                 "stage": "task_session",
                 "error": error,
                 "target": str(agent_working_dir),
@@ -549,7 +588,10 @@ class TaskProcessingService:
                 "commands": [
                     f"task close --task-id {task.short_id} --reason agent_working_dir_unavailable",
                 ],
-                "dedupe_key": f"owner-agent-working-dir:{message.message_id}:{task.short_id}",
+                "dedupe_key": (
+                    f"owner-agent-working-dir:{message.message_id}:{task.short_id}:"
+                    f"{message.revision}"
+                ),
             },
         )
 
@@ -614,6 +656,7 @@ class TaskProcessingService:
             task_id=None,
             agent_session_id=None if result is None else result.session_id,
             input_message_ids=[message.message_id],
+            input_message_revisions=[message.revision],
             input_resource_ids=[resource.file_key for resource in message.resources],
             response=router_response,
             error=outcome.last_error if result is None else result.error,
@@ -716,6 +759,7 @@ class TaskProcessingService:
             )
             self.store.record_routing_audit(
                 message_id=message.message_id,
+                revision=message.revision,
                 decision=RouteDecision(
                     RouteName.AMBIGUOUS,
                     reason=output.reason or "task_router_ambiguous",
@@ -726,7 +770,11 @@ class TaskProcessingService:
             action_id = self.approvals.notify_owner(
                 task=None,
                 reason="task_router_ambiguous",
-                payload={"message_id": message.message_id},
+                payload={
+                    "message_id": message.message_id,
+                    "source_message_id": message.message_id,
+                    "source_revision": message.revision,
+                },
             )
             self._mark_processing_processed(
                 message=message,
@@ -770,6 +818,7 @@ class TaskProcessingService:
         if output.route == "ignore":
             self.store.record_routing_audit(
                 message_id=message.message_id,
+                revision=message.revision,
                 decision=RouteDecision(
                     RouteName.IGNORE,
                     reason=output.reason or "task_router_ignore",
@@ -896,7 +945,9 @@ class TaskProcessingService:
                 matched_by="task_router",
             )
             self.store.record_routing_audit(
-                message_id=message.message_id, decision=decision
+                message_id=message.message_id,
+                revision=message.revision,
+                decision=decision,
             )
             if output.route == "reopen_task":
                 self.store.update_task_after_agent(
@@ -987,7 +1038,24 @@ class TaskProcessingService:
                 action_id=action_id,
                 reason="agent_working_dir_unavailable",
             )
-        session_plan = self.task_sessions.build_plan(task=task, message=message)
+        previous_sent_reply = None
+        if message.revision > 1:
+            previous_sent_reply = self.store.get_latest_sent_reply_for_source(
+                message_id=message.message_id,
+                before_revision=message.revision,
+            )
+        revision_context = (
+            None
+            if previous_sent_reply is None
+            else RevisionReviewContext(
+                previous_sent_reply=str(previous_sent_reply.get("text") or "")
+            )
+        )
+        session_plan = self.task_sessions.build_plan(
+            task=task,
+            message=message,
+            revision_context=revision_context,
+        )
         preflight = self._resource_preflight(
             task=task,
             message=message,
@@ -1109,6 +1177,7 @@ class TaskProcessingService:
             if result is None
             else result.session_id or session_plan.session_id,
             input_message_ids=session_plan.prompt_message_ids,
+            input_message_revisions=session_plan.prompt_message_revisions,
             input_resource_ids=[row["file_key"] for row in resources],
             response=session_response,
             error=outcome.last_error if result is None else result.error,
@@ -1233,7 +1302,10 @@ class TaskProcessingService:
                         "unavailable message resources. Automated handling was closed; "
                         "continue manually in the original chat."
                     ),
-                    "dedupe_key": f"owner-escalation:p2p-resource:{message.message_id}",
+                    "dedupe_key": (
+                        f"owner-escalation:p2p-resource:{message.message_id}:"
+                        f"{message.revision}"
+                    ),
                 },
             )
             self._mark_processing_processed(
@@ -1298,6 +1370,7 @@ class TaskProcessingService:
                 task=task,
                 reply_target_message_id=message.message_id,
                 incoming_message_id=message.message_id,
+                incoming_message_revision=message.revision,
                 proposed_reply=output.proposed_reply,
                 final_reply=composed.text,
                 reason="invalid_reply_target_message_id",
@@ -1315,6 +1388,34 @@ class TaskProcessingService:
                 task.id,
                 approval_id=approval_id,
                 reason="invalid_reply_target",
+            )
+
+        if previous_sent_reply is not None and output.answerability == "no_reply":
+            return self._notify_revision_review(
+                task=task,
+                message=message,
+                output=output,
+                watch_until=watch_until,
+                attempt_count=outcome.attempt_count,
+                reason="revision_no_reply_review",
+                payload={
+                    "type": "revision_correction_review",
+                    "message_id": message.message_id,
+                    "source_message_id": message.message_id,
+                    "source_revision": message.revision,
+                    "previous_reply": previous_sent_reply.get("text", ""),
+                    "previous_action_id": previous_sent_reply.get("action_id"),
+                    "suggested_reply": "",
+                    "impact": "uncertain",
+                    "impact_reasons": ["new_revision_no_reply"],
+                    "decision_reason": output.decision_reason,
+                    "resolution_options": ["send_correction", "no_action"],
+                    "edit_supported": False,
+                    "correction_delivery": "explicit_message",
+                    "dedupe_key": (
+                        f"revision-review:{message.message_id}:{message.revision}"
+                    ),
+                },
             )
 
         if output.answerability == "no_reply":
@@ -1370,6 +1471,7 @@ class TaskProcessingService:
                 if audit_result is None
                 else audit_result.session_id,
                 input_message_ids=postprocess.audit["input_message_ids"],
+                input_message_revisions=session_plan.prompt_message_revisions,
                 input_resource_ids=[],
                 response=_json_mapping(
                     None if audit_result is None else audit_result.json_data
@@ -1419,6 +1521,7 @@ class TaskProcessingService:
                 task=task,
                 reply_target_message_id=reply_target_id,
                 incoming_message_id=message.message_id,
+                incoming_message_revision=message.revision,
                 proposed_reply=output.proposed_reply,
                 final_reply=composed_original.text,
                 reason=f"reply_postprocess_{postprocess.failure_reason or 'failed'}",
@@ -1455,6 +1558,116 @@ class TaskProcessingService:
             composed=composed,
             proposed_reply=postprocess.reply,
         )
+        if previous_sent_reply is not None:
+            revision_assessment = assess_revision_impact(
+                previous_reply=str(previous_sent_reply.get("text") or ""),
+                current_reply=composed.text,
+                answerability=output.answerability,
+                decision_reason=output.decision_reason,
+                current_target_message_id=reply_target_id,
+                previous_target_message_id=previous_sent_reply.get("target_message_id"),
+                revision_signals=getattr(output, "revision_signals", ()),
+            )
+            revision_payload = {
+                "type": "revision_correction_review",
+                "message_id": message.message_id,
+                "source_message_id": message.message_id,
+                "source_revision": message.revision,
+                "previous_reply": previous_sent_reply.get("text", ""),
+                "previous_action_id": previous_sent_reply.get("action_id"),
+                "suggested_reply": composed.text,
+                "impact": revision_assessment.impact,
+                "impact_reasons": list(revision_assessment.reasons),
+                "decision_reason": output.decision_reason,
+                "resolution_options": ["send_correction", "no_action"],
+                "edit_supported": False,
+                "correction_delivery": "explicit_message",
+                "dedupe_key": (
+                    f"revision-review:{message.message_id}:{message.revision}"
+                ),
+            }
+            if revision_assessment.impact == "none":
+                next_status = "closed" if output.watch_action == "close" else "watching"
+                self.store.update_task_after_agent(
+                    task_id=task.id,
+                    task_label=output.task_label
+                    if isinstance(output, InitialTaskSessionOutput)
+                    else None,
+                    status=next_status,
+                    watch_until=watch_until if next_status == "watching" else None,
+                )
+                self._mark_processing_processed(
+                    message=message,
+                    stage="task_session",
+                    task_id=task.id,
+                    attempt_count=outcome.attempt_count,
+                )
+                return ProcessingResult(
+                    "audited_only", task.id, reason="revision_no_material_change"
+                )
+            if not revision_assessment.reply_changed:
+                self.logger.warning(
+                    "identical_correction_text",
+                    run_id=run_id,
+                    task_id=str(task.id),
+                    data={
+                        "message_id": message.message_id,
+                        "source_revision": message.revision,
+                        "impact": revision_assessment.impact,
+                    },
+                )
+                return self._notify_revision_review(
+                    task=task,
+                    message=message,
+                    output=output,
+                    watch_until=watch_until,
+                    attempt_count=outcome.attempt_count,
+                    reason="revision_identical_text_review",
+                    payload=revision_payload,
+                )
+            if revision_assessment.impact == "low":
+                return self._notify_revision_review(
+                    task=task,
+                    message=message,
+                    output=output,
+                    watch_until=watch_until,
+                    attempt_count=outcome.attempt_count,
+                    reason="revision_low_impact_correction_review",
+                    payload=revision_payload,
+                )
+            revision_payload["requires_owner_approval"] = True
+            approval_id = self.approvals.request_send_reply(
+                task=task,
+                reply_target_message_id=reply_target_id,
+                incoming_message_id=message.message_id,
+                incoming_message_revision=message.revision,
+                proposed_reply=output.proposed_reply,
+                final_reply=composed.text,
+                reason="revision_correction_required",
+                approvable=_can_directly_approve(output.proposed_reply, composed),
+                payload_extra=revision_payload,
+                decision_reason=output.decision_reason,
+            )
+            self.store.update_task_after_agent(
+                task_id=task.id,
+                task_label=output.task_label
+                if isinstance(output, InitialTaskSessionOutput)
+                else None,
+                status="watching",
+                watch_until=watch_until,
+            )
+            self._mark_processing_processed(
+                message=message,
+                stage="task_session",
+                task_id=task.id,
+                attempt_count=outcome.attempt_count,
+            )
+            return ProcessingResult(
+                "approval_created",
+                task.id,
+                approval_id=approval_id,
+                reason="revision_correction_required",
+            )
         if not gate["allow"]:
             self.logger.warning(
                 "task_session_auto_reply_blocked",
@@ -1482,6 +1695,7 @@ class TaskProcessingService:
                 task=task,
                 reply_target_message_id=reply_target_id,
                 incoming_message_id=message.message_id,
+                incoming_message_revision=message.revision,
                 proposed_reply=postprocess.reply,
                 final_reply=composed.text,
                 reason=gate["reason"],
@@ -1505,6 +1719,8 @@ class TaskProcessingService:
             )
         payload = {
             "reply_target_message_id": reply_target_id,
+            "source_message_id": message.message_id,
+            "source_revision": message.revision,
             "text": composed.text,
             "identity": gate["identity"],
             "source": "auto_reply",
@@ -1549,6 +1765,45 @@ class TaskProcessingService:
         )
         return ProcessingResult(
             "send_action_created", task.id, action_id=action_id, reason="gate_passed"
+        )
+
+    def _notify_revision_review(
+        self,
+        *,
+        task: TaskRecord,
+        message: NormalizedMessage,
+        output: Any,
+        watch_until: str,
+        attempt_count: int,
+        reason: str,
+        payload: dict[str, Any],
+    ) -> ProcessingResult:
+        payload.setdefault("requires_owner_approval", False)
+        payload.setdefault("commands", [f"/send {task.short_id} <final reply>"])
+        self.store.update_task_after_agent(
+            task_id=task.id,
+            task_label=output.task_label
+            if isinstance(output, InitialTaskSessionOutput)
+            else None,
+            status="watching",
+            watch_until=watch_until,
+        )
+        action_id = self.approvals.notify_owner(
+            task=task,
+            reason=reason,
+            payload=payload,
+        )
+        self._mark_processing_processed(
+            message=message,
+            stage="task_session",
+            task_id=task.id,
+            attempt_count=attempt_count,
+        )
+        return ProcessingResult(
+            "owner_notification_created",
+            task.id,
+            action_id=action_id,
+            reason=reason,
         )
 
     def _reply_postprocess(
@@ -1654,6 +1909,8 @@ class TaskProcessingService:
     ) -> int:
         notification_payload = {
             "message_id": message.message_id,
+            "source_message_id": message.message_id,
+            "source_revision": message.revision,
             "target": target_task_id,
         }
         if payload:
@@ -1679,6 +1936,7 @@ class TaskProcessingService:
     ) -> None:
         self.store.record_routing_audit(
             message_id=message.message_id,
+            revision=message.revision,
             decision=RouteDecision(
                 RouteName.AMBIGUOUS,
                 reason=reason,

@@ -316,13 +316,21 @@ def test_capture_reads_minimal_task_fixture_from_production_store(
 ) -> None:
     loaded = _loaded_config(tmp_path)
     first = _message("om_1", minute=1, direct=True)
+    first.pop("chat_type")  # Feishu mget often omits chat_type.
     target = _message("om_2", minute=2, direct=True)
     store = SQLiteStore(tmp_path / "data/test.sqlite3")
     store.initialize()
-    normalized = MessageNormalizer(owner_open_id="ou_owner").normalize(first)
+    normalized = MessageNormalizer(owner_open_id="ou_owner").normalize(
+        first, default_chat_type="group"
+    )
     store.upsert_message(normalized)
+    revised = first | {"text": "@Owner revised task"}
+    revised_normalized = MessageNormalizer(owner_open_id="ou_owner").normalize(
+        revised, default_chat_type="group"
+    )
+    assert store.upsert_message_with_revision(revised_normalized).revision == 2
     store.create_task_for_message(
-        normalized,
+        revised_normalized,
         watch_until="2026-07-10T12:00:00+08:00",
         task_label="captured task",
     )
@@ -345,6 +353,35 @@ def test_capture_reads_minimal_task_fixture_from_production_store(
             "message_ids": ["om_1"],
         }
     }
+    captured = {row["message_id"]: row for row in read_jsonl(case / "messages.jsonl")}
+    assert captured["om_1"]["source_revision"] == 2
+    assert captured["om_1"]["source_task_membership"] is True
+    assert captured["om_1"]["source_task_ids"] == [1]
+    assert "source_revision" not in captured["om_2"]
+
+
+def test_capture_omits_provenance_when_live_content_differs_from_store(
+    tmp_path: Path,
+) -> None:
+    loaded = _loaded_config(tmp_path)
+    original = _message("om_mismatch", minute=1, direct=True)
+    stored = original | {"text": "@Owner current revision"}
+    store = SQLiteStore(tmp_path / "data/test.sqlite3")
+    store.upsert_message(MessageNormalizer(owner_open_id="ou_owner").normalize(stored))
+    service = EvalService(loaded=loaded, lark_client=FakeLarkClient([original]))
+
+    case = service.capture_case(
+        message_id="om_mismatch",
+        context_before=0,
+        context_after=0,
+        lookback_days=2,
+        label=None,
+        allow_sensitive_config=False,
+    )
+
+    captured = read_jsonl(case / "messages.jsonl")[0]
+    assert "source_revision" not in captured
+    assert "source_task_membership" not in captured
 
 
 def test_promote_rechecks_sensitive_source_config(tmp_path: Path) -> None:

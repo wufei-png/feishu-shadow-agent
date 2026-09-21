@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, Bot, MessageSquare, RotateCcw, Send, XCircle } from "lucide-react";
-import { closeTask, getTask, listTasks, reopenTask } from "../api";
+import { closeTask, getTask, listTasks, reopenTask, retryMessageProcessing, updateTaskBackground } from "../api";
 import {
   Badge,
   Button,
@@ -13,6 +13,7 @@ import {
   formatDate,
   ListRow,
   LoadingState,
+  QueueControls,
   SectionHeader,
   SegmentedControl,
   shortText,
@@ -26,6 +27,17 @@ import { MessageDetailPanel } from "./MessageDetailPanel";
 
 type TaskFilter = TaskStatus | "all";
 
+type TaskCommandInput = {
+  kind: "close" | "reopen" | "retry-processing" | "update-background";
+  taskId: string;
+  reason?: string;
+  messageId?: string;
+  stage?: string;
+  content?: string | null;
+};
+
+const pageSize = 50;
+
 const taskFilters: Array<{ value: TaskFilter; label: string }> = [
   { value: "watching", label: "Watching" },
   { value: "closed", label: "Closed" },
@@ -37,20 +49,27 @@ const taskFilters: Array<{ value: TaskFilter; label: string }> = [
 export function TasksScreen({ token, selectedId }: { token: string; selectedId: string | null }) {
   const queryClient = useQueryClient();
   const [filter, setFilter] = useState<TaskFilter>("watching");
+  const [page, setPage] = useState(0);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(selectedId);
   const [messageId, setMessageId] = useState<string | null>(null);
-  const [reason, setReason] = useState("");
-  const [commandResult, setCommandResult] = useState<CommandResult | null>(null);
+  const [reasons, setReasons] = useState<Record<string, string>>({});
+  const [backgroundDrafts, setBackgroundDrafts] = useState<Record<string, string>>({});
+  const [commandResults, setCommandResults] = useState<Record<string, CommandResult>>({});
+  const busyTaskIdsRef = useRef(new Set<string>());
+  const [busyTaskIds, setBusyTaskIds] = useState<Set<string>>(new Set());
   const tasks = useQuery({
-    queryKey: queryKeys.tasks({ status: filter, limit: 50, offset: 0 }),
-    queryFn: () => listTasks(token, { status: filter === "all" ? undefined : filter, limit: 50, offset: 0 }),
-    enabled: Boolean(token)
+    queryKey: queryKeys.tasks({ status: filter, limit: pageSize + 1, offset: page * pageSize }),
+    queryFn: () => listTasks(token, { status: filter === "all" ? undefined : filter, limit: pageSize + 1, offset: page * pageSize }),
+    enabled: Boolean(token),
+    refetchInterval: 15_000
   });
-  const rows = useMemo(() => tasks.data ?? [], [tasks.data]);
+  const rows = useMemo(() => (tasks.data ?? []).slice(0, pageSize), [tasks.data]);
+  const hasNextPage = (tasks.data?.length ?? 0) > pageSize;
   const detail = useQuery({
     queryKey: queryKeys.task(selectedTaskId),
     queryFn: () => getTask(token, selectedTaskId ?? ""),
-    enabled: Boolean(token && selectedTaskId)
+    enabled: Boolean(token && selectedTaskId),
+    refetchInterval: 15_000
   });
 
   useEffect(() => {
@@ -58,42 +77,103 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
   }, [selectedId]);
 
   useEffect(() => {
+    if (selectedId) {
+      return;
+    }
     if (!selectedTaskId && rows[0]) {
       setSelectedTaskId(rows[0].task_id);
     }
     if (selectedTaskId && rows.length && !rows.some((task) => task.task_id === selectedTaskId)) {
       setSelectedTaskId(rows[0].task_id);
     }
-  }, [rows, selectedTaskId]);
+  }, [rows, selectedId, selectedTaskId]);
 
   useEffect(() => {
     setMessageId(null);
-    setCommandResult(null);
   }, [selectedTaskId]);
 
-  const close = useMutation({
-    mutationFn: () => closeTask(token, selectedTaskId ?? "", { reason: clean(reason) }),
-    onSuccess: async (result) => {
-      setCommandResult(result);
+  const taskCommand = useMutation({
+    mutationFn: (input: TaskCommandInput) =>
+      input.kind === "close"
+        ? closeTask(token, input.taskId, { reason: input.reason })
+        : input.kind === "reopen"
+          ? reopenTask(token, input.taskId, { reason: input.reason })
+          : input.kind === "retry-processing"
+            ? retryMessageProcessing(token, input.messageId ?? "", input.stage ?? "", { reason: input.reason })
+            : updateTaskBackground(token, input.taskId, { content: input.content ?? null, reason: input.reason }),
+    onSuccess: async (result, input) => {
+      setCommandResults((current) => ({ ...current, [input.taskId]: result }));
       await invalidateAfterTaskCommand(queryClient);
     },
-    onError: (error) => setCommandResult(errorResult("task.close", error))
-  });
-  const reopen = useMutation({
-    mutationFn: () => reopenTask(token, selectedTaskId ?? "", { reason: clean(reason) }),
-    onSuccess: async (result) => {
-      setCommandResult(result);
-      await invalidateAfterTaskCommand(queryClient);
+    onError: (error, input) => {
+      setCommandResults((current) => ({
+        ...current,
+        [input.taskId]: errorResult(`task.${input.kind}`, error)
+      }));
     },
-    onError: (error) => setCommandResult(errorResult("task.reopen", error))
+    onSettled: (_result, _error, input) => {
+      busyTaskIdsRef.current.delete(input.taskId);
+      setBusyTaskIds(new Set(busyTaskIdsRef.current));
+    }
   });
+  const reason = selectedTaskId ? (reasons[selectedTaskId] ?? "") : "";
+  const commandResult = selectedTaskId ? (commandResults[selectedTaskId] ?? null) : null;
+  const selectedTaskBusy = selectedTaskId ? busyTaskIds.has(selectedTaskId) : false;
   const canClose = detail.data?.status === "watching";
   const canReopen = detail.data ? ["closed", "closed_by_owner", "human_taken_over"].includes(detail.data.status) : false;
+  const backgroundDraft = selectedTaskId ? (backgroundDrafts[selectedTaskId] ?? detail.data?.task_background?.content ?? "") : "";
+
+  function setReason(reason: string): void {
+    if (selectedTaskId) {
+      setReasons((current) => ({ ...current, [selectedTaskId]: reason }));
+    }
+  }
+
+  function runTaskCommand(kind: TaskCommandInput["kind"]): void {
+    const taskId = detail.data?.task_id;
+    if (!taskId || busyTaskIdsRef.current.has(taskId)) {
+      return;
+    }
+    busyTaskIdsRef.current.add(taskId);
+    setBusyTaskIds(new Set(busyTaskIdsRef.current));
+    taskCommand.mutate({ kind, taskId, reason: clean(reason) });
+  }
+
+  function retryProcessing(messageId: string, stage: string): void {
+    const taskId = detail.data?.task_id;
+    if (!taskId || busyTaskIdsRef.current.has(taskId)) {
+      return;
+    }
+    busyTaskIdsRef.current.add(taskId);
+    setBusyTaskIds(new Set(busyTaskIdsRef.current));
+    taskCommand.mutate({
+      kind: "retry-processing",
+      taskId,
+      messageId,
+      stage,
+      reason: clean(reason)
+    });
+  }
+
+  function updateBackground(content: string | null): void {
+    const taskId = detail.data?.task_id;
+    if (!taskId || busyTaskIdsRef.current.has(taskId)) {
+      return;
+    }
+    busyTaskIdsRef.current.add(taskId);
+    setBusyTaskIds(new Set(busyTaskIdsRef.current));
+    taskCommand.mutate({
+      kind: "update-background",
+      taskId,
+      content,
+      reason: clean(reason)
+    });
+  }
 
   if (tasks.isLoading) {
     return <LoadingState title="Loading tasks" />;
   }
-  if (tasks.error) {
+  if (tasks.error && !tasks.data) {
     return <ErrorState title="Tasks unavailable" error={tasks.error} />;
   }
 
@@ -106,7 +186,25 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
             title="Conversation context"
             badge={<Badge tone={rows.length ? "info" : "muted"}>{rows.length}</Badge>}
           />
-          <SegmentedControl label="Task status filter" onChange={setFilter} options={taskFilters} value={filter} />
+          <SegmentedControl
+            label="Task status filter"
+            onChange={(nextFilter) => {
+              setFilter(nextFilter);
+              setPage(0);
+            }}
+            options={taskFilters}
+            value={filter}
+          />
+          <QueueControls
+            error={tasks.error}
+            hasNext={hasNextPage}
+            isFetching={tasks.isFetching}
+            onNext={() => setPage((current) => current + 1)}
+            onPrevious={() => setPage((current) => Math.max(0, current - 1))}
+            onRefresh={() => void tasks.refetch()}
+            page={page}
+            updatedAt={tasks.dataUpdatedAt}
+          />
           {rows.length ? (
             <div className="list-stack">
               {rows.map((task) => (
@@ -114,7 +212,7 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
                   badge={<Badge tone={statusTone(task.status)}>{task.status}</Badge>}
                   key={task.task_id}
                   meta={`${task.chat_id ?? "no chat"} · ${task.message_count} messages · ${formatDate(task.updated_at)}`}
-                  onClick={() => setSelectedTaskId(task.task_id)}
+                  onClick={() => selectTask(task.task_id, setSelectedTaskId)}
                   selected={task.task_id === selectedTaskId}
                   title={task.task_label || task.task_id}
                 >
@@ -167,20 +265,86 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
             </div>
 
             <div className="detail-panel">
+              <div className="subsection-title">
+                <Bot aria-hidden="true" size={16} />
+                <h2>任务背景</h2>
+              </div>
+              <TextareaField
+                label="Owner 补充背景"
+                onChange={(value) => {
+                  if (selectedTaskId) {
+                    setBackgroundDrafts((current) => ({ ...current, [selectedTaskId]: value }));
+                  }
+                }}
+                placeholder="仅写入这个任务需要长期参考的事实或约束"
+                rows={5}
+                value={backgroundDraft}
+              />
+              <p className="detail-note">
+                下次 fresh 重建生效；不会注入或重置当前 live provider session。
+                {detail.data.task_background ? ` 当前版本 v${detail.data.task_background.version}。` : " 尚无背景。"}
+              </p>
+              <div className="command-buttons">
+                <Button disabled={selectedTaskBusy || !backgroundDraft.trim()} onClick={() => updateBackground(backgroundDraft)} tone="info">
+                  保存背景
+                </Button>
+                <Button
+                  disabled={selectedTaskBusy || (!detail.data.task_background?.content && !backgroundDraft)}
+                  onClick={() => {
+                    if (selectedTaskId) {
+                      setBackgroundDrafts((current) => ({ ...current, [selectedTaskId]: "" }));
+                    }
+                    updateBackground(null);
+                  }}
+                  tone="danger"
+                >
+                  清空背景
+                </Button>
+              </div>
+            </div>
+
+            <div className="detail-panel">
               <p className="eyebrow">Commands</p>
               <h2>Task lifecycle</h2>
               <TextareaField label="Reason" onChange={setReason} placeholder="Optional operator note" rows={2} value={reason} />
               <div className="command-buttons">
-                <Button disabled={!canClose || close.isPending} onClick={() => close.mutate()} tone="danger">
+                <Button disabled={!canClose || selectedTaskBusy} onClick={() => runTaskCommand("close")} tone="danger">
                   <XCircle aria-hidden="true" size={15} />
                   Close
                 </Button>
-                <Button disabled={!canReopen || reopen.isPending} onClick={() => reopen.mutate()} tone="info">
+                <Button disabled={!canReopen || selectedTaskBusy} onClick={() => runTaskCommand("reopen")} tone="info">
                   <RotateCcw aria-hidden="true" size={15} />
                   Reopen
                 </Button>
               </div>
               <CommandResultPanel result={commandResult} />
+            </div>
+
+            <div className="detail-panel">
+              <div className="subsection-title">
+                <RotateCcw aria-hidden="true" size={16} />
+                <h2>Processing recovery</h2>
+              </div>
+              {(detail.data.processing ?? []).filter((item) => ["processing_failed_terminal", "blocked_waiting_external"].includes(item.status)).length ? (
+                <ul className="timeline-list">
+                  {(detail.data.processing ?? []).filter((item) => ["processing_failed_terminal", "blocked_waiting_external"].includes(item.status)).map((item) => {
+                    const activeRetry = item.latest_retry?.status === "queued" || item.latest_retry?.status === "claimed";
+                    return (
+                      <li key={`${item.message_id}-${item.revision}-${item.stage}`}>
+                        <RotateCcw aria-hidden="true" size={14} />
+                        <span>{item.stage} · {item.message_id} r{item.revision}</span>
+                        <small>{item.status}{item.terminal_reason ? ` · ${item.terminal_reason}` : ""}</small>
+                        <Button disabled={selectedTaskBusy || activeRetry} onClick={() => retryProcessing(item.message_id, item.stage)} tone="warning">
+                          {activeRetry ? "已排队" : "重试"}
+                        </Button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : (
+                <p className="detail-note">没有可人工重试的处理阶段。</p>
+              )}
+              <p className="detail-note">仅终态或外部阻塞可重试；发送结果不确定仍需在发送页人工核实。</p>
             </div>
 
             <div className="detail-panel">
@@ -291,4 +455,9 @@ function errorResult(command: string, error: unknown): CommandResult {
     warnings: [],
     next_actions: []
   };
+}
+
+function selectTask(taskId: string, setSelectedTaskId: (taskId: string) => void): void {
+  setSelectedTaskId(taskId);
+  window.location.hash = `tasks/${encodeURIComponent(taskId)}`;
 }

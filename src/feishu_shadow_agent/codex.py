@@ -185,6 +185,23 @@ class CodexCliClient:
             developer_instructions=TASK_SESSION_DEVELOPER_INSTRUCTIONS,
         )
 
+    def structured_task_session(
+        self,
+        prompt: str,
+        *,
+        output_model: type[BaseModel],
+        session_id: str | None = None,
+        cwd: str | Path | None = None,
+    ) -> AgentRunResult:
+        return self._run(
+            prompt,
+            output_model=output_model,
+            session_id=session_id,
+            cwd=cwd,
+            include_session_skills=session_id is None,
+            developer_instructions=TASK_SESSION_DEVELOPER_INSTRUCTIONS,
+        )
+
     def structured_output(
         self,
         prompt: str,

@@ -7,6 +7,10 @@ import pytest
 
 from feishu_shadow_agent.agent_backend import AgentRunResult
 from feishu_shadow_agent.agent_invocation import AgentInvoker
+from feishu_shadow_agent.agent_output_contract import (
+    FollowupTaskSessionOutput,
+    InitialRevisionTaskSessionOutput,
+)
 from feishu_shadow_agent.config import AgentBackendConfig, AppConfig, OwnerConfig
 from feishu_shadow_agent.context_access import ContextAccessBuilder
 from feishu_shadow_agent.jsonl import JSONLLogger
@@ -19,6 +23,8 @@ from feishu_shadow_agent.resource_preflight import (
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.task_session_runner import (
     P2P_ADJACENT_RESOURCE_CONTEXT_LIMIT,
+    RevisionReviewContext,
+    TaskSessionPromptPlan,
     TaskSessionRunner,
 )
 from feishu_shadow_agent.types import (
@@ -72,6 +78,146 @@ def _task(*, task_id: int = 1, short_id: str = "t_abc") -> TaskRecord:
     )
 
 
+def test_task_session_plan_injects_background_only_for_fresh_matching_task() -> None:
+    class Store:
+        def __init__(self) -> None:
+            self.sessions = {1: None, 2: None, 3: "session-live"}
+            self.backgrounds = {
+                1: "first task evidence",
+                2: "second task evidence",
+                3: "old",
+            }
+
+        def get_initialized_agent_session_id(
+            self, task_id: int, *, backend_provider: str
+        ) -> str | None:
+            assert backend_provider == "hermes"
+            return self.sessions[task_id]
+
+        def list_task_message_ids(self, task_id: int) -> list[str]:
+            return [f"om_{task_id}"]
+
+        def get_messages_by_ids(
+            self, message_ids: list[str]
+        ) -> list[dict[str, object]]:
+            return [
+                {"message_id": message_id, "revision": 1} for message_id in message_ids
+            ]
+
+        def get_task_background(self, task_id: int) -> str | None:
+            return self.backgrounds.get(task_id)
+
+    class Backend:
+        provider = "hermes"
+
+    runner = TaskSessionRunner(
+        store=Store(),  # type: ignore[arg-type]
+        agent_backend=Backend(),  # type: ignore[arg-type]
+        agent_invoker=None,  # type: ignore[arg-type]
+        context_access=None,  # type: ignore[arg-type]
+    )
+
+    first = runner.build_plan(
+        task=_task(task_id=1), message=_message(message_id="om_1")
+    )
+    second = runner.build_plan(
+        task=_task(task_id=2), message=_message(message_id="om_2")
+    )
+    resumed = runner.build_plan(
+        task=_task(task_id=3), message=_message(message_id="om_3")
+    )
+
+    assert first.task_background == "first task evidence"
+    assert second.task_background == "second task evidence"
+    assert resumed.session_id == "session-live"
+    assert resumed.task_background is None
+
+
+def test_task_session_run_emits_background_only_for_fresh_prompt(
+    tmp_path: Path,
+) -> None:
+    class Store:
+        def get_initialized_agent_session_id(
+            self, task_id: int, *, backend_provider: str
+        ) -> str | None:
+            return None if task_id == 1 else "session-live"
+
+        def list_task_message_ids(self, task_id: int) -> list[str]:
+            return [f"om_{task_id}"]
+
+        def get_messages_by_ids(
+            self, message_ids: list[str]
+        ) -> list[dict[str, object]]:
+            return [
+                {
+                    "message_id": message_id,
+                    "revision": 1,
+                    "text": "hello",
+                    "sender_name": "Ext",
+                    "sender_role": "external_user_message",
+                    "sent_at": "2026-06-22T10:00:00+08:00",
+                    "thread_id": None,
+                    "reply_to_message_id": None,
+                }
+                for message_id in message_ids
+            ]
+
+        def get_task_background(self, task_id: int) -> str | None:
+            return "fresh-only background"
+
+    class Backend:
+        provider = "hermes"
+
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def task_session(
+            self, prompt: str, *, session_id: str | None, cwd: str | Path | None
+        ) -> AgentRunResult:
+            self.prompts.append(prompt)
+            return AgentRunResult(["agent"], 1, stderr="stop after prompt capture")
+
+    class ContextAccess:
+        def task_session_context_access(self, *, task: TaskRecord) -> None:
+            return None
+
+    backend = Backend()
+    runner = TaskSessionRunner(
+        store=Store(),  # type: ignore[arg-type]
+        agent_backend=backend,  # type: ignore[arg-type]
+        agent_invoker=AgentInvoker(
+            logger=JSONLLogger(tmp_path / "agent.jsonl"), max_attempts=1
+        ),
+        context_access=ContextAccess(),  # type: ignore[arg-type]
+    )
+    fresh_task = _task(task_id=1)
+    resumed_task = _task(task_id=2)
+    fresh_message = _message(message_id="om_1")
+    resumed_message = _message(message_id="om_2")
+
+    fresh_plan = runner.build_plan(task=fresh_task, message=fresh_message)
+    resumed_plan = runner.build_plan(task=resumed_task, message=resumed_message)
+    runner.run(
+        task=fresh_task,
+        message=fresh_message,
+        plan=fresh_plan,
+        resources=[],
+        run_id="run_fresh",
+    )
+    runner.run(
+        task=resumed_task,
+        message=resumed_message,
+        plan=resumed_plan,
+        resources=[],
+        run_id="run_resumed",
+    )
+
+    assert "## Owner Task Background" in backend.prompts[0]
+    assert "fresh-only background" in backend.prompts[0]
+    assert "## Owner Task Background" not in backend.prompts[1]
+    assert "fresh-only background" not in backend.prompts[1]
+
+
 def test_agent_invoker_retries_transient_result_but_not_terminal_result(
     tmp_path: Path,
 ) -> None:
@@ -106,6 +252,127 @@ def test_agent_invoker_retries_transient_result_but_not_terminal_result(
     assert (
         terminal.last_error is not None and "permission denied" in terminal.last_error
     )
+
+
+def test_revision_task_session_uses_provider_structured_output_schema() -> None:
+    calls: list[type[object]] = []
+
+    class Backend:
+        provider = "codex"
+
+        def task_session(self, prompt: str, **kwargs: object) -> AgentRunResult:
+            raise AssertionError("revision sessions must use structured_output")
+
+        def structured_output(
+            self,
+            prompt: str,
+            *,
+            output_model: type[object],
+            session_id: str | None = None,
+            cwd: str | Path | None = None,
+        ) -> AgentRunResult:
+            calls.append(output_model)
+            return AgentRunResult(["structured"], 0, json_data={})
+
+    runner = TaskSessionRunner(
+        store=None,  # type: ignore[arg-type]
+        agent_backend=Backend(),  # type: ignore[arg-type]
+        agent_invoker=None,  # type: ignore[arg-type]
+        context_access=None,  # type: ignore[arg-type]
+    )
+    plan = TaskSessionPromptPlan(
+        session_id="session-1",
+        task_message_ids=[],
+        prompt_message_ids=[],
+        output_model=InitialRevisionTaskSessionOutput,
+        reply_target_message_ids=[],
+        revision_context=RevisionReviewContext(previous_sent_reply="old reply"),
+    )
+
+    result = runner._invoke_task_session(prompt="revision", plan=plan, cwd=None)
+
+    assert result.ok
+    assert calls == [InitialRevisionTaskSessionOutput]
+
+
+def test_happy_path_task_session_does_not_use_revision_schema() -> None:
+    calls: list[str] = []
+
+    class Backend:
+        provider = "codex"
+
+        def task_session(self, prompt: str, **kwargs: object) -> AgentRunResult:
+            calls.append("task_session")
+            return AgentRunResult(["task-session"], 0, json_data={})
+
+        def structured_task_session(self, **kwargs: object) -> AgentRunResult:
+            raise AssertionError("happy path must not use the revision structured path")
+
+        def structured_output(self, **kwargs: object) -> AgentRunResult:
+            raise AssertionError("happy path must not use structured_output")
+
+    runner = TaskSessionRunner(
+        store=None,  # type: ignore[arg-type]
+        agent_backend=Backend(),  # type: ignore[arg-type]
+        agent_invoker=None,  # type: ignore[arg-type]
+        context_access=None,  # type: ignore[arg-type]
+    )
+    plan = TaskSessionPromptPlan(
+        session_id="session-1",
+        task_message_ids=[],
+        prompt_message_ids=[],
+        output_model=FollowupTaskSessionOutput,
+        reply_target_message_ids=[],
+    )
+
+    result = runner._invoke_task_session(prompt="normal", plan=plan, cwd=None)
+
+    assert result.ok
+    assert calls == ["task_session"]
+
+
+def test_revision_task_session_prefers_provider_task_session_setup() -> None:
+    calls: list[type[object]] = []
+
+    class Backend:
+        provider = "codex"
+
+        def task_session(self, prompt: str, **kwargs: object) -> AgentRunResult:
+            raise AssertionError("revision sessions must use the structured task path")
+
+        def structured_task_session(
+            self,
+            prompt: str,
+            *,
+            output_model: type[object],
+            session_id: str | None = None,
+            cwd: str | Path | None = None,
+        ) -> AgentRunResult:
+            calls.append(output_model)
+            return AgentRunResult(["structured-task-session"], 0, json_data={})
+
+        def structured_output(self, **kwargs: object) -> AgentRunResult:
+            raise AssertionError("provider-specific task setup should be preferred")
+
+    runner = TaskSessionRunner(
+        store=None,  # type: ignore[arg-type]
+        agent_backend=Backend(),  # type: ignore[arg-type]
+        agent_invoker=None,  # type: ignore[arg-type]
+        context_access=None,  # type: ignore[arg-type]
+    )
+    plan = TaskSessionPromptPlan(
+        session_id=None,
+        task_message_ids=[],
+        prompt_message_ids=[],
+        output_model=InitialRevisionTaskSessionOutput,
+        reply_target_message_ids=[],
+        revision_context=RevisionReviewContext(previous_sent_reply="old reply"),
+    )
+
+    result = runner._invoke_task_session(prompt="revision", plan=plan, cwd=None)
+
+    assert result.ok
+    assert calls == [InitialRevisionTaskSessionOutput]
 
 
 @pytest.mark.parametrize("tool_permissions", ["read_only", "full_access"])

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { RotateCcw, Send, ShieldCheck, XCircle } from "lucide-react";
@@ -14,6 +14,7 @@ import {
   JsonBlock,
   ListRow,
   LoadingState,
+  QueueControls,
   SectionHeader,
   SegmentedControl,
   shortText,
@@ -25,6 +26,21 @@ import { invalidateAfterDispatchCommand, queryKeys } from "../queryKeys";
 import type { ActionStatus, CommandResult } from "../types";
 
 type DispatchFilter = ActionStatus | "all";
+
+type DispatchDraft = {
+  reason: string;
+  sentMessageId: string;
+};
+
+type DispatchCommandInput = {
+  kind: "retry" | "cancel" | "mark_sent";
+  actionId: number;
+  reason?: string;
+  sentMessageId: string;
+};
+
+const emptyDraft: DispatchDraft = { reason: "", sentMessageId: "" };
+const pageSize = 50;
 
 const dispatchFilters: Array<{ value: DispatchFilter; label: string }> = [
   { value: "failed_needs_review", label: "Needs review" },
@@ -39,20 +55,25 @@ const dispatchFilters: Array<{ value: DispatchFilter; label: string }> = [
 export function DispatchScreen({ token, selectedId }: { token: string; selectedId: string | null }) {
   const queryClient = useQueryClient();
   const [filter, setFilter] = useState<DispatchFilter>("failed_needs_review");
+  const [page, setPage] = useState(0);
   const [selectedActionId, setSelectedActionId] = useState<number | null>(numberOrNull(selectedId));
-  const [reason, setReason] = useState("");
-  const [sentMessageId, setSentMessageId] = useState("");
-  const [commandResult, setCommandResult] = useState<CommandResult | null>(null);
+  const [drafts, setDrafts] = useState<Record<number, DispatchDraft>>({});
+  const [commandResults, setCommandResults] = useState<Record<number, CommandResult>>({});
+  const busyActionIdsRef = useRef(new Set<number>());
+  const [busyActionIds, setBusyActionIds] = useState<Set<number>>(new Set());
   const actions = useQuery({
-    queryKey: queryKeys.dispatchActions({ status: filter, limit: 50, offset: 0 }),
-    queryFn: () => listDispatchActions(token, { status: filter === "all" ? undefined : filter, limit: 50, offset: 0 }),
-    enabled: Boolean(token)
+    queryKey: queryKeys.dispatchActions({ status: filter, limit: pageSize + 1, offset: page * pageSize }),
+    queryFn: () => listDispatchActions(token, { status: filter === "all" ? undefined : filter, limit: pageSize + 1, offset: page * pageSize }),
+    enabled: Boolean(token),
+    refetchInterval: 15_000
   });
-  const rows = useMemo(() => actions.data ?? [], [actions.data]);
+  const rows = useMemo(() => (actions.data ?? []).slice(0, pageSize), [actions.data]);
+  const hasNextPage = (actions.data?.length ?? 0) > pageSize;
   const detail = useQuery({
     queryKey: queryKeys.dispatchAction(selectedActionId),
     queryFn: () => getDispatchAction(token, selectedActionId ?? 0),
-    enabled: Boolean(token && selectedActionId !== null)
+    enabled: Boolean(token && selectedActionId !== null),
+    refetchInterval: 15_000
   });
 
   useEffect(() => {
@@ -75,39 +96,67 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
     }
   }, [rows, selectedActionId, selectedId]);
 
-  const retry = useMutation({
-    mutationFn: () => retryDispatchAction(token, selectedActionId ?? 0, { reason: clean(reason) }),
-    onSuccess: async (result) => {
-      setCommandResult(result);
+  const dispatchCommand = useMutation({
+    mutationFn: (input: DispatchCommandInput) => {
+      if (input.kind === "retry") {
+        return retryDispatchAction(token, input.actionId, { reason: input.reason });
+      }
+      if (input.kind === "cancel") {
+        return cancelDispatchAction(token, input.actionId, { reason: input.reason });
+      }
+      return markDispatchSent(token, input.actionId, {
+        sent_message_id: input.sentMessageId,
+        reason: input.reason
+      });
+    },
+    onSuccess: async (result, input) => {
+      setCommandResults((current) => ({ ...current, [input.actionId]: result }));
       await invalidateAfterDispatchCommand(queryClient);
     },
-    onError: (error) => setCommandResult(errorResult("dispatch.retry", error))
-  });
-  const cancel = useMutation({
-    mutationFn: () => cancelDispatchAction(token, selectedActionId ?? 0, { reason: clean(reason) }),
-    onSuccess: async (result) => {
-      setCommandResult(result);
-      await invalidateAfterDispatchCommand(queryClient);
+    onError: (error, input) => {
+      setCommandResults((current) => ({
+        ...current,
+        [input.actionId]: errorResult(`dispatch.${input.kind}`, error)
+      }));
     },
-    onError: (error) => setCommandResult(errorResult("dispatch.cancel", error))
+    onSettled: (_result, _error, input) => {
+      busyActionIdsRef.current.delete(input.actionId);
+      setBusyActionIds(new Set(busyActionIdsRef.current));
+    }
   });
-  const markSent = useMutation({
-    mutationFn: () =>
-      markDispatchSent(token, selectedActionId ?? 0, {
-        sent_message_id: sentMessageId,
-        reason: clean(reason)
-      }),
-    onSuccess: async (result) => {
-      setCommandResult(result);
-      await invalidateAfterDispatchCommand(queryClient);
-    },
-    onError: (error) => setCommandResult(errorResult("dispatch.mark_sent", error))
-  });
+  const selectedDraft = selectedActionId === null ? emptyDraft : (drafts[selectedActionId] ?? emptyDraft);
+  const commandResult = selectedActionId === null ? null : (commandResults[selectedActionId] ?? null);
+  const selectedActionBusy = selectedActionId === null ? false : busyActionIds.has(selectedActionId);
+
+  function updateDraft(change: Partial<DispatchDraft>): void {
+    if (selectedActionId === null) {
+      return;
+    }
+    setDrafts((current) => ({
+      ...current,
+      [selectedActionId]: { ...emptyDraft, ...current[selectedActionId], ...change }
+    }));
+  }
+
+  function runDispatchCommand(kind: DispatchCommandInput["kind"]): void {
+    const actionId = detail.data?.action.action_id;
+    if (actionId === undefined || busyActionIdsRef.current.has(actionId)) {
+      return;
+    }
+    busyActionIdsRef.current.add(actionId);
+    setBusyActionIds(new Set(busyActionIdsRef.current));
+    dispatchCommand.mutate({
+      kind,
+      actionId,
+      reason: clean(selectedDraft.reason),
+      sentMessageId: selectedDraft.sentMessageId
+    });
+  }
 
   if (actions.isLoading) {
     return <LoadingState title="Loading dispatch actions" />;
   }
-  if (actions.error) {
+  if (actions.error && !actions.data) {
     return <ErrorState title="Dispatch actions unavailable" error={actions.error} />;
   }
 
@@ -120,7 +169,25 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
             title="Send action readback"
             badge={<Badge tone={rows.length ? "warning" : "success"}>{rows.length}</Badge>}
           />
-          <SegmentedControl label="Dispatch status filter" onChange={setFilter} options={dispatchFilters} value={filter} />
+          <SegmentedControl
+            label="Dispatch status filter"
+            onChange={(nextFilter) => {
+              setFilter(nextFilter);
+              setPage(0);
+            }}
+            options={dispatchFilters}
+            value={filter}
+          />
+          <QueueControls
+            error={actions.error}
+            hasNext={hasNextPage}
+            isFetching={actions.isFetching}
+            onNext={() => setPage((current) => current + 1)}
+            onPrevious={() => setPage((current) => Math.max(0, current - 1))}
+            onRefresh={() => void actions.refetch()}
+            page={page}
+            updatedAt={actions.dataUpdatedAt}
+          />
           {rows.length ? (
             <div className="list-stack">
               {rows.map((action) => (
@@ -128,7 +195,7 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
                   badge={<Badge tone={statusTone(action.status)}>{action.status}</Badge>}
                   key={action.action_id}
                   meta={`${action.kind} · ${action.task_short_id ?? "no task"} · ${formatDate(action.updated_at)}`}
-                  onClick={() => setSelectedActionId(action.action_id)}
+                  onClick={() => selectAction(action.action_id, setSelectedActionId)}
                   selected={action.action_id === selectedActionId}
                   title={`Action ${action.action_id}`}
                 >
@@ -209,25 +276,44 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
             <div className="detail-panel">
               <p className="eyebrow">Commands</p>
               <h2>Recover action</h2>
-              <TextareaField label="Reason" onChange={setReason} placeholder="Optional recovery note" rows={2} value={reason} />
+              <TextareaField
+                label="Reason"
+                onChange={(reason) => updateDraft({ reason })}
+                placeholder="Optional recovery note"
+                rows={2}
+                value={selectedDraft.reason}
+              />
               <div className="command-buttons">
-                <Button disabled={!hasRecommendedCommand(detail.data.recommended_actions, "dispatch retry") || retry.isPending} onClick={() => retry.mutate()} tone="warning">
+                <Button
+                  disabled={!hasRecommendedCommand(detail.data.recommended_actions, "dispatch retry") || selectedActionBusy}
+                  onClick={() => runDispatchCommand("retry")}
+                  tone="warning"
+                >
                   <RotateCcw aria-hidden="true" size={15} />
                   Retry
                 </Button>
-                <Button disabled={!hasRecommendedCommand(detail.data.recommended_actions, "dispatch cancel") || cancel.isPending} onClick={() => cancel.mutate()} tone="danger">
+                <Button
+                  disabled={!hasRecommendedCommand(detail.data.recommended_actions, "dispatch cancel") || selectedActionBusy}
+                  onClick={() => runDispatchCommand("cancel")}
+                  tone="danger"
+                >
                   <XCircle aria-hidden="true" size={15} />
                   Cancel
                 </Button>
               </div>
-              <TextField label="Sent message ID" onChange={setSentMessageId} placeholder="om_xxx from Feishu readback" value={sentMessageId} />
+              <TextField
+                label="Sent message ID"
+                onChange={(sentMessageId) => updateDraft({ sentMessageId })}
+                placeholder="om_xxx from Feishu readback"
+                value={selectedDraft.sentMessageId}
+              />
               <Button
                 disabled={
-                  !sentMessageId.trim() ||
+                  !selectedDraft.sentMessageId.trim() ||
                   !hasRecommendedCommand(detail.data.recommended_actions, "dispatch mark-sent") ||
-                  markSent.isPending
+                  selectedActionBusy
                 }
-                onClick={() => markSent.mutate()}
+                onClick={() => runDispatchCommand("mark_sent")}
                 tone="success"
               >
                 <ShieldCheck aria-hidden="true" size={15} />
@@ -317,4 +403,9 @@ function errorResult(command: string, error: unknown): CommandResult {
     warnings: [],
     next_actions: []
   };
+}
+
+function selectAction(actionId: number, setSelectedActionId: (actionId: number) => void): void {
+  setSelectedActionId(actionId);
+  window.location.hash = `dispatch/${actionId}`;
 }

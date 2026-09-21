@@ -57,6 +57,8 @@ def _approval_dto(
         "short_id": short_id,
         "task_id": data["task_id"],
         "task_short_id": data["task_short_id"],
+        "source_message_id": data.get("source_message_id"),
+        "source_revision": data.get("source_revision"),
         "kind": data["kind"],
         "status": data["status"],
         "preview": data["preview"],
@@ -176,6 +178,9 @@ def _agent_audit_dto(row: sqlite3.Row) -> dict[str, Any]:
         "task_id": data["task_id"],
         "agent_session_id": data["agent_session_id"],
         "input_message_ids": _loads_json_list(data.get("input_message_ids_json")),
+        "input_message_revisions": _loads_json_list(
+            data.get("input_message_revisions_json")
+        ),
         "input_resource_ids": _loads_json_list(data.get("input_resource_ids_json")),
         "response_summary": _agent_response_summary(response),
         "response": response,
@@ -212,6 +217,8 @@ def _action_dto(row: sqlite3.Row, *, include_payload: bool) -> dict[str, Any]:
         "task_short_id": data.get("task_short_id"),
         "approval_id": data.get("approval_id"),
         "target_message_id": data["target_message_id"],
+        "source_message_id": data.get("source_message_id"),
+        "source_revision": data.get("source_revision"),
         "dry_run": bool(data["dry_run"]),
         "created_at": data["created_at"],
         "updated_at": data["updated_at"],

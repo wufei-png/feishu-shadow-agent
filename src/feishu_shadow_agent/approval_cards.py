@@ -29,10 +29,22 @@ def build_approval_card(payload: dict[str, Any]) -> dict[str, Any]:
         f"审批：{approval_id}",
         f"原因：{reason}",
     ]
+    impact = _string(payload.get("impact"))
+    if impact:
+        details.append(f"影响级别：{impact}")
+    impact_reasons = payload.get("impact_reasons")
+    if isinstance(impact_reasons, list) and impact_reasons:
+        details.append(
+            "影响依据："
+            + ", ".join(str(item) for item in cast(list[Any], impact_reasons))
+        )
     if source:
         details.append(f"来源：{source}")
     if incoming:
         details.append(f"原消息：{incoming}")
+    previous_reply = _string(payload.get("previous_reply"))
+    if previous_reply:
+        details.append(f"旧回复：{previous_reply}")
     details.append(f"建议回复：{suggested or '<无>'}")
 
     buttons: list[dict[str, Any]] = []

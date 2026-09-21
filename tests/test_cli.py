@@ -119,6 +119,52 @@ def test_send_can_read_exact_text_from_stdin(tmp_path: Path, monkeypatch) -> Non
     assert payload["text"] == "line 1\n    line 2\n"
 
 
+def test_task_background_cli_sets_and_clears_versioned_context(tmp_path: Path) -> None:
+    config = _write_config(tmp_path)
+    store = _store(tmp_path)
+    task_id = _insert_task(store, "t_background", "om_background")
+
+    assert (
+        main(
+            [
+                "task",
+                "set-background",
+                "--config",
+                str(config),
+                "--task-id",
+                "t_background",
+                "Customer",
+                "requires",
+                "Friday",
+            ]
+        )
+        == 0
+    )
+    assert store.get_task_background(task_id) == "Customer requires Friday"
+    assert (
+        main(
+            [
+                "task",
+                "clear-background",
+                "--config",
+                str(config),
+                "--task-id",
+                "t_background",
+            ]
+        )
+        == 0
+    )
+    assert store.get_task_background(task_id) is None
+    with store.connect() as conn:
+        versions = conn.execute(
+            "SELECT version, operation FROM task_background_versions ORDER BY version"
+        ).fetchall()
+    assert [(row["version"], row["operation"]) for row in versions] == [
+        (1, "set"),
+        (2, "clear"),
+    ]
+
+
 def test_approve_and_reject_emit_operator_command_result(
     tmp_path: Path, capsys
 ) -> None:

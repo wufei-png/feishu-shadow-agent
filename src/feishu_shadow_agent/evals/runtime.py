@@ -145,7 +145,7 @@ class TrialRuntime:
                 dict(row)
                 for row in conn.execute(
                     """
-                    SELECT message_id, route, target_task_id, route_reason,
+                    SELECT message_id, revision, route, target_task_id, route_reason,
                            candidates_count, router_called, matched_by
                     FROM routing_audits ORDER BY id
                     """
@@ -155,7 +155,7 @@ class TrialRuntime:
                 dict(row)
                 for row in conn.execute(
                     """
-                    SELECT message_id, task_id, stage, status, attempt_count,
+                    SELECT message_id, revision, task_id, stage, status, attempt_count,
                            terminal_reason
                     FROM message_processing ORDER BY id
                     """
@@ -165,6 +165,7 @@ class TrialRuntime:
                 _json_columns(
                     dict(row),
                     "input_message_ids_json",
+                    "input_message_revisions_json",
                     "input_resource_ids_json",
                     "response_json",
                 )
@@ -172,7 +173,8 @@ class TrialRuntime:
                     """
                     SELECT backend_provider, request_type, prompt_version, prompt_hash,
                            task_id, agent_session_id,
-                           input_message_ids_json, input_resource_ids_json,
+                           input_message_ids_json, input_message_revisions_json,
+                           input_resource_ids_json,
                            response_json, error, tool_permissions_profile
                     FROM agent_audits ORDER BY id
                     """
@@ -183,7 +185,7 @@ class TrialRuntime:
                 for row in conn.execute(
                     """
                     SELECT id, short_id, task_id, kind, status, preview,
-                           payload_json
+                           source_message_id, source_revision, payload_json
                     FROM approvals ORDER BY id
                     """
                 ).fetchall()
@@ -193,7 +195,8 @@ class TrialRuntime:
                 for row in conn.execute(
                     """
                     SELECT id, task_id, approval_id, kind, status,
-                           target_message_id, payload_json, result_json
+                           target_message_id, source_message_id, source_revision,
+                           payload_json, result_json
                     FROM actions ORDER BY id
                     """
                 ).fetchall()
@@ -249,11 +252,15 @@ def seed_task_session_scenario(
     *, runtime: TrialRuntime, case: LoadedEvalCase, loaded: LoadedConfig
 ) -> tuple[TaskRecord, NormalizedMessage, list[NormalizedMessage]]:
     scenario = _task_session_scenario(case)
-    message_ids = (
-        list(scenario.message_ids or [])
-        if scenario.mode == "initial"
-        else list(scenario.setup_message_ids or [])
-    )
+    if scenario.mode == "initial":
+        message_ids = list(scenario.message_ids or [])
+    elif scenario.turns is not None:
+        first_target = next(
+            index for index, turn in enumerate(scenario.turns) if turn.kind == "target"
+        )
+        message_ids = [turn.message_id for turn in scenario.turns[: first_target + 1]]
+    else:
+        message_ids = list(scenario.setup_message_ids or [])
     normalizer = MessageNormalizer(owner_open_id=loaded.config.owner.open_id)
     messages = [normalizer.normalize(case.raw_messages[item]) for item in message_ids]
     task = _seed_task_messages(
@@ -272,12 +279,14 @@ def attach_task_session_target(
     case: LoadedEvalCase,
     loaded: LoadedConfig,
     task: TaskRecord,
+    message_id: str | None = None,
 ) -> NormalizedMessage:
     scenario = _task_session_scenario(case)
-    if scenario.mode != "resume" or not scenario.target_message_id:
+    target_message_id = message_id or scenario.target_message_id
+    if scenario.mode != "resume" or not target_message_id:
         raise EvalError("attach_task_session_target requires resume mode")
     normalizer = MessageNormalizer(owner_open_id=loaded.config.owner.open_id)
-    message = normalizer.normalize(case.raw_messages[scenario.target_message_id])
+    message = normalizer.normalize(case.raw_messages[target_message_id])
     runtime.clock.set(_message_time(message))
     runtime.store.upsert_message(message)
     runtime.store.attach_message_to_task(
@@ -294,9 +303,7 @@ def attach_task_session_target(
             _message_time(message), loaded.config.lifecycle.watch_minutes
         ),
     )
-    _seed_resource_rows(
-        runtime=runtime, case=case, message_ids=[scenario.target_message_id]
-    )
+    _seed_resource_rows(runtime=runtime, case=case, message_ids=[target_message_id])
     return message
 
 
