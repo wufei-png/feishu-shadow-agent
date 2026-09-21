@@ -55,6 +55,7 @@ class FeishuClient(Protocol):
         page_token: str | None = None,
         query: str = "",
         page_size: int = 50,
+        page_limit: int = 1,
     ) -> MessagePage: ...
 
     def search_owner_messages(

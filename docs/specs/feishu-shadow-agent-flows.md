@@ -171,7 +171,7 @@ flowchart TD
   Download --> DownloadOK{"下载成功"}
   DownloadOK -->|是| SaveResource["保存 data/resources + resources 元数据"]
   SaveResource --> Continue
-  DownloadOK -->|234040/不可见| NotifyJoin
+  DownloadOK -->|bot + JSON code 10002| NotifyJoin
   DownloadOK -->|其他错误| Retry{"同轮重试未超过上限"}
   Retry -->|是| Download
   Retry -->|否| ResourceFailed["记录 resource_download terminal failed + owner notification"]
@@ -179,9 +179,11 @@ flowchart TD
 
 群聊的 bot membership 由 daemon 主动探测及 bot 身份发送/下载错误共同更新。
 确认在群/离群的事实默认缓存 300 秒；权限、超时或格式错误记为 `unknown`，
-默认 60 秒后重试。`unknown` 和过期事实不覆盖 owner 配置，确认离群才阻断
-资源并按 `reply_identity`/`allow_user_fallback` 派生回复身份。首次确认在群不
-通知；每个离群 episode 及随后恢复各至多通知一次，且不写 Policy Audit。
+默认 60 秒后重试。bot 身份的资源下载和消息回复只有在结构化 JSON 错误码为
+`10002`（bot 不在当前 chat）时才确认离群；`234002`、`234040`、资源不匹配和
+纯文本错误不改变 membership fact。`unknown` 和过期事实不覆盖 owner 配置，确认
+离群才阻断资源并按 `reply_identity`/`allow_user_fallback` 派生回复身份。首次确认
+在群不通知；每个离群 episode 及随后恢复各至多通知一次，且不写 Policy Audit。
 
 <a id="hermes-reply-flow"></a>
 

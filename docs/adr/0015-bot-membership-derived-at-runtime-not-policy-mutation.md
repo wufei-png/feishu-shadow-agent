@@ -25,6 +25,10 @@ Effective Policy layers a fresh runtime fact over the owner-authored
 on, `absent` forces it off, and `unknown` or an unobserved chat preserves the
 configured value. A bot-preferred reply may fall back to the user identity only
 when `allow_user_fallback` permits it. A forced bot reply and bot-dependent
-resource downloads remain blocked while absence is confirmed. Send errors
-`234002`/`234040` and equivalent invisibility errors immediately refresh the
-same absence fact and use the same episode-level notification deduplication.
+resource downloads remain blocked while absence is confirmed. Bot-identity
+resource-download and message-reply failures refresh absence only when their
+JSON error envelope has the documented `10002` code (bot not in the chat).
+Authentication (`234002`), visibility (`234040`), scope, resource ownership,
+plain-text errors, and malformed error output remain ordinary failures and do
+not alter the membership fact. Confirmed absence uses the same episode-level
+notification deduplication.

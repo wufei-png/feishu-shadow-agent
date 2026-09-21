@@ -155,7 +155,10 @@ def _export_session(
 
 def _parse_export(stdout: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for line in stdout.splitlines():
+    # JSON Lines uses LF as its record delimiter. ``str.splitlines()`` also
+    # splits on characters such as U+0085, which may legally appear inside a
+    # JSON string and would corrupt an otherwise valid exported row.
+    for line in stdout.split("\n"):
         if not line.strip():
             continue
         row = json.loads(line)

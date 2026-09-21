@@ -184,7 +184,7 @@ def test_confirmed_absence_uses_allowed_user_fallback_at_dispatch(
     assert [call["as_identity"] for call in fake.reply_calls] == ["user", "user"]
 
 
-def test_bot_send_membership_error_records_absence_and_notification(
+def test_bot_send_confirmed_not_in_chat_records_absence_and_notification(
     tmp_path: Path,
 ) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
@@ -203,9 +203,9 @@ def test_bot_send_membership_error_records_absence_and_notification(
         [
             LarkCliResult(["dry"], 0, json_data={"api": []}),
             LarkCliResult(
-                ["send", "--as", "bot"],
+                ["lark-cli", "im", "+messages-reply", "--as", "bot"],
                 3,
-                stderr="error 234040 bot invisible",
+                json_data={"code": 10002, "msg": "Bot can NOT be out of the chat"},
                 error="send failed",
             ),
         ]
@@ -220,11 +220,50 @@ def test_bot_send_membership_error_records_absence_and_notification(
     assert summary.failed == 1
     fact = store.get_bot_membership_fact("oc_1")
     assert fact is not None and fact["status"] == "absent"
+    assert fact["error_code"] == 10002
+    assert fact["error_endpoint"] == "message_reply"
     with store.connect() as conn:
         notifications = conn.execute(
             "SELECT COUNT(*) AS c FROM actions WHERE kind = 'owner_notification'"
         ).fetchone()["c"]
     assert notifications == 2  # membership transition plus normal dispatch failure
+
+
+def test_bot_send_visibility_error_does_not_record_membership_absence(
+    tmp_path: Path,
+) -> None:
+    store, dispatcher, fake = _dispatcher(tmp_path)
+    task_id = _insert_task(store)
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "bot",
+        },
+    )
+    assert action_id is not None
+    fake.reply_results.extend(
+        [
+            LarkCliResult(["dry"], 0, json_data={"api": []}),
+            LarkCliResult(
+                ["lark-cli", "im", "+messages-reply", "--as", "bot"],
+                3,
+                json_data={"code": 234040, "msg": "message is invisible"},
+                error="send failed",
+            ),
+        ]
+    )
+
+    summary = dispatcher.dispatch(
+        run_id="run_1",
+        allow_send_reply_actual=True,
+        allow_owner_notification_actual=False,
+    )
+
+    assert summary.failed == 1
+    assert store.get_bot_membership_fact("oc_1") is None
 
 
 def test_stale_revision_action_is_cancelled_without_adapter_call(
