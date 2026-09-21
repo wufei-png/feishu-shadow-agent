@@ -258,14 +258,14 @@ def _validate_task_session_context_roles(
     normalizer = MessageNormalizer(owner_open_id=owner_open_id)
     context_task_ids: list[set[int]] = []
     for turn in scenario.turns:
-        if turn.kind != "context":
-            continue
         message = normalizer.normalize(raw_messages[turn.message_id])
         if message.sender_role == "owner_message":
             raise EvalError(
-                "task-session context cannot be an owner message because "
-                "production routes owner replies to takeover"
+                "task-session timeline cannot contain an owner message because "
+                "production routes owner messages to takeover or ignore"
             )
+        if turn.kind != "context":
+            continue
         if raw_messages[turn.message_id].get("source_task_membership") is not True:
             raise EvalError(
                 "task-session context must record capture task-membership provenance"

@@ -653,7 +653,49 @@ def test_resume_timeline_rejects_owner_context(tmp_path: Path) -> None:
     )
 
     assert exit_code == 2
-    assert "cannot be an owner message" in read_yaml(run_dir / "report.yaml")["error"]
+    assert (
+        "cannot contain an owner message" in read_yaml(run_dir / "report.yaml")["error"]
+    )
+
+
+def test_resume_timeline_rejects_owner_target(tmp_path: Path) -> None:
+    loaded = _loaded(tmp_path)
+    target = _message("om_target", minute=1)
+    target["sender_id"] = "ou_owner"
+    target["source_revision"] = 1
+    case = _golden_case(
+        tmp_path,
+        loaded.path,
+        "task-session-owner-target",
+        [target],
+        {
+            "schema_version": "eval_case_v1",
+            "case_type": "task-session",
+            "mode": "resume",
+            "turns": [
+                {
+                    "message_id": "om_target",
+                    "kind": "target",
+                    "source_revision": 1,
+                }
+            ],
+            "resources": [],
+        },
+        {
+            "schema_version": "task_session_labels_v1",
+            "answerability": "no_reply",
+            "watch_action": "keep_watching",
+        },
+    )
+
+    run_dir, exit_code = EvalService(loaded=loaded).run_task_session(
+        case_dir=case, label=None, dry_run_backend=True
+    )
+
+    assert exit_code == 2
+    assert (
+        "cannot contain an owner message" in read_yaml(run_dir / "report.yaml")["error"]
+    )
 
 
 def test_resume_timeline_requires_captured_task_membership_for_context(
