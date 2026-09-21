@@ -45,6 +45,10 @@ class FakeFeishuClient:
         self.thread_pages: dict[tuple[str, str | None], MessagePage | Exception] = {}
         self.downloads: list[dict[str, str]] = []
         self.calls: list[str] = []
+        self.search_page_sizes: list[int] = []
+        self.search_page_limits: list[int] = []
+        self.current_messages: dict[str, dict[str, Any]] = {}
+        self.current_message_error: Exception | None = None
         self.write_download_files = True
 
     def version(self) -> LarkCliResult:
@@ -54,6 +58,18 @@ class FakeFeishuClient:
 
     def auth_status(self, *, verify: bool = True) -> LarkCliResult:
         return LarkCliResult(["lark-cli", "auth"], 0, json_data={})
+
+    def get_messages(self, *, as_identity: str, message_ids: list[str]) -> MessagePage:
+        self.calls.append(f"mget:{as_identity}")
+        if self.current_message_error is not None:
+            raise self.current_message_error
+        return MessagePage(
+            [
+                self.current_messages[item]
+                for item in message_ids
+                if item in self.current_messages
+            ]
+        )
 
     def owner_message(
         self,
@@ -75,8 +91,11 @@ class FakeFeishuClient:
         page_token: str | None = None,
         query: str = "",
         page_size: int = 50,
+        page_limit: int = 1,
     ) -> MessagePage:
         self.calls.append(f"search:{chat_type}:{is_at_me}:{page_token}")
+        self.search_page_sizes.append(page_size)
+        self.search_page_limits.append(page_limit)
         value = self.search_pages.get(
             (chat_type, is_at_me, page_token), MessagePage([])
         )
@@ -157,6 +176,23 @@ class PartialFailureFeishuClient(FakeFeishuClient):
             ["lark-cli", "im", "+messages-resources-download"],
             1,
             stderr="download interrupted",
+        )
+
+
+class BotNotInChatFeishuClient(FakeFeishuClient):
+    def download_resource(self, **kwargs: Any) -> LarkCliResult:
+        super().download_resource(**kwargs)
+        return LarkCliResult(
+            [
+                "lark-cli",
+                "im",
+                "+messages-resources-download",
+                "--as",
+                "bot",
+            ],
+            1,
+            json_data={"code": 10002, "msg": "Bot can NOT be out of the chat"},
+            error="download failed",
         )
 
 
@@ -301,6 +337,8 @@ def test_normalizer_marks_mentions_sender_roles_and_resources() -> None:
                 text=(
                     "<forwarded_messages>\n"
                     "[Image: img_v3_0212t_forwarded-123]\n"
+                    "[file](file_v2_forwarded-456)\n"
+                    '<folder key="file_v2_folder-789" name="assets"/>\n'
                     "RuntimeError: engine failed\n"
                     "</forwarded_messages>"
                 ),
@@ -331,7 +369,13 @@ def test_normalizer_marks_mentions_sender_roles_and_resources() -> None:
         ("file", "file_v2_xyz-456"),
     }
     assert "RuntimeError: engine failed" in merge_forward.text
-    assert merge_forward.resources == []
+    assert {
+        (resource.message_id, resource.resource_type, resource.file_key)
+        for resource in merge_forward.resources
+    } == {
+        ("om_7", "image", "img_v3_0212t_forwarded-123"),
+        ("om_7", "file", "file_v2_forwarded-456"),
+    }
 
 
 def test_raw_batch_time_helpers_treat_naive_lark_timestamps_as_china_time() -> None:
@@ -398,7 +442,12 @@ def test_group_ingest_drains_pages_sorts_dedupes_and_advances_checkpoint(
 
     assert result.processed == 4
     assert store.get_checkpoint("ingest.group_at_me") == {
-        "last_success_at": "2026-06-22T02:10:00+00:00"
+        "last_success_at": "2026-06-22T02:10:00+00:00",
+        "last_drain": {
+            "completed_at": "2026-06-22T02:10:00+00:00",
+            "messages_fetched": 4,
+            "pages_fetched": 2,
+        },
     }
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"] == 3
@@ -435,6 +484,472 @@ def test_failed_pagination_does_not_advance_checkpoint(tmp_path: Path) -> None:
         raise AssertionError("pagination failure did not raise")
 
     assert store.get_checkpoint("ingest.p2p") is None
+
+
+def test_bounded_fixed_window_resumes_across_more_than_two_page_caps(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    fake.search_pages[("p2p", False, None)] = MessagePage(
+        [_message("om_1", chat_type="p2p")],
+        next_page_token="p2",
+        has_more=True,
+    )
+    fake.search_pages[("p2p", False, "p2")] = MessagePage(
+        [_message("om_2", chat_type="p2p")],
+        next_page_token="p3",
+        has_more=True,
+    )
+    fake.search_pages[("p2p", False, "p3")] = MessagePage(
+        [_message("om_3", chat_type="p2p")]
+    )
+    config = _config(
+        daemon=DaemonConfig(overlap_seconds=120, ingest_search_max_pages=1)
+    )
+
+    for run_id in ("run_1", "run_2"):
+        result = IngestionService(
+            store=store,
+            feishu_client=fake,
+            config=config,
+            logger=JSONLLogger(tmp_path / "agent.jsonl"),
+            clock=lambda: "2026-06-22T10:10:00+08:00",
+        ).ingest_p2p(run_id=run_id)
+        assert result.processed == 1
+        checkpoint = store.get_checkpoint("ingest.p2p")
+        assert checkpoint is not None
+        assert "last_success_at" not in checkpoint
+        assert checkpoint["backlog"]["reason"] == "page_cap_exhausted"
+
+    result = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    ).ingest_p2p(run_id="run_3")
+
+    assert result.processed == 1
+    checkpoint = store.get_checkpoint("ingest.p2p")
+    assert checkpoint is not None
+    assert checkpoint["last_success_at"] == "2026-06-22T02:10:00+00:00"
+    assert "backlog" not in checkpoint
+    assert checkpoint["last_drain"]["pages_fetched"] == 3
+    assert checkpoint["last_drain"]["messages_fetched"] == 3
+    assert fake.calls[-3:] == [
+        "search:p2p:False:None",
+        "search:p2p:False:p2",
+        "search:p2p:False:p3",
+    ]
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"] == 3
+
+
+def test_search_batch_preserves_page_cap_and_resume_token(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    fake.search_pages[("p2p", False, None)] = MessagePage(
+        [
+            _message("om_1", chat_type="p2p"),
+            _message("om_2", chat_type="p2p"),
+        ],
+        next_page_token="p3",
+        has_more=True,
+        page_count=2,
+    )
+    config = _config(daemon=DaemonConfig(ingest_search_max_pages=2))
+
+    IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    ).ingest_p2p(run_id="run_1")
+
+    checkpoint = store.get_checkpoint("ingest.p2p")
+    assert checkpoint is not None
+    assert checkpoint["backlog"]["reason"] == "page_cap_exhausted"
+    assert checkpoint["backlog"]["next_page_token"] == "p3"
+    assert checkpoint["backlog"]["pages_fetched"] == 2
+    assert checkpoint["backlog"]["messages_fetched"] == 2
+    assert fake.search_page_limits == [2]
+
+
+def test_ingestion_sources_rotate_first_chance_across_ticks(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+
+    def stage_names() -> list[str]:
+        service = IngestionService(
+            store=store,
+            feishu_client=FakeFeishuClient(),
+            config=_config(),
+            logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        )
+        return [stage.__name__ for stage in service.ordered_ingestion_stages()]
+
+    assert stage_names() == ["ingest_group_at_me", "ingest_p2p", "run_active_watch"]
+    assert stage_names() == ["ingest_p2p", "run_active_watch", "ingest_group_at_me"]
+    assert stage_names() == ["run_active_watch", "ingest_group_at_me", "ingest_p2p"]
+
+
+def test_message_cap_is_applied_as_page_size_and_resumes(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    fake.search_pages[("p2p", False, None)] = MessagePage(
+        [_message("om_1", chat_type="p2p")],
+        next_page_token="p2",
+        has_more=True,
+    )
+    fake.search_pages[("p2p", False, "p2")] = MessagePage(
+        [_message("om_2", chat_type="p2p")]
+    )
+    config = _config(daemon=DaemonConfig(ingest_search_max_messages=1))
+
+    IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+    ).ingest_p2p(run_id="run_1")
+    checkpoint = store.get_checkpoint("ingest.p2p")
+    assert checkpoint is not None
+    assert checkpoint["backlog"]["reason"] == "message_cap_exhausted"
+
+    IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+    ).ingest_p2p(run_id="run_2")
+
+    assert fake.search_page_sizes == [1, 1]
+    checkpoint = store.get_checkpoint("ingest.p2p")
+    assert checkpoint is not None and "backlog" not in checkpoint
+
+
+def test_processing_budget_replays_current_page_without_skipping_or_duplicates(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    fake.search_pages[("p2p", False, None)] = MessagePage(
+        [
+            _message(
+                "om_1",
+                chat_type="p2p",
+                create_time="2026-06-22T10:01:00+08:00",
+            )
+        ],
+        next_page_token="p2",
+        has_more=True,
+    )
+    fake.search_pages[("p2p", False, "p2")] = MessagePage(
+        [
+            _message(
+                "om_3",
+                chat_type="p2p",
+                create_time="2026-06-22T10:03:00+08:00",
+            ),
+            _message(
+                "om_2",
+                chat_type="p2p",
+                create_time="2026-06-22T10:02:00+08:00",
+            ),
+        ],
+        next_page_token="p3",
+        has_more=True,
+    )
+    fake.search_pages[("p2p", False, "p3")] = MessagePage(
+        [
+            _message(
+                "om_4",
+                chat_type="p2p",
+                create_time="2026-06-22T10:04:00+08:00",
+            )
+        ]
+    )
+    config = _config(
+        daemon=DaemonConfig(
+            ingest_tick_budget_seconds=1,
+            ingest_search_max_pages=1,
+        )
+    )
+
+    def service_with_clock(values: list[float]) -> IngestionService:
+        iterator = iter(values)
+        return IngestionService(
+            store=store,
+            feishu_client=fake,
+            config=config,
+            logger=JSONLLogger(tmp_path / "agent.jsonl"),
+            clock=lambda: "2026-06-22T10:10:00+08:00",
+            monotonic=lambda: next(iterator, values[-1]),
+        )
+
+    service_with_clock([0.0, 0.0, 0.0]).ingest_p2p(run_id="run_1")
+
+    # The second page reaches its page cap, but deadline exhaustion while
+    # routing om_3 must replay p2 rather than advance to p3.
+    service_with_clock([0.0, 0.0, 0.0, 1.0]).ingest_p2p(run_id="run_2")
+    checkpoint = store.get_checkpoint("ingest.p2p")
+    assert checkpoint is not None
+    assert "last_success_at" not in checkpoint
+    assert checkpoint["backlog"]["reason"] == "tick_budget_exhausted"
+    assert checkpoint["backlog"]["fetch_reason"] == "page_cap_exhausted"
+    assert checkpoint["backlog"]["next_page_token"] == "p2"
+    assert checkpoint["backlog"]["processing"]["completed_items"] == 1
+
+    service_with_clock([0.0, 0.0, 0.0]).ingest_p2p(run_id="run_3")
+    checkpoint = store.get_checkpoint("ingest.p2p")
+    assert checkpoint is not None
+    assert checkpoint["backlog"]["reason"] == "page_cap_exhausted"
+    assert checkpoint["backlog"]["next_page_token"] == "p3"
+    assert "processing" not in checkpoint["backlog"]
+
+    service_with_clock([0.0, 0.0, 0.0]).ingest_p2p(run_id="run_4")
+
+    checkpoint = store.get_checkpoint("ingest.p2p")
+    assert checkpoint is not None
+    assert checkpoint["last_success_at"] == "2026-06-22T02:10:00+00:00"
+    assert "backlog" not in checkpoint
+    assert fake.calls[-4:] == [
+        "search:p2p:False:None",
+        "search:p2p:False:p2",
+        "search:p2p:False:p2",
+        "search:p2p:False:p3",
+    ]
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"] == 4
+        routes = [
+            row["route"]
+            for row in conn.execute("SELECT route FROM routing_audits ORDER BY id")
+        ]
+    assert routes == ["new_task", "attach_task", "attach_task", "attach_task"]
+
+
+def test_processing_cursor_replays_from_start_when_the_fetched_prefix_changes(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    original = _message(
+        "om_2",
+        chat_type="p2p",
+        create_time="2026-06-22T10:02:00+08:00",
+    )
+    later = _message(
+        "om_3",
+        chat_type="p2p",
+        create_time="2026-06-22T10:03:00+08:00",
+    )
+    fake.search_pages[("p2p", False, None)] = MessagePage([original, later])
+    config = _config(daemon=DaemonConfig(ingest_tick_budget_seconds=1))
+
+    first_clock = iter([0.0, 0.0, 0.0, 1.0])
+    IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+        monotonic=lambda: next(first_clock, 1.0),
+    ).ingest_p2p(run_id="run_1")
+
+    checkpoint = store.get_checkpoint("ingest.p2p")
+    assert checkpoint is not None
+    assert checkpoint["backlog"]["processing"]["completed_items"] == 1
+
+    # A late earlier message changes the replayed prefix.  Replaying all items
+    # is safe; trusting only the old item count would skip om_2 instead.
+    early = _message(
+        "om_1",
+        chat_type="p2p",
+        create_time="2026-06-22T10:01:00+08:00",
+    )
+    fake.search_pages[("p2p", False, None)] = MessagePage([early, original, later])
+    second_clock = iter([0.0, 0.0, 0.0, 0.0, 0.0])
+    IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+        monotonic=lambda: next(second_clock, 0.0),
+    ).ingest_p2p(run_id="run_2")
+
+    checkpoint = store.get_checkpoint("ingest.p2p")
+    assert checkpoint is not None and "backlog" not in checkpoint
+    with store.connect() as conn:
+        message_ids = {
+            row["message_id"] for row in conn.execute("SELECT message_id FROM messages")
+        }
+    assert message_ids == {"om_1", "om_2", "om_3"}
+    assert "ingestion_processing_cursor_reset" in (tmp_path / "agent.jsonl").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_processing_cursor_ignores_nonsemantic_replay_enrichment(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    first = _message(
+        "om_1",
+        chat_type="p2p",
+        create_time="2026-06-22T10:01:00+08:00",
+    )
+    second = _message(
+        "om_2",
+        chat_type="p2p",
+        create_time="2026-06-22T10:02:00+08:00",
+    )
+    fake.search_pages[("p2p", False, None)] = MessagePage([first, second])
+    config = _config(daemon=DaemonConfig(ingest_tick_budget_seconds=1))
+
+    first_clock = iter([0.0, 0.0, 0.0, 1.0])
+    IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+        monotonic=lambda: next(first_clock, 1.0),
+    ).ingest_p2p(run_id="run_1")
+
+    replayed_first = dict(first)
+    replayed_first["reactions"] = [{"reaction_type": {"emoji_type": "THUMBSUP"}}]
+    fake.search_pages[("p2p", False, None)] = MessagePage([replayed_first, second])
+    second_clock = iter([0.0, 0.0, 0.0])
+    IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+        monotonic=lambda: next(second_clock, 0.0),
+    ).ingest_p2p(run_id="run_2")
+
+    with store.connect() as conn:
+        routes = [
+            row["route"]
+            for row in conn.execute("SELECT route FROM routing_audits ORDER BY id")
+        ]
+    assert routes == ["new_task", "attach_task"]
+    assert "ingestion_processing_cursor_reset" not in (
+        tmp_path / "agent.jsonl"
+    ).read_text(encoding="utf-8")
+
+
+def test_fetch_reserve_leaves_time_to_process_before_the_tick_deadline(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    fake.search_pages[("p2p", False, None)] = MessagePage(
+        [_message("om_1", chat_type="p2p")],
+        next_page_token="p2",
+        has_more=True,
+    )
+    fake.search_pages[("p2p", False, "p2")] = MessagePage(
+        [_message("om_2", chat_type="p2p")]
+    )
+    config = _config(daemon=DaemonConfig(ingest_tick_budget_seconds=10))
+
+    # The soft fetch deadline is five seconds before the ten-second deadline.
+    # It stops before p2, leaving enough time to route the first fetched page.
+    first_clock = iter([0.0, 0.0, 5.0, 5.0])
+    first = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+        monotonic=lambda: next(first_clock, 5.0),
+    ).ingest_p2p(run_id="run_1")
+
+    assert first.processed == 1
+    checkpoint = store.get_checkpoint("ingest.p2p")
+    assert checkpoint is not None
+    assert checkpoint["backlog"]["reason"] == "tick_budget_exhausted"
+    assert checkpoint["backlog"]["next_page_token"] == "p2"
+    assert "processing" not in checkpoint["backlog"]
+
+    second_clock = iter([0.0, 0.0, 0.0])
+    second = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+        monotonic=lambda: next(second_clock, 0.0),
+    ).ingest_p2p(run_id="run_2")
+
+    assert second.processed == 1
+    checkpoint = store.get_checkpoint("ingest.p2p")
+    assert checkpoint is not None and "backlog" not in checkpoint
+    assert fake.calls == ["search:p2p:False:None", "search:p2p:False:p2"]
+
+
+def test_invalid_resumed_page_token_restarts_fixed_window_without_duplicates(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    config = _config(daemon=DaemonConfig(ingest_search_max_pages=1))
+    first = _message("om_1", chat_type="p2p")
+    second = _message("om_2", chat_type="p2p")
+    fake.search_pages[("p2p", False, None)] = MessagePage(
+        [first], next_page_token="expired", has_more=True
+    )
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    service.ingest_p2p(run_id="run_1")
+    fake.search_pages[("p2p", False, "expired")] = RuntimeError("invalid page token")
+
+    with pytest.raises(RuntimeError, match="invalid page token"):
+        IngestionService(
+            store=store,
+            feishu_client=fake,
+            config=config,
+            logger=JSONLLogger(tmp_path / "agent.jsonl"),
+            clock=lambda: "2026-06-22T10:10:00+08:00",
+        ).ingest_p2p(run_id="run_2")
+
+    checkpoint = store.get_checkpoint("ingest.p2p")
+    assert checkpoint is not None
+    assert checkpoint["backlog"]["next_page_token"] is None
+    assert checkpoint["backlog"]["restart_count"] == 1
+    fake.search_pages[("p2p", False, None)] = MessagePage(
+        [first], next_page_token="fresh", has_more=True
+    )
+    fake.search_pages[("p2p", False, "fresh")] = MessagePage([second])
+    IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    ).ingest_p2p(run_id="run_3")
+    IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    ).ingest_p2p(run_id="run_4")
+
+    checkpoint = store.get_checkpoint("ingest.p2p")
+    assert checkpoint is not None and "backlog" not in checkpoint
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"] == 2
 
 
 def test_existing_message_without_route_audit_is_routed_on_retry(
@@ -1001,6 +1516,285 @@ def test_thread_unique_match_uses_thread_shortcut(tmp_path: Path) -> None:
     assert attached.decision.matched_by == "thread"
 
 
+def test_reply_to_wins_over_conflicting_thread_and_burst_signals(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    reply_root = service.normalizer.normalize(
+        _message("om_reply_root", sender_id="ou_a", thread_id="omt_reply"),
+        default_chat_type="group",
+    )
+    thread_root = service.normalizer.normalize(
+        _message(
+            "om_thread_root",
+            sender_id="ou_conflict",
+            thread_id="omt_conflict",
+            create_time="2026-06-22T10:00:10+08:00",
+        ),
+        default_chat_type="group",
+    )
+    for root in (reply_root, thread_root):
+        store.upsert_message(root)
+        store.create_task_for_message(root, watch_until="2026-06-22T12:10:00+08:00")
+
+    result = service.process_raw_message(
+        _message(
+            "om_conflict",
+            sender_id="ou_conflict",
+            thread_id="omt_conflict",
+            reply_to="om_reply_root",
+            mentions=[{"open_id": "ou_owner"}],
+            create_time="2026-06-22T10:00:20+08:00",
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert result is not None and result.task is not None
+    assert result.decision.route == "attach_task"
+    assert result.decision.matched_by == "reply_to_msg"
+    assert result.task.root_message_id == "om_reply_root"
+    assert result.decision.candidates_count == 2
+
+
+def test_thread_wins_over_conflicting_burst_signal(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    thread_root = service.normalizer.normalize(
+        _message("om_thread_root", sender_id="ou_a", thread_id="omt_match"),
+        default_chat_type="group",
+    )
+    burst_root = service.normalizer.normalize(
+        _message(
+            "om_burst_root",
+            sender_id="ou_conflict",
+            thread_id="omt_other",
+            create_time="2026-06-22T10:00:10+08:00",
+        ),
+        default_chat_type="group",
+    )
+    for root in (thread_root, burst_root):
+        store.upsert_message(root)
+        store.create_task_for_message(root, watch_until="2026-06-22T12:10:00+08:00")
+
+    result = service.process_raw_message(
+        _message(
+            "om_conflict",
+            sender_id="ou_conflict",
+            thread_id="omt_match",
+            mentions=[{"open_id": "ou_owner"}],
+            create_time="2026-06-22T10:00:20+08:00",
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert result is not None and result.task is not None
+    assert result.decision.route == "attach_task"
+    assert result.decision.matched_by == "thread"
+    assert result.task.root_message_id == "om_thread_root"
+    assert result.decision.candidates_count == 2
+
+
+def test_cross_chat_reply_reference_cannot_attach_foreign_task(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    foreign_root = service.normalizer.normalize(
+        _message("om_foreign", chat_id="oc_foreign", sender_id="ou_a"),
+        default_chat_type="group",
+    )
+    store.upsert_message(foreign_root)
+    foreign_task = store.create_task_for_message(
+        foreign_root, watch_until="2026-06-22T12:10:00+08:00"
+    )
+
+    result = service.process_raw_message(
+        _message(
+            "om_local",
+            chat_id="oc_local",
+            sender_id="ou_b",
+            reply_to="om_foreign",
+            mentions=[{"open_id": "ou_owner"}],
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert result is not None and result.task is not None
+    assert result.decision.route == "new_task"
+    assert result.task.chat_id == "oc_local"
+    assert result.task.id != foreign_task.id
+    assert store.find_task_ids_for_message("om_local") == [result.task.id]
+
+
+def test_edited_message_can_return_to_earlier_content_after_current_readback(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+    )
+    original = _message("om_reverted", text="A")
+    edited = _message("om_reverted", text="B")
+    service.process_raw_message(
+        original, source="group_at_me", default_chat_type="group", run_id="run_1"
+    )
+    service.process_raw_message(
+        edited, source="group_at_me", default_chat_type="group", run_id="run_2"
+    )
+    fake.current_messages["om_reverted"] = original
+
+    service.process_raw_message(
+        original, source="group_at_me", default_chat_type="group", run_id="run_3"
+    )
+
+    stored = store.get_message("om_reverted")
+    assert stored is not None
+    assert (stored["text"], stored["revision"]) == ("A", 3)
+    assert fake.calls.count("mget:user") == 1
+
+
+def test_older_poll_snapshot_uses_current_readback_without_rolling_back(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+    )
+    original = _message("om_stale", text="A")
+    edited = _message("om_stale", text="B")
+    for raw in (original, edited):
+        service.process_raw_message(
+            raw, source="group_at_me", default_chat_type="group", run_id="run_1"
+        )
+    fake.current_messages["om_stale"] = edited
+
+    service.process_raw_message(
+        original, source="group_at_me", default_chat_type="group", run_id="run_2"
+    )
+
+    stored = store.get_message("om_stale")
+    assert stored is not None
+    assert (stored["text"], stored["revision"]) == ("B", 2)
+    assert fake.calls.count("mget:user") == 1
+
+
+def test_historical_snapshot_readback_failure_preserves_current_revision(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+    )
+    original = _message("om_retry", text="A")
+    edited = _message("om_retry", text="B")
+    for raw in (original, edited):
+        service.process_raw_message(
+            raw, source="group_at_me", default_chat_type="group", run_id="run_1"
+        )
+    fake.current_message_error = RuntimeError("readback unavailable")
+
+    with pytest.raises(RuntimeError, match="readback unavailable"):
+        service.process_raw_message(
+            original, source="group_at_me", default_chat_type="group", run_id="run_2"
+        )
+
+    stored = store.get_message("om_retry")
+    assert stored is not None
+    assert (stored["text"], stored["revision"]) == ("B", 2)
+
+
+def test_revision_keeps_original_task_despite_new_conflicting_signals(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    original = service.process_raw_message(
+        _message(
+            "om_original",
+            sender_id="ou_a",
+            mentions=[{"open_id": "ou_owner"}],
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    assert original is not None and original.task is not None
+    conflicting_root = service.normalizer.normalize(
+        _message(
+            "om_conflicting_root",
+            sender_id="ou_b",
+            thread_id="omt_conflicting",
+        ),
+        default_chat_type="group",
+    )
+    store.upsert_message(conflicting_root)
+    conflicting_task = store.create_task_for_message(
+        conflicting_root, watch_until="2026-06-22T12:10:00+08:00"
+    )
+
+    revised = service.process_raw_message(
+        _message(
+            "om_original",
+            sender_id="ou_a",
+            text="edited",
+            thread_id="omt_conflicting",
+            reply_to="om_conflicting_root",
+            mentions=[{"open_id": "ou_owner"}],
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_2",
+    )
+
+    assert revised is not None and revised.task is not None
+    assert revised.decision.route == "attach_task"
+    assert revised.decision.reason == "source_revision"
+    assert revised.decision.matched_by == "source_revision"
+    assert revised.task.id == original.task.id
+    assert revised.task.id != conflicting_task.id
+
+
 def test_owner_takeover_closes_task_and_cancels_pending_work(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     service = IngestionService(
@@ -1345,7 +2139,7 @@ def test_closed_recall_records_router_placeholder(tmp_path: Path) -> None:
         run_id="run_1",
     )
     assert created is not None and created.task is not None
-    store.close_task_for_owner_takeover(created.task.id)
+    store.update_task_after_agent(task_id=created.task.id, status="closed")
 
     recalled = service.process_raw_message(
         _message("om_2", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
@@ -1359,6 +2153,151 @@ def test_closed_recall_records_router_placeholder(tmp_path: Path) -> None:
     assert recalled.decision.reason == "closed_recall_router_placeholder"
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 1
+        audit = conn.execute(
+            """
+            SELECT route, route_reason, candidates_count, matched_by,
+                   target_task_id, router_called
+            FROM routing_audits
+            WHERE message_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            ("om_2",),
+        ).fetchone()
+    assert tuple(audit) == (
+        "ambiguous",
+        "closed_recall_router_placeholder",
+        1,
+        None,
+        None,
+        0,
+    )
+
+
+def test_closed_recall_multiple_candidates_remains_ambiguous_with_audit(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    for message_id in ("om_old_1", "om_old_2"):
+        message = service.normalizer.normalize(
+            _message(
+                message_id,
+                chat_id="ou_chat",
+                chat_type="p2p",
+                sender_id=message_id,
+                text="共同故障",
+            ),
+            default_chat_type="p2p",
+        )
+        store.upsert_message(message)
+        task = store.create_task_for_message(
+            message,
+            watch_until="2026-06-22T02:10:00+00:00",
+        )
+        store.update_task_after_agent(task_id=task.id, status="closed")
+
+    recalled = service.process_raw_message(
+        _message(
+            "om_conflict",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_new",
+            text="共同故障",
+        ),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    assert recalled is not None
+    assert recalled.decision.route == "ambiguous"
+    assert recalled.decision.reason == "closed_recall_router_placeholder"
+    with store.connect() as conn:
+        task_count = conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"]
+        audit = conn.execute(
+            """
+            SELECT route, route_reason, candidates_count, matched_by,
+                   target_task_id, router_called
+            FROM routing_audits
+            WHERE message_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            ("om_conflict",),
+        ).fetchone()
+    assert task_count == 2
+    assert tuple(audit) == (
+        "ambiguous",
+        "closed_recall_router_placeholder",
+        2,
+        None,
+        None,
+        0,
+    )
+
+
+@pytest.mark.parametrize("close_mode", ["operator", "takeover"])
+def test_owner_controlled_task_is_excluded_from_closed_recall(
+    tmp_path: Path, close_mode: str
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=FakeFeishuClient(),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = service.process_raw_message(
+        _message("om_1", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    if close_mode == "operator":
+        store.close_task_by_operator(created.task.id)
+    else:
+        store.close_task_for_owner_takeover(created.task.id)
+
+    routed = service.process_raw_message(
+        _message("om_2", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+
+    assert routed is not None and routed.task is not None
+    assert routed.decision.route == "new_task"
+    with store.connect() as conn:
+        task_count = conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"]
+        audit = conn.execute(
+            """
+            SELECT route, route_reason, candidates_count, matched_by,
+                   target_task_id, router_called
+            FROM routing_audits
+            WHERE message_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            ("om_2",),
+        ).fetchone()
+    assert task_count == 2
+    assert tuple(audit) == (
+        "new_task",
+        "new_trigger",
+        0,
+        "new_trigger",
+        routed.task.id,
+        0,
+    )
 
 
 def test_lifecycle_watch_minutes_controls_new_task_watch_until(tmp_path: Path) -> None:
@@ -1433,7 +2372,7 @@ def test_lifecycle_closed_recall_days_bounds_historical_candidates(
         run_id="run_1",
     )
     assert created is not None and created.task is not None
-    store.close_task_for_owner_takeover(created.task.id)
+    store.update_task_after_agent(task_id=created.task.id, status="closed")
     with store.connect() as conn:
         conn.execute(
             "UPDATE tasks SET updated_at = ? WHERE id = ?",
@@ -1475,7 +2414,7 @@ def test_unrelated_closed_task_does_not_block_new_group_task(tmp_path: Path) -> 
         run_id="run_1",
     )
     assert old_task is not None and old_task.task is not None
-    store.close_task_for_owner_takeover(old_task.task.id)
+    store.update_task_after_agent(task_id=old_task.task.id, status="closed")
 
     new_task = service.process_raw_message(
         _message(
@@ -1490,10 +2429,29 @@ def test_unrelated_closed_task_does_not_block_new_group_task(tmp_path: Path) -> 
         run_id="run_1",
     )
 
-    assert new_task is not None
+    assert new_task is not None and new_task.task is not None
     assert new_task.decision.route == "new_task"
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 2
+        audit = conn.execute(
+            """
+            SELECT route, route_reason, candidates_count, matched_by,
+                   target_task_id, router_called
+            FROM routing_audits
+            WHERE message_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            ("om_new",),
+        ).fetchone()
+    assert tuple(audit) == (
+        "new_task",
+        "new_trigger",
+        0,
+        "new_trigger",
+        new_task.task.id,
+        0,
+    )
 
 
 def test_reply_to_closed_task_enters_recall_placeholder(tmp_path: Path) -> None:
@@ -1518,7 +2476,27 @@ def test_reply_to_closed_task_enters_recall_placeholder(tmp_path: Path) -> None:
         run_id="run_1",
     )
     assert old_task is not None and old_task.task is not None
-    store.close_task_for_owner_takeover(old_task.task.id)
+    store.insert_action_for_test(
+        idempotency_key="reply_sent_for_recall",
+        task_id=old_task.task.id,
+        status="sent",
+        result={"sent_message_id": "om_agent_reply"},
+    )
+    agent_reply = service.process_raw_message(
+        _message(
+            "om_agent_reply",
+            chat_id="oc_1",
+            sender_id="ou_owner",
+            reply_to="om_old",
+            text="agent reply",
+        ),
+        source="active_watch",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+    assert agent_reply is not None
+    assert agent_reply.decision.reason == "self_message"
+    store.update_task_after_agent(task_id=old_task.task.id, status="closed")
 
     recalled = service.process_raw_message(
         _message(
@@ -1527,7 +2505,7 @@ def test_reply_to_closed_task_enters_recall_placeholder(tmp_path: Path) -> None:
             sender_id="ou_b",
             text="我这边也是这个问题",
             mentions=[{"open_id": "ou_owner"}],
-            reply_to="om_old",
+            reply_to="om_agent_reply",
         ),
         source="group_at_me",
         default_chat_type="group",
@@ -1539,6 +2517,34 @@ def test_reply_to_closed_task_enters_recall_placeholder(tmp_path: Path) -> None:
     assert recalled.decision.reason == "closed_recall_router_placeholder"
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] == 1
+        task_message = conn.execute(
+            """
+            SELECT role
+            FROM task_messages
+            WHERE task_id = ? AND message_id = ?
+            """,
+            (old_task.task.id, "om_agent_reply"),
+        ).fetchone()
+        audit = conn.execute(
+            """
+            SELECT route, route_reason, candidates_count, matched_by,
+                   target_task_id, router_called
+            FROM routing_audits
+            WHERE message_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            ("om_reply",),
+        ).fetchone()
+    assert task_message["role"] == "agent_reply"
+    assert tuple(audit) == (
+        "ambiguous",
+        "closed_recall_router_placeholder",
+        1,
+        None,
+        None,
+        0,
+    )
 
 
 def test_resource_status_downloaded_and_bot_not_joined(
@@ -1811,6 +2817,45 @@ def test_failed_resource_download_never_publishes_partial_file(
     assert resource["download_status"] == "failed"
     assert resource["path"] is None
     assert not list((tmp_path / "data/resources").rglob("*.*"))
+
+
+def test_confirmed_bot_not_in_chat_download_records_runtime_absence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake = BotNotInChatFeishuClient()
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(bot_joined=True)})
+    _seed_policy(store, cfg)
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=cfg,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+    )
+
+    service.process_raw_message(
+        _message(
+            "om_missing_bot",
+            mentions=[{"open_id": "ou_owner"}],
+            image_key="img_missing_bot",
+        ),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    with store.connect() as conn:
+        resource = conn.execute(
+            "SELECT download_status FROM resources WHERE file_key = ?",
+            ("img_missing_bot",),
+        ).fetchone()
+    fact = store.get_bot_membership_fact("oc_1")
+    assert resource["download_status"] == "bot_invisible"
+    assert fact is not None
+    assert fact["status"] == "absent"
+    assert fact["error_code"] == 10002
+    assert fact["error_endpoint"] == "resource_download"
 
 
 def test_resource_quota_guard_removes_only_stale_managed_partial_downloads(
@@ -2257,7 +3302,12 @@ def test_thread_active_watch_filters_by_checkpoint_window(tmp_path: Path) -> Non
 
     assert result.processed == 1
     assert store.get_checkpoint("active_watch.thread.omt_1") == {
-        "last_success_at": "2026-06-22T02:20:00+00:00"
+        "last_success_at": "2026-06-22T02:20:00+00:00",
+        "last_drain": {
+            "completed_at": "2026-06-22T02:20:00+00:00",
+            "messages_fetched": 2,
+            "pages_fetched": 1,
+        },
     }
     assert store.get_message("om_old_thread") is None
     assert store.get_message("om_new_thread") is not None
@@ -2330,6 +3380,8 @@ def test_daemon_tick_runs_p2_stages_in_order(tmp_path: Path) -> None:
     results = daemon.run_one_tick(run_id="run_1")
 
     assert [result.name for result in results] == [
+        "bot_membership",
+        "processing_retries",
         "approval_inbox",
         "group_at_me",
         "p2p",

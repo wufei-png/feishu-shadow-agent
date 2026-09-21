@@ -260,6 +260,55 @@
           "minimum": 0,
           "title": "Overlap Seconds",
           "type": "integer"
+        },
+        "ingest_tick_budget_seconds": {
+          "default": 30.0,
+          "description": "Shared wall-clock budget for all ingestion sources in one daemon tick.",
+          "exclusiveMinimum": 0,
+          "title": "Ingest Tick Budget Seconds",
+          "type": "number"
+        },
+        "ingest_search_max_pages": {
+          "default": 20,
+          "description": "Maximum pages fetched per cross-chat search or approval-inbox source in one tick.",
+          "minimum": 1,
+          "title": "Ingest Search Max Pages",
+          "type": "integer"
+        },
+        "ingest_search_max_messages": {
+          "default": 1000,
+          "description": "Maximum messages fetched per cross-chat search or approval-inbox source in one tick.",
+          "minimum": 1,
+          "title": "Ingest Search Max Messages",
+          "type": "integer"
+        },
+        "ingest_watch_max_pages_per_target": {
+          "default": 5,
+          "description": "Maximum pages fetched for one active chat or thread target in one tick.",
+          "minimum": 1,
+          "title": "Ingest Watch Max Pages Per Target",
+          "type": "integer"
+        },
+        "ingest_watch_max_messages_per_target": {
+          "default": 250,
+          "description": "Maximum messages fetched for one active chat or thread target in one tick.",
+          "minimum": 1,
+          "title": "Ingest Watch Max Messages Per Target",
+          "type": "integer"
+        },
+        "bot_membership_ttl_seconds": {
+          "default": 300,
+          "description": "Seconds a confirmed bot membership observation remains authoritative.",
+          "minimum": 1,
+          "title": "Bot Membership Ttl Seconds",
+          "type": "integer"
+        },
+        "bot_membership_retry_seconds": {
+          "default": 60,
+          "description": "Seconds before retrying an unknown or failed bot membership probe.",
+          "minimum": 1,
+          "title": "Bot Membership Retry Seconds",
+          "type": "integer"
         }
       },
       "title": "DaemonConfig",

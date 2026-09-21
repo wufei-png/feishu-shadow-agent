@@ -13,6 +13,12 @@ from .config import AppConfig
 from .feishu.client import FeishuClient
 from .ingestion import MessageNormalizer
 from .jsonl import JSONLLogger
+from .membership import (
+    classify_bot_membership_absence,
+    effective_membership_status,
+    record_bot_membership_absence,
+)
+from .policy import PolicyResolver
 from .store.sqlite_store import SQLiteStore
 from .time_utils import format_instant, utc_now
 from .types import (
@@ -194,7 +200,7 @@ class Dispatcher:
                             "warnings": result.get("warnings", []),
                         },
                     )
-                if not sent:
+                if not sent and not _stale_revision_cancelled(action_status, result):
                     self._queue_failed_reply_notification(
                         claimed,
                         status=action_status,
@@ -266,6 +272,10 @@ class Dispatcher:
             "error": error,
             "dedupe_key": f"dispatch:{action.id}:{dedupe_suffix}",
         }
+        if action.source_message_id is not None:
+            payload["source_message_id"] = action.source_message_id
+        if action.source_revision is not None:
+            payload["source_revision"] = action.source_revision
         try:
             notification_action_id = self.store.create_owner_notification_action(
                 task_id=action.task_id,
@@ -407,6 +417,11 @@ class Dispatcher:
         self, action: ActionRecord, *, attempt_id: int, run_id: str
     ) -> tuple[dict[str, Any], str]:
         result = _empty_result()
+        self._log_identical_correction_text(action, run_id=run_id)
+        if not self.store.action_revision_is_current(action):
+            return self._stale_revision_result(
+                action, attempt_id=attempt_id, reason="stale_revision"
+            )
         try:
             dry_run = self._dry_run(action)
         except Exception as exc:  # noqa: BLE001
@@ -437,12 +452,31 @@ class Dispatcher:
             dry_run_result=result["dry_run"],
         )
 
-        try:
-            send = self._send(action)
-        except Exception as exc:  # noqa: BLE001
+        # Re-check immediately before the adapter call. The store check must
+        # finish before the provider call so a slow send does not block
+        # ingestion of edits or tombstones; finish_claimed_action reconciles a
+        # successful send if a revision fence wins while it is in flight.
+        send: LarkCliResult | None = None
+        send_error: Exception | None = None
+        revision_current = self.store.revision_send_guard(action)
+        if not revision_current:
+            stale_reason = "stale_revision_before_send"
+        else:
+            stale_reason = None
+            try:
+                send = self._send(action)
+            except Exception as exc:  # noqa: BLE001
+                send_error = exc
+        if not revision_current:
+            stale_result, stale_status = self._stale_revision_result(
+                action, attempt_id=attempt_id, reason=stale_reason or "stale_revision"
+            )
+            return stale_result, stale_status
+
+        if send_error is not None:
             # Sending is an external boundary; preserve uncertain-send
             # semantics for every adapter failure.
-            result["send"] = _exception_command_result(action, "send", exc)
+            result["send"] = _exception_command_result(action, "send", send_error)
             result["error_stage"] = "send"
             self.store.update_dispatch_attempt(
                 attempt_id,
@@ -451,9 +485,30 @@ class Dispatcher:
                 error_stage=DispatchErrorStage.SEND.value,
             )
             return result, ActionStatus.FAILED_NEEDS_REVIEW.value
+        if send is None:
+            raise RuntimeError("revision check returned without a send result")
         result["send"] = _command_result(send)
         if not send.ok:
             result["error_stage"] = "send"
+            membership_absence = classify_bot_membership_absence(send)
+            if membership_absence:
+                task = None
+                if action.task_id is not None:
+                    with suppress(KeyError):
+                        task = self.store.get_task_by_id(action.task_id)
+                if task is not None:
+                    record_bot_membership_absence(
+                        store=self.store,
+                        config=self.config,
+                        logger=self.logger,
+                        chat_id=task.chat_id,
+                        chat_type=task.chat_type,
+                        run_id=run_id,
+                        source="dispatch_failure",
+                        error=send.error or send.stderr,
+                        absence=membership_absence,
+                        execution_mode=action.execution_mode,
+                    )
             attempt_status = _send_failure_attempt_status(send)
             action_status = (
                 ActionStatus.FAILED_NEEDS_REVIEW.value
@@ -510,6 +565,9 @@ class Dispatcher:
         else:
             result["readback"] = readback["result"]
             result["warnings"].extend(readback["warnings"])
+        # A successful send with a returned message ID makes the action terminal.
+        # Readback grades evidence and records warnings, but a missing or
+        # incomplete readback must not trigger an automatic resend.
         readback_ok = _readback_attempt_verified(
             action, readback=result["readback"], warnings=result["warnings"]
         )
@@ -526,6 +584,44 @@ class Dispatcher:
             finish=True,
         )
         return result, ActionStatus.SENT.value
+
+    def _stale_revision_result(
+        self,
+        action: ActionRecord,
+        *,
+        attempt_id: int,
+        reason: str,
+    ) -> tuple[dict[str, Any], str]:
+        result = _empty_result()
+        result["error_stage"] = DispatchErrorStage.CLAIM.value
+        result["warnings"].append(reason)
+        self.store.update_dispatch_attempt(
+            attempt_id,
+            status=DispatchAttemptStatus.FAILED.value,
+            error_stage=DispatchErrorStage.CLAIM.value,
+            finish=True,
+        )
+        return result, ActionStatus.CANCELLED.value
+
+    def _log_identical_correction_text(
+        self, action: ActionRecord, *, run_id: str
+    ) -> None:
+        warnings = action.payload.get("warnings")
+        if (
+            not isinstance(warnings, list)
+            or "identical_correction_text" not in warnings
+        ):
+            return
+        self.logger.warning(
+            "identical_correction_text",
+            run_id=run_id,
+            data={
+                "action_id": action.id,
+                "task_id": action.task_id,
+                "source_message_id": action.source_message_id,
+                "source_revision": action.source_revision,
+            },
+        )
 
     def _execute_preview(self, action: ActionRecord) -> dict[str, Any]:
         result = _empty_result()
@@ -559,6 +655,23 @@ class Dispatcher:
                 return _local_error(action, "send_reply text is missing")
             if identity not in {"user", "bot"}:
                 return _local_error(action, "send_reply identity must be user or bot")
+            if identity == "bot" and action.task_id is not None:
+                with suppress(KeyError):
+                    task = self.store.get_task_by_id(action.task_id)
+                    membership_status = effective_membership_status(
+                        self.store.get_bot_membership_fact(task.chat_id or "")
+                    )
+                    if membership_status == "absent":
+                        policy = PolicyResolver(self.store).resolve_chat_policy(
+                            task.chat_id, task.chat_type
+                        )
+                        if (
+                            policy.reply_identity == "bot_preferred"
+                            and policy.allow_user_fallback
+                        ):
+                            identity = "user"
+                        else:
+                            return _local_error(action, "bot_not_joined")
             return self.feishu.reply_message(
                 as_identity=identity,
                 message_id=target_message_id,
@@ -863,7 +976,15 @@ def _payload_identity(action: ActionRecord) -> str:
 
 def _owner_notification_text(payload: dict[str, Any]) -> str:
     lines = ["[feishu-shadow-agent] owner notification"]
-    for key in ("type", "task_id", "approval_id", "reason", "message"):
+    for key in (
+        "type",
+        "task_id",
+        "approval_id",
+        "chat_id",
+        "membership_status",
+        "reason",
+        "message",
+    ):
         value = payload.get(key)
         if value:
             lines.append(f"{key}: {_notification_display_text(str(value))}")
@@ -882,6 +1003,13 @@ def _owner_notification_text(payload: dict[str, Any]) -> str:
     if "approvable" in payload:
         lines.append(f"approvable: {'yes' if payload.get('approvable') else 'no'}")
     for key in (
+        "impact",
+        "impact_reasons",
+        "previous_reply",
+        "resolution_options",
+        "edit_supported",
+        "correction_delivery",
+        "requires_owner_approval",
         "stage",
         "target",
         "reply_target_message_id",
@@ -1059,6 +1187,18 @@ def _find_message(
 
 def _expected_mentions(text: str) -> set[str]:
     return set(EXPECTED_MENTION_RE.findall(text))
+
+
+def _stale_revision_cancelled(status: str, result: dict[str, Any]) -> bool:
+    if status != ActionStatus.CANCELLED.value:
+        return False
+    warnings = result.get("warnings")
+    if not isinstance(warnings, list):
+        return False
+    return any(
+        warning in {"stale_revision", "stale_revision_before_send"}
+        for warning in cast(list[Any], warnings)
+    )
 
 
 def _watch_until(watch_minutes: int) -> str:

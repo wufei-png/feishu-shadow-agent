@@ -14,6 +14,7 @@ from .feishu.client import FeishuClient
 from .health import HealthSuite, has_critical_failure, summarize_results
 from .ingestion import IngestionFeishuClient, IngestionService, StageResult
 from .jsonl import JSONLLogger
+from .membership import BotMembershipService
 from .processing import TaskProcessingService
 from .retention import (
     RetentionService,
@@ -41,6 +42,7 @@ class Daemon:
         config_base_dir: str | Path | None = None,
         runtime_health_interval_seconds: int | None = None,
         sleep_func: Callable[[float], None] = time.sleep,
+        ingestion_monotonic: Callable[[], float] | None = None,
         card_action_connection: FeishuCardActionConnection | None = None,
     ):
         self.store = store
@@ -60,6 +62,7 @@ class Daemon:
         self._last_runtime_health_at: float | None = None
         self._runtime_health_ok = True
         self.sleep_func = sleep_func
+        self.ingestion_monotonic = ingestion_monotonic
         self._lifecycle_condition = threading.Condition()
         self._wakeup_generation = 0
         self._stop_requested = False
@@ -144,12 +147,25 @@ class Daemon:
                 logger=self.logger,
                 task_processor=self.task_processor,
                 config_base_dir=self.config_base_dir,
+                monotonic=self.ingestion_monotonic,
             )
+            membership = BotMembershipService(
+                store=self.store,
+                feishu_client=cast(Any, self.feishu_client),
+                config=self.app_config,
+                logger=self.logger,
+                execution_mode="dry_run" if self.dry_run else "production",
+            )
+
+            def run_bot_membership(*, run_id: str) -> StageResult:
+                summary = membership.refresh(run_id=run_id)
+                return StageResult("bot_membership", ok=True, processed=summary.probed)
+
             stages = [
+                run_bot_membership,
+                service.run_processing_retries,
                 service.run_approval_inbox,
-                service.ingest_group_at_me,
-                service.ingest_p2p,
-                service.run_active_watch,
+                *service.ordered_ingestion_stages(),
             ]
             for stage in stages:
                 try:

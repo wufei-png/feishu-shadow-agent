@@ -6,7 +6,110 @@ from pydantic import ValidationError
 from feishu_shadow_agent.evals.schemas import (
     DraftTaskSessionLabels,
     TaskSessionLabels,
+    TaskSessionScenario,
 )
+
+
+def test_task_session_scenario_accepts_multiple_resume_targets() -> None:
+    scenario = TaskSessionScenario.model_validate(
+        {
+            "mode": "resume",
+            "setup_message_ids": ["om_1"],
+            "target_message_ids": ["om_2", "om_3"],
+        }
+    )
+
+    assert scenario.target_message_id is None
+    assert scenario.target_message_ids == ["om_2", "om_3"]
+
+
+def test_task_session_scenario_accepts_ordered_context_then_targets() -> None:
+    scenario = TaskSessionScenario.model_validate(
+        {
+            "mode": "resume",
+            "turns": [
+                {"message_id": "om_1", "kind": "context", "source_revision": 1},
+                {"message_id": "om_2", "kind": "target", "source_revision": 1},
+                {"message_id": "om_3", "kind": "target", "source_revision": 2},
+            ],
+        }
+    )
+
+    assert [turn.kind for turn in scenario.turns or []] == [
+        "context",
+        "target",
+        "target",
+    ]
+
+
+@pytest.mark.parametrize(
+    "turns",
+    [
+        [],
+        [{"message_id": "om_1", "kind": "context"}],
+        [
+            {"message_id": "om_1", "kind": "target"},
+            {"message_id": "om_2", "kind": "context"},
+        ],
+        [
+            {"message_id": "om_1", "kind": "target"},
+            {"message_id": "om_1", "kind": "target"},
+        ],
+    ],
+)
+def test_task_session_scenario_rejects_invalid_timeline_turns(
+    turns: list[dict[str, object]],
+) -> None:
+    with pytest.raises(ValidationError):
+        TaskSessionScenario.model_validate({"mode": "resume", "turns": turns})
+
+
+def test_task_session_scenario_accepts_final_rebuild_for_resume() -> None:
+    scenario = TaskSessionScenario.model_validate(
+        {
+            "mode": "resume",
+            "setup_message_ids": ["om_1"],
+            "target_message_id": "om_2",
+            "final_rebuild": {"recent_messages": 4, "summary": "摘要"},
+        }
+    )
+
+    assert scenario.final_rebuild is not None
+    assert scenario.final_rebuild.recent_messages == 4
+    assert scenario.final_rebuild.summary == "摘要"
+
+
+def test_task_session_scenario_rejects_final_rebuild_for_initial() -> None:
+    with pytest.raises(ValidationError):
+        TaskSessionScenario.model_validate(
+            {
+                "mode": "initial",
+                "message_ids": ["om_1"],
+                "final_rebuild": {"recent_messages": 4},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "targets",
+    [
+        {},
+        {"target_message_ids": []},
+        {"target_message_id": "om_2", "target_message_ids": ["om_3"]},
+        {"target_message_ids": ["om_2", "om_2"]},
+    ],
+)
+def test_task_session_scenario_rejects_invalid_resume_targets(
+    targets: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        TaskSessionScenario.model_validate(
+            {
+                "mode": "resume",
+                "setup_message_ids": ["om_1"],
+                **targets,
+            }
+        )
 
 
 def test_task_session_labels_default_expected_skills_for_legacy_artifacts() -> None:

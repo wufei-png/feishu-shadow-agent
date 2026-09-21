@@ -4,3 +4,14 @@ export function bootstrapTokenFromHash(hash: string): string | null {
   const token = params.get("token");
   return token && token.trim() ? token : null;
 }
+
+export function decodeHashSegment(value: string | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+}

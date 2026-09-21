@@ -85,11 +85,13 @@ flowchart TD
   Pause --> Recheck["按 retry_interval 重检"]
   Recheck --> RuntimeHealth
 
-  RuntimeHealth -->|是| ApprovalInbox["1. approval inbox<br/>成功后推进 approval_inbox checkpoint"]
-  ApprovalInbox --> GroupIngest["2. group_at_me ingest<br/>分页 drain + 时间升序处理<br/>成功后推进 ingest.group_at_me checkpoint"]
-  GroupIngest --> P2PIngest["3. p2p ingest<br/>分页 drain + 时间升序处理<br/>成功后推进 ingest.p2p checkpoint"]
-  P2PIngest --> ActiveWatch["4. active task watch<br/>按 chat/thread 合并拉取<br/>成功后推进 active_watch.* checkpoint"]
-  ActiveWatch --> Dispatch["5. pending actions dispatch<br/>send 互斥"]
+  RuntimeHealth -->|是| ApprovalInbox["1. approval inbox<br/>完整 drain 后推进 checkpoint"]
+  ApprovalInbox --> IngestScheduler["2–4. 摄取轮转<br/>group / p2p / active watch"]
+  IngestScheduler --> Backlog{"窗口完整 drain?"}
+  Backlog -->|否| Defer["保留固定窗口 + next token<br/>记录 cap / budget backlog"]
+  Backlog -->|是| Advance["推进对应 last_success_at"]
+  Defer --> Dispatch["5. pending actions dispatch<br/>send 互斥"]
+  Advance --> Dispatch
   Dispatch --> Sleep["sleep tick_interval"]
   Sleep --> Loop
 ```
@@ -114,11 +116,14 @@ flowchart TD
   SaveMsg --> CandidateCollector["CandidateCollector 纯 SQLite 检索"]
 
   CandidateCollector --> MatchAudit["写 candidates_count / shortcut_hit"]
-  MatchAudit --> Deterministic{"确定性 shortcut 命中"}
-  Deterministic -->|thread_id 唯一命中| Attach
-  Deterministic -->|reply_to msg 唯一命中| Attach
+  MatchAudit --> Revision{"当前 message revision 已归属唯一 active task?"}
+  Revision -->|是| Attach
+  Revision -->|否| Reply{"reply_to msg 唯一命中?"}
+  Reply -->|是| Attach
+  Reply -->|否| Thread{"thread_id 唯一命中?"}
+  Thread -->|是| Attach
 
-  Deterministic -->|否| Burst{"burst window 唯一命中<br/>同 chat + 同 sender + 窗口内"}
+  Thread -->|否| Burst{"burst window 唯一命中<br/>同 chat + 同 sender + 窗口内"}
   Burst -->|是| Attach
   Burst -->|否| CandidateCount{"候选是否明确"}
   CandidateCount -->|无 active 或新触发| Historical["closed task recall 检索最近 7 天"]
@@ -139,6 +144,12 @@ flowchart TD
   Include --> TaskSession["进入 Hermes Task Session；watch_action=close 时关闭任务"]
 ```
 
+所有 reply/thread/watch-key 查询均以当前 `chat_id` 为边界；引用另一个群的
+message id 只保留为当前消息元数据，不会关联外群任务或触发跨群资源抓取。
+仅直接 `@owner` 是激活信号，顺带提及其他成员不是。没有 reply/thread/burst
+唯一命中的纯 mention、多 active task 或互相冲突的非优先信号交给 TaskRouter；
+owner 消息仍只走结构性 takeover 或 `IGNORE`。
+
 <a id="resource-download-flow"></a>
 
 ## 4. 资源下载与 bot gate
@@ -148,7 +159,7 @@ flowchart TD
   Msg["已入库消息"] --> HasResource{"包含图片/文件资源"}
   HasResource -->|否| Continue["继续任务处理"]
   HasResource -->|是| Extract["user 身份读消息并提取 file_key"]
-  Extract --> BotKnown{"chat policy 标记 bot_joined"}
+  Extract --> BotKnown{"Effective Policy：配置值叠加新鲜 membership fact"}
   BotKnown -->|否，群聊| NotifyJoin["创建 resource_needs_bot owner notification"]
   BotKnown -->|否，P2P 纯资源消息| WaitContext["保持 watching，等待同任务文字上下文"]
   BotKnown -->|否，P2P 已有明确诉求| TaskWithoutResource["Task Session 使用文字、资源状态与外部证据"]
@@ -160,11 +171,19 @@ flowchart TD
   Download --> DownloadOK{"下载成功"}
   DownloadOK -->|是| SaveResource["保存 data/resources + resources 元数据"]
   SaveResource --> Continue
-  DownloadOK -->|234040/不可见| NotifyJoin
+  DownloadOK -->|bot + JSON code 10002| NotifyJoin
   DownloadOK -->|其他错误| Retry{"同轮重试未超过上限"}
   Retry -->|是| Download
   Retry -->|否| ResourceFailed["记录 resource_download terminal failed + owner notification"]
 ```
+
+群聊的 bot membership 由 daemon 主动探测及 bot 身份发送/下载错误共同更新。
+确认在群/离群的事实默认缓存 300 秒；权限、超时或格式错误记为 `unknown`，
+默认 60 秒后重试。bot 身份的资源下载和消息回复只有在结构化 JSON 错误码为
+`10002`（bot 不在当前 chat）时才确认离群；`234002`、`234040`、资源不匹配和
+纯文本错误不改变 membership fact。`unknown` 和过期事实不覆盖 owner 配置，确认
+离群才阻断资源并按 `reply_identity`/`allow_user_fallback` 派生回复身份。首次确认
+在群不通知；每个离群 episode 及随后恢复各至多通知一次，且不写 Policy Audit。
 
 <a id="hermes-reply-flow"></a>
 

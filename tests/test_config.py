@@ -30,6 +30,13 @@ def test_load_minimal_config() -> None:
     assert loaded.config.lifecycle.burst_attach_seconds == 60
     assert loaded.config.lifecycle.closed_recall_days == 7
     assert loaded.config.lifecycle.approval_timeout_hours == 24
+    assert loaded.config.daemon.ingest_tick_budget_seconds == 30.0
+    assert loaded.config.daemon.ingest_search_max_pages == 20
+    assert loaded.config.daemon.ingest_search_max_messages == 1000
+    assert loaded.config.daemon.ingest_watch_max_pages_per_target == 5
+    assert loaded.config.daemon.ingest_watch_max_messages_per_target == 250
+    assert loaded.config.daemon.bot_membership_ttl_seconds == 300
+    assert loaded.config.daemon.bot_membership_retry_seconds == 60
     assert loaded.config.retention.feedback_content_days == 30
     assert loaded.config.interactive_cards.enabled is False
     assert loaded.config.interactive_cards.app_id_env == "FEISHU_APP_ID"

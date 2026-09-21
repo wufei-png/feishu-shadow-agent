@@ -28,6 +28,12 @@ type CommandBody = {
   sent_message_id?: string;
 };
 
+export type ApprovalCommandBody = CommandBody & {
+  expected_task_id: number | null;
+  expected_source_message_id: string | null;
+  expected_source_revision: number | null;
+};
+
 export type PolicyImportBody = {
   reason?: string;
   replace?: boolean;
@@ -110,7 +116,7 @@ export function getFeedbackOverview(
 
 export function listApprovals(
   token: string,
-  params: ListParams & { status?: ApprovalStatus }
+  params: ListParams & { status?: ApprovalStatus | ApprovalStatus[] }
 ): Promise<ApprovalSummary[]> {
   return fetchApi(`/api/approvals${queryString(params)}`, token);
 }
@@ -119,12 +125,16 @@ export function getApproval(token: string, approvalId: string): Promise<Approval
   return fetchApi(`/api/approvals/${encodeURIComponent(approvalId)}`, token);
 }
 
-export function approveApproval(token: string, approvalId: string, body: CommandBody): Promise<CommandResult> {
+export function approveApproval(token: string, approvalId: string, body: ApprovalCommandBody): Promise<CommandResult> {
   return postCommand(`/api/approvals/${encodeURIComponent(approvalId)}/approve`, token, body);
 }
 
-export function rejectApproval(token: string, approvalId: string, body: CommandBody): Promise<CommandResult> {
+export function rejectApproval(token: string, approvalId: string, body: ApprovalCommandBody): Promise<CommandResult> {
   return postCommand(`/api/approvals/${encodeURIComponent(approvalId)}/reject`, token, body);
+}
+
+export function sendApproval(token: string, approvalId: string, body: ApprovalCommandBody): Promise<CommandResult> {
+  return postCommand(`/api/approvals/${encodeURIComponent(approvalId)}/send`, token, body);
 }
 
 export function listTasks(token: string, params: ListParams & { status?: TaskStatus; chat_id?: string }): Promise<TaskSummary[]> {
@@ -145,6 +155,18 @@ export function closeTask(token: string, taskId: string, body: CommandBody): Pro
 
 export function reopenTask(token: string, taskId: string, body: CommandBody): Promise<CommandResult> {
   return postCommand(`/api/tasks/${encodeURIComponent(taskId)}/reopen`, token, body);
+}
+
+export function retryMessageProcessing(token: string, messageId: string, stage: string, body: CommandBody): Promise<CommandResult> {
+  return postCommand(`/api/messages/${encodeURIComponent(messageId)}/processing/${encodeURIComponent(stage)}/retry`, token, body);
+}
+
+export function updateTaskBackground(
+  token: string,
+  taskId: string,
+  body: { content: string | null; reason?: string }
+): Promise<CommandResult> {
+  return patchCommand(`/api/tasks/${encodeURIComponent(taskId)}/background`, token, body);
 }
 
 export function expireApprovals(token: string, body: CommandBody): Promise<CommandResult> {

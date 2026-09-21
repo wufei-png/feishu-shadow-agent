@@ -1,0 +1,147 @@
+# ingest 与 membership 运行时现场验收记录
+
+本记录只保存脱敏的环境条件、配置 hash、计数和错误类别；不保存飞书消息、chat ID、
+owner/bot 身份、token、SQLite 内容或日志 payload。
+
+## 2026-09-20 预检
+
+- 时间：`2026-09-20T20:46:31+08:00`。
+- 代码：`83c1542e7ebab68b12eaa38e17bc0a04e7574186`。
+- 配置：`config.yaml` 的 SHA-256 为
+  `9b36317085cae9640ed299b5a62befdc784e91dcf1bc0cea245cfaf3c154578e`；配置中有一个
+  chat policy，但没有可公开记录的受控高流量源或获准 membership 测试 chat 标识。
+- 已配置预算：tick `30s`、search `20 pages / 1000 messages`、active watch
+  `5 pages / 250 messages`、overlap `120s`、membership TTL `300s`、unknown retry
+  `60s`。
+- `lark-cli` 路径可执行，版本为 `1.0.56`。
+
+在临时空 SQLite 库中导入同一配置的 Product Policy 后，执行不含 `--send-test` 的
+`HealthSuite`：13 项 critical 和 4 项 warning 均为 `ok`。这包括 lark-cli 认证验证、
+必需 user scopes、bot identity、Codex 登录与能力检查；owner notification 仅走 CLI
+dry-run。临时库在进程结束时删除，未写入项目的 `data/`、`logs/` 或飞书消息。
+
+同一组 ingest / runtime membership 回归测试通过：`122 passed`（
+`test_p2_ingestion_routing.py`、`test_policy_runtime.py`、`test_membership.py`、
+`test_dispatcher.py`、`test_operator_query.py`）。该结果只证明 fixture 契约，不替代
+下面的现场证据。
+
+## 2026-09-21 合并转发资源 capability preflight
+
+- 本机 `.venv/node_modules/.bin/lark-cli` 仍为 `1.0.56`；user 与 bot 凭据均已完成服务端验证。
+- user 对唯一受控 chat 的降序读取成功，返回 8 条消息，未找到 `merge_forward` 容器。
+- bot 对同一列举调用返回 API `230002`。没有 current container ID 可供 image/file 资源下载测试，因此没有执行下载调用、写入 runtime store 或保存文件。
+- 这不是 container-ID 能力失败的证据，也不推翻现有的 fail-closed 占位降级。需要在获准测试 chat 提供同时带 image 和 file 的当前合并转发容器，并以 container ID 由 bot 分别下载两种资源后，才能决定是否实施接入。
+
+## 2026-09-21 合并转发资源 revalidation
+
+- owner 在获准测试 chat 提供当前 image + file 合并转发容器；user 能读取容器并从可见内容识别两种资源键。
+- bot 对同一 top-level container ID 下载 image 成功，保存的单一文件完成 size 和 SHA-256 核对。
+- 同一 container 的 file 下载连续两次均返回 network `500`，没有保存文件。bot `+messages-mget --download-resources` 诊断只返回一个 image 资源、没有资源级 error，并只保存一个 image 文件。
+- 这证明当前 image 可通过 container acquisition path 进入资源链，但转发 file 尚未由 CLI/API 作为可下载容器资源暴露。保持现有 placeholder/fail-closed 降级；不创建子项任务、不改变 reply target，也不写入原始消息、ID、资源键、路径或下载文件。
+
+## 2026-09-21 CLI 1.0.96 revalidation
+
+- runtime 配置指向的本地 CLI 已由 1.0.56 更新到 1.0.96，并在同一路径完成版本校验。
+- 对同一获准容器重新以 bot 下载 image/file：image 成功并完成单一文件 size/SHA-256 核对；file 仍为 network `500`，没有保存文件。
+- bot `+messages-mget --download-resources` 在 ignored 诊断目录仍只声明并保存一个 image 资源。版本更新未解除 forwarded-file acquisition blocker，因而不进入接入或端到端持久化阶段。
+
+## 2026-09-21 合并转发 folder 根因与资源链验收
+
+- 进一步读取同一 container 的渲染结构后，唯一可见 `file_` 键属于 `<folder>`，不是可直接下载的 leaf file；没有顶层 `<file>` 标签。因此此前 bot 请求把 collection handle 当 `--type file` 传入。
+- 该错误调用稳定返回 CLI `network/server_error`：HTTP `500`、上游 code `40009`、`internal server error`。响应含 log ID 和 troubleshooter URL；原值只保留在本次脱敏诊断上下文，未写入 tracked 文件。这个 `500` 不是“不支持转发 file”的证据。
+- bot 用相同 container ID 调 `im files folder` 成功，返回的 collection 为 4 个一级子项（2 个 leaf file、2 个 folder；递归计数 163）。再用同一 container ID 分别下载两个一级 leaf file 均成功，并完成 size/SHA-256 核对；临时内容已删除。
+- 运行时修复移除了对 `merge_forward` 的全量资源屏蔽：direct image/file marker 现在进入既有 `ResourceProcessor`，仍以 container ID 下载；`<folder>` 和结构化 `is_folder` 键明确排除，避免重试错误的 root-folder 下载或静默递归获取 collection 内容。
+- 隔离的真实资源链（临时 SQLite、临时资源目录和只含测试 chat 的 policy）以当前 CLI 执行 `LarkCliClient → ResourceProcessor → Operator message detail`。同一 container 的 image 与一个已枚举 leaf file 都显示 `downloaded`、路径存在、size/hash 一致；临时库、日志和资源随后清理。未修改运行中 Product Policy 或保存真实资源。
+
+## 运行库与执行界限
+
+原 `data/agent.sqlite3` 的 `PRAGMA user_version` 为 `1`，当前 runtime schema 为 `7`，
+且迁移路径不接受 v1。经 owner 明确授权放弃历史后，旧库已归档在 ignored `data/` 目录，
+配置使用新的 v7 runtime store。新库已执行 `policy import-config`；一条 global policy 和
+一条 chat policy 回读为 `matches`，`doctor --config config.yaml` 的 13 项 critical 与 4 项
+warning 均通过。
+
+所有现场运行均为 `daemon --dry-run`，未传 `--send-owner-notifications`，未发送真实回复。
+每个 daemon 运行期间只有它一个 SQLite 写者；运行状态只通过 JSONL 读取，SQLite 的脱敏
+检查均在该 daemon 正常停止后进行。
+
+## 验收状态
+
+| 链路 | 状态 | 缺少的现场证据 |
+| --- | --- | --- |
+| S4 有界 ingest 追赶 | 通过 | 已在获准测试群以 1,001 条 `group_at_me` 消息验证固定窗口的 20 页 / 1,000 条 cap、处理 cursor、跨 tick 与干净重启恢复、终端 checkpoint 推进及全量追赶。 |
+| S5 membership 恢复 | 通过 | 原时间线与通知预览见下文；2026-09-21 在同一获准测试群补验真实 user fallback 回复与恢复后的资源下载，见末节。 |
+
+## 2026-09-20 现场结果
+
+- 测试群由 owner 创建并授权；测试策略在 Product Policy Store 中以 `auto_reply=false`、
+  `bot_preferred` 和 user fallback 写入。该一次 owner 操作将 Policy Audit 基线设为 3。
+- 使用 bot identity 发送了 1,001 条带稳定 idempotency key 的直接 mention 测试消息；分页
+  回读为 21 页、1,001 条。30 次初始发送失败经过只重试缺失 id 后补齐，没有重复计数。
+- 三次 dry-run daemon 读取该窗口时，`group_at_me` 分别在第 6、3、1 页以 `command failed`
+  失败。结构化 envelope 后续确认这些调用均为受控外层中断：`exit_code=-2`、
+  `timed_out=false`，且没有 stderr 或 JSON 错误；不是 CLI、认证/scope、限流、page token
+  或 ingest 处理错误。
+- membership 主动探测先记录 `present`。owner 移除 bot、确认 TTL 到期后再次探测记录
+  `absent`，Effective Policy 的 `bot_joined=false`；停止刷新超过 TTL 后只读 Effective Policy
+  得到 `unknown` 且回退为 `bot_joined=true`；owner 重新加入 bot 后探测记录 `present` 并创建
+  recovery notification。全过程 Policy Audit 保持 3。
+- 所有 daemon 运行均为 dry-run，未传 `--send-owner-notifications`；notification 仅预览，
+  `send_reply` 的 production count 为 0。
+
+## S4 修复与复验（通过）
+
+### 根因与最小修复
+
+- 实际代码缺陷不是上述外层中断：旧路径的 tick deadline 只限制了获取，逐页启动
+  `lark-cli` 可以耗尽 30 秒预算，随后已获取批次的 normalize/routing 没有可恢复的处理边界。
+- `7bf19db` 将 deadline 覆盖到逐消息处理，在边界保存当前批次起始 page token、已完成数量
+  和不含原文的 replay-prefix digest；不会把 checkpoint 越过未处理尾部。
+- `b8d48b3` 在同一预算内保留最多 5 秒给处理；`2c17fbf` 将 digest 收紧为语义字段，避免
+  易变的搜索 enrichment 让安全重放错误重置。
+- `aa2ec03` 在剩余原 page cap 内使用一次 `--page-all --page-limit` 请求，返回的聚合页数仍
+  计入原 20 页 / 1,000 条 cap；它减少相同 cap 内的 CLI 子进程开销，不提高 cap 或预算。
+  真实 capability probe 在 18.82 秒返回 1,000 条、仍带后续 token。
+- `ef4a205` 在处理耗尽预算时保留原获取原因。因此 backlog 同时记录
+  `reason=tick_budget_exhausted` 与 `fetch_reason=page_cap_exhausted`，不会掩盖 cap 事实。
+
+### 脱敏现场时间线（UTC）
+
+- `16:05:47`，同一固定窗口首次以 20 页 / 1,000 条触发 deferred backlog；处理 cursor 为
+  22。随后 cursor 依次推进至 74、129、169，checkpoint 没有推进。
+- 在 `16:10:48` 的完整 tick 后正常停止并重启。重启后 cursor 从 169 继续至 204、232，
+  JSONL 没有 `ingestion_processing_cursor_reset`；重启段新增 63 个路由审计记录恰好对应
+  cursor 的 63 项前进，未重放已完成前缀。
+- 后续同一单写者追赶持续将 cursor 推进至 984。`16:44:49` 首批处理完成，backlog 为
+  `page_cap_exhausted`、存在后续 token、没有 processing cursor，且 checkpoint 仍未推进。
+- `16:45:39` 终端页（一页、一条）完成；`last_success_at` 推进到固定窗口的
+  `2026-09-20T15:20:51+00:00`，group checkpoint 不再有 backlog。
+- 停止 daemon 后，受控 marker 消息为 `1,001 / 1,001`，缺失为 0；routing audit 的不同
+  `message_id` 同为 1,001。总 audit 行数包含此前运行的审计轨迹，不能当作唯一消息数。
+  从 `16:05:00+00:00` 至终端完成没有新的 `message_page_fetch_failed`。
+
+`last_drain` 的 `651 pages / 32,501 messages` 是 processing cursor 重放时的累计获取尝试，
+不是单 tick cap 或唯一源消息数；每个发生 cap 的 tick 仍严格为 20 页 / 1,000 条。所有停机
+均在 `retention_skipped`（dry-run tick 完成）后执行，未将受控中断写成 CLI 故障。
+
+## 2026-09-21 S5 真实降级补验（通过）
+
+- 在 owner 已授权的 `FSA-runtime-acceptance-20260920` 测试群执行。配置 SHA-256 为
+  `9b36317085cae9640ed299b5a62befdc784e91dcf1bc0cea245cfaf3c154578e`，
+  `lark-cli` 为 1.0.96；测试前后 `doctor` 均无 critical failure 或 warning。测试群
+  Product Policy 为 `auto_reply=false`、`bot_joined=true`、`bot_preferred`、允许 user fallback
+  和资源下载。未启用自动回复或 owner notification 真实发送。
+- 精确匹配测试群、唯一 bot 和 direct image 资源后，先对离群/重入命令做 CLI dry-run。
+  owner 以 user 身份暂时移除 bot，成员列表确认缺席；隔离 runtime store 的主动探测由
+  `present` 转为 `absent`，资源处理将该 image 记为 `bot_not_joined`，没有发起下载。
+- 在 bot 缺席期间，向测试群写入受控 marker，在隔离 store 中创建一条手动测试回复动作。
+  Dispatcher dry-run 成功后仅真实发送这一条回复；发送参数使用 `user` fallback，
+  Feishu 读回及动作终态均为 `sent`。第一次预演脚本误将 membership notification 也计入
+  回复预览数量而中止；该次没有真实回复，bot 已在 `finally` 中恢复。修正断言后的复验
+  得到上述唯一真实回复。
+- bot 重新入群后，成员列表及主动探测均确认 `present`；相同来源的一项 image 通过
+  `ResourceProcessor` 真实下载，临时文件存在且非空。隔离 SQLite、日志和下载文件在
+  测试结束后删除；本机运行库的测试群 Product Policy 保持原值，Policy Audit 计数为 3。
+  最终再探测本机运行库，测试群 Effective Membership 为 `present`。
+- `unknown`/TTL 过期及 episode 通知的现场证据沿用上文 2026-09-20 时间线；本次补验
+  聚焦缺席时的资源与发送降级、重入后的资源恢复。未向其他群发送回复或下载资源。
