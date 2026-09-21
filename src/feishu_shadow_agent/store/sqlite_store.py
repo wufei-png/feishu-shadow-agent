@@ -11,6 +11,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 from ..config import AppConfig, ChatPolicyConfig, ReplyPolicyConfig
+from ..revision import message_semantic_hash
 from ..time_utils import normalize_instant, parse_instant_or_none, shift_instant
 from ..types import (
     ActionKind,
@@ -705,12 +706,14 @@ class SQLiteStore:
         return self.upsert_message_with_revision(message).inserted
 
     def upsert_message_with_revision(
-        self, message: NormalizedMessage
+        self, message: NormalizedMessage, *, confirmed_current: bool = False
     ) -> MessageUpsertResult:
         self.initialize()
         now = self.clock()
         with self.connect() as conn:
-            return self._upsert_message_revision_locked(conn, message, now=now)
+            return self._upsert_message_revision_locked(
+                conn, message, now=now, confirmed_current=confirmed_current
+            )
 
     def get_message(self, message_id: str) -> sqlite3.Row | None:
         self.initialize()
@@ -4981,12 +4984,17 @@ class SQLiteStore:
         message: NormalizedMessage,
         *,
         now: str,
+        confirmed_current: bool = False,
     ) -> MessageUpsertResult:
         existing = conn.execute(
-            "SELECT revision, semantic_hash, is_deleted FROM messages WHERE message_id = ?",
+            """
+            SELECT revision, semantic_hash, is_deleted, normalized_json
+            FROM messages
+            WHERE message_id = ?
+            """,
             (message.message_id,),
         ).fetchone()
-        semantic_hash = _message_semantic_hash(message)
+        semantic_hash = message_semantic_hash(message)
         if existing is None:
             normalized_json = json.dumps(
                 {
@@ -4999,6 +5007,7 @@ class SQLiteStore:
                     "message_type": message.message_type,
                     "sender_name": message.sender_name,
                     "is_deleted": message.is_deleted,
+                    "semantic_hash_history": [semantic_hash],
                 },
                 ensure_ascii=False,
                 default=str,
@@ -5056,9 +5065,28 @@ class SQLiteStore:
                 is_deleted=True,
                 semantic_hash=previous_hash,
             )
+        uninitialized_hash = previous_hash == ""
+        semantic_hash_history = (
+            []
+            if uninitialized_hash
+            else _message_semantic_hash_history(
+                existing["normalized_json"], current_hash=previous_hash
+            )
+        )
+        # Poll windows may overlap, so an older snapshot can arrive after a
+        # newer edit. Without an upstream revision token, never let a snapshot
+        # that this store has already accepted roll the message back.
+        if semantic_hash in semantic_hash_history and not confirmed_current:
+            return MessageUpsertResult(
+                inserted=False,
+                changed=False,
+                revision=previous_revision,
+                is_deleted=False,
+                semantic_hash=previous_hash,
+                requires_confirmation=semantic_hash != previous_hash,
+            )
         # Migrated v2 rows keep semantic_hash=''. Stamp the live snapshot
         # without creating a revision so the first poll is not an edit.
-        uninitialized_hash = previous_hash == ""
         changed = previous_hash != semantic_hash or message.is_deleted
         if not changed:
             return MessageUpsertResult(
@@ -5075,6 +5103,8 @@ class SQLiteStore:
             revision = previous_revision + 1
             result_changed = True
         effective_deleted = message.is_deleted
+        if semantic_hash not in semantic_hash_history:
+            semantic_hash_history.append(semantic_hash)
         normalized_json = json.dumps(
             {
                 "mentions": message.mentions,
@@ -5086,6 +5116,7 @@ class SQLiteStore:
                 "message_type": message.message_type,
                 "sender_name": message.sender_name,
                 "is_deleted": effective_deleted,
+                "semantic_hash_history": semantic_hash_history,
             },
             ensure_ascii=False,
             default=str,
@@ -5530,27 +5561,16 @@ def _loads_json_object(value: Any) -> dict[str, Any]:
     return cast(dict[str, Any], loaded) if isinstance(loaded, dict) else {}
 
 
-def _message_semantic_hash(message: NormalizedMessage) -> str:
-    payload = {
-        "chat_id": message.chat_id,
-        "chat_type": message.chat_type,
-        "sender_id": message.sender_id,
-        "sender_type": message.sender_type,
-        "sender_role": message.sender_role,
-        "thread_id": message.thread_id,
-        "reply_to_message_id": message.reply_to_message_id,
-        "text": message.text,
-        "direct_mention": message.direct_mention,
-        "at_all": message.at_all,
-        "mentions": sorted(message.mentions),
-        "resources": sorted(
-            (resource.file_key, resource.resource_type)
-            for resource in message.resources
-        ),
-        "is_deleted": message.is_deleted,
-    }
-    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-    return sha256(serialized.encode("utf-8")).hexdigest()
+def _message_semantic_hash_history(value: Any, *, current_hash: str) -> list[str]:
+    history_value = _loads_json_object(value).get("semantic_hash_history")
+    history = (
+        [item for item in cast(list[object], history_value) if isinstance(item, str)]
+        if isinstance(history_value, list)
+        else []
+    )
+    if current_hash and current_hash not in history:
+        history.append(current_hash)
+    return history
 
 
 def _parse_datetime_or_none(value: Any) -> datetime | None:

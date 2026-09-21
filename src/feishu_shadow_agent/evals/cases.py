@@ -157,6 +157,8 @@ def scenario_message_ids(scenario: EvalModel) -> list[str]:
     if isinstance(scenario, TaskSessionScenario):
         if scenario.mode == "initial":
             return list(scenario.message_ids or [])
+        if scenario.turns is not None:
+            return [turn.message_id for turn in scenario.turns]
         targets = (
             [scenario.target_message_id]
             if scenario.target_message_id is not None
@@ -220,6 +222,13 @@ def _validate_case_relationships(
     raw_messages: dict[str, dict[str, Any]],
     run_config: LoadedConfig,
 ) -> None:
+    if isinstance(scenario, TaskSessionScenario):
+        _validate_task_session_context_roles(
+            scenario,
+            raw_messages=raw_messages,
+            owner_open_id=run_config.config.owner.open_id,
+        )
+        return
     if not isinstance(scenario, RouterScenario):
         return
     if labels is not None:
@@ -236,6 +245,61 @@ def _validate_case_relationships(
         last_message_time = _message_datetime(raw_messages[fixture.message_ids[-1]])
         if last_message_time + timedelta(minutes=watch_minutes) <= target_time:
             raise EvalError(f"watching task fixture is expired at target: {alias}")
+
+
+def _validate_task_session_context_roles(
+    scenario: TaskSessionScenario,
+    *,
+    raw_messages: dict[str, dict[str, Any]],
+    owner_open_id: str,
+) -> None:
+    if scenario.turns is None:
+        return
+    normalizer = MessageNormalizer(owner_open_id=owner_open_id)
+    context_task_ids: list[set[int]] = []
+    for turn in scenario.turns:
+        message = normalizer.normalize(raw_messages[turn.message_id])
+        if message.sender_role == "owner_message":
+            raise EvalError(
+                "task-session timeline cannot contain an owner message because "
+                "production routes owner messages to takeover or ignore"
+            )
+        if turn.kind != "context":
+            continue
+        if raw_messages[turn.message_id].get("source_task_membership") is not True:
+            raise EvalError(
+                "task-session context must record capture task-membership provenance"
+            )
+        context_task_ids.append(_source_task_ids(raw_messages[turn.message_id]))
+    if context_task_ids:
+        shared_task_ids = context_task_ids[0].copy()
+        for task_ids in context_task_ids[1:]:
+            shared_task_ids.intersection_update(task_ids)
+        for turn in scenario.turns:
+            if turn.kind == "target":
+                shared_task_ids.intersection_update(
+                    _source_task_ids(raw_messages[turn.message_id])
+                )
+        if not shared_task_ids:
+            raise EvalError(
+                "task-session context and targets must share a captured source task"
+            )
+
+
+def _source_task_ids(raw: dict[str, Any]) -> set[int]:
+    value: object = raw.get("source_task_ids")
+    if (
+        not isinstance(value, list)
+        or not value
+        or any(
+            isinstance(item, bool) or not isinstance(item, int) or item < 1
+            for item in cast(list[object], value)
+        )
+    ):
+        raise EvalError(
+            f"message {message_id_from_raw(raw)} has no valid source_task_ids"
+        )
+    return set(cast(list[int], value))
 
 
 def _validate_scenario_time_order(
@@ -264,6 +328,14 @@ def _validate_scenario_time_order(
             _require_increasing_message_order(
                 raws, "task-session setup and target message ids"
             )
+            if scenario.turns is not None:
+                for turn in scenario.turns:
+                    actual_revision = _source_revision(raw_messages[turn.message_id])
+                    if turn.source_revision != actual_revision:
+                        raise EvalError(
+                            "task-session turn source_revision does not match "
+                            f"captured message: {turn.message_id}"
+                        )
         _validate_task_session_chat(scenario, raw_messages)
         return
     if isinstance(scenario, FullChainScenario):
@@ -360,6 +432,16 @@ def _message_position(raw: dict[str, Any]) -> int:
     if isinstance(value, str) and value.isdigit():
         return int(value)
     return 0
+
+
+def _source_revision(raw: dict[str, Any]) -> int:
+    message_id = message_id_from_raw(raw)
+    if "source_revision" not in raw:
+        raise EvalError(f"message {message_id} is missing source_revision from capture")
+    value = raw["source_revision"]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise EvalError(f"message {message_id} has invalid source_revision")
+    return value
 
 
 def _safe_path_part(value: str) -> str:

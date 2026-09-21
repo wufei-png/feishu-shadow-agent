@@ -165,8 +165,8 @@ A lightweight emoji-only user action on a Feishu message. A Pure Reaction never 
 _Avoid_: follow-up, watch extension, acknowledgement signal, reaction command
 
 **Merged Forward**:
-A Feishu message of type merge_forward whose content embeds child messages — including their senders, timestamps, and bodies, possibly originating in other chats — as one expanded text block in the current chat. Child images and files are not downloadable from the container and are treated as undownloadable placeholders that never block processing; fetching them by child id is deferred until the acquisition chain exposes child message ids (an external lark-cli dependency, see ADR-0013).
-_Avoid_: sub-message ingestion, per-child resource download, cross-chat fetch
+A Feishu message of type merge_forward whose content embeds child messages — including their senders, timestamps, and bodies, possibly originating in other chats — as one expanded text block in the current chat. Directly addressable image and file markers are resource refs of the current top-level container, so the runtime downloads them using that container message ID; they never create a child task or trigger a child-ID/origin-chat fetch. A 2026-09-21 probe found that the apparent forwarded “file” was instead a `<folder>` collection key: downloading that key returned a server-mapped network `500`, while listing it and downloading its leaf files through the same container succeeded. Folder keys remain excluded from automatic resource downloads because recursively acquiring an entire collection needs its own limits and product policy. No child-ID or origin-chat fetch is permitted (see ADR-0013).
+_Avoid_: sub-message ingestion, automatic folder-child acquisition, cross-chat fetch
 
 **Cross-Chat Reference**:
 Content or reply/quote provenance that spans chats, typically carried into a chat by a Merged Forward. A Cross-Chat Reference is never a routing signal and never triggers fetching from the origin chat; it is context text of the current chat only.

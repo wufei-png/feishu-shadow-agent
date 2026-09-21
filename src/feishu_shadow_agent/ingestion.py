@@ -15,12 +15,17 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from .config import AppConfig
+from .feishu.lark_cli import LarkCliCommandError
 from .jsonl import JSONLLogger
-from .membership import bot_membership_error, record_bot_membership_failure
+from .membership import (
+    classify_bot_membership_absence,
+    record_bot_membership_absence,
+)
 from .message_eligibility import MessageEligibilityPolicy
 from .paths import resolve_agent_working_dir
 from .policy import PolicyResolver
 from .processing import ApprovalService, TaskProcessingService
+from .revision import message_semantic_hash
 from .routing import MessageRouter, RoutingResult
 from .store.sqlite_store import SQLiteStore
 from .time_utils import (
@@ -46,6 +51,10 @@ from .types import (
 class IngestionFeishuClient(Protocol):
     def auth_status(self, *, verify: bool = True) -> LarkCliResult: ...
 
+    def get_messages(
+        self, *, as_identity: str, message_ids: list[str]
+    ) -> MessagePage: ...
+
     def search_messages(
         self,
         *,
@@ -56,6 +65,7 @@ class IngestionFeishuClient(Protocol):
         page_token: str | None = None,
         query: str = "",
         page_size: int = 50,
+        page_limit: int = 1,
     ) -> MessagePage: ...
 
     def list_chat_messages(
@@ -91,12 +101,17 @@ class IngestionFeishuClient(Protocol):
 
 
 PAGE_SIZE = 50
+MAX_PROCESSING_RESERVE_SECONDS = 5.0
 FEISHU_MESSAGE_TIMEZONE = ZoneInfo("Asia/Shanghai")
 IMAGE_KEY_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])(img_[A-Za-z0-9_-]+)(?![A-Za-z0-9_-])"
 )
 FILE_KEY_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])(file_[A-Za-z0-9_-]+)(?![A-Za-z0-9_-])"
+)
+FOLDER_KEY_PATTERN = re.compile(
+    r"<folder\b[^>]*\bkey=[\"'](file_[A-Za-z0-9_-]+)[\"'][^>]*>",
+    re.IGNORECASE,
 )
 AT_USER_ID_PATTERN = re.compile(
     r"<at\s+[^>]*user_id=[\"']([^\"']+)[\"'][^>]*>", re.IGNORECASE
@@ -128,6 +143,37 @@ class DrainResult:
     next_page_token: str | None
     pages: int
     reason: str | None = None
+    fetch_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class ProcessingCursor:
+    """A replay-safe prefix of one fetched drain batch.
+
+    The cursor contains no raw message content.  The next tick re-fetches the
+    batch from the same page token and only skips this prefix after checking a
+    digest of its normalized routing inputs again.  A changed result is
+    replayed from its beginning rather than risk skipping a message.
+    """
+
+    completed_items: int
+    prefix_sha256: str
+
+
+@dataclass(frozen=True)
+class RawBatchResult:
+    """Outcome of a bounded raw-message pass.
+
+    ``processed`` follows the routing-stage convention: it counts calls that
+    produced a routing result.  Some consumers, notably approval inbox, handle
+    a raw command successfully without producing one, so ``handled_items``
+    retains the independent safe-boundary count for their stage result.
+    """
+
+    processed: int
+    handled_items: int
+    complete: bool
+    cursor: ProcessingCursor | None = None
 
 
 @dataclass(frozen=True)
@@ -135,6 +181,30 @@ class ResourceQuotaDecision:
     allow: bool
     status: str | None = None
     raw: dict[str, Any] | None = None
+
+
+def _token_fingerprint(token: str | None) -> str | None:
+    return None if token is None else sha256(token.encode()).hexdigest()[:16]
+
+
+def _json_error_summary(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    error = cast(dict[str, Any], value)
+    return {
+        key: error[key]
+        for key in ("code", "msg", "message", "request_id")
+        if isinstance(error.get(key), (str, int))
+    }
+
+
+def _redacted_cli_argv(argv: list[str]) -> list[str]:
+    sensitive = {"--page-token", "--chat-id", "--user-id"}
+    result = list(argv)
+    for index, value in enumerate(result[:-1]):
+        if value in sensitive:
+            result[index + 1] = "<redacted>"
+    return result
 
 
 def normalize_message_sent_at(value: str | None) -> str | None:
@@ -579,8 +649,8 @@ class ResourceProcessor:
                 )
             else:
                 self.quota.delete_downloaded_file(temporary_path)
-                membership_failure = _bot_invisible_error(result)
-                status = "bot_invisible" if membership_failure else "failed"
+                membership_absence = classify_bot_membership_absence(result)
+                status = "bot_invisible" if membership_absence else "failed"
                 self.store.upsert_resource(
                     resource,
                     download_status=status,
@@ -604,15 +674,17 @@ class ResourceProcessor:
                         "timed_out": result.timed_out,
                     },
                 )
-                if membership_failure:
-                    record_bot_membership_failure(
+                if membership_absence:
+                    record_bot_membership_absence(
                         store=self.store,
                         config=self.config,
                         logger=self.logger,
                         chat_id=message.chat_id,
+                        chat_type=message.chat_type,
                         run_id=run_id,
                         source="resource_download_failure",
                         error=result.error or result.stderr,
+                        absence=membership_absence,
                     )
 
     def _verified_existing_download(
@@ -860,6 +932,13 @@ class IngestionService:
         self.ingest_deadline = (
             self.monotonic() + config.daemon.ingest_tick_budget_seconds
         )
+        # Do not let a sequence of individually successful page calls consume
+        # the entire shared tick.  A bounded reserve lets the already-fetched
+        # batch reach a durable processing boundary in the same tick.
+        self.ingest_fetch_deadline = self.ingest_deadline - min(
+            MAX_PROCESSING_RESERVE_SECONDS,
+            config.daemon.ingest_tick_budget_seconds / 2,
+        )
 
     def run_approval_inbox_placeholder(self, *, run_id: str) -> StageResult:
         self.logger.emit(
@@ -1038,7 +1117,7 @@ class IngestionService:
             raise RuntimeError("bot open_id is missing from lark-cli auth status")
         window = self._window("approval_inbox", source="approval_inbox", run_id=run_id)
         drain = self._drain(
-            lambda token, page_size: self.feishu_client.list_p2p_messages(
+            lambda token, page_size, _page_limit: self.feishu_client.list_p2p_messages(
                 user_id=bot_open_id,
                 start=window.start,
                 end=window.end,
@@ -1051,17 +1130,25 @@ class IngestionService:
             max_pages=self.config.daemon.ingest_search_max_pages,
             max_messages=self.config.daemon.ingest_search_max_messages,
         )
-        self._process_raw_batch(
-            drain.items,
+        drain, batch = self._process_drain_batch(
+            window=window,
+            drain=drain,
+            raws=drain.items,
             source="approval_inbox",
             default_chat_type="p2p",
             run_id=run_id,
         )
-        self._record_drain(window, drain, run_id=run_id, source="approval_inbox")
+        self._record_drain(
+            window,
+            drain,
+            run_id=run_id,
+            source="approval_inbox",
+            processing_cursor=batch.cursor,
+        )
         return StageResult(
             "approval_inbox",
             ok=drain.complete,
-            processed=len(drain.items),
+            processed=batch.handled_items,
             error=None
             if drain.complete
             else f"approval inbox deferred: {drain.reason}",
@@ -1109,7 +1196,7 @@ class IngestionService:
                 key = f"active_watch.thread.{thread_id}"
                 window = self._window(key, source="active_watch", run_id=run_id)
                 drain = self._drain(
-                    lambda token, page_size, thread_id=thread_id: (
+                    lambda token, page_size, _page_limit, thread_id=thread_id: (
                         self.feishu_client.list_thread_messages(
                             thread_id=thread_id,
                             page_token=token,
@@ -1131,7 +1218,7 @@ class IngestionService:
                 window_start = window.start
                 window_end = window.end
                 drain = self._drain(
-                    lambda token, page_size, chat_id=chat_id, start=window_start, end=window_end: (
+                    lambda token, page_size, _page_limit, chat_id=chat_id, start=window_start, end=window_end: (
                         self.feishu_client.list_chat_messages(
                             chat_id=chat_id,
                             start=start,
@@ -1151,17 +1238,21 @@ class IngestionService:
                     default_chat_type=target["chat_type"],
                     now=now,
                 )
-            processed += self._process_raw_batch(
-                raws,
+            drain, batch = self._process_drain_batch(
+                window=window,
+                drain=drain,
+                raws=raws,
                 source="active_watch",
                 default_chat_type=target["chat_type"],
                 run_id=run_id,
             )
+            processed += batch.processed
             self._record_drain(
                 window,
                 drain,
                 run_id=run_id,
                 source="active_watch_thread" if thread_id else "active_watch_chat",
+                processing_cursor=batch.cursor,
             )
             if not drain.complete and drain.reason == "tick_budget_exhausted":
                 break
@@ -1178,7 +1269,7 @@ class IngestionService:
     ) -> StageResult:
         window = self._window(checkpoint_key, source=name, run_id=run_id)
         drain = self._drain(
-            lambda token, page_size: self.feishu_client.search_messages(
+            lambda token, page_size, page_limit: self.feishu_client.search_messages(
                 chat_type=chat_type,
                 is_at_me=is_at_me,
                 start=window.start,
@@ -1186,6 +1277,7 @@ class IngestionService:
                 page_token=token,
                 query="",
                 page_size=page_size,
+                page_limit=page_limit,
             ),
             window=window,
             run_id=run_id,
@@ -1193,14 +1285,22 @@ class IngestionService:
             max_pages=self.config.daemon.ingest_search_max_pages,
             max_messages=self.config.daemon.ingest_search_max_messages,
         )
-        processed = self._process_raw_batch(
-            drain.items,
+        drain, batch = self._process_drain_batch(
+            window=window,
+            drain=drain,
+            raws=drain.items,
             source=name,
             default_chat_type=chat_type,
             run_id=run_id,
         )
-        self._record_drain(window, drain, run_id=run_id, source=name)
-        return StageResult(name, ok=True, processed=processed)
+        self._record_drain(
+            window,
+            drain,
+            run_id=run_id,
+            source=name,
+            processing_cursor=batch.cursor,
+        )
+        return StageResult(name, ok=True, processed=batch.processed)
 
     def _process_raw_batch(
         self,
@@ -1209,18 +1309,164 @@ class IngestionService:
         source: str,
         default_chat_type: str | None,
         run_id: str,
-    ) -> int:
+        resume_cursor: ProcessingCursor | None = None,
+    ) -> RawBatchResult:
+        ordered = sorted(raws, key=_raw_sort_key)
+        completed_items = self._validated_processing_prefix(
+            ordered,
+            resume_cursor=resume_cursor,
+            source=source,
+            default_chat_type=default_chat_type,
+            run_id=run_id,
+        )
         processed = 0
-        for raw in sorted(raws, key=_raw_sort_key):
+        handled_items = 0
+        for raw in ordered[completed_items:]:
+            if self.monotonic() >= self.ingest_deadline:
+                prefix_sha256 = self._processing_prefix_sha256(
+                    ordered[:completed_items],
+                    default_chat_type=default_chat_type,
+                )
+                return RawBatchResult(
+                    processed=processed,
+                    handled_items=handled_items,
+                    complete=False,
+                    cursor=ProcessingCursor(
+                        completed_items=(
+                            completed_items if prefix_sha256 is not None else 0
+                        ),
+                        prefix_sha256=prefix_sha256 or sha256(b"").hexdigest(),
+                    ),
+                )
             result = self.process_raw_message(
                 raw,
                 source=source,
                 default_chat_type=default_chat_type,
                 run_id=run_id,
             )
+            completed_items += 1
+            handled_items += 1
             if result is not None:
                 processed += 1
-        return processed
+        return RawBatchResult(
+            processed=processed,
+            handled_items=handled_items,
+            complete=True,
+        )
+
+    def _process_drain_batch(
+        self,
+        *,
+        window: DrainWindow,
+        drain: DrainResult,
+        raws: list[dict[str, Any]],
+        source: str,
+        default_chat_type: str | None,
+        run_id: str,
+    ) -> tuple[DrainResult, RawBatchResult]:
+        batch = self._process_raw_batch(
+            raws,
+            source=source,
+            default_chat_type=default_chat_type,
+            run_id=run_id,
+            resume_cursor=self._processing_cursor(window),
+        )
+        if batch.complete:
+            return drain, batch
+        # The fetched tail has not completed routing.  Replay this same batch
+        # next tick instead of persisting the later token, which would skip it.
+        return (
+            replace(
+                drain,
+                complete=False,
+                next_page_token=window.page_token,
+                reason="tick_budget_exhausted",
+                fetch_reason=drain.reason,
+            ),
+            batch,
+        )
+
+    def _processing_cursor(self, window: DrainWindow) -> ProcessingCursor | None:
+        backlog_value = window.checkpoint.get("backlog")
+        if not isinstance(backlog_value, dict):
+            return None
+        backlog = cast(dict[str, Any], backlog_value)
+        processing_value = backlog.get("processing")
+        if not isinstance(processing_value, dict):
+            return None
+        processing = cast(dict[str, Any], processing_value)
+        completed_items = processing.get("completed_items")
+        prefix_sha256 = processing.get("prefix_sha256")
+        if (
+            not isinstance(completed_items, int)
+            or completed_items < 0
+            or not isinstance(prefix_sha256, str)
+            or len(prefix_sha256) != 64
+        ):
+            return None
+        return ProcessingCursor(
+            completed_items=completed_items,
+            prefix_sha256=prefix_sha256,
+        )
+
+    def _validated_processing_prefix(
+        self,
+        raws: list[dict[str, Any]],
+        *,
+        resume_cursor: ProcessingCursor | None,
+        source: str,
+        default_chat_type: str | None,
+        run_id: str,
+    ) -> int:
+        if resume_cursor is None or resume_cursor.completed_items == 0:
+            return 0
+        if resume_cursor.completed_items <= len(raws):
+            prefix = raws[: resume_cursor.completed_items]
+            prefix_sha256 = self._processing_prefix_sha256(
+                prefix, default_chat_type=default_chat_type
+            )
+            if (
+                prefix_sha256 is not None
+                and prefix_sha256 == resume_cursor.prefix_sha256
+            ):
+                return resume_cursor.completed_items
+        self.logger.warning(
+            "ingestion_processing_cursor_reset",
+            run_id=run_id,
+            data={
+                "source": source,
+                "completed_items": resume_cursor.completed_items,
+                "available_items": len(raws),
+                "reason": "replayed_prefix_changed",
+            },
+        )
+        return 0
+
+    def _processing_prefix_sha256(
+        self,
+        raws: list[dict[str, Any]],
+        *,
+        default_chat_type: str | None,
+    ) -> str | None:
+        digest = sha256()
+        for raw in raws:
+            try:
+                message = self.normalizer.normalize(
+                    raw, default_chat_type=default_chat_type
+                )
+            except Exception:  # noqa: BLE001
+                # A malformed item has no stable normalized identity.  Do not
+                # skip an earlier prefix on the next replay.
+                return None
+            encoded = json.dumps(
+                _processing_replay_identity(message),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            digest.update(len(encoded).to_bytes(8, byteorder="big"))
+            digest.update(encoded)
+        return digest.hexdigest()
 
     def process_raw_message(
         self,
@@ -1283,6 +1529,40 @@ class IngestionService:
             )
             raise
         upsert = self.store.upsert_message_with_revision(message)
+        if upsert.requires_confirmation:
+            page = self.feishu_client.get_messages(
+                as_identity="user", message_ids=[message.message_id]
+            )
+            current_raw = next(
+                (
+                    item
+                    for item in page.items
+                    if _first_string(item, "message_id", "messageId", "id")
+                    == message.message_id
+                ),
+                None,
+            )
+            if current_raw is None:
+                raise RuntimeError(
+                    f"could not verify current message snapshot: {message.message_id}"
+                )
+            current = self.normalizer.normalize(
+                current_raw, default_chat_type=message.chat_type
+            )
+            self.logger.info(
+                "message_current_snapshot_refetched",
+                run_id=run_id,
+                data={
+                    "message_id": message.message_id,
+                    "polled_snapshot_current": (
+                        message_semantic_hash(current) == message_semantic_hash(message)
+                    ),
+                },
+            )
+            message = current
+            upsert = self.store.upsert_message_with_revision(
+                message, confirmed_current=True
+            )
         message = replace(
             message,
             revision=upsert.revision,
@@ -1598,6 +1878,7 @@ class IngestionService:
         *,
         run_id: str,
         source: str,
+        processing_cursor: ProcessingCursor | None = None,
     ) -> None:
         previous_backlog_value = window.checkpoint.get("backlog")
         previous_backlog = (
@@ -1642,12 +1923,12 @@ class IngestionService:
                 },
             )
             return
-        value = {
+        value: dict[str, Any] = {
             key: value
             for key, value in window.checkpoint.items()
             if key not in {"backlog", "last_drain"}
         }
-        value["backlog"] = {
+        backlog: dict[str, Any] = {
             "start": window.start,
             "end": window.end,
             "next_page_token": drain.next_page_token,
@@ -1661,6 +1942,14 @@ class IngestionService:
                 else 0
             ),
         }
+        if drain.fetch_reason is not None:
+            backlog["fetch_reason"] = drain.fetch_reason
+        if processing_cursor is not None:
+            backlog["processing"] = {
+                "completed_items": processing_cursor.completed_items,
+                "prefix_sha256": processing_cursor.prefix_sha256,
+            }
+        value["backlog"] = backlog
         self.store.set_checkpoint(window.checkpoint_key, value)
         self.logger.emit(
             "warning",
@@ -1675,7 +1964,14 @@ class IngestionService:
                 "messages_fetched": len(drain.items),
                 "has_next_page_token": drain.next_page_token is not None,
                 "reason": drain.reason,
+                "fetch_reason": drain.fetch_reason,
                 "checkpoint_advanced": False,
+                "processing_items_completed": (
+                    processing_cursor.completed_items
+                    if processing_cursor is not None
+                    else None
+                ),
+                "processing_cursor_saved": processing_cursor is not None,
             },
         )
 
@@ -1688,6 +1984,7 @@ class IngestionService:
         backlog = cast(dict[str, Any], backlog_value)
         reset_backlog = dict(backlog)
         reset_backlog["next_page_token"] = None
+        reset_backlog.pop("processing", None)
         reset_backlog["reason"] = "page_token_reset_after_fetch_failure"
         reset_backlog["updated_at"] = self.clock()
         reset_backlog["restart_count"] = int(backlog.get("restart_count", 0)) + 1
@@ -1729,7 +2026,7 @@ class IngestionService:
 
     def _drain(
         self,
-        fetch_page: Callable[[str | None, int], MessagePage],
+        fetch_page: Callable[[str | None, int, int], MessagePage],
         *,
         window: DrainWindow,
         max_pages: int,
@@ -1750,38 +2047,65 @@ class IngestionService:
                 return DrainResult(
                     items, False, page_token, page_number, "message_cap_exhausted"
                 )
-            if self.monotonic() >= self.ingest_deadline:
+            now = self.monotonic()
+            if now >= self.ingest_deadline:
                 return DrainResult(
                     items, False, page_token, page_number, "tick_budget_exhausted"
                 )
-            page_size = min(PAGE_SIZE, max_messages - len(items))
+            if items and now >= self.ingest_fetch_deadline:
+                return DrainResult(
+                    items, False, page_token, page_number, "tick_budget_exhausted"
+                )
+            remaining_messages = max_messages - len(items)
+            remaining_pages = max_pages - page_number
+            page_size = min(PAGE_SIZE, remaining_messages)
             try:
-                page = fetch_page(page_token, page_size)
+                page = fetch_page(page_token, page_size, remaining_pages)
             except Exception as exc:
                 if page_number == 0 and window.page_token is not None:
                     self._reset_resumed_token(window, run_id=run_id, source=source)
+                data: dict[str, Any] = {
+                    "source": source,
+                    "page_number": page_number + 1,
+                    "has_page_token": page_token is not None,
+                    "page_token_sha256": _token_fingerprint(page_token),
+                    "error": str(exc),
+                }
+                if isinstance(exc, LarkCliCommandError):
+                    result = exc.result
+                    data.update(
+                        {
+                            "cli_exit_code": result.exit_code,
+                            "cli_timed_out": result.timed_out,
+                            "cli_stderr": result.stderr[:500],
+                            "cli_json_error": _json_error_summary(result.json_data),
+                            "cli_argv": _redacted_cli_argv(result.argv),
+                        }
+                    )
                 self.logger.error(
                     "message_page_fetch_failed",
                     run_id=run_id,
-                    data={
-                        "source": source,
-                        "page_number": page_number + 1,
-                        "has_page_token": page_token is not None,
-                        "error": str(exc),
-                    },
+                    data=data,
                 )
                 raise
-            if len(page.items) > page_size:
+            if len(page.items) > remaining_messages:
                 raise RuntimeError(
-                    f"message page returned {len(page.items)} items above requested {page_size}"
+                    "message page returned "
+                    f"{len(page.items)} items above remaining {remaining_messages}"
                 )
-            page_number += 1
+            if page.page_count < 1 or page.page_count > remaining_pages:
+                raise RuntimeError(
+                    "message page reported "
+                    f"{page.page_count} pages outside remaining {remaining_pages}"
+                )
+            page_number += page.page_count
             self.logger.debug(
                 "message_page_fetched",
                 run_id=run_id,
                 data={
                     "source": source,
                     "page_number": page_number,
+                    "page_count": page.page_count,
                     "items": len(page.items),
                     "has_more": page.has_more,
                     "has_next_page_token": bool(page.next_page_token),
@@ -1933,11 +2257,7 @@ def _message_type(raw: dict[str, Any], content: dict[str, Any]) -> str | None:
 def _resources(
     message_id: str, raw: dict[str, Any], content: dict[str, Any]
 ) -> list[ResourceRef]:
-    message_type = _message_type(raw, content)
-    if message_type == "merge_forward":
-        # Feishu renders forwarded child resources as text placeholders, but the
-        # message resource API cannot reliably download them from the container.
-        return []
+    folder_keys = _folder_keys(raw, content)
     resources: dict[tuple[str, str], ResourceRef] = {}
     for node in _walk([raw, content]):
         if isinstance(node, dict):
@@ -1948,7 +2268,7 @@ def _resources(
                     message_id, image_key, "image", node_map
                 )
             file_key = _first_string(node_map, "file_key", "fileKey")
-            if file_key:
+            if file_key and file_key not in folder_keys and not _is_folder(node_map):
                 resources[("file", file_key)] = ResourceRef(
                     message_id, file_key, "file", node_map
                 )
@@ -1964,6 +2284,8 @@ def _resources(
                     ),
                 )
             for file_key in FILE_KEY_PATTERN.findall(node):
+                if file_key in folder_keys:
+                    continue
                 resources.setdefault(
                     ("file", file_key),
                     ResourceRef(
@@ -1974,6 +2296,23 @@ def _resources(
                     ),
                 )
     return list(resources.values())
+
+
+def _folder_keys(raw: dict[str, Any], content: dict[str, Any]) -> set[str]:
+    keys: set[str] = set()
+    for node in _walk([raw, content]):
+        if isinstance(node, str):
+            keys.update(FOLDER_KEY_PATTERN.findall(node))
+        elif isinstance(node, dict):
+            node_map = cast(dict[str, Any], node)
+            file_key = _first_string(node_map, "file_key", "fileKey")
+            if file_key and _is_folder(node_map):
+                keys.add(file_key)
+    return keys
+
+
+def _is_folder(value: dict[str, Any]) -> bool:
+    return value.get("is_folder") is True or value.get("isFolder") is True
 
 
 def _walk(value: Any) -> list[Any]:
@@ -2026,6 +2365,31 @@ def _raw_sort_key(raw: dict[str, Any]) -> tuple[float, str]:
         parsed.timestamp() if parsed is not None else float("-inf"),
         _first_string(raw, "message_id", "messageId", "id") or "",
     )
+
+
+def _processing_replay_identity(message: NormalizedMessage) -> dict[str, Any]:
+    """Return exactly the normalized fields that can affect replay behavior."""
+    return {
+        "message_id": message.message_id,
+        "sent_at": message.sent_at,
+        "chat_id": message.chat_id,
+        "chat_type": message.chat_type,
+        "sender_id": message.sender_id,
+        "sender_type": message.sender_type,
+        "sender_role": message.sender_role,
+        "thread_id": message.thread_id,
+        "reply_to_message_id": message.reply_to_message_id,
+        "text": message.text,
+        "direct_mention": message.direct_mention,
+        "at_all": message.at_all,
+        "mentions": sorted(message.mentions),
+        "message_type": message.message_type,
+        "resources": sorted(
+            (resource.file_key, resource.resource_type)
+            for resource in message.resources
+        ),
+        "is_deleted": message.is_deleted,
+    }
 
 
 def _filter_raws_in_window(
@@ -2143,7 +2507,3 @@ def _normalized_download_result(
     if result_map.get("output") != temporary_output:
         return result_map
     return result_map | {"output": final_output}
-
-
-def _bot_invisible_error(result: Any) -> bool:
-    return isinstance(result, LarkCliResult) and bot_membership_error(result)

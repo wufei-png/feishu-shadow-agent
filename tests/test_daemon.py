@@ -1212,7 +1212,7 @@ def test_ingestion_budget_exhaustion_still_runs_dispatch_and_retention(
 def test_source_rotation_lets_other_ingestion_progress_under_repeated_budget_pressure(
     tmp_path: Path,
 ) -> None:
-    monotonic_values = iter([0.0, 0.0, 2.0, 2.0, 10.0, 10.0, 12.0, 12.0])
+    monotonic_values = iter([0.0, 0.0, 0.0, 2.0, 2.0, 10.0, 10.0, 10.0, 12.0])
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     logger = JSONLLogger(tmp_path / "agent.jsonl")
     suite = FakeHealthSuite(

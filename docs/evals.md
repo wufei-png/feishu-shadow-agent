@@ -187,6 +187,25 @@ resources: []
 
 Resume 会把全部 setup messages 作为一个真实 initial turn 执行。只有拿到真实 provider session id 后才 attach target，并按生产规则只把 target 送入 resume prompt；setup 失败不会回退为 initial。
 
+需要记录在 initial prompt 中真实可见、但本身不应触发后端调用的前置消息时，resume 可以使用有序 `turns`。timeline 的每项都必须记录 capture 从生产 SQLite 写入的 `source_revision`；capture 只有在 Feishu 快照的语义内容与存储的当前修订一致时才写入该字段，loader 会与 `messages.jsonl` 中的同名字段核对，缺失时拒绝加载，不能自行补成 1。`context` 还必须带有 capture 写入的 `source_task_membership: true` 和非空 `source_task_ids`；所有 context 与 target 必须共享同一个生产 task ID。只有布尔 membership、不同 task 的消息或来源内容不符的快照不能伪装成可重放上下文。`context` 只能出现在第一个 `target` 之前：它们与第一个 target 一起进入 initial prompt，因此不会产生额外调用。owner 消息在生产中只会触发接管或忽略，不能作为 timeline 的 `context` 或 `target`。第一个 target 之后的 context 在生产 resumed session 中不会自动传给 provider，评测不得把这种不可见上下文伪装为可重放事实。
+
+```yaml
+schema_version: eval_case_v1
+case_type: task-session
+mode: resume
+turns:
+  - message_id: om_1
+    kind: context
+    source_revision: 1
+  - message_id: om_2
+    kind: target
+    source_revision: 1
+  - message_id: om_3
+    kind: target
+    source_revision: 1
+resources: []
+```
+
 Golden labels：
 
 ```yaml
