@@ -8,6 +8,8 @@
 
 **2026-09-21 固定条件重跑（不完整）：**active suite 的 16 个 case 只有 6 个匹配当前 owner，其中 4 个含 owner intervention 而不能忠实 replay；剩余 2 个（1 initial、1 legacy resume）在 Codex / `gpt-5.6-luna`、`xhigh`、`read_only`、`repeat=1` 和 run config hash `9b36317085cae9640ed299b5a62befdc784e91dcf1bc0cea245cfaf3c154578e` 下运行。2/2 未通过：1 个结构失败且不进入 semantic judge；1 个结构通过但被判各 1 个 minor omission 与 minor unsupported addition。两次最终显式 prompt 分别为 3105、3149 字符，运行时 skill trace 均可用。P22 尚无有效替代样本，且没有结构化 token、费用或端到端 duration，因此这些结果只保留为当次失败证据，不构成完整 S10 基线、稳定性结论或生产上下文变更依据。
 
+**2026-09-21 来源校验修复后复跑：**同两条有效 case、同一 run config hash、Codex / `gpt-5.6-luna`、`xhigh`、`read_only`、`repeat=1` 下，结果仍为 `0/2`。legacy resume 的结构失败字段为 `answerability` 和 `decision_reason`，显式最终 prompt 为 3105 字符；initial 的结构通过、semantic `partial`，包含 1 个 minor omission 和 1 个 minor unsupported addition，显式 prompt 为 3149 字符。initial 的 skill trace 导出报 `invalid_jsonl`，该次不能声称 skill 加载已被验证；另一条 trace 为 available。case config hash 分别为 `9b36317085cae9640ed299b5a62befdc784e91dcf1bc0cea245cfaf3c154578e`、`98634ab11429d5c831f96ad30ed339973cb84cd7bcd0bf74d9104130e287ed46`。没有有效 P22 golden，以上仍不是完整 S10 基线；原始报告只留在 ignored `data/evals/runs/`。
+
 ## 范围与样本
 
 - 当前运行库只有 3 条消息、1 个任务，且没有可用的 feedback、agent audit 或 processing failure，不能作为当前质量基线。

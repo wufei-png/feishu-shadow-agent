@@ -26,3 +26,4 @@ S9 的五个旧样本曾给出过度转交、事实遗漏等当次失败；另�
 - 当前运行库以新 schema 重建后含 1,001 条受控测试消息，但没有生产 task 或 `task_messages`。因此不能从该库为旧 P22 生成可信的多轮 task 来源证明。active suite 中匹配当前 owner 的 6 个 case，4 个含 owner 接管；另外 2 个维持既有有效 S9 基线资格。
 - 从真实飞书消息中补捕一个当前 owner 的独立单轮技术问题，保存为 ignored `data/evals/captured/` 的 review draft；`run-task-session --dry-run-backend` 通过结构检查。其唯一目标发生在 owner 后续回复之前，但缺少可独立核验的标准答案，未 promotion，也未用于调参或候选通过判定。原始消息和配置不进入 Git。
 - 06 仍为部分完成：需要新的生产 Task Session 多轮来源和经审核的人工标签，才能建立有效 P22 基线；不得把测试群 marker、接管后的 owner 事实或模型中间回答填作生产可见上下文。
+- 同两条有效 S9 case 在固定 `repeat=1` 条件下再运行，仍为 `0/2`：1 个结构失败，1 个结构通过但有 1 minor omission 与 1 minor unsupported addition；后一条 skill trace 导出为 `invalid_jsonl`，不能据此确认 skill 加载。见[S9 脱敏记录](../s9-answer-quality-baseline.md)。
