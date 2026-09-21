@@ -21,7 +21,7 @@ from fastapi import (
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.base import RequestResponseEndpoint
 
 from .config import LoadedConfig
@@ -55,7 +55,13 @@ from .replay import replay_message_dry_run
 from .settings_catalog import settings_catalog
 from .store.sqlite_store import SQLiteStore
 from .time_utils import shift_instant
-from .types import ActionStatus, ApprovalStatus, TaskStatus, utc_now_iso
+from .types import (
+    ActionStatus,
+    ApprovalStatus,
+    ApprovalTargetBinding,
+    TaskStatus,
+    utc_now_iso,
+)
 
 _ASSET_REF_PATTERN = re.compile(r"""(?:src|href)=["'](/assets/[^"']+)["']""")
 LOCAL_CONSOLE_ACTOR = "local_console"
@@ -82,6 +88,26 @@ class CommandRequest(BaseModel):
     command_id: str | None = None
     final_reply: str | None = None
     sent_message_id: str | None = None
+
+
+class ApprovalCommandRequest(CommandRequest):
+    expected_task_id: int | None
+    expected_source_message_id: str | None
+    expected_source_revision: Annotated[int, Field(ge=1)] | None
+
+    def target_binding(self) -> ApprovalTargetBinding:
+        return ApprovalTargetBinding(
+            task_id=self.expected_task_id,
+            source_message_id=self.expected_source_message_id,
+            source_revision=self.expected_source_revision,
+        )
+
+
+class TaskBackgroundRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str | None
+    reason: str | None = None
 
 
 class PolicyImportRequest(BaseModel):
@@ -288,10 +314,10 @@ def create_console_app(
     def approvals(
         limit: Annotated[int, Query(ge=1, le=100)] = 20,
         offset: Annotated[int, Query(ge=0)] = 0,
-        status: ApprovalStatus | None = None,
+        status: Annotated[list[ApprovalStatus] | None, Query()] = None,
     ) -> list[dict[str, Any]]:
         return query_service().list_approvals(
-            status=None if status is None else status.value,
+            statuses=None if status is None else tuple(item.value for item in status),
             limit=limit,
             offset=offset,
         )
@@ -441,19 +467,37 @@ def create_console_app(
             result=result,
         ).as_dict()
 
-    @api.post("/approvals/{approval_id}/approve")
-    def approve_approval(
-        approval_id: str,
+    @api.post("/messages/{message_id}/processing/{stage}/retry")
+    def retry_message_processing(
+        message_id: str,
+        stage: str,
         body: Annotated[CommandRequest | None, Body()] = None,
     ) -> dict[str, Any]:
         payload = body or CommandRequest()
         return (
             command_service()
+            .retry_processing(
+                message_id,
+                stage=stage,
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=payload.reason,
+            )
+            .as_dict()
+        )
+
+    @api.post("/approvals/{approval_id}/approve")
+    def approve_approval(
+        approval_id: str,
+        body: Annotated[ApprovalCommandRequest, Body()],
+    ) -> dict[str, Any]:
+        return (
+            command_service()
             .approve(
                 approval_id,
                 actor=LOCAL_CONSOLE_ACTOR,
-                reason=payload.reason,
-                command_id=payload.command_id,
+                reason=body.reason,
+                command_id=body.command_id,
+                target_binding=body.target_binding(),
             )
             .as_dict()
         )
@@ -461,16 +505,35 @@ def create_console_app(
     @api.post("/approvals/{approval_id}/reject")
     def reject_approval(
         approval_id: str,
-        body: Annotated[CommandRequest | None, Body()] = None,
+        body: Annotated[ApprovalCommandRequest, Body()],
     ) -> dict[str, Any]:
-        payload = body or CommandRequest()
         return (
             command_service()
             .reject(
                 approval_id,
                 actor=LOCAL_CONSOLE_ACTOR,
-                reason=payload.reason,
-                command_id=payload.command_id,
+                reason=body.reason,
+                command_id=body.command_id,
+                target_binding=body.target_binding(),
+            )
+            .as_dict()
+        )
+
+    @api.post("/approvals/{approval_id}/send")
+    def send_approval(
+        approval_id: str,
+        body: Annotated[ApprovalCommandRequest, Body()],
+    ) -> dict[str, Any]:
+        final_reply = _required_text(body.final_reply, field="final_reply")
+        return (
+            command_service()
+            .send(
+                approval_id,
+                final_reply,
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=body.reason,
+                command_id=body.command_id,
+                target_binding=body.target_binding(),
             )
             .as_dict()
         )
@@ -525,6 +588,22 @@ def create_console_app(
                 ),
                 actor=LOCAL_CONSOLE_ACTOR,
                 reason=payload.reason,
+            )
+            .as_dict()
+        )
+
+    @api.patch("/tasks/{task_id}/background")
+    def update_task_background(
+        task_id: str,
+        body: Annotated[TaskBackgroundRequest, Body()],
+    ) -> dict[str, Any]:
+        return (
+            command_service()
+            .update_task_background(
+                task_id,
+                content=body.content,
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=body.reason,
             )
             .as_dict()
         )

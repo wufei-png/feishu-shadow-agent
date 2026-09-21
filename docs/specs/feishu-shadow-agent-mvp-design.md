@@ -233,13 +233,11 @@ agent_message
 
 ## 6. Tick 顺序
 
-每轮 tick 顺序：
+每轮 tick 先处理 approval inbox；其后的摄取来源轮转首个执行机会，避免共享预算耗尽时固定饿死后续来源：
 
 ```text
 1. approval inbox
-2. group_at_me ingest
-3. p2p ingest
-4. active task watch
+2–4. group_at_me ingest / p2p ingest / active task watch（跨 tick 轮转）
 5. pending actions dispatch
 ```
 
@@ -255,7 +253,7 @@ checkpoint: active_watch.thread.<thread_id>
 
 每个入口只在对应阶段“拉取 + 入库 + 初步归属处理”成功后推进 checkpoint。
 
-ingest 分页必须 drain 完再推进 checkpoint：同一窗口内如果 `messages-search` / `chat-messages-list` / `threads-messages-list` 还有下一页，必须继续拉取并完成入库与初步归属。任何分页、入库或归属失败，都不推进该入口 checkpoint。
+ingest 分页必须在 fetch、入库和初步归属处理都完成后才推进 `last_success_at`，且 tick 共享时间预算覆盖这三个阶段。cross-chat search 可在单次 CLI `--page-all` 调用中读取剩余 page cap 内的页数，但聚合结果仍按实际页数计入既有 cap 并保留末页 token。已取得至少一页后，fetch 会在总预算前预留最多 5 秒（且不超过预算的一半）给处理阶段；这不改变 page/message cap 或总预算。页数、消息数或时间预算耗尽时，固定窗口、下一页 token 和累计进度作为 backlog 保留到后续 tick；若时间在已取回批次的消息边界耗尽，则保留该批次起始 token 与不含原文、但包含 message ID、排序时间和所有路由语义字段的已完成归一化前缀摘要，后续 tick 重拉并仅在摘要匹配时跳过此前完成的前缀；易变的搜索 enrichment 不影响匹配。处理失败、摘要不匹配或恢复 token 首次请求失败都不保存更晚的下一页进度；token 失败清除 cursor 并从同一固定窗口重拉，依靠 message revision 与 routing audit 幂等去重。详细恢复契约见 [ADR-0016](../adr/0016-ingest-caps-defer-not-truncate.md)。
 
 同一 chat/thread 在同一 tick 拉到多条消息时，按 `create_time asc, message_id asc` 逐条处理。每条消息完成 normalize、去重、归属和必要的 task 状态更新后，再处理下一条，避免后到消息先被错误 attach 到 active task。
 
@@ -441,7 +439,7 @@ Task Session:
   后续 follow-up 使用 agent backend 的 resume/session 机制；Hermes backend 对应 `hermes chat --resume <agent_session_id>`。
 ```
 
-数据库只按当前 schema 从空库初始化；旧库和旧 `agent_session_id` 格式不读取、不识别、不迁移。同一飞书 thread 后续消息可以挂到同一个 task session。
+数据库可从空库初始化当前 schema，也可迁移代码明确支持且带版本标记的旧 schema；未标记或不受支持的布局不会被猜测迁移。旧 `agent_session_id` 格式仍不读取、不识别、不迁移。同一飞书 thread 后续消息可以挂到同一个 task session。
 
 Hermes 输出必须是严格 JSON，由 Python schema 校验。校验失败降级 owner 审批。
 
@@ -471,7 +469,7 @@ Reply Context 只保留回复目标安全所需的字段，不携带 task/messag
 - chat_type（非空时）
 ```
 
-Messages 是 prompt 内飞书正文的唯一权威来源。Task Session 不再重复 task label 或 Context Access message snapshot；每条消息保留 message id、sender name/role、sent time 和正文，thread/reply-to 只在非空时展示。当前消息和 root 只出现在 Reply Context 的 id 字段里，Messages 标题不再标注 `(current)` / `(root)`。资源为空时连 `## Resources` 标题也不出现。Context Access 只提供 read-only URI、allowed tables 与当前 task query scope。Output Contract 精简说明最终字段和交叉约束；完整 Pydantic schema 不重复嵌入业务 prompt，支持结构化输出的 backend 仍通过原生参数接收 schema。
+Messages 是 prompt 内飞书正文的唯一权威来源。Task Session 不再重复 task label 或 Context Access message snapshot；每条消息保留 message id、sender name/role、sent time 和正文，thread/reply-to 只在非空时展示。当前消息和 root 只出现在 Reply Context 的 id 字段里，Messages 标题不再标注 `(current)` / `(root)`。资源为空时连 `## Resources` 标题也不出现。Owner 通过 Operator Command 维护的任务背景是独立、任务级、带版本的补充证据，只在 fresh provider session 构建时注入；resumed session 不重复注入，且较新的 Messages 冲突时优先。Context Access 只提供 read-only URI、allowed tables 与当前 task query scope。Output Contract 精简说明最终字段和交叉约束；完整 Pydantic schema 不重复嵌入业务 prompt，支持结构化输出的 backend 仍通过原生参数接收 schema。
 
 Task Session 初次处理：
 
@@ -574,6 +572,9 @@ thread:<thread_id>
   mentions 包含 owner
 则进入候选，由 TaskMatcher 处理
 ```
+
+这里的 mention 仅指直接 `@owner`；顺带提及其他成员不构成激活或任务归属
+信号。所有 watch key 和消息引用匹配都必须限定在当前 `chat_id`。
 
 `included_messages` 是任务消息关联表，只用于去重、审计、构建 Hermes 输入，不参与跟踪判断。
 
@@ -688,11 +689,11 @@ target_task_id
 可跳过 TaskRouter 的确定性 shortcut：
 
 ```text
-群聊有 thread_id:
-  thread:<thread_id> 唯一命中 active task。
-
 群聊 reply_to:
   reply_to 的 msg key 唯一命中 active task。
+
+群聊有 thread_id:
+  thread:<thread_id> 唯一命中 active task。
 
 burst window:
   source 是 p2p 或 group_at_me。
@@ -702,6 +703,11 @@ burst window:
   过滤后唯一 burst-eligible active task 命中时 attach_task，
   matched_by=burst_window，不调用 TaskRouter。
 ```
+
+优先级固定为：同 message revision 的既有 active task、`reply_to`、`thread`、
+burst window、TaskRouter。高优先级唯一命中时，即使低优先级信号指向另一
+active task，也使用高优先级结果并在 routing audit 中记录 `matched_by`。
+跨 chat 的 reply/thread 不参与候选，也不触发跨 chat 抓取。
 
 P2P single-active 不能无条件 attach。只有满足 burst window 或 reply/thread
 结构性 shortcut 时才可跳过 TaskRouter；窗口外的普通 follow-up 仍必须经
@@ -1164,15 +1170,4 @@ prepare_send
 
 ## 26. 后续迭代
 
-明确后续但不进 MVP：
-
-- macOS LaunchAgent / Windows service / Ubuntu systemd。
-- 本地 Web UI / TUI 审批台。历史说明：本地 Operator Console 已由后续 P15-P18 落地；远程 Web UI、多用户 UI 和桌面二进制仍不在当前范围。
-- 飞书交互卡片。
-- 配置 UI 和 `ApprovalRequest(type=config_change)`。
-- `/reply` 补充背景。
-- `/retry` 重试资源下载或任务处理。
-- per-user policy UI。
-- SDK 接入和自管 OAuth token。
-- 向量检索历史任务。
-- 更细资源下载策略和文件类型分析。
+本节是 MVP 基线的历史记录；当前未完成的 post-MVP 工作统一见 [Post-MVP Backlog](../plans/post-mvp-backlog.md)，本节不重复列出。

@@ -269,8 +269,11 @@ def test_codex_cli_applies_silent_instruction_only_to_task_sessions() -> None:
     router = client.structured_output("judge input", output_model=TaskRouterOutput)
     initial = client.task_session("task input")
     resumed = client.task_session("follow-up task input", session_id="thread_1")
+    revision = client.structured_task_session(
+        "revision task input", output_model=TaskRouterOutput
+    )
 
-    assert router.ok and initial.ok and resumed.ok
+    assert router.ok and initial.ok and resumed.ok and revision.ok
     override = "developer_instructions=" + json.dumps(
         TASK_SESSION_DEVELOPER_INSTRUCTIONS
     )

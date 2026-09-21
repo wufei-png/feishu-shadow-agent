@@ -126,6 +126,33 @@ def test_hermes_structured_output_does_not_inject_task_session_skills() -> None:
     assert "--skills" not in seen[0]
 
 
+def test_hermes_structured_task_session_injects_task_session_skills() -> None:
+    seen: list[list[str]] = []
+
+    def runner(argv: list[str], timeout: int) -> AgentRunResult:
+        seen.append(argv)
+        return AgentRunResult(
+            argv=argv,
+            exit_code=0,
+            stdout='{"answerability":"no_reply","decision_reason":"no_response_needed",'
+            '"proposed_reply":"","reply_target_message_id":null,"watch_action":"keep_watching"}',
+        )
+
+    client = HermesCliClient(
+        config=HermesConfig(path="hermes"),
+        session_skills=["/skills/docmate"],
+        runner=runner,
+    )
+
+    result = client.structured_task_session(
+        "revision task", output_model=TaskRouterOutput
+    )
+
+    assert result.ok
+    assert "--skills" in seen[0]
+    assert seen[0][seen[0].index("--skills") + 1] == "/skills/docmate"
+
+
 def test_hermes_cli_parses_json_and_session_id() -> None:
     def runner(argv: list[str], timeout: int) -> AgentRunResult:
         return AgentRunResult(

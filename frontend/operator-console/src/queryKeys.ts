@@ -7,7 +7,7 @@ export const queryKeys = {
   dashboard: () => ["dashboard"] as const,
   healthIssues: () => ["health-issues"] as const,
   feedbackOverview: (executionMode: FeedbackExecutionMode) => ["feedback-overview", executionMode] as const,
-  approvals: (filters: { status?: ApprovalStatus | ApprovalFilter; limit?: number; offset?: number }) =>
+  approvals: (filters: { status?: ApprovalStatus | ApprovalStatus[] | ApprovalFilter; limit?: number; offset?: number }) =>
     ["approvals", filters] as const,
   approval: (approvalId: string | null) => ["approval", approvalId] as const,
   tasks: (filters: { status?: TaskStatus | "all"; chat_id?: string; limit?: number; offset?: number }) =>

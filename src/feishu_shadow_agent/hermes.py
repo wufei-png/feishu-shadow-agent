@@ -151,6 +151,17 @@ class HermesCliClient:
             cwd=cwd,
         )
 
+    def structured_task_session(
+        self,
+        prompt: str,
+        *,
+        output_model: type[BaseModel],
+        session_id: str | None = None,
+        cwd: str | Path | None = None,
+    ) -> AgentRunResult:
+        del output_model
+        return self.task_session(prompt, session_id=session_id, cwd=cwd)
+
     def structured_output(
         self,
         prompt: str,

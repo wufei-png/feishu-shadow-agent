@@ -2,7 +2,7 @@ import { useMutation } from "@tanstack/react-query";
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { Bot, FileText, GitBranch, PackageSearch, RotateCcw, Send } from "lucide-react";
-import { getMessageDetail, replayMessage } from "../api";
+import { getMessageDetail, replayMessage, retryMessageProcessing } from "../api";
 import {
   Badge,
   Button,
@@ -30,9 +30,21 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
     mutationFn: (targetMessageId: string) => replayMessage(token, targetMessageId),
     onError: (error) => errorResult("message.replay_dry_run", error)
   });
+  const retryProcessing = useMutation({
+    mutationFn: ({ targetMessageId, stage }: { targetMessageId: string; stage: string }) =>
+      retryMessageProcessing(token, targetMessageId, stage, {}),
+    onSuccess: async () => {
+      await detail.refetch();
+    }
+  });
   const replayResult =
     replay.variables === messageId
       ? (replay.data as CommandResult | undefined) ?? (replay.error ? errorResult("message.replay_dry_run", replay.error) : null)
+      : null;
+  const retryResult =
+    retryProcessing.variables?.targetMessageId === messageId
+      ? (retryProcessing.data as CommandResult | undefined) ??
+        (retryProcessing.error ? errorResult("processing.retry", retryProcessing.error) : null)
       : null;
 
   if (!messageId) {
@@ -109,17 +121,30 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
         </div>
         {detail.data.processing.length ? (
           <ul className="timeline-list">
-            {detail.data.processing.map((item) => (
-              <li key={item.id}>
-                <PackageSearch aria-hidden="true" size={14} />
-                <span>{item.stage}</span>
-                <small>{`${item.status}${item.terminal_reason ? ` · ${item.terminal_reason}` : ""}`}</small>
-              </li>
-            ))}
+            {detail.data.processing.map((item) => {
+              const activeRetry = item.latest_retry?.status === "queued" || item.latest_retry?.status === "claimed";
+              return (
+                <li key={item.id}>
+                  <PackageSearch aria-hidden="true" size={14} />
+                  <span>{item.stage}</span>
+                  <small>{`${item.status}${item.terminal_reason ? ` · ${item.terminal_reason}` : ""}`}</small>
+                  {["processing_failed_terminal", "blocked_waiting_external"].includes(item.status) ? (
+                    <Button
+                      disabled={retryProcessing.isPending || activeRetry}
+                      onClick={() => retryProcessing.mutate({ targetMessageId: messageId, stage: item.stage })}
+                      tone="warning"
+                    >
+                      {activeRetry ? "已排队" : "重试"}
+                    </Button>
+                  ) : null}
+                </li>
+              );
+            })}
           </ul>
         ) : (
           <p className="detail-note">No processing stages recorded for this message.</p>
         )}
+        <CommandResultPanel result={retryResult} />
       </div>
 
       <div className="detail-panel">

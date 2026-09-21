@@ -85,18 +85,32 @@ class MessageRouter:
         *,
         source: str,
         inserted: bool,
+        revision_changed: bool = False,
         now: str,
         watch_until: str,
         retry_incomplete_processing: bool = False,
         agent_working_dir: str | None = None,
     ) -> RoutingResult:
-        if not inserted and self.store.message_has_routing_audit(message.message_id):
+        """Resolve audited deterministic routes before returning model-router placeholders.
+
+        Duplicate/readback, self-message, owner, mention, reply/thread, and
+        burst cases are resolved locally. Unresolved trigger messages either
+        create a task or return an audited placeholder for the production
+        Task Router.
+        """
+        if (
+            not inserted
+            and not revision_changed
+            and self.store.message_has_routing_audit(
+                message.message_id, revision=message.revision
+            )
+        ):
             if retry_incomplete_processing:
                 # A duplicate route audit means ingestion was durable, but Hermes
                 # processing may have crashed before reaching a terminal marker.
                 # Reuse that route only when the downstream stage is still open.
                 existing = self.store.get_latest_non_duplicate_routing_decision(
-                    message.message_id
+                    message.message_id, revision=message.revision
                 )
                 if existing is not None:
                     decision, task = existing
@@ -106,12 +120,14 @@ class MessageRouter:
                         and self.store.message_processing_is_final(
                             message.message_id,
                             stage=stage,
+                            revision=message.revision,
                         )
                     )
                     resource_status = (
                         self.store.message_processing_status(
                             message.message_id,
                             stage="resource_download",
+                            revision=message.revision,
                         )
                         if stage == "task_session"
                         else None
@@ -136,6 +152,19 @@ class MessageRouter:
             return self._audit(
                 message, RouteDecision(RouteName.IGNORE, reason="duplicate_message")
             )
+
+        if revision_changed:
+            existing_task = self._existing_active_task_for_message(message, now=now)
+            if existing_task is not None:
+                decision = self.store.attach_message_to_task_and_audit(
+                    existing_task,
+                    message,
+                    watch_until=watch_until,
+                    candidates_count=1,
+                    matched_by="source_revision",
+                    reason="source_revision",
+                )
+                return RoutingResult(decision=decision, task=existing_task)
 
         sent_action_task = self.store.find_task_for_sent_action_message(
             message.message_id
@@ -269,7 +298,10 @@ class MessageRouter:
                     message.reply_to_message_id
                 )
             ]
-            active = [task for task in tasks if _is_active(task, now=now)]
+            # Routing never crosses chat boundaries (ADR-0013): a reply target
+            # in another chat is context here, never a takeover signal.
+            same_chat = [task for task in tasks if task.chat_id == message.chat_id]
+            active = [task for task in same_chat if _is_active(task, now=now)]
             if len(active) == 1:
                 return active[0]
         if message.thread_id:
@@ -302,6 +334,18 @@ class MessageRouter:
         if len(thread_matches) == 1:
             return thread_matches[0]
         return None
+
+    def _existing_active_task_for_message(
+        self, message: NormalizedMessage, *, now: str
+    ) -> TaskRecord | None:
+        active: list[TaskRecord] = []
+        for task_id in self.store.find_task_ids_for_message(message.message_id):
+            task = self.store.get_task_by_id(task_id)
+            if _is_active(task, now=now):
+                active.append(task)
+        if len(active) != 1:
+            return None
+        return active[0]
 
     def _burst_attach_match(
         self,
@@ -350,7 +394,9 @@ class MessageRouter:
         task: TaskRecord | None = None,
     ) -> RoutingResult:
         self.store.record_routing_audit(
-            message_id=message.message_id, decision=decision
+            message_id=message.message_id,
+            revision=message.revision,
+            decision=decision,
         )
         return RoutingResult(decision=decision, task=task)
 

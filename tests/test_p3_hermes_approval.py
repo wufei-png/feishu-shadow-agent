@@ -145,6 +145,9 @@ class FakeFeishu:
     def search_messages(self, **kwargs: Any) -> MessagePage:
         return MessagePage([])
 
+    def get_messages(self, **kwargs: Any) -> MessagePage:
+        raise AssertionError("unexpected canonical message readback")
+
     def list_chat_messages(self, **kwargs: Any) -> MessagePage:
         return MessagePage([])
 
@@ -312,6 +315,8 @@ def _assert_owner_notification_context(
     chat_id: str,
 ) -> None:
     assert payload["incoming_message"] == {"message_id": message_id, "text": text}
+    assert payload["source_message_id"] == message_id
+    assert payload["source_revision"] == 1
     assert payload["source"]["chat_id"] == chat_id
     assert payload["source"]["sender_name"] == sender_name
 
@@ -2296,7 +2301,7 @@ def test_task_router_can_reopen_historical_closed_recall_candidate(
         run_id="run_1",
     )
     assert created is not None and created.task is not None
-    store.close_task_for_owner_takeover(created.task.id)
+    store.update_task_after_agent(task_id=created.task.id, status="closed")
 
     hermes.router_outputs.append(
         {
@@ -2362,7 +2367,7 @@ def test_task_router_cannot_attach_historical_closed_recall_candidate(
         run_id="run_1",
     )
     assert created is not None and created.task is not None
-    store.close_task_for_owner_takeover(created.task.id)
+    store.update_task_after_agent(task_id=created.task.id, status="closed")
 
     hermes.router_outputs.append(
         {
@@ -2403,7 +2408,7 @@ def test_task_router_cannot_attach_historical_closed_recall_candidate(
     assert route_row["route_reason"] == "task_router_invalid_route"
     assert route_row["target_task_id"] is None
     assert route_row["router_called"] == 1
-    assert task["status"] == "human_taken_over"
+    assert task["status"] == "closed"
     assert task["closed_at"] is not None
     assert task_message is None
     assert notification is not None
@@ -2773,7 +2778,7 @@ def test_task_session_exception_retries_terminal_without_empty_approval(
     assert payload["type"] == "processing_failed"
     assert payload["message_id"] == "om_1"
     assert payload["stage"] == "task_session"
-    assert payload["dedupe_key"] == "owner-processing-failed:om_1:task_session"
+    assert payload["dedupe_key"] == "owner-processing-failed:om_1:task_session:1"
     _assert_owner_notification_context(
         payload, message_id="om_1", text="hello", sender_name="Ext", chat_id="ou_chat"
     )
@@ -3070,7 +3075,12 @@ def test_approval_inbox_approves_pending_request_and_advances_checkpoint(
     assert result.processed == 1
     assert fake.calls == ["p2p:ou_bot:None"]
     assert store.get_checkpoint("approval_inbox") == {
-        "last_success_at": "2026-06-22T02:10:00+00:00"
+        "last_success_at": "2026-06-22T02:10:00+00:00",
+        "last_drain": {
+            "completed_at": "2026-06-22T02:10:00+00:00",
+            "messages_fetched": 1,
+            "pages_fetched": 1,
+        },
     }
     with store.connect() as conn:
         approval = conn.execute(

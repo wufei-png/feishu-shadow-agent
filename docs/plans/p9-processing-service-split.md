@@ -1,118 +1,57 @@
 # P9 Processing Service Split Plan
 
+状态：**已完成（2026-08 刷新）**。目标 collaborators 已全部落地，拆分决策已定；本文保留为历史计划与边界记录。
+
 ## Summary
 
-P9 is the final structural cleanup after P5-P8 have stabilized behavior. It should reduce `TaskProcessingService` size and responsibility without changing product semantics.
+P9 是 P5-P8 行为稳定后的结构清理：在不改变产品语义的前提下缩小 `TaskProcessingService` 的体积与职责。
 
-## Goals
+## 目标
 
-- Keep `TaskProcessingService` as the high-level orchestrator.
-- Extract remaining stable responsibilities into focused collaborators.
-- Preserve prompt contracts, reply gates, resource preflight semantics, and audit behavior.
-- Make future behavior changes easier to review.
+- `TaskProcessingService` 保持为高层编排者。
+- 稳定职责提取到聚焦 collaborators。
+- 保持 prompt contract、reply gates、resource preflight 语义与 audit 行为。
+- 让后续行为变更更容易 review。
 
-## Non-goals
+## 已落地结果
 
-- No schema redesign.
-- No policy semantic changes.
-- No routing semantic changes.
-- No dispatch recovery changes.
-- No new agent backend/provider.
-- No broad store rewrite.
+以下 collaborators 已作为独立模块存在，并在 `TaskProcessingService.__init__` 中注入：
 
-## Expected Precondition
+- `agent_invocation.py`：agent 调用重试、重试分类、延迟/错误日志。
+- `context_access.py`（`ContextAccessBuilder`）：router 与 task session 的 context access、query scope 卡片。
+- `resource_preflight.py`（`ResourcePreflight`）：资源状态检查、重试注入、`blocked_waiting_external` 映射。
+- `task_session_runner.py`（`TaskSessionRunner`）：prompt 消息 id 选择、prompt 构造、output model 选择、schema 验证、session 级 agent 调用。
+- `reply_postprocess.py` / `reply_style.py`：回复后处理与 owner style。
+- `approval_cards.py` / `card_actions.py`：审批卡片与动作。
+- `SendComposer`、`ApprovalService`：回复组装与审批/通知/升级（processing.py 内的小型 collaborator）。
+- `revision.py`（撤回/编辑切片，随 main 的 revision slice 落地，非本分支引入）：revision 影响评估。
 
-P9 assumes previous plans have already landed:
+## 最终决策（2026-08）
 
-- P5 introduced `PolicyResolver`.
-- P6 introduced `StrEnum` state values and clean DB schema.
-- P7 introduced dispatch attempts/recovery.
-- P8 introduced resource quota and heartbeat.
+- 拆分到此为止：所有明确的行为边界均已提取，剩余的两个编排方法 `_run_task_router`（约 380 行）与 `_run_task_session`（约 770 行）按 P9 本意属于主服务——route dispatch、router/session 编排、决定调用哪个 collaborator、产出最终 `ProcessingResult`。
+- 不再做纯重排：没有明确收益前不继续拆分（backlog 约束）。若未来出现具体痛点（如某个行为变更难以 review 或测试），再单独评估把 session 生命周期并入 `TaskSessionRunner` 或提取通知 collaborator。
+- 新增行为仍按「服务编排 + collaborator 执行」的边界落地，例如撤回/编辑的 revision review 上下文在 `task_session_runner.py`、通知与门禁留在 `processing.py`。
 
-If those plans have not landed, do not start P9 as a pure refactor. Apply the required behavior plan first.
+## 非目标
 
-## Target Splits
+- 无 schema 重设计。
+- 无 policy/routing/dispatch recovery 语义变更。
+- 无新 agent backend/provider。
+- 无 broad store rewrite（store 只按需加窄 wrapper）。
 
-Recommended collaborators:
+## Store 边界
 
-```text
-AgentInvoker:
-  agent call retries
-  retry classification
-  latency/error logging helper
+`SQLiteStore` 不做 wholesale rewrite；approval/action 事务边界保留在 store 方法中。
 
-ContextAccessBuilder:
-  router context_access
-  task session context_access
-  query scope card construction
+## Context Access 安全
 
-ResourcePreflight:
-  resource status inspection
-  retry attempts through injected resource retry function
-  blocked_waiting_external mapping
+`ContextAccessBuilder` 保持产品边界：Python 决定是否暴露 context access；prompt 语义使用但不作为本地副作用的 security boundary。
 
-TaskSessionRunner:
-  prompt message id selection
-  prompt construction call
-  output model selection
-  schema validation wrapper
-```
-
-`TaskProcessingService` should still own:
-
-```text
-route dispatch at a high level
-router/session orchestration
-deciding which collaborator to call
-creating final ProcessingResult
-```
-
-Do not extract everything at once if it makes review harder. Extract one stable boundary per commit if needed.
-
-## Store Boundary
-
-P9 should not rewrite `SQLiteStore` wholesale. If a store method is too broad, only add narrower wrapper/helper methods required by the extracted service.
-
-Approval/action transaction boundaries should remain in store methods unless a future dedicated plan moves them.
-
-## Context Access Safety
-
-`ContextAccessBuilder` should preserve current product boundary:
-
-- Python decides whether any context access is exposed.
-- Prompt may use provided context semantically.
-- Prompt must not be treated as the security boundary for local side effects.
-
-If P9 finds context access still too prompt-enforced, document a follow-up plan for Python-owned context snapshots or read-only query APIs. Do not broaden access in P9.
-
-## Files To Update
-
-Likely files:
-
-- `src/feishu_shadow_agent/processing.py`
-- `src/feishu_shadow_agent/policy.py`
-- new modules under `src/feishu_shadow_agent/` as needed, such as:
-  - `agent_invocation.py`
-  - `context_access.py`
-  - `resource_preflight.py`
-- `tests/test_p3_hermes_approval.py`
-- new focused tests for extracted collaborators if useful
-
-Avoid moving test helpers broadly unless necessary. Stable fake extraction can happen, but should remain mechanical.
-
-## Test Plan
-
-- Existing P2/P3/daemon/dispatcher tests remain behaviorally unchanged.
-- Add focused unit tests for extracted helpers only where they reduce scenario-test burden.
-- Verify retry classification remains identical.
-- Verify context_access cards remain identical for router/task session.
-- Verify resource preflight decisions remain identical.
-- Verify schema failure and owner notification paths are unchanged.
-
-## Acceptance
+## 验收（已满足）
 
 ```bash
-.venv/bin/python -m pytest -q tests/test_p3_hermes_approval.py
 .venv/bin/python -m pytest -q
 git diff --check
 ```
+
+相关回归测试：`tests/test_processing_collaborators.py` 等聚焦测试随各 collaborator 落地。

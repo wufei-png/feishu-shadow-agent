@@ -11,6 +11,14 @@ from ..types import LarkCliResult, MessagePage
 Runner = Callable[[list[str], int], LarkCliResult]
 
 
+class LarkCliCommandError(RuntimeError):
+    """Preserve a failed CLI result for boundary-specific recovery and audit."""
+
+    def __init__(self, result: LarkCliResult):
+        super().__init__(result.error or "lark-cli command failed")
+        self.result = result
+
+
 class LarkCliClient:
     def __init__(
         self,
@@ -107,6 +115,24 @@ class LarkCliClient:
         if no_reactions:
             argv.append("--no-reactions")
         return argv
+
+    def build_chat_members_bots(
+        self, *, chat_id: str, as_identity: str = "user"
+    ) -> list[str]:
+        _validate_identity(as_identity)
+        if not chat_id:
+            raise ValueError("chat_id is required")
+        return [
+            self.path,
+            "im",
+            "chat.members",
+            "bots",
+            "--as",
+            as_identity,
+            "--json",
+            "--chat-id",
+            chat_id,
+        ]
 
     def build_threads_messages_list(
         self,
@@ -401,7 +427,10 @@ class LarkCliClient:
         page_token: str | None = None,
         query: str = "",
         page_size: int = 50,
+        page_limit: int = 1,
     ) -> MessagePage:
+        if page_limit < 1:
+            raise ValueError("page_limit must be at least 1")
         result = self.run_json(
             self.build_messages_search(
                 chat_id=chat_id,
@@ -412,9 +441,25 @@ class LarkCliClient:
                 page_token=page_token,
                 query=query,
                 page_size=page_size,
+                page_all=page_limit > 1,
+                page_limit=page_limit if page_limit > 1 else None,
             )
         )
-        return _message_page_from_result(result)
+        page = _message_page_from_result(result)
+        if page_limit == 1:
+            return page
+        page_count = (
+            page_limit
+            if page.has_more
+            else max(1, (len(page.items) + page_size - 1) // page_size)
+        )
+        return MessagePage(
+            items=page.items,
+            next_page_token=page.next_page_token,
+            has_more=page.has_more,
+            raw=page.raw,
+            page_count=page_count,
+        )
 
     def search_owner_messages(
         self,
@@ -480,6 +525,13 @@ class LarkCliClient:
         )
         return _message_page_from_result(result)
 
+    def list_chat_bots(
+        self, *, chat_id: str, as_identity: str = "user"
+    ) -> LarkCliResult:
+        return self.run_json(
+            self.build_chat_members_bots(chat_id=chat_id, as_identity=as_identity)
+        )
+
     def list_thread_messages(
         self,
         *,
@@ -528,26 +580,38 @@ class LarkCliClient:
             result = self._runner(argv, self.timeout_seconds)
         else:
             result = _run_subprocess(argv, self.timeout_seconds, cwd=self.cwd)
-        if parse_json and result.ok:
-            if result.json_data is not None:
-                return result
-            try:
-                json_data: Any = json.loads(_json_stdout(result.stdout) or "{}")
-            except json.JSONDecodeError as exc:
+        if parse_json and result.json_data is None:
+            stdout = _json_stdout(result.stdout)
+            if stdout:
+                try:
+                    json_data: Any = json.loads(stdout)
+                except json.JSONDecodeError as exc:
+                    if result.ok:
+                        return LarkCliResult(
+                            argv=result.argv,
+                            exit_code=result.exit_code,
+                            stdout=result.stdout,
+                            stderr=result.stderr,
+                            error=f"stdout was not valid JSON: {exc}",
+                        )
+                else:
+                    return LarkCliResult(
+                        argv=result.argv,
+                        exit_code=result.exit_code,
+                        stdout=result.stdout,
+                        stderr=result.stderr,
+                        json_data=json_data,
+                        error=result.error,
+                        timed_out=result.timed_out,
+                    )
+            elif result.ok:
                 return LarkCliResult(
                     argv=result.argv,
                     exit_code=result.exit_code,
                     stdout=result.stdout,
                     stderr=result.stderr,
-                    error=f"stdout was not valid JSON: {exc}",
+                    json_data={},
                 )
-            return LarkCliResult(
-                argv=result.argv,
-                exit_code=result.exit_code,
-                stdout=result.stdout,
-                stderr=result.stderr,
-                json_data=json_data,
-            )
         return result
 
 
@@ -625,7 +689,7 @@ def _json_stdout(stdout: str) -> str:
 
 def _message_page_from_result(result: LarkCliResult) -> MessagePage:
     if not result.ok:
-        raise RuntimeError(result.error or "lark-cli command failed")
+        raise LarkCliCommandError(result)
     return _extract_message_page(result.json_data)
 
 

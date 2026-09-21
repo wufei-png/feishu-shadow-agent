@@ -1,7 +1,8 @@
 BEGIN IMMEDIATE;
 
 PRAGMA application_id = 1179861319;
-PRAGMA user_version = 2;
+PRAGMA application_id = 1179861319;
+PRAGMA user_version = 7;
 
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -18,7 +19,11 @@ CREATE TABLE IF NOT EXISTS messages (
   reply_to_message_id TEXT,
   direct_mention INTEGER NOT NULL DEFAULT 0,
   at_all INTEGER NOT NULL DEFAULT 0,
+  message_type TEXT,
   text TEXT,
+  is_deleted INTEGER NOT NULL DEFAULT 0,
+  revision INTEGER NOT NULL DEFAULT 1,
+  semantic_hash TEXT NOT NULL DEFAULT '',
   normalized_json TEXT NOT NULL DEFAULT '{}',
   raw_json TEXT NOT NULL,
   inserted_at TEXT NOT NULL
@@ -61,6 +66,20 @@ CREATE TABLE IF NOT EXISTS task_watch_keys (
   FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS task_background_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL,
+  version INTEGER NOT NULL,
+  content TEXT,
+  operation TEXT NOT NULL CHECK (operation IN ('set', 'clear')),
+  actor TEXT NOT NULL,
+  reason TEXT,
+  created_at TEXT NOT NULL,
+  content_expired_at TEXT,
+  UNIQUE (task_id, version),
+  FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS approvals (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   short_id TEXT NOT NULL UNIQUE,
@@ -69,6 +88,8 @@ CREATE TABLE IF NOT EXISTS approvals (
   status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'expired')),
   payload_json TEXT NOT NULL DEFAULT '{}',
   preview TEXT,
+  source_message_id TEXT,
+  source_revision INTEGER,
   created_at TEXT NOT NULL,
   expires_at TEXT,
   resolved_at TEXT,
@@ -84,6 +105,8 @@ CREATE TABLE IF NOT EXISTS actions (
   status TEXT NOT NULL
     CHECK (status IN ('pending', 'sending', 'sent', 'failed', 'failed_needs_review', 'cancelled')),
   target_message_id TEXT,
+  source_message_id TEXT,
+  source_revision INTEGER,
   dry_run INTEGER NOT NULL DEFAULT 1,
   execution_mode TEXT NOT NULL DEFAULT 'production'
     CHECK (execution_mode IN ('dry_run', 'production')),
@@ -208,6 +231,7 @@ CREATE TABLE IF NOT EXISTS config_suggestions (
 CREATE TABLE IF NOT EXISTS routing_audits (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   message_id TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1,
   task_id INTEGER,
   route TEXT NOT NULL
     CHECK (route IN ('new_task', 'attach_task', 'reopen_task', 'close_task', 'ignore', 'ambiguous', 'human_taken_over')),
@@ -231,6 +255,7 @@ CREATE TABLE IF NOT EXISTS agent_audits (
   task_id INTEGER,
   agent_session_id TEXT,
   input_message_ids_json TEXT NOT NULL DEFAULT '[]',
+  input_message_revisions_json TEXT NOT NULL DEFAULT '[]',
   input_resource_ids_json TEXT NOT NULL DEFAULT '[]',
   response_json TEXT,
   error TEXT,
@@ -287,6 +312,7 @@ CREATE TABLE IF NOT EXISTS approval_feedback (
 CREATE TABLE IF NOT EXISTS message_processing (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   message_id TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1,
   task_id INTEGER,
   stage TEXT NOT NULL CHECK (stage IN ('task_router', 'task_session', 'resource_download')),
   status TEXT NOT NULL
@@ -296,7 +322,29 @@ CREATE TABLE IF NOT EXISTS message_processing (
   terminal_reason TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  UNIQUE (message_id, stage),
+  UNIQUE (message_id, revision, stage),
+  FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS processing_retry_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  task_id INTEGER,
+  stage TEXT NOT NULL CHECK (stage IN ('task_router', 'task_session', 'resource_download')),
+  source_status TEXT NOT NULL
+    CHECK (source_status IN ('processing_failed_terminal', 'blocked_waiting_external')),
+  status TEXT NOT NULL CHECK (status IN ('queued', 'claimed', 'succeeded', 'failed', 'cancelled')),
+  claim_token TEXT,
+  run_id TEXT,
+  actor TEXT NOT NULL,
+  reason TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  claimed_at TEXT,
+  finished_at TEXT,
+  content_expired_at TEXT,
+  FOREIGN KEY (message_id) REFERENCES messages(message_id) ON DELETE CASCADE,
   FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL
 );
 
@@ -305,11 +353,18 @@ CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id);
 CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages(reply_to_message_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_active ON tasks(status, watch_until);
 CREATE INDEX IF NOT EXISTS idx_tasks_chat_thread ON tasks(chat_id, thread_id);
+CREATE INDEX IF NOT EXISTS idx_task_background_versions_task
+ON task_background_versions(task_id, version DESC);
 CREATE INDEX IF NOT EXISTS idx_routing_audits_message ON routing_audits(message_id);
 CREATE INDEX IF NOT EXISTS idx_agent_audits_task ON agent_audits(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_approval_commands_status ON approval_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_message_processing_status ON message_processing(status, updated_at);
-CREATE INDEX IF NOT EXISTS idx_message_processing_message ON message_processing(message_id, stage);
+CREATE INDEX IF NOT EXISTS idx_message_processing_message ON message_processing(message_id, revision, stage);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_processing_retry_active
+ON processing_retry_attempts(message_id, revision, stage)
+WHERE status IN ('queued', 'claimed');
+CREATE INDEX IF NOT EXISTS idx_processing_retry_status
+ON processing_retry_attempts(status, created_at, id);
 CREATE INDEX IF NOT EXISTS idx_dispatch_attempts_action ON dispatch_attempts(action_id, started_at, id);
 CREATE INDEX IF NOT EXISTS idx_dispatch_attempts_status ON dispatch_attempts(status, finished_at);
 CREATE INDEX IF NOT EXISTS idx_policy_audits_policy ON policy_audits(policy_key, created_at);
@@ -317,8 +372,15 @@ CREATE INDEX IF NOT EXISTS idx_approval_feedback_created_at ON approval_feedback
 CREATE INDEX IF NOT EXISTS idx_approval_feedback_outcome_reason
 ON approval_feedback(outcome, decision_reason, created_at);
 
+DROP INDEX IF EXISTS idx_actions_active_send_reply_target;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_active_send_reply_target
-ON actions(task_id, target_message_id, execution_mode)
+ON actions(
+  task_id,
+  target_message_id,
+  execution_mode,
+  COALESCE(source_message_id, ''),
+  COALESCE(source_revision, 0)
+)
 WHERE kind = 'send_reply'
   AND status IN ('pending', 'sending', 'failed_needs_review')
   AND target_message_id IS NOT NULL;

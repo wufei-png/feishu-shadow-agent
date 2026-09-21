@@ -14,6 +14,7 @@ from .store.sqlite_store import SQLiteStore
 from .types import (
     ActionRecord,
     ApprovalOutcome,
+    ApprovalTargetBinding,
     ExecutionMode,
     FeedbackReason,
     new_run_id,
@@ -99,6 +100,7 @@ class ApprovalCommandService:
         feedback_reason: FeedbackReason | None = None,
         note: str | None = None,
         execution_mode: ExecutionMode = "production",
+        target_binding: ApprovalTargetBinding | None = None,
     ) -> CommandResult:
         return self._apply(
             "approve",
@@ -110,6 +112,7 @@ class ApprovalCommandService:
             note=note,
             execution_mode=execution_mode,
             requested_outcome="suggestion_sent",
+            target_binding=target_binding,
         )
 
     def reject(
@@ -123,6 +126,7 @@ class ApprovalCommandService:
         feedback_reason: FeedbackReason | None = None,
         note: str | None = None,
         execution_mode: ExecutionMode = "production",
+        target_binding: ApprovalTargetBinding | None = None,
     ) -> CommandResult:
         return self._apply(
             "reject",
@@ -140,6 +144,7 @@ class ApprovalCommandService:
                 if keep_watching
                 else "no_send_end_task"
             ),
+            target_binding=target_binding,
         )
 
     def send(
@@ -153,6 +158,7 @@ class ApprovalCommandService:
         feedback_reason: FeedbackReason | None = None,
         note: str | None = None,
         execution_mode: ExecutionMode = "production",
+        target_binding: ApprovalTargetBinding | None = None,
     ) -> CommandResult:
         return self._apply(
             "send",
@@ -167,6 +173,7 @@ class ApprovalCommandService:
             # The store compares the final text with the pending suggestion so
             # an unchanged send is recorded as suggestion_sent.
             requested_outcome=None,
+            target_binding=target_binding,
         )
 
     def apply_text(
@@ -222,6 +229,7 @@ class ApprovalCommandService:
         requested_outcome: ApprovalOutcome | None = None,
         command_text: str | None = None,
         keep_watching_until: str | None = None,
+        target_binding: ApprovalTargetBinding | None = None,
     ) -> CommandResult:
         effective_command_text = command_text or (
             f"/{verb} {target_id}"
@@ -246,6 +254,7 @@ class ApprovalCommandService:
             note=note,
             execution_mode=execution_mode,
             requested_outcome=requested_outcome,
+            expected_target_binding=target_binding,
         )
         raw_status = str(raw.get("status", "failed"))
         result = _dict_result(raw.get("result"))
@@ -427,6 +436,57 @@ class MaintenanceCommandService:
         )
 
 
+class ProcessingRetryCommandService:
+    def __init__(self, store: SQLiteStore):
+        self.store = store
+
+    def retry(
+        self,
+        message_id: str,
+        *,
+        stage: str,
+        actor: str,
+        reason: str | None = None,
+    ) -> CommandResult:
+        target = {
+            "type": "message_processing",
+            "message_id": message_id,
+            "stage": stage,
+        }
+        try:
+            raw = self.store.request_processing_retry(
+                message_id=message_id,
+                stage=stage,
+                actor=actor,
+                reason=reason,
+            )
+        except ValueError as exc:
+            return _error_result(
+                status=_processing_retry_error_status(str(exc)),
+                command="processing.retry",
+                actor=actor,
+                reason=reason,
+                target=target,
+                error=str(exc),
+            )
+        changed = bool(raw.get("changed"))
+        return CommandResult(
+            status="applied" if changed else "no_change",
+            command="processing.retry",
+            actor=actor,
+            reason=reason,
+            target=target,
+            changed=changed,
+            result=raw,
+            next_actions=[
+                {
+                    "command": "status",
+                    "target": {"type": "message", "message_id": message_id},
+                }
+            ],
+        )
+
+
 class TaskCommandService:
     def __init__(self, store: SQLiteStore):
         self.store = store
@@ -490,6 +550,56 @@ class TaskCommandService:
             changed=changed,
             result=raw,
             next_actions=_task_next_actions(raw.get("task")),
+        )
+
+    def update_background(
+        self,
+        task_id: str,
+        *,
+        content: str | None,
+        actor: str,
+        reason: str | None = None,
+    ) -> CommandResult:
+        command = "task.background.update"
+        target = _task_target(task_id)
+        try:
+            raw = self.store.update_task_background(
+                task_id,
+                content=content,
+                actor=actor,
+                reason=reason,
+            )
+        except KeyError as exc:
+            return _error_result(
+                status="not_found",
+                command=command,
+                actor=actor,
+                reason=reason,
+                target=target,
+                error=str(exc),
+            )
+        except ValueError as exc:
+            return _error_result(
+                status="validation_failed",
+                command=command,
+                actor=actor,
+                reason=reason,
+                target=target,
+                error=str(exc),
+            )
+        changed = bool(raw.get("changed"))
+        return CommandResult(
+            status="applied" if changed else "no_change",
+            command=command,
+            actor=actor,
+            reason=reason,
+            target=target,
+            changed=changed,
+            result=raw,
+            warnings=["Task background applies on the next fresh session rebuild."],
+            next_actions=[
+                {"command": "task.inspect", "target": target},
+            ],
         )
 
 
@@ -730,6 +840,7 @@ class OperatorCommandService:
             store, keep_watching_until_factory=keep_watching_until_factory
         )
         self.dispatch = DispatchCommandService(store, readback_marker=readback_marker)
+        self.processing_retries = ProcessingRetryCommandService(store)
         self.maintenance = MaintenanceCommandService(store)
         self.tasks = TaskCommandService(store)
         self.policy = PolicyCommandService(store)
@@ -744,6 +855,7 @@ class OperatorCommandService:
         feedback_reason: FeedbackReason | None = None,
         note: str | None = None,
         execution_mode: ExecutionMode = "production",
+        target_binding: ApprovalTargetBinding | None = None,
     ) -> CommandResult:
         return self.approvals.approve(
             target_id,
@@ -753,6 +865,7 @@ class OperatorCommandService:
             feedback_reason=feedback_reason,
             note=note,
             execution_mode=execution_mode,
+            target_binding=target_binding,
         )
 
     def apply_approval_text(
@@ -783,6 +896,7 @@ class OperatorCommandService:
         feedback_reason: FeedbackReason | None = None,
         note: str | None = None,
         execution_mode: ExecutionMode = "production",
+        target_binding: ApprovalTargetBinding | None = None,
     ) -> CommandResult:
         return self.approvals.reject(
             target_id,
@@ -793,6 +907,7 @@ class OperatorCommandService:
             feedback_reason=feedback_reason,
             note=note,
             execution_mode=execution_mode,
+            target_binding=target_binding,
         )
 
     def send(
@@ -806,6 +921,7 @@ class OperatorCommandService:
         feedback_reason: FeedbackReason | None = None,
         note: str | None = None,
         execution_mode: ExecutionMode = "production",
+        target_binding: ApprovalTargetBinding | None = None,
     ) -> CommandResult:
         return self.approvals.send(
             task_id,
@@ -816,6 +932,7 @@ class OperatorCommandService:
             feedback_reason=feedback_reason,
             note=note,
             execution_mode=execution_mode,
+            target_binding=target_binding,
         )
 
     def do_not_send(
@@ -871,6 +988,18 @@ class OperatorCommandService:
     ) -> CommandResult:
         return self.dispatch.retry(action_id, actor=actor, reason=reason)
 
+    def retry_processing(
+        self,
+        message_id: str,
+        *,
+        stage: str,
+        actor: str = "operator",
+        reason: str | None = None,
+    ) -> CommandResult:
+        return self.processing_retries.retry(
+            message_id, stage=stage, actor=actor, reason=reason
+        )
+
     def cancel_dispatch_action(
         self,
         action_id: int,
@@ -904,6 +1033,21 @@ class OperatorCommandService:
     ) -> CommandResult:
         return self.tasks.reopen(
             task_id, watch_until=watch_until, actor=actor, reason=reason
+        )
+
+    def update_task_background(
+        self,
+        task_id: str,
+        *,
+        content: str | None,
+        actor: str = "operator",
+        reason: str | None = None,
+    ) -> CommandResult:
+        return self.tasks.update_background(
+            task_id,
+            content=content,
+            actor=actor,
+            reason=reason,
         )
 
     def import_policy_config(
@@ -1056,6 +1200,8 @@ def _policy_mutation_result(
 
 
 def _approval_command_status(raw_status: str, result: dict[str, Any]) -> str:
+    if result.get("outcome") == "stale_revision":
+        return "conflict"
     if raw_status == "applied":
         return "applied"
     if raw_status == "duplicate":
@@ -1076,6 +1222,7 @@ def _approval_error_status(error: str) -> str:
         "ambiguous" in lowered
         or "multiple pending" in lowered
         or "active send action already exists" in lowered
+        or "target is stale" in lowered
     ):
         return "conflict"
     if (
@@ -1108,6 +1255,23 @@ def _dispatch_error_status(error: str) -> str:
         or "text mismatch" in lowered
         or "text did not match" in lowered
     ):
+        return "validation_failed"
+    return "failed"
+
+
+def _processing_retry_error_status(error: str) -> str:
+    lowered = error.lower()
+    if "not found" in lowered:
+        return "not_found"
+    if (
+        "in flight" in lowered
+        or "stale" in lowered
+        or "ownership" in lowered
+        or "closure" in lowered
+        or "was sent" in lowered
+    ):
+        return "conflict"
+    if "only accepts" in lowered:
         return "validation_failed"
     return "failed"
 
