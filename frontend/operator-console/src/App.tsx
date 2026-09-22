@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Bell, ClipboardList, Database, FileText, HeartPulse, Home, MessageSquareDiff, Send, Settings, ShieldCheck, SunMoon, Wrench } from "lucide-react";
+import { useTranslation } from "react-i18next";
+import { Activity, Bell, ClipboardList, Database, FileText, HeartPulse, Home, Languages, MessageSquareDiff, Send, Settings, ShieldCheck, SunMoon, Wrench } from "lucide-react";
 import { getDashboard } from "./api";
 import { Badge, EmptyState } from "./components/Primitives";
 import { bootstrapTokenFromHash, decodeHashSegment } from "./consoleSession";
+import { normalizeLanguage, setConsoleLanguage, type ConsoleLanguage } from "./i18n";
 import { queryKeys } from "./queryKeys";
 import { useThemePreference, type ThemePreference } from "./theme";
 import { ApprovalsScreen } from "./screens/ApprovalsScreen";
@@ -32,6 +34,7 @@ const navItems: Array<{ key: RouteKey; label: string; icon: typeof Home }> = [
 ];
 
 export function App() {
+  const { i18n, t } = useTranslation();
   const [token, setToken] = useState(() => sessionStorage.getItem(TOKEN_STORAGE_KEY) ?? "");
   const [location, setLocation] = useState(() => currentLocation());
   const [themePreference, setThemePreference] = useThemePreference();
@@ -55,6 +58,10 @@ export function App() {
       window.history.replaceState(null, "", `${url.pathname}${url.search}#dashboard`);
     }
   }, []);
+
+  useEffect(() => {
+    document.title = t("app.title");
+  }, [i18n.resolvedLanguage, t]);
 
   useEffect(() => {
     const handleHash = () => setLocation(currentLocation());
@@ -99,7 +106,13 @@ export function App() {
       </aside>
 
       <div className="workspace">
-        <RuntimeStrip onThemeChange={setThemePreference} preference={themePreference} status={runtimeStatus} />
+        <RuntimeStrip
+          language={normalizeLanguage(i18n.resolvedLanguage)}
+          onLanguageChange={(language) => void setConsoleLanguage(language)}
+          onThemeChange={setThemePreference}
+          preference={themePreference}
+          status={runtimeStatus}
+        />
         <main className="main-surface">
           {!token ? (
             <EmptyState title="缺少会话令牌" detail="请使用服务启动时输出的本地控制台链接打开页面。" />
@@ -132,13 +145,18 @@ export function App() {
 
 function RuntimeStrip({
   status,
+  language,
+  onLanguageChange,
   preference,
   onThemeChange
 }: {
   status: Array<{ label: string; value: string; tone: Tone }>;
+  language: ConsoleLanguage;
+  onLanguageChange: (language: ConsoleLanguage) => void;
   preference: ThemePreference;
   onThemeChange: (preference: ThemePreference) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <header className="runtime-strip">
       <div className="runtime-heading">
@@ -153,6 +171,14 @@ function RuntimeStrip({
           </div>
         ))}
       </div>
+      <label className="theme-control locale-control">
+        <Languages aria-hidden="true" size={16} />
+        <span>{t("language.label")}</span>
+        <select aria-label={t("language.label")} onChange={(event) => onLanguageChange(event.target.value as ConsoleLanguage)} value={language}>
+          <option value="zh-CN">{t("language.chinese")}</option>
+          <option value="en-US">{t("language.english")}</option>
+        </select>
+      </label>
       <label className="theme-control">
         <SunMoon aria-hidden="true" size={16} />
         <span>外观</span>
