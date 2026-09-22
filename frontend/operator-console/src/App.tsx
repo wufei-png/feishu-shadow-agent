@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { Activity, Bell, ClipboardList, Database, FileText, HeartPulse, Home, Languages, MessageSquareDiff, Send, Settings, ShieldCheck, SunMoon, Wrench } from "lucide-react";
 import { getDashboard } from "./api";
 import { Badge, EmptyState } from "./components/Primitives";
@@ -21,16 +22,16 @@ import type { DashboardSnapshot, RouteKey, Tone } from "./types";
 
 const TOKEN_STORAGE_KEY = "feishu_shadow_agent_console_token";
 
-const navItems: Array<{ key: RouteKey; label: string; icon: typeof Home }> = [
-  { key: "dashboard", label: "待我处理", icon: Home },
-  { key: "approvals", label: "审批", icon: Bell },
-  { key: "tasks", label: "任务", icon: ClipboardList },
-  { key: "dispatch", label: "发送", icon: Send },
-  { key: "feedback", label: "反馈", icon: MessageSquareDiff },
-  { key: "policy", label: "策略", icon: ShieldCheck },
-  { key: "settings", label: "设置", icon: Settings },
-  { key: "health", label: "健康", icon: HeartPulse },
-  { key: "maintenance", label: "维护", icon: Wrench }
+const navItems: Array<{ key: RouteKey; labelKey: string; icon: typeof Home }> = [
+  { key: "dashboard", labelKey: "navigation.dashboard", icon: Home },
+  { key: "approvals", labelKey: "navigation.approvals", icon: Bell },
+  { key: "tasks", labelKey: "navigation.tasks", icon: ClipboardList },
+  { key: "dispatch", labelKey: "navigation.dispatch", icon: Send },
+  { key: "feedback", labelKey: "navigation.feedback", icon: MessageSquareDiff },
+  { key: "policy", labelKey: "navigation.policy", icon: ShieldCheck },
+  { key: "settings", labelKey: "navigation.settings", icon: Settings },
+  { key: "health", labelKey: "navigation.health", icon: HeartPulse },
+  { key: "maintenance", labelKey: "navigation.maintenance", icon: Wrench }
 ];
 
 export function App() {
@@ -70,8 +71,8 @@ export function App() {
   }, []);
 
   const runtimeStatus = useMemo(
-    () => runtimeStripStatus(dashboard.data, dashboard.error, dashboard.dataUpdatedAt),
-    [dashboard.data, dashboard.dataUpdatedAt, dashboard.error]
+    () => runtimeStripStatus(t, dashboard.data, dashboard.error, dashboard.dataUpdatedAt),
+    [dashboard.data, dashboard.dataUpdatedAt, dashboard.error, t]
   );
 
   function navigate(route: RouteKey, selectedId?: string, view?: "attention" | "all") {
@@ -81,12 +82,12 @@ export function App() {
 
   return (
     <div className="app-shell">
-      <aside className="side-nav" aria-label="主导航">
+      <aside className="side-nav" aria-label={t("app.mainNavigation")}>
         <div className="brand-lockup">
           <Database aria-hidden="true" size={18} />
           <div>
             <span className="brand-title">Shadow Agent</span>
-            <span className="brand-subtitle">值守台</span>
+            <span className="brand-subtitle">{t("app.brandSubtitle")}</span>
           </div>
         </div>
         <nav className="nav-list">
@@ -96,10 +97,10 @@ export function App() {
               className="nav-item"
               href={`#${item.key}`}
               key={item.key}
-              title={item.label}
+              title={t(item.labelKey)}
             >
               <item.icon aria-hidden="true" size={17} />
-              <span>{item.label}</span>
+              <span>{t(item.labelKey)}</span>
             </a>
           ))}
         </nav>
@@ -115,7 +116,7 @@ export function App() {
         />
         <main className="main-surface">
           {!token ? (
-            <EmptyState title="缺少会话令牌" detail="请使用服务启动时输出的本地控制台链接打开页面。" />
+            <EmptyState title={t("app.missingToken")} detail={t("app.missingTokenDetail")} />
           ) : location.route === "dashboard" ? (
             <DashboardScreen navigate={navigate} token={token} />
           ) : location.route === "approvals" ? (
@@ -161,7 +162,7 @@ function RuntimeStrip({
     <header className="runtime-strip">
       <div className="runtime-heading">
         <Activity aria-hidden="true" size={16} />
-        <span>运行状态</span>
+        <span>{t("app.runtime")}</span>
       </div>
       <div className="runtime-items">
         {status.map((item) => (
@@ -181,11 +182,11 @@ function RuntimeStrip({
       </label>
       <label className="theme-control">
         <SunMoon aria-hidden="true" size={16} />
-        <span>外观</span>
-        <select aria-label="外观主题" onChange={(event) => onThemeChange(event.target.value as ThemePreference)} value={preference}>
-          <option value="system">跟随系统</option>
-          <option value="light">浅色</option>
-          <option value="dark">深色</option>
+        <span>{t("app.appearance")}</span>
+        <select aria-label={t("app.appearanceLabel")} onChange={(event) => onThemeChange(event.target.value as ThemePreference)} value={preference}>
+          <option value="system">{t("app.themeSystem")}</option>
+          <option value="light">{t("app.themeLight")}</option>
+          <option value="dark">{t("app.themeDark")}</option>
         </select>
       </label>
     </header>
@@ -193,20 +194,21 @@ function RuntimeStrip({
 }
 
 function FollowUpScreen({ route }: { route: RouteKey }) {
-  const label = navItems.find((item) => item.key === route)?.label ?? "控制台";
+  const { t } = useTranslation();
+  const label = t(navItems.find((item) => item.key === route)?.labelKey ?? "navigation.console");
   return (
     <section className="work-grid" aria-label={label}>
       <div className="queue-panel">
         <div className="section-header">
           <div>
-            <p className="eyebrow">功能状态</p>
+            <p className="eyebrow">{t("app.featureState")}</p>
             <h1>{label}</h1>
           </div>
-          <Badge tone="muted">暂不可用</Badge>
+          <Badge tone="muted">{t("app.unavailable")}</Badge>
         </div>
         <div className="quiet-empty">
           <FileText aria-hidden="true" size={18} />
-          <span>当前没有可用的操作流程。</span>
+          <span>{t("app.noWorkflow")}</span>
         </div>
       </div>
     </section>
@@ -225,15 +227,15 @@ function currentLocation(): { route: RouteKey; selectedId: string | null; view: 
   };
 }
 
-function runtimeStripStatus(snapshot: DashboardSnapshot | undefined, error: unknown, updatedAt: number) {
+function runtimeStripStatus(t: TFunction, snapshot: DashboardSnapshot | undefined, error: unknown, updatedAt: number) {
   const daemon = String(snapshot?.daemon_liveness?.status ?? "unknown");
   const initialized = snapshot?.policy_status?.initialized;
   const importDiff = snapshot?.policy_status?.policy_import_diff?.status ?? "unknown";
   const dataStale = updatedAt > 0 && Date.now() - updatedAt > 30_000;
   return [
-    { label: "守护进程", value: daemon === "live" ? "运行中" : daemon === "unknown" ? "未知" : daemon, tone: daemon === "live" ? "success" : daemon === "unknown" ? "muted" : "warning" },
-    { label: "策略", value: initialized ? "已初始化" : "缺失", tone: initialized ? "success" : "warning" },
-    { label: "导入差异", value: importDiff === "matches" ? "一致" : importDiff === "differs" ? "有差异" : "未知", tone: importDiff === "matches" ? "success" : "info" },
-    { label: "数据", value: error ? "读取失败" : dataStale ? "缓存过期" : updatedAt ? "最新" : "等待中", tone: error ? "danger" : dataStale ? "warning" : updatedAt ? "success" : "muted" }
+    { label: t("runtime.daemon"), value: daemon === "live" ? t("runtime.running") : daemon === "unknown" ? t("common.unknown") : daemon, tone: daemon === "live" ? "success" : daemon === "unknown" ? "muted" : "warning" },
+    { label: t("runtime.policy"), value: initialized ? t("runtime.initialized") : t("runtime.missing"), tone: initialized ? "success" : "warning" },
+    { label: t("runtime.importDiff"), value: importDiff === "matches" ? t("runtime.matches") : importDiff === "differs" ? t("runtime.differs") : t("common.unknown"), tone: importDiff === "matches" ? "success" : "info" },
+    { label: t("runtime.data"), value: error ? t("runtime.readFailed") : dataStale ? t("runtime.stale") : updatedAt ? t("runtime.latest") : t("runtime.waiting"), tone: error ? "danger" : dataStale ? "warning" : updatedAt ? "success" : "muted" }
   ] satisfies Array<{ label: string; value: string; tone: Tone }>;
 }

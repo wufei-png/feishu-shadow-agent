@@ -33,6 +33,7 @@ void i18n.use(initReactI18next).init({
   lng: language,
   fallbackLng: "zh-CN",
   supportedLngs: supportedLanguages,
+  keySeparator: false,
   interpolation: { escapeValue: false },
   returnNull: false
 });

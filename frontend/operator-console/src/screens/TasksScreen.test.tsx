@@ -98,8 +98,8 @@ describe("TasksScreen processing recovery", () => {
     );
 
     await screen.findByRole("heading", { name: "任务背景" });
-    expect(screen.getByText(/下次 fresh 重建生效/)).toBeTruthy();
-    await user.type(screen.getByLabelText("Owner 补充背景"), "客户只接受周五发布");
+    expect(screen.getByText(/下次新会话重建生效/)).toBeTruthy();
+    await user.type(screen.getByLabelText("所有者补充背景"), "客户只接受周五发布");
     await user.click(screen.getByRole("button", { name: "保存背景" }));
 
     expect(api.updateTaskBackground).toHaveBeenCalledWith("token", "t_retry", {

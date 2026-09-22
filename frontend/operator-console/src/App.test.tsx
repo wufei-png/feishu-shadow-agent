@@ -5,6 +5,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
+import { setConsoleLanguage } from "./i18n";
 
 vi.mock("./api", () => ({ getDashboard: vi.fn().mockResolvedValue({}) }));
 vi.mock("./screens/DashboardScreen", () => ({
@@ -22,7 +23,8 @@ vi.mock("./screens/TasksScreen", () => ({
   TasksScreen: ({ initialFilter }: { initialFilter?: string }) => <p>任务筛选：{initialFilter ?? "默认"}</p>
 }));
 
-beforeEach(() => {
+beforeEach(async () => {
+  await setConsoleLanguage("zh-CN");
   sessionStorage.setItem("feishu_shadow_agent_console_token", "token");
   window.location.hash = "#dashboard";
   vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({
@@ -53,5 +55,17 @@ describe("dashboard attention navigation", () => {
     await user.click(await screen.findByRole("button", { name: "查看任务待办" }));
     expect(await screen.findByText("任务筛选：all")).toBeTruthy();
     expect(window.location.hash).toBe("#tasks?view=all");
+  });
+
+  it("switches the application shell to English without reloading", async () => {
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><App /></QueryClientProvider>);
+
+    await user.selectOptions(screen.getByRole("combobox", { name: "语言" }), "en-US");
+
+    expect(await screen.findByRole("link", { name: "Approvals" })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Language" })).toBeTruthy();
+    expect(document.documentElement.lang).toBe("en-US");
   });
 });
