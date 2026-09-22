@@ -1,4 +1,5 @@
 import { Bot, Clock } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import {
   Badge,
   EmptyState,
@@ -10,8 +11,9 @@ import {
 import type { AgentAudit } from "../types";
 
 export function AgentAuditList({ audits, compact = false }: { audits: AgentAudit[]; compact?: boolean }) {
+  const { t } = useTranslation();
   if (!audits.length) {
-    return <EmptyState title="没有 Agent 审计记录" detail="Agent 后端调用被记录后会显示在这里。" />;
+    return <EmptyState title={t("audit.empty")} detail={t("audit.emptyDetail")} />;
   }
   return (
     <ul className="audit-list">
@@ -23,31 +25,31 @@ export function AgentAuditList({ audits, compact = false }: { audits: AgentAudit
             <span>{formatDate(audit.created_at)}</span>
           </div>
           <FieldList>
-            <FactRow label="会话" value={audit.agent_session_id ?? "无"} />
-            <FactRow label="耗时" value={audit.latency_ms === null ? "未记录" : `${audit.latency_ms} ms`} />
-            <FactRow label="消息" value={audit.input_message_ids.join(", ") || "无"} />
-            {!compact ? <FactRow label="资源" value={audit.input_resource_ids.join(", ") || "无"} /> : null}
-            {!compact ? <FactRow label="工具权限" value={audit.tool_permissions_profile ?? "未记录"} /> : null}
+            <FactRow label={t("audit.session")} value={audit.agent_session_id ?? t("common.none")} />
+            <FactRow icon="clock" label={t("audit.latency")} value={audit.latency_ms === null ? t("common.notRecorded") : `${audit.latency_ms} ms`} />
+            <FactRow label={t("audit.messages")} value={audit.input_message_ids.join(", ") || t("common.none")} />
+            {!compact ? <FactRow label={t("audit.resources")} value={audit.input_resource_ids.join(", ") || t("common.none")} /> : null}
+            {!compact ? <FactRow label={t("audit.toolPermissions")} value={audit.tool_permissions_profile ?? t("common.notRecorded")} /> : null}
           </FieldList>
           {audit.error ? (
             <div className="readonly-note">
               <Bot aria-hidden="true" size={14} />
-              <span>{shortText(audit.error, "Agent 错误")}</span>
+              <span>{shortText(audit.error, t("audit.agentError"))}</span>
             </div>
           ) : null}
           <details>
-            <summary>响应摘要</summary>
+            <summary>{t("audit.responseSummary")}</summary>
             <JsonBlock value={audit.response_summary} />
           </details>
           {!compact ? (
             <details>
-              <summary>响应 JSON</summary>
+              <summary>{t("audit.responseJson")}</summary>
               <JsonBlock value={audit.response} />
             </details>
           ) : null}
           {Object.keys(audit.prompt_debug ?? {}).length ? (
             <details>
-              <summary>调试提示词</summary>
+              <summary>{t("audit.debugPrompt")}</summary>
               <JsonBlock value={audit.prompt_debug} />
             </details>
           ) : null}
@@ -57,12 +59,12 @@ export function AgentAuditList({ audits, compact = false }: { audits: AgentAudit
   );
 }
 
-function FactRow({ label, value }: { label: string; value: string }) {
+function FactRow({ label, value, icon }: { label: string; value: string; icon?: "clock" }) {
   return (
     <div>
       <dt>{label}</dt>
       <dd>
-        {label === "耗时" ? <Clock aria-hidden="true" size={12} /> : null}
+        {icon === "clock" ? <Clock aria-hidden="true" size={12} /> : null}
         {value}
       </dd>
     </div>

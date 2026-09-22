@@ -6,7 +6,7 @@ function keyPart(value: string): string {
 
 export function enumLabel(
   t: TFunction,
-  group: "status" | "kind" | "stage" | "identity" | "role" | "source" | "action" | "postprocess",
+  group: "status" | "kind" | "stage" | "identity" | "role" | "source" | "action" | "postprocess" | "severity" | "category" | "outcome" | "reason",
   value: string | null | undefined,
   fallback?: string
 ): string {
