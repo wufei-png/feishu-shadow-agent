@@ -17,9 +17,9 @@ import type { SettingsCatalogEntry, SettingsRuntime, Tone } from "../types";
 type SettingsGroup = "normal" | "advanced" | "diagnostics";
 
 const groupLabels: Record<SettingsGroup, { eyebrow: string; title: string; icon: typeof Settings2 }> = {
-  normal: { eyebrow: "Normal Settings", title: "Product and workflow fields", icon: Settings2 },
-  advanced: { eyebrow: "Advanced Settings", title: "Operational controls", icon: SlidersHorizontal },
-  diagnostics: { eyebrow: "Diagnostics", title: "Installation and runtime facts", icon: Database }
+  normal: { eyebrow: "常规设置", title: "产品与流程字段", icon: Settings2 },
+  advanced: { eyebrow: "高级设置", title: "运行控制字段", icon: SlidersHorizontal },
+  diagnostics: { eyebrow: "诊断信息", title: "安装与运行状态", icon: Database }
 };
 
 export function SettingsScreen({ token }: { token: string }) {
@@ -40,34 +40,34 @@ export function SettingsScreen({ token }: { token: string }) {
   const grouped = useMemo(() => groupSettings(visibleEntries), [visibleEntries]);
 
   if (catalog.isLoading || runtime.isLoading) {
-    return <LoadingState title="Loading settings" />;
+    return <LoadingState title="正在读取设置" />;
   }
   if (catalog.error) {
-    return <ErrorState title="Settings Catalog unavailable" error={catalog.error} />;
+    return <ErrorState title="无法读取设置目录" error={catalog.error} />;
   }
   if (runtime.error) {
-    return <ErrorState title="Settings runtime unavailable" error={runtime.error} />;
+    return <ErrorState title="无法读取运行设置" error={runtime.error} />;
   }
   if (!catalog.data || !runtime.data) {
-    return <EmptyState title="Settings unavailable" detail="The local console did not return catalog and runtime values." />;
+    return <EmptyState title="设置暂不可用" detail="本地控制台没有返回设置目录或运行值。" />;
   }
 
   return (
-    <section className="settings-screen" aria-label="Settings">
+    <section className="settings-screen" aria-label="设置">
       <div className="queue-panel">
         <SectionHeader
-          eyebrow="Settings Catalog"
-          title="Console-exposed product fields"
-          badge={<Badge tone="info">{visibleEntries.length} visible</Badge>}
+          eyebrow="设置目录"
+          title="可查看的产品设置"
+          badge={<Badge tone="info">{visibleEntries.length} 项</Badge>}
         >
           <p className="section-note">
-            Settings is a product field map. Product Policy edits live on the Policy page; config.yaml fields are readonly in v1.
+            此处展示产品字段。策略修改请前往“策略”；config.yaml 字段当前只读。
           </p>
         </SectionHeader>
         <div className="policy-diff-grid">
-          <FactTile label="Policy" value={runtime.data.policy_status.initialized ? "initialized" : "missing"} tone={runtime.data.policy_status.initialized ? "success" : "warning"} />
-          <FactTile label="Import Diff" value={runtime.data.policy_status.policy_import_diff?.status ?? "unknown"} tone={statusTone(runtime.data.policy_status.policy_import_diff?.status)} />
-          <FactTile label="Chat policy rows" value={String(runtime.data.chat_policies.length)} tone="info" />
+          <FactTile label="策略" value={runtime.data.policy_status.initialized ? "已初始化" : "缺失"} tone={runtime.data.policy_status.initialized ? "success" : "warning"} />
+          <FactTile label="导入差异" value={runtime.data.policy_status.policy_import_diff?.status ?? "未知"} tone={statusTone(runtime.data.policy_status.policy_import_diff?.status)} />
+          <FactTile label="会话策略数" value={String(runtime.data.chat_policies.length)} tone="info" />
         </div>
       </div>
 
@@ -112,7 +112,7 @@ function SettingsCatalogSection({
           ))}
         </div>
       ) : (
-        <EmptyState title="No fields in this section" detail="Hidden fields are intentionally omitted from the default console." />
+        <EmptyState title="此分类暂无字段" detail="隐藏字段不会显示在默认控制台中。" />
       )}
     </section>
   );
@@ -132,10 +132,10 @@ function SettingsField({ entry, runtime }: { entry: SettingsCatalogEntry; runtim
       </div>
       {entry.help ? <p className="field-help">{entry.help}</p> : null}
       <FieldList>
-        <FactRow label="Current value" value={formatSettingValue(value)} />
-        <FactRow label="Source" value={entry.source} />
-        <FactRow label="Requires restart" value={entry.requires_restart ? "yes" : "no"} />
-        <FactRow label="Write boundary" value={entry.write_boundary ?? "none"} />
+        <FactRow label="当前值" value={formatSettingValue(value)} />
+        <FactRow label="来源" value={entry.source} />
+        <FactRow label="需要重启" value={entry.requires_restart ? "是" : "否"} />
+        <FactRow label="写入边界" value={entry.write_boundary ?? "无"} />
       </FieldList>
       {readonlyReason ? (
         <div className="readonly-note">
@@ -172,36 +172,36 @@ function settingValue(entry: SettingsCatalogEntry, runtime: SettingsRuntime): un
     return runtime.values[entry.key];
   }
   if (entry.scope === "chat_policy") {
-    return runtime.chat_policies.length ? `${runtime.chat_policies.length} chat policy rows` : "no chat policy rows";
+    return runtime.chat_policies.length ? `${runtime.chat_policies.length} 条会话策略` : "没有会话策略";
   }
   if (entry.scope === "policy_audit") {
-    return `${runtime.policy_audit_history.length} recent audits`;
+    return `${runtime.policy_audit_history.length} 条近期审计记录`;
   }
   return null;
 }
 
 function editableLabel(entry: SettingsCatalogEntry): string {
   if (entry.editable_v1 === "command") {
-    return "command";
+    return "通过命令修改";
   }
   if (entry.editable_v1 === true) {
-    return entry.source === "product_policy_store" ? "Edit on Policy page" : "editable";
+    return entry.source === "product_policy_store" ? "在策略页修改" : "可编辑";
   }
-  return "readonly";
+  return "只读";
 }
 
 function readonlyNote(entry: SettingsCatalogEntry): string | null {
   if (entry.source === "config_yaml") {
     if (entry.editable_v1 === "command") {
-      return "Run the Policy import command from the Policy screen; the console does not write config.yaml.";
+      return "可在策略页运行导入命令；控制台不会写入 config.yaml。";
     }
-    return "Readonly in v1 because config.yaml writes need a future command facade and audit path.";
+    return "当前只读；修改 config.yaml 仍需专门的命令和审计路径。";
   }
   if (entry.source === "product_policy_store" && entry.editable_v1 === true) {
-    return "Editable through the Policy page and OperatorCommandService.";
+    return "可在策略页通过受审计的操作修改。";
   }
   if (entry.editable_v1 === false) {
-    return "Readonly runtime or derived field.";
+    return "运行时或派生字段，只读。";
   }
   return null;
 }
@@ -226,16 +226,16 @@ function FactRow({ label, value }: { label: string; value: string }) {
 
 function formatSettingValue(value: unknown): string {
   if (value === true) {
-    return "yes";
+    return "是";
   }
   if (value === false) {
-    return "no";
+    return "否";
   }
   if (value === null || value === undefined || value === "") {
-    return "not set";
+    return "未设置";
   }
   if (Array.isArray(value)) {
-    return value.length ? value.join(", ") : "none";
+    return value.length ? value.join(", ") : "无";
   }
   if (typeof value === "object") {
     return JSON.stringify(value);

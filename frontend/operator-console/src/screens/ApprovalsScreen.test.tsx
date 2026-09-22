@@ -50,21 +50,21 @@ describe("ApprovalsScreen", () => {
     renderScreen();
     await screen.findByRole("heading", { name: approvalA.approval_id });
 
-    await user.type(screen.getByLabelText("Reason"), "reason for A");
-    await user.type(screen.getByLabelText("Final reply"), "reply for A");
+    await user.type(screen.getByLabelText("原因"), "reason for A");
+    await user.type(screen.getByLabelText("最终回复"), "reply for A");
     await user.click(screen.getByRole("button", { name: new RegExp(approvalB.approval_id) }));
     await screen.findByRole("heading", { name: approvalB.approval_id });
 
     expect(window.location.hash).toBe(`#approvals/${approvalB.approval_id}`);
-    expect((screen.getByLabelText("Reason") as HTMLTextAreaElement).value).toBe("");
-    expect((screen.getByLabelText("Final reply") as HTMLTextAreaElement).value).toBe("");
-    await user.type(screen.getByLabelText("Reason"), "reason for B");
-    await user.type(screen.getByLabelText("Final reply"), "reply for B");
+    expect((screen.getByLabelText("原因") as HTMLTextAreaElement).value).toBe("");
+    expect((screen.getByLabelText("最终回复") as HTMLTextAreaElement).value).toBe("");
+    await user.type(screen.getByLabelText("原因"), "reason for B");
+    await user.type(screen.getByLabelText("最终回复"), "reply for B");
     await user.click(screen.getByRole("button", { name: new RegExp(approvalA.approval_id) }));
     await screen.findByRole("heading", { name: approvalA.approval_id });
 
-    expect((screen.getByLabelText("Reason") as HTMLTextAreaElement).value).toBe("reason for A");
-    expect((screen.getByLabelText("Final reply") as HTMLTextAreaElement).value).toBe("reply for A");
+    expect((screen.getByLabelText("原因") as HTMLTextAreaElement).value).toBe("reason for A");
+    expect((screen.getByLabelText("最终回复") as HTMLTextAreaElement).value).toBe("reply for A");
   });
 
   it("binds a command to the submitted approval and keeps its late result there", async () => {
@@ -73,9 +73,9 @@ describe("ApprovalsScreen", () => {
     const user = userEvent.setup();
     renderScreen();
     await screen.findByRole("heading", { name: approvalA.approval_id });
-    await user.type(screen.getByLabelText("Reason"), "checked A");
+    await user.type(screen.getByLabelText("原因"), "checked A");
 
-    await user.dblClick(screen.getByRole("button", { name: "Approve" }));
+    await user.dblClick(screen.getByRole("button", { name: "批准" }));
 
     expect(api.approveApproval).toHaveBeenCalledTimes(1);
     expect(api.approveApproval).toHaveBeenCalledWith("token", approvalA.approval_id, {
@@ -85,8 +85,8 @@ describe("ApprovalsScreen", () => {
       expected_source_revision: approvalA.source_revision,
       reason: "checked A"
     });
-    expect((screen.getByRole("button", { name: "Reject" }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: "Send final reply" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "拒绝" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "发送最终回复" }) as HTMLButtonElement).disabled).toBe(true);
 
     await user.click(screen.getByRole("button", { name: new RegExp(approvalB.approval_id) }));
     await screen.findByRole("heading", { name: approvalB.approval_id });
@@ -113,13 +113,13 @@ describe("ApprovalsScreen", () => {
     });
     const user = userEvent.setup();
     renderScreen();
-    await screen.findByRole("button", { name: "Next" });
+    await screen.findByRole("button", { name: "下一页" });
 
-    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.click(screen.getByRole("button", { name: "下一页" }));
     await waitFor(() => {
       expect(api.listApprovals).toHaveBeenCalledWith("token", { status: "pending", limit: 51, offset: 50 });
     });
-    await user.click(screen.getByRole("button", { name: "Expired" }));
+    await user.click(screen.getByRole("button", { name: "已过期" }));
     await waitFor(() => {
       expect(api.listApprovals).toHaveBeenCalledWith("token", { status: "expired", limit: 51, offset: 0 });
     });

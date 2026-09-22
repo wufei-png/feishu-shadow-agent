@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Bell, CheckCircle2, ClipboardList, RefreshCw, Send, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ArrowUpRight, Bell, CheckCircle2, ClipboardList, RefreshCw, Send, ShieldCheck } from "lucide-react";
 import { expireApprovals, getDashboard } from "../api";
 import {
   Badge,
@@ -17,7 +17,7 @@ import {
 import { invalidateAfterMaintenanceCommand, queryKeys } from "../queryKeys";
 import type { ApprovalSummary, AttentionTask, BotMembershipStatus, CommandResult, DispatchActionSummary, IngestionStatus, RouteKey } from "../types";
 
-export function DashboardScreen({ token, navigate }: { token: string; navigate: (route: RouteKey, selectedId?: string) => void }) {
+export function DashboardScreen({ token, navigate }: { token: string; navigate: (route: RouteKey, selectedId?: string, view?: "attention" | "all") => void }) {
   const queryClient = useQueryClient();
   const dashboard = useQuery({
     queryKey: queryKeys.dashboard(),
@@ -49,36 +49,34 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
   const policyDiff = policyStatus?.policy_import_diff;
   const policyNeedsAttention = policyStatus?.initialized === false || policyDiff?.status === "differs";
   const actionCount = attention?.total_item_count ?? 0;
-  const blockedOrFailed =
-    (attention?.blocked_processing_count ?? 0) +
-    (attention?.failed_processing_count ?? 0) +
-    (attention?.failed_action_count ?? 0);
+  const sendAttention = (attention?.uncertain_action_count ?? 0) + (attention?.failed_action_count ?? 0);
+  const blockedOrFailed = (attention?.blocked_processing_count ?? 0) + (attention?.failed_processing_count ?? 0);
 
   return (
     <section className="work-grid" aria-label="待我处理">
       <div className="work-main">
-        <div className="queue-panel">
+        <div className="queue-panel dashboard-overview">
           <SectionHeader
-            eyebrow="OWNER ACTION QUEUE"
+            eyebrow="人工决策"
             title="待我处理"
             badge={<Badge tone={actionCount ? "warning" : "success"}>{actionCount ? `${actionCount} 项` : "已清空"}</Badge>}
           >
-            <p className="section-note">聚合待审批、发送异常和处理阻塞；总量来自完整数据，不受下方预览条数影响。</p>
+            <p className="section-note">先核实发送结果，再处理审批与任务阻塞。下方数量来自完整数据，不受预览条数影响。</p>
             <div className="command-buttons">
               <Button disabled={dashboard.isFetching} onClick={() => void dashboard.refetch()}>
                 <RefreshCw aria-hidden="true" size={15} />
                 {dashboard.isFetching ? "刷新中…" : "刷新"}
               </Button>
-              <span className="detail-note">更新于 {dashboard.dataUpdatedAt ? new Date(dashboard.dataUpdatedAt).toLocaleString() : "尚未更新"}</span>
+              <span className="detail-note">更新于 {dashboard.dataUpdatedAt ? new Date(dashboard.dataUpdatedAt).toLocaleString("zh-CN") : "尚未更新"}</span>
             </div>
             {dashboard.error ? <p className="detail-note danger">刷新失败，当前展示缓存数据。</p> : null}
           </SectionHeader>
-          <div className="metric-row">
-            <Metric label="待审批" value={attention?.pending_approval_count ?? 0} tone={attention?.pending_approval_count ? "warning" : "neutral"} />
-            <Metric label="发送结果不确定" value={attention?.uncertain_action_count ?? 0} tone={attention?.uncertain_action_count ? "danger" : "neutral"} />
-            <Metric label="阻塞 / 失败" value={blockedOrFailed} tone={blockedOrFailed ? "danger" : "neutral"} />
-            <Metric label="关联任务" value={attention?.affected_task_count ?? 0} tone={attention?.affected_task_count ? "info" : "neutral"} />
+          <div aria-label="待办索引" className="decision-index">
+            <DecisionLink count={sendAttention} hint="查看发送记录" label="发送待核实或失败" onClick={() => navigate("dispatch", undefined, "attention")} tone="danger" />
+            <DecisionLink count={attention?.pending_approval_count ?? 0} hint="查看审批" label="待审批" onClick={() => navigate("approvals")} tone="warning" />
+            <DecisionLink count={blockedOrFailed} hint="查看全部任务" label="处理阻塞或失败" onClick={() => navigate("tasks", undefined, "all")} tone="danger" />
           </div>
+          <p className="decision-context">涉及 {attention?.affected_task_count ?? 0} 个任务</p>
           {actionCount === 0 ? <EmptyState title="当前没有待处理事项" detail="运行状态、策略和健康入口仍保留在右侧。" /> : null}
         </div>
 
@@ -97,11 +95,11 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
         <MembershipPanel status={snapshot?.bot_membership_status} />
 
         <div className="detail-panel">
-          <p className="eyebrow">PRODUCT POLICY</p>
+          <p className="eyebrow">运行边界</p>
           <h2>运行时策略</h2>
           <dl className="fact-list">
             <div><dt>初始化</dt><dd><Badge tone={policyStatus?.initialized ? "success" : "warning"}>{policyStatus?.initialized ? "已完成" : "缺失"}</Badge></dd></div>
-            <div><dt>Policy Import Diff</dt><dd><Badge tone={statusTone(policyDiff?.status)}>{policyDiff?.status ?? "unknown"}</Badge></dd></div>
+            <div><dt>策略导入差异</dt><dd><Badge tone={statusTone(policyDiff?.status)}>{policyDiff?.status === "matches" ? "一致" : policyDiff?.status === "differs" ? "有差异" : "未知"}</Badge></dd></div>
             <div><dt>上次 tick</dt><dd>{formatDate(snapshot?.last_run?.last_tick_finished_at)}</dd></div>
           </dl>
           {policyDiff?.message ? <p className="detail-note">{policyDiff.message}</p> : null}
@@ -113,7 +111,7 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
         </div>
 
         <div className="detail-panel">
-          <p className="eyebrow">MAINTENANCE</p>
+          <p className="eyebrow">维护操作</p>
           <h2>审批过期处理</h2>
           <p className="detail-note">读取不会改变状态；只有点击命令才会显式过期超时审批。</p>
           <Button disabled={expire.isPending} onClick={() => expire.mutate()} tone="warning">过期超时审批</Button>
@@ -121,7 +119,7 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
         </div>
 
         <div className="detail-panel">
-          <p className="eyebrow">RECENT SIGNALS</p>
+          <p className="eyebrow">近期信号</p>
           <h2>最近错误与审计信号</h2>
           {recentErrors.length ? (
             <ul className="timeline-list">
@@ -141,7 +139,7 @@ function MembershipPanel({ status }: { status: BotMembershipStatus | undefined }
   const attention = status?.facts.filter((fact) => fact.status !== "present") ?? [];
   return (
     <div className="detail-panel">
-      <p className="eyebrow">BOT MEMBERSHIP</p>
+      <p className="eyebrow">群成员状态</p>
       <div className="detail-title-row">
         <h2>机器人群成员状态</h2>
         <Badge tone={status?.summary.absent ? "danger" : status?.summary.unknown || status?.summary.unobserved ? "warning" : "success"}>
@@ -154,7 +152,7 @@ function MembershipPanel({ status }: { status: BotMembershipStatus | undefined }
             <li key={fact.chat_id}>
               <AlertTriangle aria-hidden="true" size={14} />
               <span>{fact.chat_id}</span>
-              <small>{fact.status} · {fact.source ?? "source unknown"} · {formatDate(fact.checked_at)}</small>
+              <small>{fact.status} · {fact.source ?? "来源未知"} · {formatDate(fact.checked_at)}</small>
             </li>
           ))}
         </ul>
@@ -168,13 +166,13 @@ function IngestionPanel({ status }: { status: IngestionStatus | undefined }) {
   const backlogs = status?.sources.filter((source) => !source.drain_complete) ?? [];
   return (
     <div className="detail-panel">
-      <p className="eyebrow">INGESTION</p>
+      <p className="eyebrow">消息摄取</p>
       <div className="detail-title-row">
         <h2>摄取积压</h2>
         <Badge tone={summary?.backlog_count ? "warning" : "success"}>{summary?.backlog_count ?? 0} 个来源</Badge>
       </div>
       <dl className="fact-list">
-        <div><dt>最老 checkpoint</dt><dd>{formatAge(summary?.oldest_checkpoint_age_seconds)}</dd></div>
+        <div><dt>最早检查点</dt><dd>{formatAge(summary?.oldest_checkpoint_age_seconds)}</dd></div>
         <div><dt>预算耗尽</dt><dd>{summary?.budget_exhausted_count ?? 0}</dd></div>
       </dl>
       {backlogs.length ? (
@@ -205,8 +203,20 @@ function formatAge(seconds: number | null | undefined): string {
   return `${Math.floor(seconds / 3600)} 小时`;
 }
 
-function Metric({ label, value, tone }: { label: string; value: number; tone: string }) {
-  return <div className={`metric-card ${tone}`}><span>{label}</span><strong>{value}</strong></div>;
+function DecisionLink({ count, hint, label, onClick, tone }: {
+  count: number;
+  hint: string;
+  label: string;
+  onClick: () => void;
+  tone: "danger" | "warning";
+}) {
+  return (
+    <button className={`decision-link ${count ? tone : "quiet"}`} onClick={onClick} type="button">
+      <span className="decision-label">{label}</span>
+      <strong>{count}</strong>
+      <span className="decision-hint">{hint}<ArrowUpRight aria-hidden="true" size={15} /></span>
+    </button>
+  );
 }
 
 function AttentionTasks({ tasks, onTask }: { tasks: AttentionTask[]; onTask: (taskId: string) => void }) {
@@ -281,7 +291,7 @@ function PreviewList({ approvals, actions, staleActions, onApproval, onAction }:
                 meta={`${action.task_short_id ?? "未关联任务"} · 目标 ${action.target_message_id ?? "unknown"} · ${formatDate(action.updated_at)}`}
                 onClick={() => onAction(action.action_id)}
                 selected={false}
-                title={`Action ${action.action_id}`}
+                title={`发送记录 ${action.action_id}`}
               ><span className="row-preview">发送状态：{action.status}</span></ListRow>
             ))}
           </div>

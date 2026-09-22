@@ -41,10 +41,10 @@ const emptyDraft: ApprovalDraft = { reason: "", finalReply: "" };
 const pageSize = 50;
 
 const approvalFilters: Array<{ value: ApprovalFilter; label: string }> = [
-  { value: "pending", label: "Pending" },
-  { value: "expired", label: "Expired" },
-  { value: "resolved", label: "Resolved" },
-  { value: "all", label: "All" }
+  { value: "pending", label: "待处理" },
+  { value: "expired", label: "已过期" },
+  { value: "resolved", label: "已处理" },
+  { value: "all", label: "全部" }
 ];
 
 export function ApprovalsScreen({ token, selectedId }: { token: string; selectedId: string | null }) {
@@ -180,23 +180,23 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
   }
 
   if (approvals.isLoading) {
-    return <LoadingState title="Loading approvals" />;
+    return <LoadingState title="正在读取审批" />;
   }
   if (approvals.error && !approvals.data) {
-    return <ErrorState title="Approvals unavailable" error={approvals.error} />;
+    return <ErrorState title="无法读取审批列表" error={approvals.error} />;
   }
 
   return (
-    <section className="work-grid" aria-label="Approvals">
+    <section className="work-grid" aria-label="审批">
       <div className="work-main">
         <div className="queue-panel">
           <SectionHeader
-            eyebrow="Approval Queue"
-            title="Human-reviewed replies"
+            eyebrow="人工审核"
+            title="审批队列"
             badge={<Badge tone={visibleApprovals.length ? "warning" : "success"}>{visibleApprovals.length}</Badge>}
           />
           <SegmentedControl
-            label="Approval status filter"
+            label="审批状态筛选"
             onChange={(nextFilter) => {
               setFilter(nextFilter);
               setPage(0);
@@ -218,9 +218,9 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
             <div className="list-stack">
               {visibleApprovals.map((approval) => (
                 <ListRow
-                  badge={<Badge tone={approval.is_overdue ? "danger" : statusTone(approval.status)}>{approval.is_overdue ? "overdue" : approval.status}</Badge>}
+                  badge={<Badge tone={approval.is_overdue ? "danger" : statusTone(approval.status)}>{approval.is_overdue ? "已逾期" : approval.status}</Badge>}
                   key={approval.approval_id}
-                  meta={`${approval.kind} · ${approval.task_short_id ?? "no task"} · ${formatDate(approval.created_at)}`}
+                  meta={`${approval.kind} · ${approval.task_short_id ?? "未关联任务"} · ${formatDate(approval.created_at)}`}
                   onClick={() => selectApproval(approval.approval_id, setSelectedApprovalId)}
                   selected={approval.approval_id === selectedApprovalId}
                   title={approval.approval_id}
@@ -237,40 +237,40 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
               ))}
             </div>
           ) : (
-            <EmptyState title="No approvals in this view" detail="Pending, expired, and resolved blockers stay separated for queue work." />
+            <EmptyState title="当前筛选下没有审批" detail="可切换上方状态，查看待处理、已过期或已处理的审批。" />
           )}
         </div>
       </div>
 
       <aside className="work-detail">
-        {selectedApprovalId && detail.isLoading ? <LoadingState title="Loading approval detail" /> : null}
-        {detail.error ? <ErrorState title="Approval detail unavailable" error={detail.error} /> : null}
+        {selectedApprovalId && detail.isLoading ? <LoadingState title="正在读取审批详情" /> : null}
+        {detail.error ? <ErrorState title="无法读取审批详情" error={detail.error} /> : null}
         {detail.data ? (
           <>
             <div className="detail-panel">
-              <p className="eyebrow">Approval Detail</p>
+              <p className="eyebrow">审批详情</p>
               <div className="detail-title-row">
                 <h2>{detail.data.approval_id}</h2>
                 <Badge tone={detail.data.is_overdue ? "danger" : statusTone(detail.data.status)}>
-                  {detail.data.is_overdue ? "overdue" : detail.data.status}
+                  {detail.data.is_overdue ? "已逾期" : detail.data.status}
                 </Badge>
               </div>
-              <p className="preview-copy">{shortText(detail.data.preview, "No approval preview")}</p>
+              <p className="preview-copy">{shortText(detail.data.preview, "无审批预览")}</p>
               <FieldList>
-                <FactRow label="Task" value={detail.data.task_short_id ?? "not linked"} />
-                <FactRow label="Created" value={formatDate(detail.data.created_at)} />
-                <FactRow label="Expires" value={formatDate(detail.data.expires_at)} />
-                <FactRow label="Recommended" value={detail.data.recommended_action} />
+                <FactRow label="关联任务" value={detail.data.task_short_id ?? "未关联"} />
+                <FactRow label="创建时间" value={formatDate(detail.data.created_at)} />
+                <FactRow label="过期时间" value={formatDate(detail.data.expires_at)} />
+                <FactRow label="建议操作" value={detail.data.recommended_action} />
               </FieldList>
               {postprocessInfo(detail.data.payload) ? (
                 <div className="subsection">
-                  <p className="eyebrow">Postprocess</p>
+                  <p className="eyebrow">回复后处理</p>
                   <FieldList>
-                    <FactRow label="Status" value={String(postprocessInfo(detail.data.payload)?.status ?? "unknown")} />
-                    <FactRow label="Guidance" value={postprocessInfo(detail.data.payload)?.guidance || "none"} />
-                    <FactRow label="Failure" value={postprocessInfo(detail.data.payload)?.failure || "none"} />
-                    <FactRow label="Approve sends" value={postprocessInfo(detail.data.payload)?.approveBehavior || "payload text"} />
-                    <FactRow label="Reject behavior" value={postprocessInfo(detail.data.payload)?.rejectBehavior || "normal"} />
+                    <FactRow label="状态" value={String(postprocessInfo(detail.data.payload)?.status ?? "未知")} />
+                    <FactRow label="处理提示" value={postprocessInfo(detail.data.payload)?.guidance || "无"} />
+                    <FactRow label="失败原因" value={postprocessInfo(detail.data.payload)?.failure || "无"} />
+                    <FactRow label="批准后的发送内容" value={postprocessInfo(detail.data.payload)?.approveBehavior || "原始回复"} />
+                    <FactRow label="拒绝后的行为" value={postprocessInfo(detail.data.payload)?.rejectBehavior || "正常"} />
                   </FieldList>
                 </div>
               ) : null}
@@ -278,12 +278,12 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
             </div>
 
             <div className="detail-panel">
-              <p className="eyebrow">Commands</p>
-              <h2>Resolve blocker</h2>
+              <p className="eyebrow">审批操作</p>
+              <h2>处理审批</h2>
               <TextareaField
-                label="Reason"
+                label="原因"
                 onChange={(reason) => updateDraft({ reason })}
-                placeholder="Optional audit reason"
+                placeholder="可选；会记录到审计中"
                 rows={2}
                 value={selectedDraft.reason}
               />
@@ -293,27 +293,27 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
                   onClick={() => runApprovalCommand("approve")}
                   tone="success"
                 >
-                  Approve
+                  批准
                 </Button>
                 <Button
                   disabled={!canReject || selectedApprovalBusy || expire.isPending}
                   onClick={() => runApprovalCommand("reject")}
                   tone="danger"
                 >
-                  Reject
+                  拒绝
                 </Button>
                 <Button
                   disabled={expire.isPending || busyApprovalIds.size > 0}
                   onClick={() => expire.mutate({ approvalId: selectedApprovalId, reason: clean(selectedDraft.reason) })}
                   tone="warning"
                 >
-                  Expire overdue
+                  过期超时审批
                 </Button>
               </div>
               <TextareaField
-                label="Final reply"
+                label="最终回复"
                 onChange={(finalReply) => updateDraft({ finalReply })}
-                placeholder="Send a final reply for the related task"
+                placeholder="输入要发送给关联任务的最终回复"
                 rows={4}
                 value={selectedDraft.finalReply}
               />
@@ -323,7 +323,7 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
                 tone="info"
               >
                 <Send aria-hidden="true" size={15} />
-                Send final reply
+                发送最终回复
               </Button>
               <CommandResultPanel result={selectedCommandResult} />
             </div>
@@ -331,16 +331,16 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
             <div className="detail-panel">
               <div className="subsection-title">
                 <ClipboardList aria-hidden="true" size={16} />
-                <h2>Related task context</h2>
+                <h2>关联任务上下文</h2>
               </div>
-              {task.isLoading ? <p className="detail-note">Loading task context...</p> : null}
+              {task.isLoading ? <p className="detail-note">正在读取任务上下文…</p> : null}
               {task.data ? (
                 <>
                   <FieldList>
-                    <FactRow label="Task status" value={task.data.status} />
-                    <FactRow label="Chat" value={task.data.chat_id ?? "not recorded"} />
-                    <FactRow label="Messages" value={task.data.message_count} />
-                    <FactRow label="Policy" value={task.data.effective_policy.policy_source} />
+                    <FactRow label="任务状态" value={task.data.status} />
+                    <FactRow label="会话" value={task.data.chat_id ?? "未记录"} />
+                    <FactRow label="消息数" value={task.data.message_count} />
+                    <FactRow label="策略来源" value={task.data.effective_policy.policy_source} />
                   </FieldList>
                   <ul className="timeline-list">
                     {task.data.recent_messages.slice(-4).map((message) => (
@@ -356,7 +356,7 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
             </div>
           </>
         ) : selectedApproval ? null : (
-          <EmptyState title="Select an approval" detail="Approval payload, task context, and commands will appear here." />
+          <EmptyState title="选择一项审批" detail="此处会显示审批内容、任务上下文和可用操作。" />
         )}
       </aside>
     </section>

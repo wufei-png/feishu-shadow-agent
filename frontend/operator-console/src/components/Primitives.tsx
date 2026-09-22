@@ -46,7 +46,7 @@ export function EmptyState({
   );
 }
 
-export function LoadingState({ title = "Loading", detail = "Reading local operator state." }) {
+export function LoadingState({ title = "正在加载", detail = "正在读取本地值守状态。" }) {
   return (
     <div className="empty-state">
       <Loader2 aria-hidden="true" className="spin" size={18} />
@@ -64,8 +64,8 @@ export function ErrorState({ title, error }: { title: string; error: unknown }) 
     <div className="empty-state">
       <AlertTriangle aria-hidden="true" className="danger" size={18} />
       <div>
-        <h1>{request?.status === 401 ? "Session expired" : request?.status === 404 ? "Object not found" : title}</h1>
-        <p>{request?.message ?? (error instanceof Error ? error.message : "Request failed.")}</p>
+        <h1>{request?.status === 401 ? "会话已过期" : request?.status === 404 ? "对象不存在" : title}</h1>
+        <p>{request?.message ?? (error instanceof Error ? error.message : "请求失败，请重试。")}</p>
         {request?.code ? <small>{request.code}</small> : null}
       </div>
     </div>
@@ -94,13 +94,13 @@ export function QueueControls({
   return (
     <div aria-live="polite">
       <div className="command-buttons">
-        <Button disabled={page === 0 || isFetching} onClick={onPrevious}>Previous</Button>
-        <Badge tone="muted">Page {page + 1}</Badge>
-        <Button disabled={!hasNext || isFetching} onClick={onNext}>Next</Button>
-        <Button disabled={isFetching} onClick={onRefresh}>{isFetching ? "Refreshing…" : "Refresh"}</Button>
+        <Button disabled={page === 0 || isFetching} onClick={onPrevious}>上一页</Button>
+        <Badge tone="muted">第 {page + 1} 页</Badge>
+        <Button disabled={!hasNext || isFetching} onClick={onNext}>下一页</Button>
+        <Button disabled={isFetching} onClick={onRefresh}>{isFetching ? "刷新中…" : "刷新"}</Button>
       </div>
-      <p className="detail-note">Updated {updatedAt ? new Date(updatedAt).toLocaleString() : "not yet"}</p>
-      {error ? <p className="detail-note danger">Refresh failed; showing cached data. {requestError(error)?.code ?? "request_failed"}</p> : null}
+      <p className="detail-note">更新于 {updatedAt ? new Date(updatedAt).toLocaleString("zh-CN") : "尚未更新"}</p>
+      {error ? <p className="detail-note danger">刷新失败，当前展示缓存数据。{requestError(error)?.code ?? "request_failed"}</p> : null}
     </div>
   );
 }
@@ -118,9 +118,9 @@ export function CommandResultPanel({ result }: { result: CommandResult | null })
         <Badge tone={tone}>{result.status}</Badge>
       </div>
       <dl className="compact-facts">
-        <Fact label="Changed" value={result.changed ? "yes" : "no"} />
-        <Fact label="Actor" value={result.actor} />
-        {result.reason ? <Fact label="Reason" value={result.reason} /> : null}
+        <Fact label="是否变更" value={result.changed ? "是" : "否"} />
+        <Fact label="执行者" value={result.actor} />
+        {result.reason ? <Fact label="原因" value={result.reason} /> : null}
       </dl>
       {result.warnings.length ? (
         <ul className="warning-list">
@@ -161,7 +161,7 @@ export function Fact({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div>
       <dt>{label}</dt>
-      <dd>{value ?? "not recorded"}</dd>
+      <dd>{value ?? "未记录"}</dd>
     </div>
   );
 }
@@ -270,16 +270,16 @@ export function TextField({
 
 export function formatDate(value: string | null | undefined): string {
   if (!value) {
-    return "not recorded";
+    return "未记录";
   }
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     return value;
   }
-  return date.toLocaleString();
+  return date.toLocaleString("zh-CN");
 }
 
-export function shortText(value: string | null | undefined, fallback = "No preview"): string {
+export function shortText(value: string | null | undefined, fallback = "无预览"): string {
   const text = (value ?? "").trim();
   if (!text) {
     return fallback;

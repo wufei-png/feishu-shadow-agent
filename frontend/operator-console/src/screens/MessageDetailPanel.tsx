@@ -48,39 +48,39 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
       : null;
 
   if (!messageId) {
-    return <EmptyState title="Select a message" detail="Message processing context will appear here." />;
+    return <EmptyState title="选择一条消息" detail="此处会显示消息的处理上下文。" />;
   }
   if (detail.isLoading) {
-    return <LoadingState title="Loading message detail" />;
+    return <LoadingState title="正在读取消息详情" />;
   }
   if (detail.error) {
-    return <ErrorState title="Message detail unavailable" error={detail.error} />;
+    return <ErrorState title="无法读取消息详情" error={detail.error} />;
   }
   if (!detail.data) {
-    return <EmptyState title="Message not found" detail="The local store did not return this message detail." />;
+    return <EmptyState title="找不到消息" detail="本地存储中没有这条消息的详情。" />;
   }
 
   return (
     <div className="message-detail-stack">
       <div className="detail-panel">
-        <p className="eyebrow">Message Detail</p>
+        <p className="eyebrow">消息详情</p>
         <div className="detail-title-row">
           <h2>{detail.data.message.message_id}</h2>
           <Badge tone={statusTone(detail.data.message.sender_role)}>{detail.data.message.sender_role ?? "unknown"}</Badge>
         </div>
-        <p className="preview-copy">{shortText(detail.data.message.text, "No message text")}</p>
+        <p className="preview-copy">{shortText(detail.data.message.text, "无消息正文")}</p>
         <FieldList>
-          <FactRow label="Chat" value={detail.data.message.chat_id ?? "not recorded"} />
-          <FactRow label="Sent" value={formatDate(detail.data.message.sent_at)} />
-          <FactRow label="Thread" value={detail.data.message.thread_id ?? "none"} />
-          <FactRow label="Reply to" value={detail.data.message.reply_to_message_id ?? "none"} />
+          <FactRow label="会话" value={detail.data.message.chat_id ?? "未记录"} />
+          <FactRow label="发送时间" value={formatDate(detail.data.message.sent_at)} />
+          <FactRow label="话题" value={detail.data.message.thread_id ?? "无"} />
+          <FactRow label="回复消息" value={detail.data.message.reply_to_message_id ?? "无"} />
         </FieldList>
       </div>
 
       <div className="detail-panel">
         <div className="subsection-title">
           <GitBranch aria-hidden="true" size={16} />
-          <h2>Routing and tasks</h2>
+          <h2>路由与任务</h2>
         </div>
         <ul className="timeline-list">
           {detail.data.routing_audits.map((audit, index) => (
@@ -105,11 +105,11 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
       <div className="detail-panel">
         <div className="subsection-title">
           <RotateCcw aria-hidden="true" size={16} />
-          <h2>Replay dry-run</h2>
+          <h2>消息重放预演</h2>
         </div>
         <Button disabled={replay.isPending} onClick={() => replay.mutate(messageId)} tone="info">
           <RotateCcw aria-hidden="true" size={15} />
-          Replay dry-run
+          预演重放
         </Button>
         <CommandResultPanel result={replayResult} />
       </div>
@@ -117,7 +117,7 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
       <div className="detail-panel">
         <div className="subsection-title">
           <PackageSearch aria-hidden="true" size={16} />
-          <h2>Processing</h2>
+          <h2>处理阶段</h2>
         </div>
         {detail.data.processing.length ? (
           <ul className="timeline-list">
@@ -142,7 +142,7 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
             })}
           </ul>
         ) : (
-          <p className="detail-note">No processing stages recorded for this message.</p>
+          <p className="detail-note">这条消息没有处理阶段记录。</p>
         )}
         <CommandResultPanel result={retryResult} />
       </div>
@@ -150,7 +150,7 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
       <div className="detail-panel">
         <div className="subsection-title">
           <PackageSearch aria-hidden="true" size={16} />
-          <h2>Resources</h2>
+          <h2>资源</h2>
         </div>
         {detail.data.resources.length ? (
           <ul className="audit-list">
@@ -162,32 +162,32 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
                   <span>{resource.file_key}</span>
                 </div>
                 <FieldList>
-                  <FactRow label="Path" value={resource.path ?? "not recorded"} />
-                  <FactRow label="Path exists" value={resource.path_exists === null ? "not checked" : resource.path_exists ? "yes" : "no"} />
-                  <FactRow label="SHA-256" value={resource.sha256_short ?? "not recorded"} />
+                  <FactRow label="路径" value={resource.path ?? "未记录"} />
+                  <FactRow label="路径存在" value={resource.path_exists === null ? "未检查" : resource.path_exists ? "是" : "否"} />
+                  <FactRow label="SHA-256" value={resource.sha256_short ?? "未记录"} />
                 </FieldList>
                 {Object.keys(resource.raw_summary).length ? (
                   <details>
-                    <summary>Raw summary</summary>
+                    <summary>原始摘要</summary>
                     <JsonBlock value={resource.raw_summary} />
                   </details>
                 ) : null}
                 <details>
-                  <summary>Raw JSON</summary>
+                  <summary>原始 JSON</summary>
                   <JsonBlock value={resource.raw} />
                 </details>
               </li>
             ))}
           </ul>
         ) : (
-          <p className="detail-note">No downloadable resources recorded for this message.</p>
+          <p className="detail-note">这条消息没有可下载资源记录。</p>
         )}
       </div>
 
       <div className="detail-panel">
         <div className="subsection-title">
           <Bot aria-hidden="true" size={16} />
-          <h2>Agent audits</h2>
+          <h2>Agent 审计</h2>
         </div>
         <AgentAuditList audits={detail.data.agent_audits} compact />
       </div>
@@ -195,7 +195,7 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
       <div className="detail-panel">
         <div className="subsection-title">
           <FileText aria-hidden="true" size={16} />
-          <h2>Approvals</h2>
+          <h2>审批</h2>
         </div>
         {detail.data.approvals.length ? (
           <ul className="timeline-list">
@@ -208,19 +208,19 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
             ))}
           </ul>
         ) : (
-          <p className="detail-note">No approvals recorded for this message context.</p>
+          <p className="detail-note">这条消息没有关联审批记录。</p>
         )}
       </div>
 
       <div className="detail-panel">
         <div className="subsection-title">
           <Send aria-hidden="true" size={16} />
-          <h2>Dispatch outcomes</h2>
+          <h2>发送结果</h2>
         </div>
         {detail.data.recorded_dispatch_outcomes.length ? (
           <JsonBlock value={detail.data.recorded_dispatch_outcomes} />
         ) : (
-          <p className="detail-note">No recorded dispatch outcome.</p>
+          <p className="detail-note">没有已记录的发送结果。</p>
         )}
       </div>
     </div>

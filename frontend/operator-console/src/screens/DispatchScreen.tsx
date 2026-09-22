@@ -25,7 +25,7 @@ import {
 import { invalidateAfterDispatchCommand, queryKeys } from "../queryKeys";
 import type { ActionStatus, CommandResult } from "../types";
 
-type DispatchFilter = ActionStatus | "all";
+type DispatchFilter = ActionStatus | "all" | "attention";
 
 type DispatchDraft = {
   reason: string;
@@ -43,18 +43,19 @@ const emptyDraft: DispatchDraft = { reason: "", sentMessageId: "" };
 const pageSize = 50;
 
 const dispatchFilters: Array<{ value: DispatchFilter; label: string }> = [
-  { value: "failed_needs_review", label: "Needs review" },
-  { value: "failed", label: "Failed" },
-  { value: "sending", label: "Sending" },
-  { value: "pending", label: "Pending" },
-  { value: "sent", label: "Sent" },
-  { value: "cancelled", label: "Cancelled" },
-  { value: "all", label: "All" }
+  { value: "attention", label: "待办相关" },
+  { value: "failed_needs_review", label: "待核实" },
+  { value: "failed", label: "失败" },
+  { value: "sending", label: "发送中" },
+  { value: "pending", label: "待发送" },
+  { value: "sent", label: "已发送" },
+  { value: "cancelled", label: "已取消" },
+  { value: "all", label: "全部" }
 ];
 
-export function DispatchScreen({ token, selectedId }: { token: string; selectedId: string | null }) {
+export function DispatchScreen({ token, selectedId, initialFilter }: { token: string; selectedId: string | null; initialFilter?: DispatchFilter }) {
   const queryClient = useQueryClient();
-  const [filter, setFilter] = useState<DispatchFilter>("failed_needs_review");
+  const [filter, setFilter] = useState<DispatchFilter>(initialFilter ?? "failed_needs_review");
   const [page, setPage] = useState(0);
   const [selectedActionId, setSelectedActionId] = useState<number | null>(numberOrNull(selectedId));
   const [drafts, setDrafts] = useState<Record<number, DispatchDraft>>({});
@@ -63,7 +64,7 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
   const [busyActionIds, setBusyActionIds] = useState<Set<number>>(new Set());
   const actions = useQuery({
     queryKey: queryKeys.dispatchActions({ status: filter, limit: pageSize + 1, offset: page * pageSize }),
-    queryFn: () => listDispatchActions(token, { status: filter === "all" ? undefined : filter, limit: pageSize + 1, offset: page * pageSize }),
+    queryFn: () => listDispatchActions(token, { status: filter === "all" ? undefined : filter === "attention" ? ["failed_needs_review", "failed", "sending"] : filter, limit: pageSize + 1, offset: page * pageSize }),
     enabled: Boolean(token),
     refetchInterval: 15_000
   });
@@ -75,6 +76,11 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
     enabled: Boolean(token && selectedActionId !== null),
     refetchInterval: 15_000
   });
+
+  useEffect(() => {
+    setFilter(initialFilter ?? "failed_needs_review");
+    setPage(0);
+  }, [initialFilter]);
 
   useEffect(() => {
     const routeActionId = numberOrNull(selectedId);
@@ -154,23 +160,23 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
   }
 
   if (actions.isLoading) {
-    return <LoadingState title="Loading dispatch actions" />;
+    return <LoadingState title="正在读取发送记录" />;
   }
   if (actions.error && !actions.data) {
-    return <ErrorState title="Dispatch actions unavailable" error={actions.error} />;
+    return <ErrorState title="无法读取发送记录" error={actions.error} />;
   }
 
   return (
-    <section className="work-grid" aria-label="Dispatch">
+    <section className="work-grid" aria-label="发送记录">
       <div className="work-main">
         <div className="queue-panel">
           <SectionHeader
-            eyebrow="Dispatch Recovery"
-            title="Send action readback"
+            eyebrow="发送核实与恢复"
+            title="发送记录"
             badge={<Badge tone={rows.length ? "warning" : "success"}>{rows.length}</Badge>}
           />
           <SegmentedControl
-            label="Dispatch status filter"
+            label="发送状态筛选"
             onChange={(nextFilter) => {
               setFilter(nextFilter);
               setPage(0);
@@ -194,12 +200,12 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
                 <ListRow
                   badge={<Badge tone={statusTone(action.status)}>{action.status}</Badge>}
                   key={action.action_id}
-                  meta={`${action.kind} · ${action.task_short_id ?? "no task"} · ${formatDate(action.updated_at)}`}
+                  meta={`${action.kind} · ${action.task_short_id ?? "未关联任务"} · ${formatDate(action.updated_at)}`}
                   onClick={() => selectAction(action.action_id, setSelectedActionId)}
                   selected={action.action_id === selectedActionId}
-                  title={`Action ${action.action_id}`}
+                  title={`发送记录 ${action.action_id}`}
                 >
-                  <span className="row-preview">{action.target_message_id ?? "no target message"}</span>
+                  <span className="row-preview">{action.target_message_id ?? "未记录目标消息"}</span>
                   {(action.recommended_actions ?? []).length ? (
                     <span className="inline-badges row-actions">
                       {(action.recommended_actions ?? []).slice(0, 2).map((recommendedAction) => (
@@ -213,36 +219,36 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
               ))}
             </div>
           ) : (
-            <EmptyState title="No dispatch actions in this view" detail="Failed, sending, pending, sent, and cancelled actions are filterable here." />
+            <EmptyState title="当前筛选下没有发送记录" detail="可切换上方状态，查看失败、发送中、待发送或已发送的记录。" />
           )}
         </div>
       </div>
 
       <aside className="work-detail">
-        {selectedActionId !== null && detail.isLoading ? <LoadingState title="Loading action detail" /> : null}
-        {detail.error ? <ErrorState title="Dispatch detail unavailable" error={detail.error} /> : null}
+        {selectedActionId !== null && detail.isLoading ? <LoadingState title="正在读取发送详情" /> : null}
+        {detail.error ? <ErrorState title="无法读取发送详情" error={detail.error} /> : null}
         {detail.data ? (
           <>
             <div className="detail-panel">
-              <p className="eyebrow">Action Detail</p>
+              <p className="eyebrow">发送详情</p>
               <div className="detail-title-row">
-                <h2>Action {detail.data.action.action_id}</h2>
+                <h2>发送记录 {detail.data.action.action_id}</h2>
                 <Badge tone={statusTone(detail.data.action.status)}>{detail.data.action.status}</Badge>
               </div>
               <FieldList>
-                <FactRow label="Kind" value={detail.data.action.kind} />
-                <FactRow label="Task" value={detail.data.action.task_short_id ?? "not linked"} />
-                <FactRow label="Target message" value={detail.data.action.target_message_id ?? "not recorded"} />
-                <FactRow label="Updated" value={formatDate(detail.data.action.updated_at)} />
+                <FactRow label="类型" value={detail.data.action.kind} />
+                <FactRow label="关联任务" value={detail.data.action.task_short_id ?? "未关联"} />
+                <FactRow label="目标消息" value={detail.data.action.target_message_id ?? "未记录"} />
+                <FactRow label="更新时间" value={formatDate(detail.data.action.updated_at)} />
               </FieldList>
               {postprocessInfo(detail.data.action.payload) ? (
                 <div className="subsection">
-                  <p className="eyebrow">Postprocess</p>
+                  <p className="eyebrow">回复后处理</p>
                   <FieldList>
-                    <FactRow label="Applied" value={postprocessInfo(detail.data.action.payload)?.applied ?? "unknown"} />
-                    <FactRow label="Guidance" value={postprocessInfo(detail.data.action.payload)?.guidance || "none"} />
-                    <FactRow label="Original" value={shortText(postprocessInfo(detail.data.action.payload)?.original, "not recorded")} />
-                    <FactRow label="Final" value={shortText(postprocessInfo(detail.data.action.payload)?.final, "not recorded")} />
+                    <FactRow label="已应用" value={postprocessInfo(detail.data.action.payload)?.applied ?? "未知"} />
+                    <FactRow label="处理提示" value={postprocessInfo(detail.data.action.payload)?.guidance || "无"} />
+                    <FactRow label="原始内容" value={shortText(postprocessInfo(detail.data.action.payload)?.original, "未记录")} />
+                    <FactRow label="最终内容" value={shortText(postprocessInfo(detail.data.action.payload)?.final, "未记录")} />
                   </FieldList>
                 </div>
               ) : null}
@@ -250,13 +256,13 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
             </div>
 
             <div className="detail-panel">
-              <p className="eyebrow">Readback</p>
-              <h2>Attempt summary</h2>
+              <p className="eyebrow">发送回读</p>
+              <h2>尝试记录</h2>
               <FieldList>
-                <FactRow label="Attempts" value={String(detail.data.readback_summary.attempt_count ?? 0)} />
-                <FactRow label="Latest status" value={String(detail.data.readback_summary.latest_status ?? "none")} />
-                <FactRow label="Sent message" value={String(detail.data.readback_summary.sent_message_id ?? "not recorded")} />
-                <FactRow label="Readback message" value={String(detail.data.readback_summary.readback_message_id ?? "not recorded")} />
+                <FactRow label="尝试次数" value={String(detail.data.readback_summary.attempt_count ?? 0)} />
+                <FactRow label="最近状态" value={String(detail.data.readback_summary.latest_status ?? "无")} />
+                <FactRow label="已发送消息" value={String(detail.data.readback_summary.sent_message_id ?? "未记录")} />
+                <FactRow label="回读消息" value={String(detail.data.readback_summary.readback_message_id ?? "未记录")} />
               </FieldList>
               {detail.data.attempts.length ? (
                 <ul className="timeline-list">
@@ -264,22 +270,22 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
                     <li key={attempt.id}>
                       <Send aria-hidden="true" size={14} />
                       <span>{attempt.status}</span>
-                      <small>{attempt.error_stage ?? attempt.sent_message_id ?? "no error stage"}</small>
+                      <small>{attempt.error_stage ?? attempt.sent_message_id ?? "无错误阶段"}</small>
                     </li>
                   ))}
                 </ul>
               ) : (
-                <p className="detail-note">No dispatch attempts recorded.</p>
+                <p className="detail-note">尚无发送尝试记录。</p>
               )}
             </div>
 
             <div className="detail-panel">
-              <p className="eyebrow">Commands</p>
-              <h2>Recover action</h2>
+              <p className="eyebrow">恢复操作</p>
+              <h2>处理发送记录</h2>
               <TextareaField
-                label="Reason"
+                label="原因"
                 onChange={(reason) => updateDraft({ reason })}
-                placeholder="Optional recovery note"
+                placeholder="可选；记录本次恢复操作的原因"
                 rows={2}
                 value={selectedDraft.reason}
               />
@@ -290,7 +296,7 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
                   tone="warning"
                 >
                   <RotateCcw aria-hidden="true" size={15} />
-                  Retry
+                  重试发送
                 </Button>
                 <Button
                   disabled={!hasRecommendedCommand(detail.data.recommended_actions, "dispatch cancel") || selectedActionBusy}
@@ -298,13 +304,13 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
                   tone="danger"
                 >
                   <XCircle aria-hidden="true" size={15} />
-                  Cancel
+                  取消发送
                 </Button>
               </div>
               <TextField
-                label="Sent message ID"
+                label="已发送消息 ID"
                 onChange={(sentMessageId) => updateDraft({ sentMessageId })}
-                placeholder="om_xxx from Feishu readback"
+                placeholder="填写飞书回读得到的 om_xxx"
                 value={selectedDraft.sentMessageId}
               />
               <Button
@@ -317,14 +323,14 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
                 tone="success"
               >
                 <ShieldCheck aria-hidden="true" size={15} />
-                Mark sent
+                标记为已发送
               </Button>
               <CommandResultPanel result={commandResult} />
             </div>
 
             <div className="detail-panel">
-              <p className="eyebrow">Recorded Result</p>
-              <h2>Persisted outcome</h2>
+              <p className="eyebrow">已记录结果</p>
+              <h2>持久化结果</h2>
               <JsonBlock value={detail.data.action.result} />
               {(detail.data.recommended_actions ?? []).length ? (
                 <div className="inline-badges">
@@ -338,7 +344,7 @@ export function DispatchScreen({ token, selectedId }: { token: string; selectedI
             </div>
           </>
         ) : (
-          <EmptyState title="Select a dispatch action" detail="Payload, attempts, readback, and recovery commands will appear here." />
+          <EmptyState title="选择一条发送记录" detail="此处会显示内容、发送尝试、回读和恢复操作。" />
         )}
       </aside>
     </section>

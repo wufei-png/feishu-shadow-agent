@@ -32,10 +32,17 @@ describe("DashboardScreen", () => {
 
     await screen.findByRole("heading", { name: "待我处理" });
     expect(screen.getByText("待审批").parentElement?.textContent).toContain("23");
-    expect(screen.getByText("关联任务").parentElement?.textContent).toContain("4");
+    expect(screen.getByRole("button", { name: /发送待核实或失败/ }).textContent).toContain("4");
+    expect(screen.getByText("涉及 4 个任务")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "摄取积压" })).toBeTruthy();
     expect(screen.getByText("ingest.p2p").parentElement?.textContent).toContain("page_cap_exhausted");
     expect(screen.getByText("oc_absent").parentElement?.textContent).toContain("absent");
+
+    await user.click(screen.getByRole("button", { name: /发送待核实或失败/ }));
+    expect(navigate).toHaveBeenCalledWith("dispatch", undefined, "attention");
+
+    await user.click(screen.getByRole("button", { name: /处理阻塞或失败/ }));
+    expect(navigate).toHaveBeenCalledWith("tasks", undefined, "all");
 
     await user.click(screen.getByRole("button", { name: /需要处理的任务/ }));
     expect(navigate).toHaveBeenCalledWith("tasks", "t_attention");

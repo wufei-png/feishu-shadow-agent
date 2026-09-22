@@ -13,7 +13,7 @@ export const queryKeys = {
   tasks: (filters: { status?: TaskStatus | "all"; chat_id?: string; limit?: number; offset?: number }) =>
     ["tasks", filters] as const,
   task: (taskId: string | null) => ["task", taskId] as const,
-  dispatchActions: (filters: { status?: ActionStatus | "all"; limit?: number; offset?: number }) =>
+  dispatchActions: (filters: { status?: ActionStatus | "all" | "attention"; limit?: number; offset?: number }) =>
     ["dispatch-actions", filters] as const,
   dispatchAction: (actionId: number | null) => ["dispatch-action", actionId] as const,
   messageDetail: (messageId: string | null) => ["message-detail", messageId] as const,

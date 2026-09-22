@@ -39,16 +39,16 @@ type TaskCommandInput = {
 const pageSize = 50;
 
 const taskFilters: Array<{ value: TaskFilter; label: string }> = [
-  { value: "watching", label: "Watching" },
-  { value: "closed", label: "Closed" },
-  { value: "closed_by_owner", label: "Owner closed" },
-  { value: "human_taken_over", label: "Taken over" },
-  { value: "all", label: "All" }
+  { value: "watching", label: "观察中" },
+  { value: "closed", label: "已关闭" },
+  { value: "closed_by_owner", label: "Owner 已关闭" },
+  { value: "human_taken_over", label: "人工接管" },
+  { value: "all", label: "全部" }
 ];
 
-export function TasksScreen({ token, selectedId }: { token: string; selectedId: string | null }) {
+export function TasksScreen({ token, selectedId, initialFilter }: { token: string; selectedId: string | null; initialFilter?: TaskFilter }) {
   const queryClient = useQueryClient();
-  const [filter, setFilter] = useState<TaskFilter>("watching");
+  const [filter, setFilter] = useState<TaskFilter>(initialFilter ?? "watching");
   const [page, setPage] = useState(0);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(selectedId);
   const [messageId, setMessageId] = useState<string | null>(null);
@@ -71,6 +71,11 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
     enabled: Boolean(token && selectedTaskId),
     refetchInterval: 15_000
   });
+
+  useEffect(() => {
+    setFilter(initialFilter ?? "watching");
+    setPage(0);
+  }, [initialFilter]);
 
   useEffect(() => {
     setSelectedTaskId(selectedId);
@@ -171,23 +176,23 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
   }
 
   if (tasks.isLoading) {
-    return <LoadingState title="Loading tasks" />;
+    return <LoadingState title="正在读取任务" />;
   }
   if (tasks.error && !tasks.data) {
-    return <ErrorState title="Tasks unavailable" error={tasks.error} />;
+    return <ErrorState title="无法读取任务列表" error={tasks.error} />;
   }
 
   return (
-    <section className="work-grid tasks-layout" aria-label="Tasks">
+    <section className="work-grid tasks-layout" aria-label="任务">
       <div className="work-main">
         <div className="queue-panel">
           <SectionHeader
-            eyebrow="Tasks"
-            title="Conversation context"
+            eyebrow="会话任务"
+            title="任务列表"
             badge={<Badge tone={rows.length ? "info" : "muted"}>{rows.length}</Badge>}
           />
           <SegmentedControl
-            label="Task status filter"
+            label="任务状态筛选"
             onChange={(nextFilter) => {
               setFilter(nextFilter);
               setPage(0);
@@ -211,7 +216,7 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
                 <ListRow
                   badge={<Badge tone={statusTone(task.status)}>{task.status}</Badge>}
                   key={task.task_id}
-                  meta={`${task.chat_id ?? "no chat"} · ${task.message_count} messages · ${formatDate(task.updated_at)}`}
+                  meta={`${task.chat_id ?? "未记录会话"} · ${task.message_count} 条消息 · ${formatDate(task.updated_at)}`}
                   onClick={() => selectTask(task.task_id, setSelectedTaskId)}
                   selected={task.task_id === selectedTaskId}
                   title={task.task_label || task.task_id}
@@ -230,28 +235,28 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
               ))}
             </div>
           ) : (
-            <EmptyState title="No tasks in this view" detail="Task context appears after messages are routed into a conversation task." />
+            <EmptyState title="当前筛选下没有任务" detail="消息归入会话任务后会显示在这里。" />
           )}
         </div>
       </div>
 
       <aside className="work-detail">
-        {selectedTaskId && detail.isLoading ? <LoadingState title="Loading task detail" /> : null}
-        {detail.error ? <ErrorState title="Task detail unavailable" error={detail.error} /> : null}
+        {selectedTaskId && detail.isLoading ? <LoadingState title="正在读取任务详情" /> : null}
+        {detail.error ? <ErrorState title="无法读取任务详情" error={detail.error} /> : null}
         {detail.data ? (
           <>
             <div className="detail-panel">
-              <p className="eyebrow">Task Detail</p>
+              <p className="eyebrow">任务详情</p>
               <div className="detail-title-row">
                 <h2>{detail.data.task_label || detail.data.task_id}</h2>
                 <Badge tone={statusTone(detail.data.status)}>{detail.data.status}</Badge>
               </div>
               <FieldList>
-                <FactRow label="Task" value={detail.data.task_id} />
-                <FactRow label="Chat" value={detail.data.chat_id ?? "not recorded"} />
-                <FactRow label="Watch until" value={formatDate(detail.data.watch_until)} />
-                <FactRow label="Agent cwd" value={detail.data.agent_working_dir ?? "not recorded"} />
-                <FactRow label="Policy" value={detail.data.effective_policy.policy_source} />
+                <FactRow label="任务 ID" value={detail.data.task_id} />
+                <FactRow label="会话" value={detail.data.chat_id ?? "未记录"} />
+                <FactRow label="观察截止" value={formatDate(detail.data.watch_until)} />
+                <FactRow label="Agent 工作目录" value={detail.data.agent_working_dir ?? "未记录"} />
+                <FactRow label="策略来源" value={detail.data.effective_policy.policy_source} />
               </FieldList>
               {detail.data.recommended_actions.length ? (
                 <div className="inline-badges">
@@ -304,17 +309,17 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
             </div>
 
             <div className="detail-panel">
-              <p className="eyebrow">Commands</p>
-              <h2>Task lifecycle</h2>
-              <TextareaField label="Reason" onChange={setReason} placeholder="Optional operator note" rows={2} value={reason} />
+              <p className="eyebrow">任务操作</p>
+              <h2>任务状态</h2>
+              <TextareaField label="原因" onChange={setReason} placeholder="可选；记录本次操作的原因" rows={2} value={reason} />
               <div className="command-buttons">
                 <Button disabled={!canClose || selectedTaskBusy} onClick={() => runTaskCommand("close")} tone="danger">
                   <XCircle aria-hidden="true" size={15} />
-                  Close
+                  关闭任务
                 </Button>
                 <Button disabled={!canReopen || selectedTaskBusy} onClick={() => runTaskCommand("reopen")} tone="info">
                   <RotateCcw aria-hidden="true" size={15} />
-                  Reopen
+                  重新打开
                 </Button>
               </div>
               <CommandResultPanel result={commandResult} />
@@ -323,7 +328,7 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
             <div className="detail-panel">
               <div className="subsection-title">
                 <RotateCcw aria-hidden="true" size={16} />
-                <h2>Processing recovery</h2>
+                <h2>处理恢复</h2>
               </div>
               {(detail.data.processing ?? []).filter((item) => ["processing_failed_terminal", "blocked_waiting_external"].includes(item.status)).length ? (
                 <ul className="timeline-list">
@@ -350,7 +355,7 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
             <div className="detail-panel">
               <div className="subsection-title">
                 <MessageSquare aria-hidden="true" size={16} />
-                <h2>Timeline</h2>
+                <h2>消息时间线</h2>
               </div>
               {detail.data.recent_messages.length ? (
                 <ul className="timeline-list">
@@ -365,14 +370,14 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
                   ))}
                 </ul>
               ) : (
-                <p className="detail-note">No task messages recorded.</p>
+                <p className="detail-note">此任务尚无已记录消息。</p>
               )}
             </div>
 
             <div className="detail-panel">
               <div className="subsection-title">
                 <Bell aria-hidden="true" size={16} />
-                <h2>Related approvals</h2>
+                <h2>关联审批</h2>
               </div>
               {detail.data.pending_approvals.length ? (
                 <ul className="timeline-list">
@@ -380,49 +385,49 @@ export function TasksScreen({ token, selectedId }: { token: string; selectedId: 
                     <li key={approval.approval_id}>
                       <Bell aria-hidden="true" size={14} />
                       <span>{approval.approval_id}</span>
-                      <small>{approval.is_overdue ? "overdue" : approval.status}</small>
+                      <small>{approval.is_overdue ? "已逾期" : approval.status}</small>
                     </li>
                   ))}
                 </ul>
               ) : (
-                <p className="detail-note">No pending approvals for this task.</p>
+                <p className="detail-note">此任务没有待处理审批。</p>
               )}
             </div>
 
             <div className="detail-panel">
               <div className="subsection-title">
                 <Send aria-hidden="true" size={16} />
-                <h2>Dispatch actions</h2>
+                <h2>发送记录</h2>
               </div>
               {detail.data.actions.length ? (
                 <ul className="timeline-list">
                   {detail.data.actions.map((action) => (
                     <li key={action.action_id}>
                       <Send aria-hidden="true" size={14} />
-                      <span>Action {action.action_id}</span>
+                      <span>发送记录 {action.action_id}</span>
                       <small>{action.status}</small>
                     </li>
                   ))}
                 </ul>
               ) : (
-                <p className="detail-note">No dispatch actions for this task.</p>
+                <p className="detail-note">此任务没有发送记录。</p>
               )}
             </div>
 
             <div className="detail-panel">
               <div className="subsection-title">
                 <Bot aria-hidden="true" size={16} />
-                <h2>Agent audits</h2>
+                <h2>Agent 审计</h2>
               </div>
               <AgentAuditList audits={detail.data.agent_audits} />
             </div>
           </>
         ) : (
-          <EmptyState title="Select a task" detail="Timeline, policy, approvals, and dispatch actions will appear here." />
+          <EmptyState title="选择一个任务" detail="此处会显示时间线、策略、审批和发送记录。" />
         )}
       </aside>
 
-      <aside className="message-drawer" aria-label="Message Detail">
+      <aside className="message-drawer" aria-label="消息详情">
         <MessageDetailPanel messageId={messageId} token={token} />
       </aside>
     </section>

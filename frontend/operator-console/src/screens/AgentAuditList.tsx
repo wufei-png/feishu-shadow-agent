@@ -11,7 +11,7 @@ import type { AgentAudit } from "../types";
 
 export function AgentAuditList({ audits, compact = false }: { audits: AgentAudit[]; compact?: boolean }) {
   if (!audits.length) {
-    return <EmptyState title="No agent audits" detail="Agent backend calls will appear here after processing records them." />;
+    return <EmptyState title="没有 Agent 审计记录" detail="Agent 后端调用被记录后会显示在这里。" />;
   }
   return (
     <ul className="audit-list">
@@ -23,31 +23,31 @@ export function AgentAuditList({ audits, compact = false }: { audits: AgentAudit
             <span>{formatDate(audit.created_at)}</span>
           </div>
           <FieldList>
-            <FactRow label="Session" value={audit.agent_session_id ?? "none"} />
-            <FactRow label="Latency" value={audit.latency_ms === null ? "not recorded" : `${audit.latency_ms} ms`} />
-            <FactRow label="Messages" value={audit.input_message_ids.join(", ") || "none"} />
-            {!compact ? <FactRow label="Resources" value={audit.input_resource_ids.join(", ") || "none"} /> : null}
-            {!compact ? <FactRow label="Tool permissions" value={audit.tool_permissions_profile ?? "not recorded"} /> : null}
+            <FactRow label="会话" value={audit.agent_session_id ?? "无"} />
+            <FactRow label="耗时" value={audit.latency_ms === null ? "未记录" : `${audit.latency_ms} ms`} />
+            <FactRow label="消息" value={audit.input_message_ids.join(", ") || "无"} />
+            {!compact ? <FactRow label="资源" value={audit.input_resource_ids.join(", ") || "无"} /> : null}
+            {!compact ? <FactRow label="工具权限" value={audit.tool_permissions_profile ?? "未记录"} /> : null}
           </FieldList>
           {audit.error ? (
             <div className="readonly-note">
               <Bot aria-hidden="true" size={14} />
-              <span>{shortText(audit.error, "agent error")}</span>
+              <span>{shortText(audit.error, "Agent 错误")}</span>
             </div>
           ) : null}
           <details>
-            <summary>Response summary</summary>
+            <summary>响应摘要</summary>
             <JsonBlock value={audit.response_summary} />
           </details>
           {!compact ? (
             <details>
-              <summary>Response JSON</summary>
+              <summary>响应 JSON</summary>
               <JsonBlock value={audit.response} />
             </details>
           ) : null}
           {Object.keys(audit.prompt_debug ?? {}).length ? (
             <details>
-              <summary>Debug prompt</summary>
+              <summary>调试提示词</summary>
               <JsonBlock value={audit.prompt_debug} />
             </details>
           ) : null}
@@ -62,7 +62,7 @@ function FactRow({ label, value }: { label: string; value: string }) {
     <div>
       <dt>{label}</dt>
       <dd>
-        {label === "Latency" ? <Clock aria-hidden="true" size={12} /> : null}
+        {label === "耗时" ? <Clock aria-hidden="true" size={12} /> : null}
         {value}
       </dd>
     </div>

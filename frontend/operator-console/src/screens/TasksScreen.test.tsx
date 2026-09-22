@@ -23,6 +23,19 @@ afterEach(() => {
 });
 
 describe("TasksScreen processing recovery", () => {
+  it("requests every task status from the dashboard attention index", async () => {
+    vi.mocked(api.listTasks).mockResolvedValue([]);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <TasksScreen initialFilter="all" selectedId={null} token="token" />
+      </QueryClientProvider>
+    );
+
+    await screen.findByRole("heading", { name: "任务列表" });
+    expect(api.listTasks).toHaveBeenCalledWith("token", { status: undefined, limit: 51, offset: 0 });
+  });
+
   it("queues the selected terminal stage and disables an active retry", async () => {
     const detail = taskDetail();
     vi.mocked(api.listTasks).mockResolvedValue([detail]);
@@ -46,7 +59,7 @@ describe("TasksScreen processing recovery", () => {
       </QueryClientProvider>
     );
 
-    await screen.findByRole("heading", { name: "Processing recovery" });
+    await screen.findByRole("heading", { name: "处理恢复" });
     const buttons = screen.getAllByRole("button", { name: "重试" });
     expect(buttons).toHaveLength(1);
     expect(screen.getByRole("button", { name: "已排队" }).hasAttribute("disabled")).toBe(true);

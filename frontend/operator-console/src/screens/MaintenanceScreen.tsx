@@ -50,39 +50,39 @@ export function MaintenanceScreen({ token }: { token: string }) {
   });
 
   return (
-    <section className="work-grid" aria-label="Maintenance">
+    <section className="work-grid" aria-label="维护">
       <div className="work-main">
         <div className="queue-panel">
           <SectionHeader
-            eyebrow="Maintenance"
-            title="Operator commands"
-            badge={<Badge tone="info">Explicit</Badge>}
+            eyebrow="维护"
+            title="值守操作"
+            badge={<Badge tone="info">需主动执行</Badge>}
           >
-            <p className="section-note">Run diagnostics and maintenance commands through the same local command boundary as the CLI.</p>
+            <p className="section-note">诊断和维护操作使用与 CLI 相同的本地命令边界。</p>
           </SectionHeader>
         </div>
 
         <section className="queue-panel">
           <div className="subsection-title">
             <HeartPulse aria-hidden="true" size={16} />
-            <h2>Diagnostics</h2>
+            <h2>诊断</h2>
           </div>
           <div className="command-buttons">
             <Button disabled={doctor.isPending} onClick={() => doctor.mutate(false)} tone="info">
               <HeartPulse aria-hidden="true" size={15} />
-              Run doctor
+              运行 Doctor
             </Button>
             <Button
               disabled={doctor.isPending}
-              onClick={() => confirmThen("This sends one test message to the configured owner.", () => doctor.mutate(true))}
+              onClick={() => confirmThen("将向已配置的 Owner 发送一条测试消息，确认继续？", () => doctor.mutate(true))}
               tone="warning"
             >
               <Send aria-hidden="true" size={15} />
-              Send owner test
+              向 Owner 发送测试消息
             </Button>
             <Button disabled={config.isPending} onClick={() => config.mutate()} tone="neutral">
               <ShieldCheck aria-hidden="true" size={15} />
-              Validate config
+              验证配置
             </Button>
           </div>
         </section>
@@ -90,20 +90,20 @@ export function MaintenanceScreen({ token }: { token: string }) {
         <section className="queue-panel">
           <div className="subsection-title">
             <Scissors aria-hidden="true" size={16} />
-            <h2>Data Retention</h2>
+            <h2>数据留存</h2>
           </div>
           <div className="command-buttons">
             <Button disabled={retention.isPending} onClick={() => retention.mutate(true)} tone="info">
               <Scissors aria-hidden="true" size={15} />
-              Dry run
+              预演清理
             </Button>
             <Button
               disabled={retention.isPending}
-              onClick={() => confirmThen("This prunes expired local raw messages and resources.", () => retention.mutate(false))}
+              onClick={() => confirmThen("将清理本地已过期的原始消息和资源，确认继续？", () => retention.mutate(false))}
               tone="danger"
             >
               <Scissors aria-hidden="true" size={15} />
-              Prune
+              清理过期数据
             </Button>
           </div>
         </section>
@@ -111,20 +111,20 @@ export function MaintenanceScreen({ token }: { token: string }) {
         <section className="queue-panel">
           <div className="subsection-title">
             <RefreshCw aria-hidden="true" size={16} />
-            <h2>Reply Style</h2>
+            <h2>回复风格</h2>
           </div>
           <div className="command-buttons">
             <Button disabled={replyStyle.isPending} onClick={() => replyStyle.mutate(true)} tone="info">
               <RefreshCw aria-hidden="true" size={15} />
-              Dry run
+              预演刷新
             </Button>
             <Button
               disabled={replyStyle.isPending}
-              onClick={() => confirmThen("This refreshes the owner reply style profile.", () => replyStyle.mutate(false))}
+              onClick={() => confirmThen("将刷新 Owner 回复风格档案，确认继续？", () => replyStyle.mutate(false))}
               tone="warning"
             >
               <RefreshCw aria-hidden="true" size={15} />
-              Refresh
+              刷新风格
             </Button>
           </div>
         </section>
@@ -132,9 +132,9 @@ export function MaintenanceScreen({ token }: { token: string }) {
 
       <aside className="work-detail">
         <div className="detail-panel">
-          <p className="eyebrow">Command Note</p>
-          <h2>Maintenance reason</h2>
-          <TextareaField label="Reason" onChange={setReason} placeholder="Optional maintenance note" rows={3} value={reason} />
+          <p className="eyebrow">命令备注</p>
+          <h2>维护原因</h2>
+          <TextareaField label="原因" onChange={setReason} placeholder="可选；记录本次维护的原因" rows={3} value={reason} />
         </div>
         <CommandResultPanel result={commandResult} />
       </aside>
