@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { TFunction } from "i18next";
 import { FileDiff, History, Save, Trash2, Upload } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import {
   deleteChatPolicy,
   getSettingsCatalog,
@@ -22,6 +24,7 @@ import {
   ErrorState,
   FieldList,
   formatDate,
+  HelpTooltip,
   JsonBlock,
   ListRow,
   LoadingState,
@@ -30,6 +33,8 @@ import {
   statusTone,
   TextareaField
 } from "../components/Primitives";
+import { catalogText } from "../catalogPresentation";
+import { enumLabel } from "../presentation";
 import { invalidateAfterPolicyCommand, queryKeys } from "../queryKeys";
 import type {
   ChatPolicy,
@@ -81,6 +86,7 @@ const chatFields: Array<{ key: keyof ChatPolicyForm; catalogKey: string; type: "
 ];
 
 export function PolicyScreen({ token, selectedId }: { token: string; selectedId: string | null }) {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [scope, setScope] = useState<PolicyScope>("global");
   const [reason, setReason] = useState("");
@@ -188,7 +194,7 @@ export function PolicyScreen({ token, selectedId }: { token: string; selectedId:
   const importConfig = useMutation({
     mutationFn: (replace: boolean) => importPolicyConfig(token, { replace, reason: clean(reason) }),
     onSuccess: (result) => afterPolicyCommand(result, null),
-    onError: (error) => setCommandResult(errorResult("policy.import_config", error))
+    onError: (error) => setCommandResult(errorResult("policy.import_config", error, t))
   });
   const saveGlobal = useMutation({
     mutationFn: () =>
@@ -197,7 +203,7 @@ export function PolicyScreen({ token, selectedId }: { token: string; selectedId:
         reason: clean(reason)
       }),
     onSuccess: (result) => afterPolicyCommand(result, "global"),
-    onError: (error) => setCommandResult(errorResult("policy.update_global", error))
+    onError: (error) => setCommandResult(errorResult("policy.update_global", error, t))
   });
   const saveChat = useMutation({
     mutationFn: () =>
@@ -206,7 +212,7 @@ export function PolicyScreen({ token, selectedId }: { token: string; selectedId:
         reason: clean(reason)
       }),
     onSuccess: (result) => afterPolicyCommand(result, "chat"),
-    onError: (error) => setCommandResult(errorResult("policy.update_chat", error))
+    onError: (error) => setCommandResult(errorResult("policy.update_chat", error, t))
   });
   const deleteChat = useMutation({
     mutationFn: () => deleteChatPolicy(token, activeChatId, { reason: clean(reason) }),
@@ -219,26 +225,26 @@ export function PolicyScreen({ token, selectedId }: { token: string; selectedId:
         setLastChatScope(null);
       }
     },
-    onError: (error) => setCommandResult(errorResult("policy.delete_chat", error))
+    onError: (error) => setCommandResult(errorResult("policy.delete_chat", error, t))
   });
 
   if (runtime.isLoading || catalog.isLoading) {
-    return <LoadingState title="正在读取策略" />;
+    return <LoadingState title={t("policy.loading")} />;
   }
   if (runtime.error) {
-    return <ErrorState title="无法读取运行策略" error={runtime.error} />;
+    return <ErrorState title={t("policy.runtimeError")} error={runtime.error} />;
   }
   if (catalog.error) {
-    return <ErrorState title="无法读取设置目录" error={catalog.error} />;
+    return <ErrorState title={t("policy.catalogError")} error={catalog.error} />;
   }
 
   const data = runtime.data;
   if (!data) {
-    return <EmptyState title="策略暂不可用" detail="本地控制台没有返回运行策略状态。" />;
+    return <EmptyState title={t("policy.unavailable")} detail={t("policy.unavailableDetail")} />;
   }
 
   return (
-    <section className="work-grid policy-layout" aria-label="策略">
+    <section className="work-grid policy-layout" aria-label={t("policy.aria")}>
       <div className="work-main">
         <PolicyStatusPanel
           data={data}
@@ -254,9 +260,9 @@ export function PolicyScreen({ token, selectedId }: { token: string; selectedId:
 
       <aside className="work-detail">
         <div className="detail-panel">
-          <p className="eyebrow">命令备注</p>
-          <h2>策略变更原因</h2>
-          <TextareaField label="原因" onChange={setReason} placeholder="可选；记录本次策略变更的原因" rows={2} value={reason} />
+          <p className="eyebrow">{t("policy.commandNote")}</p>
+          <h2>{t("policy.changeReason")}</h2>
+          <TextareaField label={t("common.reason")} onChange={setReason} placeholder={t("policy.reasonPlaceholder")} rows={2} value={reason} />
         </div>
 
         {scope === "global" ? (
@@ -327,31 +333,38 @@ function PolicyStatusPanel({
   importPending: boolean;
   onImport: (replace: boolean) => void;
 }) {
+  const { t } = useTranslation();
   const diff = data.policy_status.policy_import_diff;
   return (
     <div className="queue-panel">
       <SectionHeader
-        eyebrow="产品策略"
-        title="运行策略状态"
-        badge={<Badge tone={data.policy_status.initialized ? "success" : "warning"}>{data.policy_status.initialized ? "已初始化" : "缺失"}</Badge>}
+        eyebrow={t("policy.productPolicy")}
+        title={t("policy.runtimeStatus")}
+        badge={<Badge tone={data.policy_status.initialized ? "success" : "warning"}>{data.policy_status.initialized ? t("policy.initialized") : t("policy.missing")}</Badge>}
       >
-        <p className="section-note">运行时以产品策略存储为准；config.yaml 仅作为只读导入来源。</p>
+        <p className="section-note">{t("policy.sourceBoundary")}</p>
       </SectionHeader>
       <div className="policy-diff-grid">
-        <FactTile label="策略导入差异" value={<Badge tone={statusTone(diff?.status)}>{diff?.status ?? "未知"}</Badge>} />
-        <FactTile label="会话策略数" value={String(data.policy_status.chat_policy_count ?? data.chat_policies.length)} />
-        <FactTile label="全局策略更新于" value={formatDate(data.policy_status.global_policy_updated_at)} />
+        <FactTile label={t("policy.importDiff")} value={<Badge tone={statusTone(diff?.status)}>{enumLabel(t, "status", diff?.status)}</Badge>} />
+        <FactTile label={t("policy.chatPolicyCount")} value={String(data.policy_status.chat_policy_count ?? data.chat_policies.length)} />
+        <FactTile label={t("policy.globalUpdatedAt")} value={formatDate(data.policy_status.global_policy_updated_at)} />
       </div>
-      {diff?.message ? <p className="detail-note">{diff.message}</p> : null}
+      <p className="detail-note">{diff?.status === "matches" ? t("policy.diffMatches") : diff?.status === "differs" ? (data.policy_status.initialized ? t("policy.diffDiffers") : t("policy.diffUninitialized")) : t("policy.diffUnknown")}</p>
+      {diff?.message ? (
+        <details className="technical-details">
+          <summary>{t("policy.technicalMessage")}</summary>
+          <p className="detail-note">{diff.message}</p>
+        </details>
+      ) : null}
       <ImportDiffDetails diff={diff} />
       <div className="command-buttons">
         <Button disabled={importPending} onClick={() => onImport(false)} tone="info">
           <Upload aria-hidden="true" size={15} />
-          导入缺失项
+          {t("policy.importMissing")}
         </Button>
         <Button disabled={importPending} onClick={() => onImport(true)} tone="warning">
           <FileDiff aria-hidden="true" size={15} />
-          覆盖配置中列出的项
+          {t("policy.replaceListed")}
         </Button>
       </div>
     </div>
@@ -367,34 +380,35 @@ function PolicyScopeList({
   scope: PolicyScope;
   setScope: (scope: PolicyScope) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="queue-panel">
       <SectionHeader
-        eyebrow="策略范围"
-        title="全局与会话策略"
-        badge={<Badge tone={data.chat_policies.length ? "info" : "muted"}>{data.chat_policies.length} 个会话</Badge>}
+        eyebrow={t("policy.scope")}
+        title={t("policy.globalAndChat")}
+        badge={<Badge tone={data.chat_policies.length ? "info" : "muted"}>{t("policy.chatCount", { count: data.chat_policies.length })}</Badge>}
       />
       <div className="list-stack">
         <ListRow
-          badge={<Badge tone={data.global_policy ? "success" : "warning"}>{data.global_policy ? "就绪" : "缺失"}</Badge>}
-          meta="私聊和未单独配置的群聊使用此策略"
+          badge={<Badge tone={data.global_policy ? "success" : "warning"}>{data.global_policy ? t("policy.ready") : t("policy.missing")}</Badge>}
+          meta={t("policy.globalMeta")}
           onClick={() => setScope("global")}
           selected={scope === "global"}
-          title="全局策略"
+          title={t("policy.global")}
         />
         <ListRow
-          badge={<Badge tone="info">新建</Badge>}
-          meta="为单个群聊创建或替换策略"
+          badge={<Badge tone="info">{t("policy.new")}</Badge>}
+          meta={t("policy.newChatMeta")}
           onClick={() => setScope("new-chat")}
           selected={scope === "new-chat"}
-          title="新建会话策略"
+          title={t("policy.newChat")}
         />
         {data.chat_policies.length ? (
           data.chat_policies.map((policy) => (
             <ListRow
-              badge={<Badge tone={policy.auto_reply ? "success" : "muted"}>{policy.auto_reply ? "自动" : "人工"}</Badge>}
+              badge={<Badge tone={policy.auto_reply ? "success" : "muted"}>{policy.auto_reply ? t("policy.auto") : t("policy.manual")}</Badge>}
               key={policy.chat_id}
-              meta={`${policy.reply_identity} · ${formatDate(policy.updated_at)}`}
+              meta={`${enumLabel(t, "identity", policy.reply_identity)} · ${formatDate(policy.updated_at)}`}
               onClick={() => setScope(`chat:${policy.chat_id}`)}
               selected={scope === `chat:${policy.chat_id}`}
               title={policy.name || policy.chat_id}
@@ -403,7 +417,7 @@ function PolicyScopeList({
             </ListRow>
           ))
         ) : (
-          <EmptyState title="尚无会话策略" detail="导入配置或为群聊保存策略后会显示在这里。" />
+          <EmptyState title={t("policy.noChats")} detail={t("policy.noChatsDetail")} />
         )}
       </div>
     </div>
@@ -431,17 +445,18 @@ function GlobalPolicyEditor({
   previewError: unknown;
   previewLoading: boolean;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="detail-panel">
-      <p className="eyebrow">全局策略编辑</p>
+      <p className="eyebrow">{t("policy.globalEditor")}</p>
       <div className="detail-title-row">
-        <h2>默认运行策略</h2>
-        <Badge tone={Object.keys(changes).length ? "warning" : "success"}>{Object.keys(changes).length ? "未保存" : "已同步"}</Badge>
+        <h2>{t("policy.defaultRuntime")}</h2>
+        <Badge tone={Object.keys(changes).length ? "warning" : "success"}>{Object.keys(changes).length ? t("policy.unsaved") : t("policy.synced")}</Badge>
       </div>
       <div className="policy-form-grid">
         {globalFields.map((field) => (
           <PolicyField
-            entry={entryFor(entries, field.catalogKey)}
+            entry={entryFor(entries, field.catalogKey, t)}
             key={field.key}
             type={field.type}
             value={form[field.key]}
@@ -454,13 +469,13 @@ function GlobalPolicyEditor({
         error={previewError}
         isLoading={previewLoading}
         preview={preview}
-        title="运行影响预览"
+        title={t("policy.runtimeImpact")}
       />
       <Button disabled={disabled || Object.keys(changes).length === 0} onClick={onSave} tone="success">
         <Save aria-hidden="true" size={15} />
-        保存全局策略
+        {t("policy.saveGlobal")}
       </Button>
-      {!disabled ? null : <p className="detail-note">更新全局策略前需先初始化产品策略存储。</p>}
+      {!disabled ? null : <p className="detail-note">{t("policy.initializeFirst")}</p>}
     </div>
   );
 }
@@ -502,23 +517,24 @@ function ChatPolicyEditor({
   updatePreviewError: unknown;
   updatePreviewLoading: boolean;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="detail-panel">
-      <p className="eyebrow">会话策略编辑</p>
+      <p className="eyebrow">{t("policy.chatEditor")}</p>
       <div className="detail-title-row">
-        <h2>{isNew ? "新建会话策略" : selectedChatId}</h2>
-        <Badge tone={Object.keys(changes).length ? "warning" : "success"}>{Object.keys(changes).length ? "未保存" : "已同步"}</Badge>
+        <h2>{isNew ? t("policy.newChat") : selectedChatId}</h2>
+        <Badge tone={Object.keys(changes).length ? "warning" : "success"}>{Object.keys(changes).length ? t("policy.unsaved") : t("policy.synced")}</Badge>
       </div>
       {isNew ? (
         <label className="field-control">
-          <span>会话 ID</span>
+          <span>{t("policy.chatId")}</span>
           <input onChange={(event) => onChatIdChange(event.target.value)} placeholder="oc_xxx" value={selectedChatId} />
         </label>
       ) : null}
       <div className="policy-form-grid">
         {chatFields.map((field) => (
           <PolicyField
-            entry={entryFor(entries, field.catalogKey)}
+            entry={entryFor(entries, field.catalogKey, t)}
             key={field.key}
             type={field.type}
             value={form[field.key]}
@@ -531,29 +547,29 @@ function ChatPolicyEditor({
         error={updatePreviewError}
         isLoading={updatePreviewLoading}
         preview={updatePreview}
-        title="保存影响预览"
+        title={t("policy.saveImpact")}
       />
       {!isNew ? (
         <PolicyImpactPreviewPanel
           error={deletePreviewError}
           isLoading={deletePreviewLoading}
           preview={deletePreview}
-          title="删除后回退预览"
+          title={t("policy.deleteImpact")}
         />
       ) : null}
       <div className="command-buttons">
         <Button disabled={saveDisabled || Object.keys(changes).length === 0} onClick={onSave} tone="success">
           <Save aria-hidden="true" size={15} />
-          保存会话策略
+          {t("policy.saveChat")}
         </Button>
         {!isNew ? (
           <Button disabled={deleteDisabled} onClick={onDelete} tone="danger">
             <Trash2 aria-hidden="true" size={15} />
-            删除会话策略
+            {t("policy.deleteChat")}
           </Button>
         ) : null}
       </div>
-      {!saveDisabled ? null : <p className="detail-note">更新会话策略前需初始化产品策略存储，并提供会话 ID。</p>}
+      {!saveDisabled ? null : <p className="detail-note">{t("policy.chatRequirements")}</p>}
     </div>
   );
 }
@@ -569,40 +585,51 @@ function PolicyField({
   value: boolean | string;
   onChange: (value: boolean | string) => void;
 }) {
+  const { t } = useTranslation();
+  const inputId = useId();
+  const label = catalogText(t, entry, "label");
   if (type === "boolean") {
     return (
-      <label className="toggle-field">
-        <input checked={Boolean(value)} onChange={(event) => onChange(event.target.checked)} type="checkbox" />
-        <FieldText entry={entry} />
-      </label>
+      <div className="toggle-field">
+        <input checked={Boolean(value)} id={inputId} onChange={(event) => onChange(event.target.checked)} type="checkbox" />
+        <label htmlFor={inputId}><FieldText entry={entry} /></label>
+      </div>
     );
   }
   if (type === "identity") {
     return (
-      <label className="select-field">
+      <div className="select-field">
         <FieldText entry={entry} />
-        <select onChange={(event) => onChange(event.target.value)} value={String(value)}>
-          <option value="bot_preferred">bot_preferred</option>
-          <option value="bot">bot</option>
-          <option value="user">user</option>
+        <select aria-label={label} onChange={(event) => onChange(event.target.value)} value={String(value)}>
+          <option value="bot_preferred">{enumLabel(t, "identity", "bot_preferred")}</option>
+          <option value="bot">{enumLabel(t, "identity", "bot")}</option>
+          <option value="user">{enumLabel(t, "identity", "user")}</option>
         </select>
-      </label>
+      </div>
     );
   }
   return (
-    <label className="field-control">
+    <div className="field-control">
       <FieldText entry={entry} />
-      <input onChange={(event) => onChange(event.target.value)} value={String(value)} />
-    </label>
+      <input aria-label={label} onChange={(event) => onChange(event.target.value)} value={String(value)} />
+    </div>
   );
 }
 
 function FieldText({ entry }: { entry: SettingsCatalogEntry }) {
+  const { t } = useTranslation();
+  const label = catalogText(t, entry, "label");
+  const description = catalogText(t, entry, "description");
+  const help = catalogText(t, entry, "help");
   return (
     <span className="field-copy">
-      <strong>{entry.label}</strong>
-      <small>{entry.description}</small>
-      {entry.help ? <em>{entry.help}</em> : null}
+      <span className="field-label-row">
+        <strong>{label}</strong>
+        <HelpTooltip label={t("policy.helpFor", { label })}>
+          <span>{description}</span>
+          {help ? <><br />{help}</> : null}
+        </HelpTooltip>
+      </span>
     </span>
   );
 }
@@ -616,12 +643,13 @@ function ChangePreview({
   entries: SettingsCatalogEntry[];
   fieldDefs: Array<{ key: string; catalogKey: string }>;
 }) {
+  const { t } = useTranslation();
   const rows = Object.entries(changes);
   return (
     <div className="policy-change-preview">
       <div className="subsection-title">
         <FileDiff aria-hidden="true" size={16} />
-        <h2>未保存的策略变更</h2>
+        <h2>{t("policy.unsavedChanges")}</h2>
       </div>
       {rows.length ? (
         <ul className="change-list">
@@ -629,14 +657,14 @@ function ChangePreview({
             const catalogKey = fieldDefs.find((field) => field.key === key)?.catalogKey ?? key;
             return (
               <li key={key}>
-                <span>{entryFor(entries, catalogKey).label}</span>
-                <strong>{formatSettingValue(value)}</strong>
+                <span>{catalogText(t, entryFor(entries, catalogKey, t), "label")}</span>
+                <strong>{formatSettingValue(t, value)}</strong>
               </li>
             );
           })}
         </ul>
       ) : (
-        <p className="detail-note">没有待保存的修改。表单未编辑时会自动更新运行值。</p>
+        <p className="detail-note">{t("policy.noChanges")}</p>
       )}
     </div>
   );
@@ -653,6 +681,7 @@ function PolicyImpactPreviewPanel({
   isLoading: boolean;
   error: unknown;
 }) {
+  const { t } = useTranslation();
   if (!preview && !isLoading && !error) {
     return null;
   }
@@ -662,12 +691,12 @@ function PolicyImpactPreviewPanel({
         <FileDiff aria-hidden="true" size={16} />
         <h2>{title}</h2>
       </div>
-      {isLoading ? <p className="detail-note">正在计算策略影响…</p> : null}
-      {error ? <p className="detail-note">无法生成预览：{errorMessage(error)}</p> : null}
+      {isLoading ? <p className="detail-note">{t("policy.calculating")}</p> : null}
+      {error ? <p className="detail-note">{t("policy.previewError", { error: errorMessage(error, t) })}</p> : null}
       {preview ? (
         <>
-          <ImpactChangeList title="字段变更" changes={preview.field_changes} />
-          <ImpactChangeList title="行为变更" changes={preview.behavior_changes} />
+          <ImpactChangeList title={t("policy.fieldChanges")} changes={preview.field_changes} />
+          <ImpactChangeList title={t("policy.behaviorChanges")} changes={preview.behavior_changes} />
           <ImpactSummary summary={preview.affected_summary} />
           {preview.warnings.length ? (
             <ul className="warning-list">
@@ -689,6 +718,7 @@ function ImpactChangeList({
   title: string;
   changes: PolicyImpactPreview["behavior_changes"];
 }) {
+  const { t } = useTranslation();
   return (
     <div className="impact-section">
       <h3>{title}</h3>
@@ -698,31 +728,32 @@ function ImpactChangeList({
             <li key={`${change.subject ?? "field"}:${change.field}`}>
               <span>{impactLabel(change)}</span>
               <strong>
-                {formatSettingValue(change.before)}
+                {formatSettingValue(t, change.before)}
                 {" -> "}
-                {formatSettingValue(change.after)}
+                {formatSettingValue(t, change.after)}
               </strong>
             </li>
           ))}
         </ul>
       ) : (
-        <p className="detail-note">未检测到可确定的行为变化。</p>
+        <p className="detail-note">{t("policy.noBehaviorChanges")}</p>
       )}
     </div>
   );
 }
 
 function ImpactSummary({ summary }: { summary: Record<string, unknown> }) {
+  const { t } = useTranslation();
   const rows = Object.entries(summary);
   if (!rows.length) {
     return null;
   }
   return (
     <div className="impact-section">
-      <h3>影响范围摘要</h3>
+      <h3>{t("policy.impactSummary")}</h3>
       <FieldList>
         {rows.map(([key, value]) => (
-          <FactRow key={key} label={key} value={formatSettingValue(value)} />
+          <FactRow key={key} label={key} value={formatSettingValue(t, value)} />
         ))}
       </FieldList>
     </div>
@@ -730,17 +761,18 @@ function ImpactSummary({ summary }: { summary: Record<string, unknown> }) {
 }
 
 function ImportDiffDetails({ diff }: { diff: SettingsRuntime["policy_status"]["policy_import_diff"] }) {
+  const { t } = useTranslation();
   return (
     <div className="policy-import-detail">
       <div className="subsection-title">
         <FileDiff aria-hidden="true" size={16} />
-        <h2>策略导入差异详情</h2>
+        <h2>{t("policy.importDetails")}</h2>
       </div>
       <FieldList>
-        <FactRow label="缺失全局策略" value={diff?.missing_global ? "是" : "否"} />
-        <FactRow label="全局策略有差异" value={diff?.changed_global ? "是" : "否"} />
-        <FactRow label="缺失会话策略" value={(diff?.missing_chats ?? []).join(", ") || "无"} />
-        <FactRow label="会话策略有差异" value={(diff?.changed_chats ?? []).join(", ") || "无"} />
+        <FactRow label={t("policy.missingGlobal")} value={diff?.missing_global ? t("common.yes") : t("common.no")} />
+        <FactRow label={t("policy.changedGlobal")} value={diff?.changed_global ? t("common.yes") : t("common.no")} />
+        <FactRow label={t("policy.missingChats")} value={(diff?.missing_chats ?? []).join(", ") || t("common.none")} />
+        <FactRow label={t("policy.changedChats")} value={(diff?.changed_chats ?? []).join(", ") || t("common.none")} />
       </FieldList>
     </div>
   );
@@ -769,53 +801,54 @@ function PolicyAuditHistory({
   onFilterScopeChange: (value: AuditScopeFilter) => void;
   usingFallback: boolean;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="detail-panel">
       <div className="subsection-title">
         <History aria-hidden="true" size={16} />
-        <h2>策略审计记录</h2>
+        <h2>{t("policy.auditHistory")}</h2>
       </div>
-      <div className="audit-filter-row" aria-label="策略审计筛选">
+      <div className="audit-filter-row" aria-label={t("policy.auditFilters")}>
         <label>
-          <span>范围</span>
+          <span>{t("policy.filterScope")}</span>
           <select onChange={(event) => onFilterScopeChange(event.target.value as AuditScopeFilter)} value={filterScope}>
-            <option value="all">全部</option>
-            <option value="global">全局</option>
-            <option value="chat">会话</option>
+            <option value="all">{t("policy.scopeAll")}</option>
+            <option value="global">{t("policy.scopeGlobal")}</option>
+            <option value="chat">{t("policy.scopeChat")}</option>
           </select>
         </label>
         <label>
-          <span>策略键</span>
-          <input onChange={(event) => onFilterKeyChange(event.target.value)} placeholder="例如 reply_policy 或 chat:oc_xxx" value={filterKey} />
+          <span>{t("policy.policyKey")}</span>
+          <input onChange={(event) => onFilterKeyChange(event.target.value)} placeholder={t("policy.policyKeyPlaceholder")} value={filterKey} />
         </label>
       </div>
-      {isLoading ? <p className="detail-note">正在读取筛选后的审计记录…</p> : null}
-      {error ? <p className="detail-note">筛选读取失败，当前展示近期运行记录。</p> : null}
-      {usingFallback ? <p className="detail-note">筛选结果加载前展示近期运行记录。</p> : null}
+      {isLoading ? <p className="detail-note">{t("policy.loadingAudits")}</p> : null}
+      {error ? <p className="detail-note">{t("policy.auditFallbackError")}</p> : null}
+      {usingFallback ? <p className="detail-note">{t("policy.auditFallbackLoading")}</p> : null}
       {audits.length ? (
         <ul className="audit-list">
           {audits.map((audit) => (
             <li key={audit.id}>
               <div className="audit-row-head">
-                <Badge tone="info">{audit.scope}</Badge>
+                <Badge tone="info">{audit.scope === "global" ? t("policy.scopeGlobal") : audit.scope === "chat" ? t("policy.scopeChat") : audit.scope}</Badge>
                 <strong>{audit.policy_key}</strong>
                 <span>{formatDate(audit.created_at)}</span>
               </div>
-              <p>{audit.reason || "未记录原因"}</p>
+              <p>{audit.reason || t("policy.noReason")}</p>
               <FieldList>
-                <FactRow label="执行者" value={audit.actor} />
-                <FactRow label="变更前" value={shortText(formatSettingValue(audit.old_summary), "空")} />
-                <FactRow label="变更后" value={shortText(formatSettingValue(audit.new_summary), "空")} />
+                <FactRow label={t("common.actor")} value={audit.actor} />
+                <FactRow label={t("policy.before")} value={shortText(formatSettingValue(t, audit.old_summary), t("policy.emptyValue"))} />
+                <FactRow label={t("policy.after")} value={shortText(formatSettingValue(t, audit.new_summary), t("policy.emptyValue"))} />
               </FieldList>
               <details>
-                <summary>摘要 JSON</summary>
+                <summary>{t("policy.summaryJson")}</summary>
                 <JsonBlock value={{ old_summary: audit.old_summary, new_summary: audit.new_summary }} />
               </details>
             </li>
           ))}
         </ul>
       ) : (
-        <EmptyState title="尚无策略审计记录" detail="导入或更新策略后，审计记录会显示在这里。" />
+        <EmptyState title={t("policy.noAudits")} detail={t("policy.noAuditsDetail")} />
       )}
     </div>
   );
@@ -839,12 +872,12 @@ function FactRow({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
-function entryFor(entries: SettingsCatalogEntry[], key: string): SettingsCatalogEntry {
+function entryFor(entries: SettingsCatalogEntry[], key: string, t: TFunction): SettingsCatalogEntry {
   return (
     entries.find((entry) => entry.key === key) ?? {
       key,
       label: key,
-      description: "Catalog metadata unavailable.",
+      description: t("policy.catalogMetadataUnavailable"),
       help: null,
       source: "derived",
       scope: "policy",
@@ -894,15 +927,15 @@ function clean(value: string): string | undefined {
   return trimmed || undefined;
 }
 
-function formatSettingValue(value: unknown): string {
+function formatSettingValue(t: TFunction, value: unknown): string {
   if (value === true) {
-    return "是";
+    return t("common.yes");
   }
   if (value === false) {
-    return "否";
+    return t("common.no");
   }
   if (value === null || value === undefined || value === "") {
-    return "未设置";
+    return t("policy.notSet");
   }
   if (typeof value === "object") {
     return JSON.stringify(value);
@@ -910,11 +943,11 @@ function formatSettingValue(value: unknown): string {
   return String(value);
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "Request failed.";
+function errorMessage(error: unknown, t: TFunction): string {
+  return error instanceof Error ? error.message : t("common.requestFailed");
 }
 
-function errorResult(command: string, error: unknown): CommandResult {
+function errorResult(command: string, error: unknown, t: TFunction): CommandResult {
   return {
     status: "failed",
     command,
@@ -922,7 +955,7 @@ function errorResult(command: string, error: unknown): CommandResult {
     reason: null,
     target: {},
     changed: false,
-    result: { error: error instanceof Error ? error.message : "Request failed." },
+    result: { error: error instanceof Error ? error.message : t("common.requestFailed") },
     warnings: [],
     next_actions: []
   };

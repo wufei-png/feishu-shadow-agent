@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
-import { AlertTriangle, CheckCircle2, Loader2, RotateCcw } from "lucide-react";
+import * as Tooltip from "@radix-ui/react-tooltip";
+import { AlertTriangle, CheckCircle2, CircleHelp, Loader2, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import i18n, { formatDateTime } from "../i18n";
 import { commandLabel, enumLabel } from "../presentation";
@@ -7,6 +8,24 @@ import type { CommandResult, Tone } from "../types";
 
 export function Badge({ children, tone = "neutral" }: { children: ReactNode; tone?: Tone }) {
   return <span className={`status-pill ${tone}`}>{children}</span>;
+}
+
+export function HelpTooltip({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <Tooltip.Root>
+      <Tooltip.Trigger asChild>
+        <button aria-label={label} className="help-trigger" type="button">
+          <CircleHelp aria-hidden="true" size={15} />
+        </button>
+      </Tooltip.Trigger>
+      <Tooltip.Portal>
+        <Tooltip.Content className="tooltip-content" collisionPadding={10} sideOffset={6}>
+          {children}
+          <Tooltip.Arrow className="tooltip-arrow" />
+        </Tooltip.Content>
+      </Tooltip.Portal>
+    </Tooltip.Root>
+  );
 }
 
 export function Button({
