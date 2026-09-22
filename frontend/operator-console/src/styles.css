@@ -749,6 +749,51 @@ dd {
   overflow-wrap: anywhere;
 }
 
+.technical-details {
+  margin-top: 12px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.technical-details summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-weight: 650;
+}
+
+.copy-value {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 5px;
+}
+
+.copy-value > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.copy-trigger {
+  display: inline-grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-small);
+  place-items: center;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.copy-trigger:hover,
+.copy-trigger:focus-visible {
+  background: var(--accent-wash);
+  color: var(--accent-primary);
+}
+
 .field-control {
   display: grid;
   gap: 6px;
@@ -1277,8 +1322,16 @@ dd {
 }
 
 .timeline-list small {
+  min-width: 0;
   color: var(--text-muted);
   font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.timeline-list li > span,
+.timeline-button > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .timeline-button {
@@ -1566,22 +1619,62 @@ dd {
 }
 
 @media (max-width: 560px) {
+  .side-nav {
+    gap: 8px;
+    padding: 10px 8px;
+  }
+
   .brand-lockup {
+    min-height: 32px;
     padding: 0;
   }
 
   .nav-item {
-    min-width: 44px;
+    min-width: 64px;
+    min-height: 52px;
+    flex-direction: column;
+    gap: 3px;
     justify-content: center;
+    padding: 5px 7px;
+    font-size: 10px;
   }
 
   .nav-item span {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
+    position: static;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip: auto;
     white-space: nowrap;
+  }
+
+  .runtime-strip {
+    gap: 8px;
+    padding: 8px 10px;
+  }
+
+  .runtime-heading {
+    margin-right: auto;
+  }
+
+  .theme-control {
+    gap: 4px;
+    margin-left: 0;
+  }
+
+  .theme-control select {
+    min-height: 36px;
+  }
+
+  .runtime-items {
+    flex-wrap: nowrap;
+    gap: 12px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+
+  .runtime-item {
+    flex: 0 0 auto;
   }
 
   .section-header,

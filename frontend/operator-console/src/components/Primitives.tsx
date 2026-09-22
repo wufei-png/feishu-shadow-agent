@@ -1,6 +1,7 @@
+import { useState } from "react";
 import type { ReactNode } from "react";
 import * as Tooltip from "@radix-ui/react-tooltip";
-import { AlertTriangle, CheckCircle2, CircleHelp, Loader2, RotateCcw } from "lucide-react";
+import { AlertTriangle, Check, CheckCircle2, CircleHelp, Copy, Loader2, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import i18n, { formatDateTime } from "../i18n";
 import { commandLabel, enumLabel } from "../presentation";
@@ -25,6 +26,47 @@ export function HelpTooltip({ label, children }: { label: string; children: Reac
         </Tooltip.Content>
       </Tooltip.Portal>
     </Tooltip.Root>
+  );
+}
+
+export function CopyValue({ value, label }: { value: string; label?: string }) {
+  const { t } = useTranslation();
+  const [copied, setCopied] = useState(false);
+  const accessibleLabel = label ?? t("common.value");
+
+  async function copy(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  return (
+    <span className="copy-value">
+      <span>{value}</span>
+      <button
+        aria-label={copied ? t("common.copied", { label: accessibleLabel }) : t("common.copy", { label: accessibleLabel })}
+        className="copy-trigger"
+        onBlur={() => setCopied(false)}
+        onClick={() => void copy()}
+        title={copied ? t("common.copied", { label: accessibleLabel }) : t("common.copy", { label: accessibleLabel })}
+        type="button"
+      >
+        {copied ? <Check aria-hidden="true" size={14} /> : <Copy aria-hidden="true" size={14} />}
+      </button>
+    </span>
+  );
+}
+
+export function TechnicalDetails({ children, summary }: { children: ReactNode; summary?: string }) {
+  const { t } = useTranslation();
+  return (
+    <details className="technical-details">
+      <summary>{summary ?? t("common.technicalDetails")}</summary>
+      {children}
+    </details>
   );
 }
 
@@ -155,7 +197,9 @@ export function CommandResultPanel({ result }: { result: CommandResult | null })
           ))}
         </ul>
       ) : null}
-      <JsonBlock value={result.result} />
+      <TechnicalDetails>
+        <JsonBlock value={result.result} />
+      </TechnicalDetails>
     </section>
   );
 }

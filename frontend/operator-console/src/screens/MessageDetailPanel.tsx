@@ -9,6 +9,7 @@ import {
   Badge,
   Button,
   CommandResultPanel,
+  CopyValue,
   EmptyState,
   ErrorState,
   FieldList,
@@ -16,7 +17,8 @@ import {
   JsonBlock,
   LoadingState,
   shortText,
-  statusTone
+  statusTone,
+  TechnicalDetails
 } from "../components/Primitives";
 import { queryKeys } from "../queryKeys";
 import { enumLabel } from "../presentation";
@@ -69,7 +71,7 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
       <div className="detail-panel">
         <p className="eyebrow">{t("message.detail")}</p>
         <div className="detail-title-row">
-          <h2>{detail.data.message.message_id}</h2>
+          <h2><CopyValue label={t("message.messageId")} value={detail.data.message.message_id} /></h2>
           <Badge tone={statusTone(detail.data.message.sender_role)}>{enumLabel(t, "role", detail.data.message.sender_role)}</Badge>
         </div>
         <p className="preview-copy">{shortText(detail.data.message.text, t("message.noBody"))}</p>
@@ -222,7 +224,9 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
           <h2>{t("message.dispatchOutcomes")}</h2>
         </div>
         {detail.data.recorded_dispatch_outcomes.length ? (
-          <JsonBlock value={detail.data.recorded_dispatch_outcomes} />
+          <TechnicalDetails>
+            <JsonBlock value={detail.data.recorded_dispatch_outcomes} />
+          </TechnicalDetails>
         ) : (
           <p className="detail-note">{t("message.noDispatchOutcomes")}</p>
         )}

@@ -8,6 +8,7 @@ import {
   Badge,
   Button,
   CommandResultPanel,
+  CopyValue,
   EmptyState,
   ErrorState,
   FieldList,
@@ -20,6 +21,7 @@ import {
   SegmentedControl,
   shortText,
   statusTone,
+  TechnicalDetails,
   TextareaField
 } from "../components/Primitives";
 import { invalidateAfterApprovalCommand, invalidateAfterMaintenanceCommand, queryKeys, type ApprovalFilter } from "../queryKeys";
@@ -252,7 +254,7 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
             <div className="detail-panel">
               <p className="eyebrow">{t("approvals.detailEyebrow")}</p>
               <div className="detail-title-row">
-                <h2>{detail.data.approval_id}</h2>
+                <h2><CopyValue label={t("approvals.approvalId")} value={detail.data.approval_id} /></h2>
                 <Badge tone={detail.data.is_overdue ? "danger" : statusTone(detail.data.status)}>
                   {detail.data.is_overdue ? t("approvals.overdue") : enumLabel(t, "status", detail.data.status)}
                 </Badge>
@@ -276,7 +278,9 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
                   </FieldList>
                 </div>
               ) : null}
-              <JsonBlock value={detail.data.payload ?? {}} />
+              <TechnicalDetails>
+                <JsonBlock value={detail.data.payload ?? {}} />
+              </TechnicalDetails>
             </div>
 
             <div className="detail-panel">

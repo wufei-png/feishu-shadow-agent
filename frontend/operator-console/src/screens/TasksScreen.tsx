@@ -8,6 +8,7 @@ import {
   Badge,
   Button,
   CommandResultPanel,
+  CopyValue,
   EmptyState,
   ErrorState,
   FieldList,
@@ -254,8 +255,8 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
                 <Badge tone={statusTone(detail.data.status)}>{enumLabel(t, "status", detail.data.status)}</Badge>
               </div>
               <FieldList>
-                <FactRow label={t("tasks.taskId")} value={detail.data.task_id} />
-                <FactRow label={t("tasks.chat")} value={detail.data.chat_id ?? t("common.notRecorded")} />
+                <FactRow label={t("tasks.taskId")} value={<CopyValue label={t("tasks.taskId")} value={detail.data.task_id} />} />
+                <FactRow label={t("tasks.chat")} value={detail.data.chat_id ? <CopyValue label={t("tasks.chat")} value={detail.data.chat_id} /> : t("common.notRecorded")} />
                 <FactRow label={t("tasks.watchUntil")} value={formatDate(detail.data.watch_until)} />
                 <FactRow label={t("tasks.agentWorkingDir")} value={detail.data.agent_working_dir ?? t("common.notRecorded")} />
                 <FactRow label={t("tasks.policySource")} value={enumLabel(t, "source", detail.data.effective_policy.policy_source)} />

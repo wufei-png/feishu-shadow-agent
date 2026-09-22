@@ -8,6 +8,7 @@ import {
   Badge,
   Button,
   CommandResultPanel,
+  CopyValue,
   EmptyState,
   ErrorState,
   FieldList,
@@ -20,6 +21,7 @@ import {
   SegmentedControl,
   shortText,
   statusTone,
+  TechnicalDetails,
   TextareaField,
   TextField
 } from "../components/Primitives";
@@ -234,13 +236,13 @@ export function DispatchScreen({ token, selectedId, initialFilter }: { token: st
             <div className="detail-panel">
               <p className="eyebrow">{t("dispatch.detailEyebrow")}</p>
               <div className="detail-title-row">
-                <h2>{t("dispatch.record", { id: detail.data.action.action_id })}</h2>
+                <h2>{t("dispatch.recordLabel")} <CopyValue label={t("dispatch.actionId")} value={String(detail.data.action.action_id)} /></h2>
                 <Badge tone={statusTone(detail.data.action.status)}>{enumLabel(t, "status", detail.data.action.status)}</Badge>
               </div>
               <FieldList>
                 <FactRow label={t("dispatch.kind")} value={enumLabel(t, "kind", detail.data.action.kind)} />
                 <FactRow label={t("dispatch.linkedTask")} value={detail.data.action.task_short_id ?? t("common.notLinked")} />
-                <FactRow label={t("dispatch.targetMessage")} value={detail.data.action.target_message_id ?? t("common.notRecorded")} />
+                <FactRow label={t("dispatch.targetMessage")} value={detail.data.action.target_message_id ? <CopyValue label={t("dispatch.targetMessage")} value={detail.data.action.target_message_id} /> : t("common.notRecorded")} />
                 <FactRow label={t("dispatch.updatedAt")} value={formatDate(detail.data.action.updated_at)} />
               </FieldList>
               {postprocessInfo(detail.data.action.payload) ? (
@@ -254,7 +256,9 @@ export function DispatchScreen({ token, selectedId, initialFilter }: { token: st
                   </FieldList>
                 </div>
               ) : null}
-              <JsonBlock value={detail.data.action.payload} />
+              <TechnicalDetails>
+                <JsonBlock value={detail.data.action.payload} />
+              </TechnicalDetails>
             </div>
 
             <div className="detail-panel">
@@ -263,8 +267,8 @@ export function DispatchScreen({ token, selectedId, initialFilter }: { token: st
               <FieldList>
                 <FactRow label={t("dispatch.attemptCount")} value={String(detail.data.readback_summary.attempt_count ?? 0)} />
                 <FactRow label={t("dispatch.latestStatus")} value={enumLabel(t, "status", String(detail.data.readback_summary.latest_status ?? ""), t("common.none"))} />
-                <FactRow label={t("dispatch.sentMessage")} value={String(detail.data.readback_summary.sent_message_id ?? t("common.notRecorded"))} />
-                <FactRow label={t("dispatch.readbackMessage")} value={String(detail.data.readback_summary.readback_message_id ?? t("common.notRecorded"))} />
+                <FactRow label={t("dispatch.sentMessage")} value={detail.data.readback_summary.sent_message_id ? <CopyValue label={t("dispatch.sentMessage")} value={String(detail.data.readback_summary.sent_message_id)} /> : t("common.notRecorded")} />
+                <FactRow label={t("dispatch.readbackMessage")} value={detail.data.readback_summary.readback_message_id ? <CopyValue label={t("dispatch.readbackMessage")} value={String(detail.data.readback_summary.readback_message_id)} /> : t("common.notRecorded")} />
               </FieldList>
               {detail.data.attempts.length ? (
                 <ul className="timeline-list">
@@ -333,7 +337,9 @@ export function DispatchScreen({ token, selectedId, initialFilter }: { token: st
             <div className="detail-panel">
               <p className="eyebrow">{t("dispatch.recordedResult")}</p>
               <h2>{t("dispatch.persistedOutcome")}</h2>
-              <JsonBlock value={detail.data.action.result} />
+              <TechnicalDetails>
+                <JsonBlock value={detail.data.action.result} />
+              </TechnicalDetails>
               {(detail.data.recommended_actions ?? []).length ? (
                 <div className="inline-badges">
                   {(detail.data.recommended_actions ?? []).map((action) => (

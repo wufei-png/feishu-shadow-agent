@@ -13,7 +13,8 @@ import {
   LoadingState,
   SectionHeader,
   shortText,
-  statusTone
+  statusTone,
+  TechnicalDetails
 } from "../components/Primitives";
 import { invalidateAfterMaintenanceCommand, queryKeys } from "../queryKeys";
 import { enumLabel } from "../presentation";
@@ -105,7 +106,12 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
             <div><dt>{t("dashboard.policyImportDiff")}</dt><dd><Badge tone={statusTone(policyDiff?.status)}>{enumLabel(t, "status", policyDiff?.status, t("common.unknown"))}</Badge></dd></div>
             <div><dt>{t("dashboard.lastTick")}</dt><dd>{formatDate(snapshot?.last_run?.last_tick_finished_at)}</dd></div>
           </dl>
-          {policyDiff?.message ? <p className="detail-note">{policyDiff.message}</p> : null}
+          <p className="detail-note">{policyDiffSummary(t, policyDiff?.status, policyStatus?.initialized === true)}</p>
+          {policyDiff?.message ? (
+            <TechnicalDetails>
+              <p className="detail-note">{policyDiff.message}</p>
+            </TechnicalDetails>
+          ) : null}
           {policyNeedsAttention ? <div className="quiet-empty"><AlertTriangle aria-hidden="true" size={18} /><span>{t("dashboard.policyNeedsReview")}</span></div> : null}
           <div className="command-buttons">
             <Button onClick={() => navigate("settings")}>{t("dashboard.openSettings")}</Button>
@@ -206,6 +212,16 @@ function formatAge(seconds: number | null | undefined, t: ReturnType<typeof useT
     return t("dashboard.minutes", { count: Math.floor(seconds / 60) });
   }
   return t("dashboard.hours", { count: Math.floor(seconds / 3600) });
+}
+
+function policyDiffSummary(t: ReturnType<typeof useTranslation>["t"], status: string | null | undefined, initialized: boolean): string {
+  if (status === "matches") {
+    return t("policy.diffMatches");
+  }
+  if (status === "differs") {
+    return initialized ? t("policy.diffDiffers") : t("policy.diffUninitialized");
+  }
+  return t("policy.diffUnknown");
 }
 
 function DecisionLink({ count, hint, label, onClick, tone }: {
