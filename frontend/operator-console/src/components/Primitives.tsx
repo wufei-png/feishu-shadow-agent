@@ -1,9 +1,73 @@
+import { useState } from "react";
 import type { ReactNode } from "react";
-import { AlertTriangle, CheckCircle2, Loader2, RotateCcw } from "lucide-react";
+import * as Tooltip from "@radix-ui/react-tooltip";
+import { AlertTriangle, Check, CheckCircle2, CircleHelp, Copy, Loader2, RotateCcw } from "lucide-react";
+import { useTranslation } from "react-i18next";
+import i18n, { formatDateTime } from "../i18n";
+import { commandLabel, enumLabel } from "../presentation";
 import type { CommandResult, Tone } from "../types";
 
 export function Badge({ children, tone = "neutral" }: { children: ReactNode; tone?: Tone }) {
   return <span className={`status-pill ${tone}`}>{children}</span>;
+}
+
+export function HelpTooltip({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <Tooltip.Root>
+      <Tooltip.Trigger asChild>
+        <button aria-label={label} className="help-trigger" type="button">
+          <CircleHelp aria-hidden="true" size={15} />
+        </button>
+      </Tooltip.Trigger>
+      <Tooltip.Portal>
+        <Tooltip.Content className="tooltip-content" collisionPadding={10} sideOffset={6}>
+          {children}
+          <Tooltip.Arrow className="tooltip-arrow" />
+        </Tooltip.Content>
+      </Tooltip.Portal>
+    </Tooltip.Root>
+  );
+}
+
+export function CopyValue({ value, label }: { value: string; label?: string }) {
+  const { t } = useTranslation();
+  const [copied, setCopied] = useState(false);
+  const accessibleLabel = label ?? t("common.value");
+
+  async function copy(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  return (
+    <span className="copy-value">
+      <span>{value}</span>
+      <button
+        aria-label={copied ? t("common.copied", { label: accessibleLabel }) : t("common.copy", { label: accessibleLabel })}
+        className="copy-trigger"
+        onBlur={() => setCopied(false)}
+        onClick={() => void copy()}
+        title={copied ? t("common.copied", { label: accessibleLabel }) : t("common.copy", { label: accessibleLabel })}
+        type="button"
+      >
+        {copied ? <Check aria-hidden="true" size={14} /> : <Copy aria-hidden="true" size={14} />}
+      </button>
+    </span>
+  );
+}
+
+export function TechnicalDetails({ children, summary }: { children: ReactNode; summary?: string }) {
+  const { t } = useTranslation();
+  return (
+    <details className="technical-details">
+      <summary>{summary ?? t("common.technicalDetails")}</summary>
+      {children}
+    </details>
+  );
 }
 
 export function Button({
@@ -46,26 +110,28 @@ export function EmptyState({
   );
 }
 
-export function LoadingState({ title = "正在加载", detail = "正在读取本地值守状态。" }) {
+export function LoadingState({ title, detail }: { title?: string; detail?: string }) {
+  const { t } = useTranslation();
   return (
     <div className="empty-state">
       <Loader2 aria-hidden="true" className="spin" size={18} />
       <div>
-        <h1>{title}</h1>
-        <p>{detail}</p>
+        <h1>{title ?? t("common.loading")}</h1>
+        <p>{detail ?? t("common.loadingDetail")}</p>
       </div>
     </div>
   );
 }
 
 export function ErrorState({ title, error }: { title: string; error: unknown }) {
+  const { t } = useTranslation();
   const request = requestError(error);
   return (
     <div className="empty-state">
       <AlertTriangle aria-hidden="true" className="danger" size={18} />
       <div>
-        <h1>{request?.status === 401 ? "会话已过期" : request?.status === 404 ? "对象不存在" : title}</h1>
-        <p>{request?.message ?? (error instanceof Error ? error.message : "请求失败，请重试。")}</p>
+        <h1>{request?.status === 401 ? t("common.sessionExpired") : request?.status === 404 ? t("common.objectNotFound") : title}</h1>
+        <p>{request?.message ?? (error instanceof Error ? error.message : t("common.requestFailed"))}</p>
         {request?.code ? <small>{request.code}</small> : null}
       </div>
     </div>
@@ -91,21 +157,23 @@ export function QueueControls({
   onNext: () => void;
   onRefresh: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div aria-live="polite">
       <div className="command-buttons">
-        <Button disabled={page === 0 || isFetching} onClick={onPrevious}>上一页</Button>
-        <Badge tone="muted">第 {page + 1} 页</Badge>
-        <Button disabled={!hasNext || isFetching} onClick={onNext}>下一页</Button>
-        <Button disabled={isFetching} onClick={onRefresh}>{isFetching ? "刷新中…" : "刷新"}</Button>
+        <Button disabled={page === 0 || isFetching} onClick={onPrevious}>{t("common.previousPage")}</Button>
+        <Badge tone="muted">{t("common.page", { page: page + 1 })}</Badge>
+        <Button disabled={!hasNext || isFetching} onClick={onNext}>{t("common.nextPage")}</Button>
+        <Button disabled={isFetching} onClick={onRefresh}>{isFetching ? t("common.refreshing") : t("common.refresh")}</Button>
       </div>
-      <p className="detail-note">更新于 {updatedAt ? new Date(updatedAt).toLocaleString("zh-CN") : "尚未更新"}</p>
-      {error ? <p className="detail-note danger">刷新失败，当前展示缓存数据。{requestError(error)?.code ?? "request_failed"}</p> : null}
+      <p className="detail-note">{t("common.updatedAt", { time: updatedAt ? formatDateTime(updatedAt) : t("common.notUpdated") })}</p>
+      {error ? <p className="detail-note danger">{t("common.cachedRefreshError", { code: requestError(error)?.code ?? "request_failed" })}</p> : null}
     </div>
   );
 }
 
 export function CommandResultPanel({ result }: { result: CommandResult | null }) {
+  const { t } = useTranslation();
   if (!result) {
     return null;
   }
@@ -114,13 +182,13 @@ export function CommandResultPanel({ result }: { result: CommandResult | null })
     <section className={`command-result ${tone}`} aria-live="polite">
       <div className="command-result-title">
         {tone === "success" ? <CheckCircle2 aria-hidden="true" size={16} /> : <AlertTriangle aria-hidden="true" size={16} />}
-        <span>{result.command}</span>
-        <Badge tone={tone}>{result.status}</Badge>
+        <span title={result.command}>{commandLabel(t, result.command)}</span>
+        <Badge tone={tone}>{enumLabel(t, "status", result.status)}</Badge>
       </div>
       <dl className="compact-facts">
-        <Fact label="是否变更" value={result.changed ? "是" : "否"} />
-        <Fact label="执行者" value={result.actor} />
-        {result.reason ? <Fact label="原因" value={result.reason} /> : null}
+        <Fact label={t("common.changed")} value={result.changed ? t("common.yes") : t("common.no")} />
+        <Fact label={t("common.actor")} value={result.actor} />
+        {result.reason ? <Fact label={t("common.reason")} value={result.reason} /> : null}
       </dl>
       {result.warnings.length ? (
         <ul className="warning-list">
@@ -129,7 +197,10 @@ export function CommandResultPanel({ result }: { result: CommandResult | null })
           ))}
         </ul>
       ) : null}
-      <JsonBlock value={result.result} />
+      <TechnicalDetails>
+        <p className="detail-note"><strong>{t("common.rawCommand")}:</strong> <code>{result.command}</code></p>
+        <JsonBlock value={result.result} />
+      </TechnicalDetails>
     </section>
   );
 }
@@ -158,10 +229,11 @@ export function SectionHeader({
 }
 
 export function Fact({ label, value }: { label: string; value: ReactNode }) {
+  const { t } = useTranslation();
   return (
     <div>
       <dt>{label}</dt>
-      <dd>{value ?? "未记录"}</dd>
+      <dd>{value ?? t("common.notRecorded")}</dd>
     </div>
   );
 }
@@ -270,16 +342,16 @@ export function TextField({
 
 export function formatDate(value: string | null | undefined): string {
   if (!value) {
-    return "未记录";
+    return i18n.t("common.notRecorded");
   }
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     return value;
   }
-  return date.toLocaleString("zh-CN");
+  return formatDateTime(date);
 }
 
-export function shortText(value: string | null | undefined, fallback = "无预览"): string {
+export function shortText(value: string | null | undefined, fallback = i18n.t("common.noPreview")): string {
   const text = (value ?? "").trim();
   if (!text) {
     return fallback;

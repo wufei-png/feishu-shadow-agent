@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
+import type { TFunction } from "i18next";
 import { AlertTriangle, CheckCircle2, ExternalLink, HeartPulse, Send } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { getHealthIssues } from "../api";
 import {
   Badge,
@@ -15,9 +17,11 @@ import {
   shortText
 } from "../components/Primitives";
 import { queryKeys } from "../queryKeys";
+import { enumLabel } from "../presentation";
 import type { HealthIssue, HealthIssueLink, HealthIssuesResponse, Tone } from "../types";
 
 export function HealthScreen({ token }: { token: string }) {
+  const { t } = useTranslation();
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
   const health = useQuery({
     queryKey: queryKeys.healthIssues(),
@@ -39,44 +43,44 @@ export function HealthScreen({ token }: { token: string }) {
   }, [issues, selectedIssueId]);
 
   if (health.isLoading) {
-    return <LoadingState title="正在读取健康问题" />;
+    return <LoadingState title={t("health.loading")} />;
   }
   if (health.error) {
-    return <ErrorState title="无法读取健康状态" error={health.error} />;
+    return <ErrorState title={t("health.error")} error={health.error} />;
   }
   if (!health.data) {
-    return <EmptyState title="健康状态暂不可用" detail="本地控制台没有返回运行健康状态。" />;
+    return <EmptyState title={t("health.unavailable")} detail={t("health.unavailableDetail")} />;
   }
 
   return (
-    <section className="work-grid health-layout" aria-label="健康">
+    <section className="work-grid health-layout" aria-label={t("health.aria")}>
       <div className="work-main">
         <HealthSummaryPanel data={health.data} refreshing={health.isFetching && !health.isLoading} />
         <div className="queue-panel">
           <SectionHeader
-            eyebrow="当前问题"
-            title="需要检查的事项"
+            eyebrow={t("health.currentIssues")}
+            title={t("health.needsAttention")}
             badge={<Badge tone={issues.length ? issueTone(health.data.summary.highest_severity) : "success"}>{issues.length}</Badge>}
           >
-            <p className="section-note">汇总运行、策略、存储和发送问题，便于逐项检查。</p>
+            <p className="section-note">{t("health.intro")}</p>
           </SectionHeader>
           {issues.length ? (
             <div className="list-stack">
               {issues.map((issue) => (
                 <ListRow
-                  badge={<Badge tone={issueTone(issue.severity)}>{issue.severity}</Badge>}
+                  badge={<Badge tone={issueTone(issue.severity)}>{enumLabel(t, "severity", issue.severity)}</Badge>}
                   key={issue.id}
-                  meta={`${issue.category} · ${formatDate(issue.detected_at)}`}
+                  meta={`${enumLabel(t, "category", issue.category)} · ${formatDate(issue.detected_at)}`}
                   onClick={() => setSelectedIssueId(issue.id)}
                   selected={issue.id === selectedIssue?.id}
-                  title={issue.title}
+                  title={issueCopy(t, issue).title}
                 >
-                  <span className="row-preview">{shortText(issue.detail, "未记录详情")}</span>
+                  <span className="row-preview">{shortText(issueCopy(t, issue).detail, t("health.noDetail"))}</span>
                 </ListRow>
               ))}
             </div>
           ) : (
-            <EmptyState title="当前没有健康问题" detail="仍可在右侧查看守护进程和存储状态。" />
+            <EmptyState title={t("health.noIssues")} detail={t("health.noIssuesDetail")} />
           )}
         </div>
       </div>
@@ -92,46 +96,55 @@ export function HealthScreen({ token }: { token: string }) {
 }
 
 function HealthSummaryPanel({ data, refreshing }: { data: HealthIssuesResponse; refreshing: boolean }) {
+  const { t } = useTranslation();
   return (
     <div className="queue-panel">
       <SectionHeader
-        eyebrow="健康状态"
-        title="运行诊断"
-        badge={<Badge tone={refreshing ? "info" : data.summary.open_issue_count ? issueTone(data.summary.highest_severity) : "success"}>{refreshing ? "刷新中" : data.summary.highest_severity}</Badge>}
+        eyebrow={t("health.status")}
+        title={t("health.diagnostics")}
+        badge={<Badge tone={refreshing ? "info" : data.summary.open_issue_count ? issueTone(data.summary.highest_severity) : "success"}>{refreshing ? t("health.refreshing") : enumLabel(t, "severity", data.summary.highest_severity)}</Badge>}
       >
-        <p className="section-note">这里显示可处理的健康问题和运行状态。</p>
+        <p className="section-note">{t("health.summaryNote")}</p>
       </SectionHeader>
       <div className="metric-row health-metrics">
-        <Metric label="未解决问题" value={String(data.summary.open_issue_count)} tone={data.summary.open_issue_count ? issueTone(data.summary.highest_severity) : "success"} />
-        <Metric label="存储" value={String(data.runtime.store?.status ?? "unknown")} tone={data.runtime.store?.status === "available" ? "success" : "danger"} />
-        <Metric label="守护进程" value={String(data.runtime.daemon_liveness?.status ?? "unknown")} tone={runtimeTone(data.runtime.daemon_liveness?.status)} />
-        <Metric label="生成时间" value={formatDate(data.generated_at)} tone="neutral" />
+        <Metric label={t("health.openIssues")} value={String(data.summary.open_issue_count)} tone={data.summary.open_issue_count ? issueTone(data.summary.highest_severity) : "success"} />
+        <Metric label={t("health.storage")} value={enumLabel(t, "status", String(data.runtime.store?.status ?? "unknown"))} tone={data.runtime.store?.status === "available" ? "success" : "danger"} />
+        <Metric label={t("health.daemon")} value={enumLabel(t, "status", String(data.runtime.daemon_liveness?.status ?? "unknown"))} tone={runtimeTone(data.runtime.daemon_liveness?.status)} />
+        <Metric label={t("health.generatedAt")} value={formatDate(data.generated_at)} tone="neutral" />
       </div>
     </div>
   );
 }
 
 function IssueDetailPanel({ issue }: { issue: HealthIssue | null }) {
+  const { t } = useTranslation();
   if (!issue) {
-    return <EmptyState title="选择一个健康问题" detail="此处会显示详情、关联对象和可用操作。" />;
+    return <EmptyState title={t("health.select")} detail={t("health.selectDetail")} />;
   }
+  const copy = issueCopy(t, issue);
   return (
     <div className="detail-panel health-issue-detail">
-      <p className="eyebrow">问题详情</p>
+      <p className="eyebrow">{t("health.issueDetail")}</p>
       <div className="detail-title-row">
-        <h2>{issue.title}</h2>
-        <Badge tone={issueTone(issue.severity)}>{issue.severity}</Badge>
+        <h2>{copy.title}</h2>
+        <Badge tone={issueTone(issue.severity)}>{enumLabel(t, "severity", issue.severity)}</Badge>
       </div>
       <FieldList>
-        <FactRow label="类别" value={issue.category} />
-        <FactRow label="发现时间" value={formatDate(issue.detected_at)} />
+        <FactRow label={t("health.category")} value={enumLabel(t, "category", issue.category)} />
+        <FactRow label={t("health.detectedAt")} value={formatDate(issue.detected_at)} />
       </FieldList>
-      <p className="detail-note">{issue.detail}</p>
+      <p className="detail-note">{copy.detail}</p>
+      {copy.localized ? (
+        <details className="technical-details">
+          <summary>{t("health.technicalDetails")}</summary>
+          <p className="detail-note">{issue.title}: {issue.detail}</p>
+        </details>
+      ) : null}
       {issue.recommended_actions.length ? (
-        <div className="inline-badges" aria-label="建议操作">
+        <div className="inline-badges" aria-label={t("health.actions")}>
           {issue.recommended_actions.map((action) => (
             <Badge key={action} tone="info">
-              {action}
+              {enumLabel(t, "action", action)}
             </Badge>
           ))}
         </div>
@@ -142,18 +155,19 @@ function IssueDetailPanel({ issue }: { issue: HealthIssue | null }) {
 }
 
 function IssueLinks({ links }: { links: HealthIssueLink[] }) {
+  const { t } = useTranslation();
   if (!links.length) {
     return (
       <div className="quiet-empty">
         <HeartPulse aria-hidden="true" size={18} />
-        <span>没有关联的控制台对象。</span>
+        <span>{t("health.noLinks")}</span>
       </div>
     );
   }
   return (
     <div className="health-link-list">
       {links.map((link) => {
-        const target = linkTarget(link);
+        const target = linkTarget(t, link);
         if (!target.href) {
           return (
             <span className="button disabled-action" key={`${link.type}-${link.id}`}>
@@ -173,43 +187,45 @@ function IssueLinks({ links }: { links: HealthIssueLink[] }) {
 }
 
 function RuntimePanel({ data }: { data: HealthIssuesResponse }) {
+  const { t } = useTranslation();
   const liveness = data.runtime.daemon_liveness ?? {};
   const lastRun = data.runtime.last_run ?? {};
   return (
     <div className="detail-panel">
-      <p className="eyebrow">运行活性</p>
-      <h2>守护进程与存储</h2>
+      <p className="eyebrow">{t("health.liveness")}</p>
+      <h2>{t("health.daemonAndStore")}</h2>
       <FieldList>
-        <FactRow label="守护进程状态" value={String(liveness.status ?? "unknown")} />
-        <FactRow label="上次心跳" value={formatSeconds(liveness.heartbeat_age_seconds)} />
-        <FactRow label="运行状态" value={String(liveness.run_status ?? lastRun.status ?? "未记录")} />
-        <FactRow label="最近 tick" value={formatDate(String(lastRun.last_tick_finished_at ?? ""))} />
-        <FactRow label="存储可用" value={data.runtime.store?.available ? "是" : "否"} />
+        <FactRow label={t("health.daemonStatus")} value={enumLabel(t, "status", String(liveness.status ?? "unknown"))} />
+        <FactRow label={t("health.lastHeartbeat")} value={formatSeconds(t, liveness.heartbeat_age_seconds)} />
+        <FactRow label={t("health.runStatus")} value={enumLabel(t, "status", String(liveness.run_status ?? lastRun.status ?? "unknown"))} />
+        <FactRow label={t("health.lastTick")} value={formatDate(String(lastRun.last_tick_finished_at ?? ""))} />
+        <FactRow label={t("health.storeAvailable")} value={data.runtime.store?.available ? t("common.yes") : t("common.no")} />
       </FieldList>
     </div>
   );
 }
 
 function FailedCommandsPanel({ data }: { data: HealthIssuesResponse }) {
+  const { t } = useTranslation();
   const commands = data.recent_failed_commands ?? [];
   return (
     <div className="detail-panel">
-      <p className="eyebrow">失败命令</p>
-      <h2>最近失败的审批操作</h2>
+      <p className="eyebrow">{t("health.failedCommands")}</p>
+      <h2>{t("health.failedApprovals")}</h2>
       {commands.length ? (
         <ul className="timeline-list">
           {commands.slice(0, 5).map((command, index) => (
             <li key={`${String(command.message_id ?? "command")}-${index}`}>
               <AlertTriangle aria-hidden="true" size={14} />
-              <span>{String(command.label ?? "审批操作")}</span>
-              <small>{String(command.status ?? "failed")}</small>
+              <span>{String(command.label ?? t("health.approvalAction"))}</span>
+              <small>{enumLabel(t, "status", String(command.status ?? "failed"))}</small>
             </li>
           ))}
         </ul>
       ) : (
         <div className="quiet-empty">
           <CheckCircle2 aria-hidden="true" size={18} />
-          <span>近期没有失败的审批操作。</span>
+          <span>{t("health.noFailedApprovals")}</span>
         </div>
       )}
     </div>
@@ -223,6 +239,7 @@ function FailedDispatchPanel({
   data: HealthIssuesResponse;
   onSelect: (issueId: string) => void;
 }) {
+  const { t } = useTranslation();
   const dispatchIssues = data.issues.filter((issue) => issue.category === "dispatch");
   const failedActions = data.recent_failed_dispatch_actions ?? [];
   const issueActionIds = new Set(
@@ -231,16 +248,16 @@ function FailedDispatchPanel({
   const actionSummaries = failedActions.filter((action) => !issueActionIds.has(String(action.action_id)));
   return (
     <div className="detail-panel">
-      <p className="eyebrow">发送恢复</p>
-      <h2>失败发送摘要</h2>
+      <p className="eyebrow">{t("health.dispatchRecovery")}</p>
+      <h2>{t("health.failedDispatch")}</h2>
       {dispatchIssues.length || actionSummaries.length ? (
         <ul className="timeline-list">
           {dispatchIssues.slice(0, 6).map((issue) => (
             <li key={issue.id}>
               <button className="timeline-button" onClick={() => onSelect(issue.id)} type="button">
                 <Send aria-hidden="true" size={14} />
-                <span>{issue.title}</span>
-                <small>{issue.severity}</small>
+                <span>{issueCopy(t, issue).title}</span>
+                <small>{enumLabel(t, "severity", issue.severity)}</small>
               </button>
             </li>
           ))}
@@ -248,8 +265,8 @@ function FailedDispatchPanel({
             <li key={`dispatch-action-summary-${action.action_id}`}>
               <a className="timeline-button" href={`#dispatch/${encodeURIComponent(String(action.action_id))}`}>
                 <Send aria-hidden="true" size={14} />
-                <span>{`发送记录 ${action.action_id}`}</span>
-                <small>{action.status}</small>
+                <span>{t("health.dispatchRecord", { id: action.action_id })}</span>
+                <small>{enumLabel(t, "status", action.status)}</small>
               </a>
             </li>
           ))}
@@ -257,7 +274,7 @@ function FailedDispatchPanel({
       ) : (
         <div className="quiet-empty">
           <CheckCircle2 aria-hidden="true" size={18} />
-          <span>没有失败的发送记录。</span>
+          <span>{t("health.noFailedDispatch")}</span>
         </div>
       )}
     </div>
@@ -282,23 +299,42 @@ function FactRow({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
-function linkTarget(link: HealthIssueLink): { label: string; href: string | null } {
+function linkTarget(t: TFunction, link: HealthIssueLink): { label: string; href: string | null } {
   if (link.type === "dispatch_action") {
-    return { label: `查看发送记录 ${link.id}`, href: `#dispatch/${encodeURIComponent(link.id)}` };
+    return { label: t("health.viewDispatch", { id: link.id }), href: `#dispatch/${encodeURIComponent(link.id)}` };
   }
   if (link.type === "approval") {
-    return { label: `查看审批 ${link.id}`, href: `#approvals/${encodeURIComponent(link.id)}` };
+    return { label: t("health.viewApproval", { id: link.id }), href: `#approvals/${encodeURIComponent(link.id)}` };
   }
   if (link.type === "task") {
-    return { label: `查看任务 ${link.id}`, href: `#tasks/${encodeURIComponent(link.id)}` };
+    return { label: t("health.viewTask", { id: link.id }), href: `#tasks/${encodeURIComponent(link.id)}` };
   }
   if (link.type === "policy") {
-    return { label: "打开策略", href: "#policy" };
+    return { label: t("health.openPolicy"), href: "#policy" };
   }
   if (link.type === "settings") {
-    return { label: "打开设置", href: "#settings" };
+    return { label: t("health.openSettings"), href: "#settings" };
   }
-  return { label: "请从任务页打开消息详情", href: null };
+  return { label: t("health.openMessageFromTask"), href: null };
+}
+
+function issueCopy(t: TFunction, issue: HealthIssue): { title: string; detail: string; localized: boolean } {
+  const exact: Record<string, [string, string]> = {
+    "store-read-error": ["health.issue.storeRead.title", "health.issue.storeRead.detail"],
+    "daemon-not-started": ["health.issue.daemonNotStarted.title", "health.issue.daemonNotStarted.detail"],
+    "daemon-stale": ["health.issue.daemonStale.title", "health.issue.daemonStale.detail"],
+    "daemon-stopped": ["health.issue.daemonStopped.title", "health.issue.daemonStopped.detail"],
+    "daemon-unknown": ["health.issue.daemonUnknown.title", "health.issue.daemonUnknown.detail"],
+    "policy-uninitialized": ["health.issue.policyUninitialized.title", "health.issue.policyUninitialized.detail"],
+    "policy-invalid": ["health.issue.policyInvalid.title", "health.issue.policyInvalid.detail"]
+  };
+  const keys = exact[issue.id] ??
+    (issue.id.startsWith("store-") ? ["health.issue.storeUnavailable.title", "health.issue.storeUnavailable.detail"] as [string, string] : null) ??
+    (issue.id.startsWith("dispatch-action-") ? ["health.issue.dispatch.title", "health.issue.dispatch.detail"] as [string, string] : null) ??
+    (issue.id.startsWith("health-") ? ["health.issue.runtime.title", "health.issue.runtime.detail"] as [string, string] : null);
+  return keys
+    ? { title: t(keys[0]), detail: t(keys[1]), localized: true }
+    : { title: issue.title, detail: issue.detail, localized: false };
 }
 
 function issueTone(severity: string | null | undefined): Tone {
@@ -327,6 +363,6 @@ function runtimeTone(status: unknown): Tone {
   return "muted";
 }
 
-function formatSeconds(value: unknown): string {
-  return typeof value === "number" ? `${value} 秒` : "未记录";
+function formatSeconds(t: TFunction, value: unknown): string {
+  return typeof value === "number" ? t("common.seconds", { count: value }) : t("common.notRecorded");
 }

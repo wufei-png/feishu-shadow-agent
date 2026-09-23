@@ -2,11 +2,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, ClipboardList, Send } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { approveApproval, expireApprovals, getApproval, getTask, listApprovals, rejectApproval, sendApproval } from "../api";
 import {
   Badge,
   Button,
   CommandResultPanel,
+  CopyValue,
   EmptyState,
   ErrorState,
   FieldList,
@@ -19,9 +21,11 @@ import {
   SegmentedControl,
   shortText,
   statusTone,
+  TechnicalDetails,
   TextareaField
 } from "../components/Primitives";
 import { invalidateAfterApprovalCommand, invalidateAfterMaintenanceCommand, queryKeys, type ApprovalFilter } from "../queryKeys";
+import { enumLabel } from "../presentation";
 import type { ApprovalDetail, ApprovalStatus, ApprovalSummary, CommandResult } from "../types";
 
 type ApprovalDraft = {
@@ -40,14 +44,8 @@ type ApprovalCommandInput = {
 const emptyDraft: ApprovalDraft = { reason: "", finalReply: "" };
 const pageSize = 50;
 
-const approvalFilters: Array<{ value: ApprovalFilter; label: string }> = [
-  { value: "pending", label: "待处理" },
-  { value: "expired", label: "已过期" },
-  { value: "resolved", label: "已处理" },
-  { value: "all", label: "全部" }
-];
-
 export function ApprovalsScreen({ token, selectedId }: { token: string; selectedId: string | null }) {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [filter, setFilter] = useState<ApprovalFilter>("pending");
   const [page, setPage] = useState(0);
@@ -152,6 +150,12 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
   const canApprove = detail.data?.available_commands.includes(`approve ${detail.data.approval_id}`) ?? false;
   const canReject = detail.data?.available_commands.includes(`reject ${detail.data.approval_id}`) ?? false;
   const canSend = detail.data?.available_commands.some((command) => command.startsWith("send ")) ?? false;
+  const approvalFilters: Array<{ value: ApprovalFilter; label: string }> = [
+    { value: "pending", label: t("approvals.filters.pending") },
+    { value: "expired", label: t("approvals.filters.expired") },
+    { value: "resolved", label: t("approvals.filters.resolved") },
+    { value: "all", label: t("approvals.filters.all") }
+  ];
 
   function updateDraft(change: Partial<ApprovalDraft>): void {
     if (!selectedApprovalId) {
@@ -180,23 +184,23 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
   }
 
   if (approvals.isLoading) {
-    return <LoadingState title="正在读取审批" />;
+    return <LoadingState title={t("approvals.loading")} />;
   }
   if (approvals.error && !approvals.data) {
-    return <ErrorState title="无法读取审批列表" error={approvals.error} />;
+    return <ErrorState title={t("approvals.unavailable")} error={approvals.error} />;
   }
 
   return (
-    <section className="work-grid" aria-label="审批">
+    <section className="work-grid" aria-label={t("approvals.aria")}>
       <div className="work-main">
         <div className="queue-panel">
           <SectionHeader
-            eyebrow="人工审核"
-            title="审批队列"
+            eyebrow={t("approvals.eyebrow")}
+            title={t("approvals.title")}
             badge={<Badge tone={visibleApprovals.length ? "warning" : "success"}>{visibleApprovals.length}</Badge>}
           />
           <SegmentedControl
-            label="审批状态筛选"
+            label={t("approvals.filterLabel")}
             onChange={(nextFilter) => {
               setFilter(nextFilter);
               setPage(0);
@@ -218,9 +222,9 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
             <div className="list-stack">
               {visibleApprovals.map((approval) => (
                 <ListRow
-                  badge={<Badge tone={approval.is_overdue ? "danger" : statusTone(approval.status)}>{approval.is_overdue ? "已逾期" : approval.status}</Badge>}
+                  badge={<Badge tone={approval.is_overdue ? "danger" : statusTone(approval.status)}>{approval.is_overdue ? t("approvals.overdue") : enumLabel(t, "status", approval.status)}</Badge>}
                   key={approval.approval_id}
-                  meta={`${approval.kind} · ${approval.task_short_id ?? "未关联任务"} · ${formatDate(approval.created_at)}`}
+                  meta={`${enumLabel(t, "kind", approval.kind)} · ${approval.task_short_id ?? t("common.notLinked")} · ${formatDate(approval.created_at)}`}
                   onClick={() => selectApproval(approval.approval_id, setSelectedApprovalId)}
                   selected={approval.approval_id === selectedApprovalId}
                   title={approval.approval_id}
@@ -229,7 +233,7 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
                   {postprocessBadge(approval) ? (
                     <span className="inline-badges row-actions">
                       <Badge tone={approval.postprocess_status === "needs_owner" ? "warning" : "danger"}>
-                        {postprocessBadge(approval)}
+                        {enumLabel(t, "postprocess", postprocessBadge(approval))}
                       </Badge>
                     </span>
                   ) : null}
@@ -237,53 +241,55 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
               ))}
             </div>
           ) : (
-            <EmptyState title="当前筛选下没有审批" detail="可切换上方状态，查看待处理、已过期或已处理的审批。" />
+            <EmptyState title={t("approvals.noItems")} detail={t("approvals.noItemsDetail")} />
           )}
         </div>
       </div>
 
       <aside className="work-detail">
-        {selectedApprovalId && detail.isLoading ? <LoadingState title="正在读取审批详情" /> : null}
-        {detail.error ? <ErrorState title="无法读取审批详情" error={detail.error} /> : null}
+        {selectedApprovalId && detail.isLoading ? <LoadingState title={t("approvals.detailLoading")} /> : null}
+        {detail.error ? <ErrorState title={t("approvals.detailUnavailable")} error={detail.error} /> : null}
         {detail.data ? (
           <>
             <div className="detail-panel">
-              <p className="eyebrow">审批详情</p>
+              <p className="eyebrow">{t("approvals.detailEyebrow")}</p>
               <div className="detail-title-row">
-                <h2>{detail.data.approval_id}</h2>
+                <h2><CopyValue label={t("approvals.approvalId")} value={detail.data.approval_id} /></h2>
                 <Badge tone={detail.data.is_overdue ? "danger" : statusTone(detail.data.status)}>
-                  {detail.data.is_overdue ? "已逾期" : detail.data.status}
+                  {detail.data.is_overdue ? t("approvals.overdue") : enumLabel(t, "status", detail.data.status)}
                 </Badge>
               </div>
-              <p className="preview-copy">{shortText(detail.data.preview, "无审批预览")}</p>
+              <p className="preview-copy">{shortText(detail.data.preview, t("approvals.noApprovalPreview"))}</p>
               <FieldList>
-                <FactRow label="关联任务" value={detail.data.task_short_id ?? "未关联"} />
-                <FactRow label="创建时间" value={formatDate(detail.data.created_at)} />
-                <FactRow label="过期时间" value={formatDate(detail.data.expires_at)} />
-                <FactRow label="建议操作" value={detail.data.recommended_action} />
+                <FactRow label={t("approvals.linkedTask")} value={detail.data.task_short_id ?? t("common.notLinked")} />
+                <FactRow label={t("approvals.createdAt")} value={formatDate(detail.data.created_at)} />
+                <FactRow label={t("approvals.expiresAt")} value={formatDate(detail.data.expires_at)} />
+                <FactRow label={t("approvals.recommendedAction")} value={enumLabel(t, "action", detail.data.recommended_action)} />
               </FieldList>
               {postprocessInfo(detail.data.payload) ? (
                 <div className="subsection">
-                  <p className="eyebrow">回复后处理</p>
+                  <p className="eyebrow">{t("approvals.postprocess")}</p>
                   <FieldList>
-                    <FactRow label="状态" value={String(postprocessInfo(detail.data.payload)?.status ?? "未知")} />
-                    <FactRow label="处理提示" value={postprocessInfo(detail.data.payload)?.guidance || "无"} />
-                    <FactRow label="失败原因" value={postprocessInfo(detail.data.payload)?.failure || "无"} />
-                    <FactRow label="批准后的发送内容" value={postprocessInfo(detail.data.payload)?.approveBehavior || "原始回复"} />
-                    <FactRow label="拒绝后的行为" value={postprocessInfo(detail.data.payload)?.rejectBehavior || "正常"} />
+                    <FactRow label={t("approvals.status")} value={enumLabel(t, "status", String(postprocessInfo(detail.data.payload)?.status ?? ""), t("common.unknown"))} />
+                    <FactRow label={t("approvals.guidance")} value={postprocessInfo(detail.data.payload)?.guidance || t("common.none")} />
+                    <FactRow label={t("approvals.failure")} value={postprocessInfo(detail.data.payload)?.failure || t("common.none")} />
+                    <FactRow label={t("approvals.approveBehavior")} value={enumLabel(t, "postprocess", postprocessInfo(detail.data.payload)?.approveBehavior, t("approvals.originalReply"))} />
+                    <FactRow label={t("approvals.rejectBehavior")} value={enumLabel(t, "postprocess", postprocessInfo(detail.data.payload)?.rejectBehavior, t("common.unknown"))} />
                   </FieldList>
                 </div>
               ) : null}
-              <JsonBlock value={detail.data.payload ?? {}} />
+              <TechnicalDetails>
+                <JsonBlock value={detail.data.payload ?? {}} />
+              </TechnicalDetails>
             </div>
 
             <div className="detail-panel">
-              <p className="eyebrow">审批操作</p>
-              <h2>处理审批</h2>
+              <p className="eyebrow">{t("approvals.operations")}</p>
+              <h2>{t("approvals.handle")}</h2>
               <TextareaField
-                label="原因"
+                label={t("common.reason")}
                 onChange={(reason) => updateDraft({ reason })}
-                placeholder="可选；会记录到审计中"
+                placeholder={t("approvals.reasonPlaceholder")}
                 rows={2}
                 value={selectedDraft.reason}
               />
@@ -293,27 +299,27 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
                   onClick={() => runApprovalCommand("approve")}
                   tone="success"
                 >
-                  批准
+                  {t("approvals.approve")}
                 </Button>
                 <Button
                   disabled={!canReject || selectedApprovalBusy || expire.isPending}
                   onClick={() => runApprovalCommand("reject")}
                   tone="danger"
                 >
-                  拒绝
+                  {t("approvals.reject")}
                 </Button>
                 <Button
                   disabled={expire.isPending || busyApprovalIds.size > 0}
                   onClick={() => expire.mutate({ approvalId: selectedApprovalId, reason: clean(selectedDraft.reason) })}
                   tone="warning"
                 >
-                  过期超时审批
+                  {t("approvals.expire")}
                 </Button>
               </div>
               <TextareaField
-                label="最终回复"
+                label={t("approvals.finalReply")}
                 onChange={(finalReply) => updateDraft({ finalReply })}
-                placeholder="输入要发送给关联任务的最终回复"
+                placeholder={t("approvals.finalReplyPlaceholder")}
                 rows={4}
                 value={selectedDraft.finalReply}
               />
@@ -323,7 +329,7 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
                 tone="info"
               >
                 <Send aria-hidden="true" size={15} />
-                发送最终回复
+                {t("approvals.sendFinalReply")}
               </Button>
               <CommandResultPanel result={selectedCommandResult} />
             </div>
@@ -331,23 +337,23 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
             <div className="detail-panel">
               <div className="subsection-title">
                 <ClipboardList aria-hidden="true" size={16} />
-                <h2>关联任务上下文</h2>
+                <h2>{t("approvals.taskContext")}</h2>
               </div>
-              {task.isLoading ? <p className="detail-note">正在读取任务上下文…</p> : null}
+              {task.isLoading ? <p className="detail-note">{t("approvals.taskContextLoading")}</p> : null}
               {task.data ? (
                 <>
                   <FieldList>
-                    <FactRow label="任务状态" value={task.data.status} />
-                    <FactRow label="会话" value={task.data.chat_id ?? "未记录"} />
-                    <FactRow label="消息数" value={task.data.message_count} />
-                    <FactRow label="策略来源" value={task.data.effective_policy.policy_source} />
+                    <FactRow label={t("approvals.taskStatus")} value={enumLabel(t, "status", task.data.status)} />
+                    <FactRow label={t("approvals.chat")} value={task.data.chat_id ?? t("common.notRecorded")} />
+                    <FactRow label={t("approvals.messageCount")} value={task.data.message_count} />
+                    <FactRow label={t("approvals.policySource")} value={enumLabel(t, "source", task.data.effective_policy.policy_source)} />
                   </FieldList>
                   <ul className="timeline-list">
                     {task.data.recent_messages.slice(-4).map((message) => (
                       <li key={message.message_id}>
                         <Bell aria-hidden="true" size={14} />
                         <span>{shortText(message.text, message.message_id)}</span>
-                        <small>{message.sender_role}</small>
+                        <small>{enumLabel(t, "role", message.sender_role)}</small>
                       </li>
                     ))}
                   </ul>
@@ -356,7 +362,7 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
             </div>
           </>
         ) : selectedApproval ? null : (
-          <EmptyState title="选择一项审批" detail="此处会显示审批内容、任务上下文和可用操作。" />
+          <EmptyState title={t("approvals.selectTitle")} detail={t("approvals.selectDetail")} />
         )}
       </aside>
     </section>

@@ -2,11 +2,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, Bot, MessageSquare, RotateCcw, Send, XCircle } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { closeTask, getTask, listTasks, reopenTask, retryMessageProcessing, updateTaskBackground } from "../api";
 import {
   Badge,
   Button,
   CommandResultPanel,
+  CopyValue,
   EmptyState,
   ErrorState,
   FieldList,
@@ -21,6 +23,7 @@ import {
   TextareaField
 } from "../components/Primitives";
 import { invalidateAfterTaskCommand, queryKeys } from "../queryKeys";
+import { enumLabel } from "../presentation";
 import type { CommandResult, TaskStatus } from "../types";
 import { AgentAuditList } from "./AgentAuditList";
 import { MessageDetailPanel } from "./MessageDetailPanel";
@@ -38,15 +41,8 @@ type TaskCommandInput = {
 
 const pageSize = 50;
 
-const taskFilters: Array<{ value: TaskFilter; label: string }> = [
-  { value: "watching", label: "观察中" },
-  { value: "closed", label: "已关闭" },
-  { value: "closed_by_owner", label: "Owner 已关闭" },
-  { value: "human_taken_over", label: "人工接管" },
-  { value: "all", label: "全部" }
-];
-
 export function TasksScreen({ token, selectedId, initialFilter }: { token: string; selectedId: string | null; initialFilter?: TaskFilter }) {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [filter, setFilter] = useState<TaskFilter>(initialFilter ?? "watching");
   const [page, setPage] = useState(0);
@@ -127,6 +123,13 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
   const canClose = detail.data?.status === "watching";
   const canReopen = detail.data ? ["closed", "closed_by_owner", "human_taken_over"].includes(detail.data.status) : false;
   const backgroundDraft = selectedTaskId ? (backgroundDrafts[selectedTaskId] ?? detail.data?.task_background?.content ?? "") : "";
+  const taskFilters: Array<{ value: TaskFilter; label: string }> = [
+    { value: "watching", label: t("tasks.filters.watching") },
+    { value: "closed", label: t("tasks.filters.closed") },
+    { value: "closed_by_owner", label: t("tasks.filters.closed_by_owner") },
+    { value: "human_taken_over", label: t("tasks.filters.human_taken_over") },
+    { value: "all", label: t("tasks.filters.all") }
+  ];
 
   function setReason(reason: string): void {
     if (selectedTaskId) {
@@ -176,23 +179,23 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
   }
 
   if (tasks.isLoading) {
-    return <LoadingState title="正在读取任务" />;
+    return <LoadingState title={t("tasks.loading")} />;
   }
   if (tasks.error && !tasks.data) {
-    return <ErrorState title="无法读取任务列表" error={tasks.error} />;
+    return <ErrorState title={t("tasks.unavailable")} error={tasks.error} />;
   }
 
   return (
-    <section className="work-grid tasks-layout" aria-label="任务">
+    <section className="work-grid tasks-layout" aria-label={t("tasks.aria")}>
       <div className="work-main">
         <div className="queue-panel">
           <SectionHeader
-            eyebrow="会话任务"
-            title="任务列表"
+            eyebrow={t("tasks.eyebrow")}
+            title={t("tasks.title")}
             badge={<Badge tone={rows.length ? "info" : "muted"}>{rows.length}</Badge>}
           />
           <SegmentedControl
-            label="任务状态筛选"
+            label={t("tasks.filterLabel")}
             onChange={(nextFilter) => {
               setFilter(nextFilter);
               setPage(0);
@@ -214,9 +217,9 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
             <div className="list-stack">
               {rows.map((task) => (
                 <ListRow
-                  badge={<Badge tone={statusTone(task.status)}>{task.status}</Badge>}
+                  badge={<Badge tone={statusTone(task.status)}>{enumLabel(t, "status", task.status)}</Badge>}
                   key={task.task_id}
-                  meta={`${task.chat_id ?? "未记录会话"} · ${task.message_count} 条消息 · ${formatDate(task.updated_at)}`}
+                  meta={`${task.chat_id ?? t("tasks.noChat")} · ${t("common.messages", { count: task.message_count })} · ${formatDate(task.updated_at)}`}
                   onClick={() => selectTask(task.task_id, setSelectedTaskId)}
                   selected={task.task_id === selectedTaskId}
                   title={task.task_label || task.task_id}
@@ -226,7 +229,7 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
                     <span className="inline-badges row-actions">
                       {(task.recommended_actions ?? []).slice(0, 2).map((action) => (
                         <Badge key={action} tone="warning">
-                          {action}
+                          {enumLabel(t, "action", action)}
                         </Badge>
                       ))}
                     </span>
@@ -235,34 +238,34 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
               ))}
             </div>
           ) : (
-            <EmptyState title="当前筛选下没有任务" detail="消息归入会话任务后会显示在这里。" />
+            <EmptyState title={t("tasks.noItems")} detail={t("tasks.noItemsDetail")} />
           )}
         </div>
       </div>
 
       <aside className="work-detail">
-        {selectedTaskId && detail.isLoading ? <LoadingState title="正在读取任务详情" /> : null}
-        {detail.error ? <ErrorState title="无法读取任务详情" error={detail.error} /> : null}
+        {selectedTaskId && detail.isLoading ? <LoadingState title={t("tasks.detailLoading")} /> : null}
+        {detail.error ? <ErrorState title={t("tasks.detailUnavailable")} error={detail.error} /> : null}
         {detail.data ? (
           <>
             <div className="detail-panel">
-              <p className="eyebrow">任务详情</p>
+              <p className="eyebrow">{t("tasks.detailEyebrow")}</p>
               <div className="detail-title-row">
                 <h2>{detail.data.task_label || detail.data.task_id}</h2>
-                <Badge tone={statusTone(detail.data.status)}>{detail.data.status}</Badge>
+                <Badge tone={statusTone(detail.data.status)}>{enumLabel(t, "status", detail.data.status)}</Badge>
               </div>
               <FieldList>
-                <FactRow label="任务 ID" value={detail.data.task_id} />
-                <FactRow label="会话" value={detail.data.chat_id ?? "未记录"} />
-                <FactRow label="观察截止" value={formatDate(detail.data.watch_until)} />
-                <FactRow label="Agent 工作目录" value={detail.data.agent_working_dir ?? "未记录"} />
-                <FactRow label="策略来源" value={detail.data.effective_policy.policy_source} />
+                <FactRow label={t("tasks.taskId")} value={<CopyValue label={t("tasks.taskId")} value={detail.data.task_id} />} />
+                <FactRow label={t("tasks.chat")} value={detail.data.chat_id ? <CopyValue label={t("tasks.chat")} value={detail.data.chat_id} /> : t("common.notRecorded")} />
+                <FactRow label={t("tasks.watchUntil")} value={formatDate(detail.data.watch_until)} />
+                <FactRow label={t("tasks.agentWorkingDir")} value={detail.data.agent_working_dir ?? t("common.notRecorded")} />
+                <FactRow label={t("tasks.policySource")} value={enumLabel(t, "source", detail.data.effective_policy.policy_source)} />
               </FieldList>
               {detail.data.recommended_actions.length ? (
                 <div className="inline-badges">
                   {detail.data.recommended_actions.map((action) => (
                     <Badge key={action} tone="warning">
-                      {action}
+                      {enumLabel(t, "action", action)}
                     </Badge>
                   ))}
                 </div>
@@ -272,26 +275,25 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
             <div className="detail-panel">
               <div className="subsection-title">
                 <Bot aria-hidden="true" size={16} />
-                <h2>任务背景</h2>
+                <h2>{t("tasks.background")}</h2>
               </div>
               <TextareaField
-                label="Owner 补充背景"
+                label={t("tasks.ownerBackground")}
                 onChange={(value) => {
                   if (selectedTaskId) {
                     setBackgroundDrafts((current) => ({ ...current, [selectedTaskId]: value }));
                   }
                 }}
-                placeholder="仅写入这个任务需要长期参考的事实或约束"
+                placeholder={t("tasks.backgroundPlaceholder")}
                 rows={5}
                 value={backgroundDraft}
               />
               <p className="detail-note">
-                下次 fresh 重建生效；不会注入或重置当前 live provider session。
-                {detail.data.task_background ? ` 当前版本 v${detail.data.task_background.version}。` : " 尚无背景。"}
+                {t("tasks.backgroundNote")} {detail.data.task_background ? t("tasks.currentVersion", { version: detail.data.task_background.version }) : t("tasks.noBackground")}
               </p>
               <div className="command-buttons">
                 <Button disabled={selectedTaskBusy || !backgroundDraft.trim()} onClick={() => updateBackground(backgroundDraft)} tone="info">
-                  保存背景
+                  {t("tasks.saveBackground")}
                 </Button>
                 <Button
                   disabled={selectedTaskBusy || (!detail.data.task_background?.content && !backgroundDraft)}
@@ -303,23 +305,23 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
                   }}
                   tone="danger"
                 >
-                  清空背景
+                  {t("tasks.clearBackground")}
                 </Button>
               </div>
             </div>
 
             <div className="detail-panel">
-              <p className="eyebrow">任务操作</p>
-              <h2>任务状态</h2>
-              <TextareaField label="原因" onChange={setReason} placeholder="可选；记录本次操作的原因" rows={2} value={reason} />
+              <p className="eyebrow">{t("tasks.operations")}</p>
+              <h2>{t("tasks.state")}</h2>
+              <TextareaField label={t("common.reason")} onChange={setReason} placeholder={t("tasks.reasonPlaceholder")} rows={2} value={reason} />
               <div className="command-buttons">
                 <Button disabled={!canClose || selectedTaskBusy} onClick={() => runTaskCommand("close")} tone="danger">
                   <XCircle aria-hidden="true" size={15} />
-                  关闭任务
+                  {t("tasks.close")}
                 </Button>
                 <Button disabled={!canReopen || selectedTaskBusy} onClick={() => runTaskCommand("reopen")} tone="info">
                   <RotateCcw aria-hidden="true" size={15} />
-                  重新打开
+                  {t("tasks.reopen")}
                 </Button>
               </div>
               <CommandResultPanel result={commandResult} />
@@ -328,7 +330,7 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
             <div className="detail-panel">
               <div className="subsection-title">
                 <RotateCcw aria-hidden="true" size={16} />
-                <h2>处理恢复</h2>
+                <h2>{t("tasks.recovery")}</h2>
               </div>
               {(detail.data.processing ?? []).filter((item) => ["processing_failed_terminal", "blocked_waiting_external"].includes(item.status)).length ? (
                 <ul className="timeline-list">
@@ -337,25 +339,25 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
                     return (
                       <li key={`${item.message_id}-${item.revision}-${item.stage}`}>
                         <RotateCcw aria-hidden="true" size={14} />
-                        <span>{item.stage} · {item.message_id} r{item.revision}</span>
-                        <small>{item.status}{item.terminal_reason ? ` · ${item.terminal_reason}` : ""}</small>
+                        <span>{enumLabel(t, "stage", item.stage)} · {item.message_id} r{item.revision}</span>
+                        <small title={`${item.status}${item.terminal_reason ? ` · ${item.terminal_reason}` : ""}`}>{enumLabel(t, "status", item.status)}{item.terminal_reason ? ` · ${item.terminal_reason}` : ""}</small>
                         <Button disabled={selectedTaskBusy || activeRetry} onClick={() => retryProcessing(item.message_id, item.stage)} tone="warning">
-                          {activeRetry ? "已排队" : "重试"}
+                          {activeRetry ? t("tasks.queued") : t("tasks.retry")}
                         </Button>
                       </li>
                     );
                   })}
                 </ul>
               ) : (
-                <p className="detail-note">没有可人工重试的处理阶段。</p>
+                <p className="detail-note">{t("tasks.noRetryable")}</p>
               )}
-              <p className="detail-note">仅终态或外部阻塞可重试；发送结果不确定仍需在发送页人工核实。</p>
+              <p className="detail-note">{t("tasks.recoveryBoundary")}</p>
             </div>
 
             <div className="detail-panel">
               <div className="subsection-title">
                 <MessageSquare aria-hidden="true" size={16} />
-                <h2>消息时间线</h2>
+                <h2>{t("tasks.timeline")}</h2>
               </div>
               {detail.data.recent_messages.length ? (
                 <ul className="timeline-list">
@@ -364,20 +366,20 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
                       <button className="timeline-button" onClick={() => setMessageId(message.message_id)} type="button">
                         <MessageSquare aria-hidden="true" size={14} />
                         <span>{shortText(message.text, message.message_id)}</span>
-                        <small>{message.sender_role ?? message.role}</small>
+                        <small>{enumLabel(t, "role", message.sender_role ?? message.role)}</small>
                       </button>
                     </li>
                   ))}
                 </ul>
               ) : (
-                <p className="detail-note">此任务尚无已记录消息。</p>
+                <p className="detail-note">{t("tasks.noMessages")}</p>
               )}
             </div>
 
             <div className="detail-panel">
               <div className="subsection-title">
                 <Bell aria-hidden="true" size={16} />
-                <h2>关联审批</h2>
+                <h2>{t("tasks.approvals")}</h2>
               </div>
               {detail.data.pending_approvals.length ? (
                 <ul className="timeline-list">
@@ -385,49 +387,49 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
                     <li key={approval.approval_id}>
                       <Bell aria-hidden="true" size={14} />
                       <span>{approval.approval_id}</span>
-                      <small>{approval.is_overdue ? "已逾期" : approval.status}</small>
+                      <small>{approval.is_overdue ? t("approvals.overdue") : enumLabel(t, "status", approval.status)}</small>
                     </li>
                   ))}
                 </ul>
               ) : (
-                <p className="detail-note">此任务没有待处理审批。</p>
+                <p className="detail-note">{t("tasks.noApprovals")}</p>
               )}
             </div>
 
             <div className="detail-panel">
               <div className="subsection-title">
                 <Send aria-hidden="true" size={16} />
-                <h2>发送记录</h2>
+                <h2>{t("tasks.dispatch")}</h2>
               </div>
               {detail.data.actions.length ? (
                 <ul className="timeline-list">
                   {detail.data.actions.map((action) => (
                     <li key={action.action_id}>
                       <Send aria-hidden="true" size={14} />
-                      <span>发送记录 {action.action_id}</span>
-                      <small>{action.status}</small>
+                      <span>{t("tasks.dispatchRecord", { id: action.action_id })}</span>
+                      <small>{enumLabel(t, "status", action.status)}</small>
                     </li>
                   ))}
                 </ul>
               ) : (
-                <p className="detail-note">此任务没有发送记录。</p>
+                <p className="detail-note">{t("tasks.noDispatch")}</p>
               )}
             </div>
 
             <div className="detail-panel">
               <div className="subsection-title">
                 <Bot aria-hidden="true" size={16} />
-                <h2>Agent 审计</h2>
+                <h2>{t("tasks.agentAudit")}</h2>
               </div>
               <AgentAuditList audits={detail.data.agent_audits} />
             </div>
           </>
         ) : (
-          <EmptyState title="选择一个任务" detail="此处会显示时间线、策略、审批和发送记录。" />
+          <EmptyState title={t("tasks.selectTitle")} detail={t("tasks.selectDetail")} />
         )}
       </aside>
 
-      <aside className="message-drawer" aria-label="消息详情">
+      <aside className="message-drawer" aria-label={t("tasks.messageDetail")}>
         <MessageDetailPanel messageId={messageId} token={token} />
       </aside>
     </section>

@@ -1,28 +1,39 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Database, LockKeyhole, Settings2, SlidersHorizontal } from "lucide-react";
+import type { TFunction } from "i18next";
+import { Database, LockKeyhole, Search, Settings2, SlidersHorizontal } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { getSettingsCatalog, getSettingsRuntime } from "../api";
 import {
   Badge,
   EmptyState,
   ErrorState,
   FieldList,
+  HelpTooltip,
   LoadingState,
   SectionHeader,
+  SegmentedControl,
   statusTone
 } from "../components/Primitives";
+import { catalogText } from "../catalogPresentation";
+import { enumLabel } from "../presentation";
 import { queryKeys } from "../queryKeys";
 import type { SettingsCatalogEntry, SettingsRuntime, Tone } from "../types";
 
 type SettingsGroup = "normal" | "advanced" | "diagnostics";
 
-const groupLabels: Record<SettingsGroup, { eyebrow: string; title: string; icon: typeof Settings2 }> = {
-  normal: { eyebrow: "常规设置", title: "产品与流程字段", icon: Settings2 },
-  advanced: { eyebrow: "高级设置", title: "运行控制字段", icon: SlidersHorizontal },
-  diagnostics: { eyebrow: "诊断信息", title: "安装与运行状态", icon: Database }
+const groupLabels: Record<SettingsGroup, { eyebrowKey: string; titleKey: string; labelKey: string; icon: typeof Settings2 }> = {
+  normal: { eyebrowKey: "settings.group.normal.eyebrow", titleKey: "settings.group.normal.title", labelKey: "settings.group.normal", icon: Settings2 },
+  advanced: { eyebrowKey: "settings.group.advanced.eyebrow", titleKey: "settings.group.advanced.title", labelKey: "settings.group.advanced", icon: SlidersHorizontal },
+  diagnostics: { eyebrowKey: "settings.group.diagnostics.eyebrow", titleKey: "settings.group.diagnostics.title", labelKey: "settings.group.diagnostics", icon: Database }
 };
 
+const settingsGroups: SettingsGroup[] = ["normal", "advanced", "diagnostics"];
+
 export function SettingsScreen({ token }: { token: string }) {
+  const { t } = useTranslation();
+  const [activeGroup, setActiveGroup] = useState<SettingsGroup>("normal");
+  const [search, setSearch] = useState("");
   const catalog = useQuery({
     queryKey: queryKeys.settingsCatalog(),
     queryFn: () => getSettingsCatalog(token),
@@ -37,49 +48,79 @@ export function SettingsScreen({ token }: { token: string }) {
   const visibleEntries = useMemo(() => {
     return (catalog.data?.entries ?? []).filter((entry) => entry.visibility !== "hidden");
   }, [catalog.data]);
-  const grouped = useMemo(() => groupSettings(visibleEntries), [visibleEntries]);
+  const grouped = useMemo(() => {
+    const query = search.trim().toLocaleLowerCase();
+    const matched = query
+      ? visibleEntries.filter((entry) =>
+          [entry.key, catalogText(t, entry, "label"), catalogText(t, entry, "description"), catalogText(t, entry, "help")]
+            .join(" ")
+            .toLocaleLowerCase()
+            .includes(query)
+        )
+      : visibleEntries;
+    return groupSettings(matched);
+  }, [search, t, visibleEntries]);
+
+  useEffect(() => {
+    if (!search.trim() || grouped[activeGroup].length) {
+      return;
+    }
+    const firstMatchingGroup = settingsGroups.find((group) => grouped[group].length > 0);
+    if (firstMatchingGroup) {
+      setActiveGroup(firstMatchingGroup);
+    }
+  }, [activeGroup, grouped, search]);
 
   if (catalog.isLoading || runtime.isLoading) {
-    return <LoadingState title="正在读取设置" />;
+    return <LoadingState title={t("settings.loading")} />;
   }
   if (catalog.error) {
-    return <ErrorState title="无法读取设置目录" error={catalog.error} />;
+    return <ErrorState title={t("settings.catalogError")} error={catalog.error} />;
   }
   if (runtime.error) {
-    return <ErrorState title="无法读取运行设置" error={runtime.error} />;
+    return <ErrorState title={t("settings.runtimeError")} error={runtime.error} />;
   }
   if (!catalog.data || !runtime.data) {
-    return <EmptyState title="设置暂不可用" detail="本地控制台没有返回设置目录或运行值。" />;
+    return <EmptyState title={t("settings.unavailable")} detail={t("settings.unavailableDetail")} />;
   }
 
   return (
-    <section className="settings-screen" aria-label="设置">
+    <section className="settings-screen" aria-label={t("settings.aria")}>
       <div className="queue-panel">
         <SectionHeader
-          eyebrow="设置目录"
-          title="可查看的产品设置"
-          badge={<Badge tone="info">{visibleEntries.length} 项</Badge>}
+          eyebrow={t("settings.eyebrow")}
+          title={t("settings.title")}
+          badge={<Badge tone="info">{t("settings.itemCount", { count: visibleEntries.length })}</Badge>}
         >
           <p className="section-note">
-            此处展示产品字段。策略修改请前往“策略”；config.yaml 字段当前只读。
+            {t("settings.intro")}
           </p>
         </SectionHeader>
         <div className="policy-diff-grid">
-          <FactTile label="策略" value={runtime.data.policy_status.initialized ? "已初始化" : "缺失"} tone={runtime.data.policy_status.initialized ? "success" : "warning"} />
-          <FactTile label="导入差异" value={runtime.data.policy_status.policy_import_diff?.status ?? "未知"} tone={statusTone(runtime.data.policy_status.policy_import_diff?.status)} />
-          <FactTile label="会话策略数" value={String(runtime.data.chat_policies.length)} tone="info" />
+          <FactTile label={t("settings.policy")} value={runtime.data.policy_status.initialized ? t("policy.initialized") : t("policy.missing")} tone={runtime.data.policy_status.initialized ? "success" : "warning"} />
+          <FactTile label={t("settings.importDiff")} value={enumLabel(t, "status", runtime.data.policy_status.policy_import_diff?.status)} tone={statusTone(runtime.data.policy_status.policy_import_diff?.status)} />
+          <FactTile label={t("settings.chatPolicyCount")} value={String(runtime.data.chat_policies.length)} tone="info" />
         </div>
       </div>
 
+      <div className="settings-toolbar queue-panel">
+        <SegmentedControl
+          label={t("settings.groupLabel")}
+          onChange={setActiveGroup}
+          options={settingsGroups.map((group) => ({ value: group, label: `${t(groupLabels[group].labelKey)} (${grouped[group].length})` }))}
+          value={activeGroup}
+        />
+        <label className="settings-search">
+          <span>{t("settings.searchLabel")}</span>
+          <span className="settings-search-input">
+            <Search aria-hidden="true" size={15} />
+            <input onChange={(event) => setSearch(event.target.value)} placeholder={t("settings.searchPlaceholder")} type="search" value={search} />
+          </span>
+        </label>
+      </div>
+
       <div className="settings-groups">
-        {(["normal", "advanced", "diagnostics"] as SettingsGroup[]).map((group) => (
-          <SettingsCatalogSection
-            entries={grouped[group]}
-            group={group}
-            key={group}
-            runtime={runtime.data}
-          />
-        ))}
+        <SettingsCatalogSection entries={grouped[activeGroup]} group={activeGroup} runtime={runtime.data} />
       </div>
     </section>
   );
@@ -94,15 +135,16 @@ function SettingsCatalogSection({
   group: SettingsGroup;
   runtime: SettingsRuntime;
 }) {
+  const { t } = useTranslation();
   const meta = groupLabels[group];
   const Icon = meta.icon;
   return (
-    <section className="queue-panel settings-section" aria-label={meta.title}>
+    <section className="queue-panel settings-section" aria-label={t(meta.titleKey)}>
       <div className="subsection-title">
         <Icon aria-hidden="true" size={16} />
         <div>
-          <p className="eyebrow">{meta.eyebrow}</p>
-          <h2>{meta.title}</h2>
+          <p className="eyebrow">{t(meta.eyebrowKey)}</p>
+          <h2>{t(meta.titleKey)}</h2>
         </div>
       </div>
       {entries.length ? (
@@ -112,37 +154,52 @@ function SettingsCatalogSection({
           ))}
         </div>
       ) : (
-        <EmptyState title="此分类暂无字段" detail="隐藏字段不会显示在默认控制台中。" />
+        <EmptyState title={t("settings.noFields")} detail={t("settings.noFieldsDetail")} />
       )}
     </section>
   );
 }
 
 function SettingsField({ entry, runtime }: { entry: SettingsCatalogEntry; runtime: SettingsRuntime }) {
-  const value = settingValue(entry, runtime);
-  const readonlyReason = readonlyNote(entry);
+  const { t } = useTranslation();
+  const value = settingValue(t, entry, runtime);
+  const readonlyReason = readonlyNote(t, entry);
+  const label = catalogText(t, entry, "label");
+  const description = catalogText(t, entry, "description");
+  const help = catalogText(t, entry, "help");
   return (
     <article className="settings-field">
       <div className="settings-field-head">
-        <div>
-          <h3>{entry.label}</h3>
-          <p>{entry.description}</p>
-        </div>
-        <Badge tone={entry.editable_v1 ? "info" : "muted"}>{editableLabel(entry)}</Badge>
+        <span className="field-label-row">
+          <h3>{label}</h3>
+          <HelpTooltip label={t("settings.helpFor", { label })}>
+            <span>{description}</span>
+            {help ? <><br />{help}</> : null}
+          </HelpTooltip>
+        </span>
+        <Badge tone={entry.editable_v1 ? "info" : "muted"}>{editableLabel(t, entry)}</Badge>
       </div>
-      {entry.help ? <p className="field-help">{entry.help}</p> : null}
-      <FieldList>
-        <FactRow label="当前值" value={formatSettingValue(value)} />
-        <FactRow label="来源" value={entry.source} />
-        <FactRow label="需要重启" value={entry.requires_restart ? "是" : "否"} />
-        <FactRow label="写入边界" value={entry.write_boundary ?? "无"} />
-      </FieldList>
-      {readonlyReason ? (
-        <div className="readonly-note">
-          <LockKeyhole aria-hidden="true" size={14} />
-          <span>{readonlyReason}</span>
-        </div>
-      ) : null}
+      <div className="settings-current-value">
+        <span>{t("settings.currentValue")}</span>
+        <strong>{formatSettingValue(t, value)}</strong>
+      </div>
+      <details className="settings-technical-details">
+        <summary>{t("settings.technicalDetails")}</summary>
+        <FieldList>
+          <FactRow label={t("settings.settingKey")} value={entry.key} />
+          <FactRow label={t("settings.source")} value={enumLabel(t, "source", entry.source)} />
+          <FactRow label={t("settings.scope")} value={entry.scope} />
+          <FactRow label={t("settings.requiresRestart")} value={entry.requires_restart ? t("common.yes") : t("common.no")} />
+          <FactRow label={t("settings.writeBoundary")} value={entry.write_boundary ?? t("common.none")} />
+          <FactRow label={t("settings.auditBehavior")} value={entry.audit_behavior} />
+        </FieldList>
+        {readonlyReason ? (
+          <div className="readonly-note">
+            <LockKeyhole aria-hidden="true" size={14} />
+            <span>{readonlyReason}</span>
+          </div>
+        ) : null}
+      </details>
     </article>
   );
 }
@@ -167,41 +224,41 @@ function groupForEntry(entry: SettingsCatalogEntry): SettingsGroup {
   return "normal";
 }
 
-function settingValue(entry: SettingsCatalogEntry, runtime: SettingsRuntime): unknown {
+function settingValue(t: TFunction, entry: SettingsCatalogEntry, runtime: SettingsRuntime): unknown {
   if (entry.key in runtime.values) {
     return runtime.values[entry.key];
   }
   if (entry.scope === "chat_policy") {
-    return runtime.chat_policies.length ? `${runtime.chat_policies.length} 条会话策略` : "没有会话策略";
+    return runtime.chat_policies.length ? t("settings.chatPolicyValue", { count: runtime.chat_policies.length }) : t("settings.noChatPolicyValue");
   }
   if (entry.scope === "policy_audit") {
-    return `${runtime.policy_audit_history.length} 条近期审计记录`;
+    return t("settings.auditValue", { count: runtime.policy_audit_history.length });
   }
   return null;
 }
 
-function editableLabel(entry: SettingsCatalogEntry): string {
+function editableLabel(t: TFunction, entry: SettingsCatalogEntry): string {
   if (entry.editable_v1 === "command") {
-    return "通过命令修改";
+    return t("settings.editCommand");
   }
   if (entry.editable_v1 === true) {
-    return entry.source === "product_policy_store" ? "在策略页修改" : "可编辑";
+    return entry.source === "product_policy_store" ? t("settings.editPolicy") : t("settings.editable");
   }
-  return "只读";
+  return t("settings.readOnly");
 }
 
-function readonlyNote(entry: SettingsCatalogEntry): string | null {
+function readonlyNote(t: TFunction, entry: SettingsCatalogEntry): string | null {
   if (entry.source === "config_yaml") {
     if (entry.editable_v1 === "command") {
-      return "可在策略页运行导入命令；控制台不会写入 config.yaml。";
+      return t("settings.noteImport");
     }
-    return "当前只读；修改 config.yaml 仍需专门的命令和审计路径。";
+    return t("settings.noteConfig");
   }
   if (entry.source === "product_policy_store" && entry.editable_v1 === true) {
-    return "可在策略页通过受审计的操作修改。";
+    return t("settings.notePolicy");
   }
   if (entry.editable_v1 === false) {
-    return "运行时或派生字段，只读。";
+    return t("settings.noteRuntime");
   }
   return null;
 }
@@ -224,18 +281,18 @@ function FactRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-function formatSettingValue(value: unknown): string {
+function formatSettingValue(t: TFunction, value: unknown): string {
   if (value === true) {
-    return "是";
+    return t("common.yes");
   }
   if (value === false) {
-    return "否";
+    return t("common.no");
   }
   if (value === null || value === undefined || value === "") {
-    return "未设置";
+    return t("settings.notSet");
   }
   if (Array.isArray(value)) {
-    return value.length ? value.join(", ") : "无";
+    return value.length ? value.join(", ") : t("common.none");
   }
   if (typeof value === "object") {
     return JSON.stringify(value);

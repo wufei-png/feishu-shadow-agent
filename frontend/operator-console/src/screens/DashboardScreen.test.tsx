@@ -34,9 +34,11 @@ describe("DashboardScreen", () => {
     expect(screen.getByText("待审批").parentElement?.textContent).toContain("23");
     expect(screen.getByRole("button", { name: /发送待核实或失败/ }).textContent).toContain("4");
     expect(screen.getByText("涉及 4 个任务")).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "摄取积压" })).toBeTruthy();
-    expect(screen.getByText("ingest.p2p").parentElement?.textContent).toContain("page_cap_exhausted");
-    expect(screen.getByText("oc_absent").parentElement?.textContent).toContain("absent");
+    expect(screen.getByRole("heading", { name: "消息积压" })).toBeTruthy();
+    const backlog = screen.getByText("ingest.p2p").parentElement;
+    expect(backlog?.textContent).toContain("已达到单次抓取页数上限");
+    expect(backlog?.querySelector("small")?.getAttribute("title")).toBe("page_cap_exhausted");
+    expect(screen.getByText("oc_absent").parentElement?.textContent).toContain("已离群");
 
     await user.click(screen.getByRole("button", { name: /发送待核实或失败/ }));
     expect(navigate).toHaveBeenCalledWith("dispatch", undefined, "attention");

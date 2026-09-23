@@ -1,12 +1,15 @@
 import { useMutation } from "@tanstack/react-query";
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
+import type { TFunction } from "i18next";
 import { Bot, FileText, GitBranch, PackageSearch, RotateCcw, Send } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { getMessageDetail, replayMessage, retryMessageProcessing } from "../api";
 import {
   Badge,
   Button,
   CommandResultPanel,
+  CopyValue,
   EmptyState,
   ErrorState,
   FieldList,
@@ -14,13 +17,16 @@ import {
   JsonBlock,
   LoadingState,
   shortText,
-  statusTone
+  statusTone,
+  TechnicalDetails
 } from "../components/Primitives";
 import { queryKeys } from "../queryKeys";
+import { enumLabel } from "../presentation";
 import type { CommandResult } from "../types";
 import { AgentAuditList } from "./AgentAuditList";
 
 export function MessageDetailPanel({ token, messageId }: { token: string; messageId: string | null }) {
+  const { t } = useTranslation();
   const detail = useQuery({
     queryKey: queryKeys.messageDetail(messageId),
     queryFn: () => getMessageDetail(token, messageId ?? ""),
@@ -28,7 +34,7 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
   });
   const replay = useMutation({
     mutationFn: (targetMessageId: string) => replayMessage(token, targetMessageId),
-    onError: (error) => errorResult("message.replay_dry_run", error)
+    onError: (error) => errorResult("message.replay_dry_run", error, t)
   });
   const retryProcessing = useMutation({
     mutationFn: ({ targetMessageId, stage }: { targetMessageId: string; stage: string }) =>
@@ -39,48 +45,48 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
   });
   const replayResult =
     replay.variables === messageId
-      ? (replay.data as CommandResult | undefined) ?? (replay.error ? errorResult("message.replay_dry_run", replay.error) : null)
+      ? (replay.data as CommandResult | undefined) ?? (replay.error ? errorResult("message.replay_dry_run", replay.error, t) : null)
       : null;
   const retryResult =
     retryProcessing.variables?.targetMessageId === messageId
       ? (retryProcessing.data as CommandResult | undefined) ??
-        (retryProcessing.error ? errorResult("processing.retry", retryProcessing.error) : null)
+        (retryProcessing.error ? errorResult("processing.retry", retryProcessing.error, t) : null)
       : null;
 
   if (!messageId) {
-    return <EmptyState title="选择一条消息" detail="此处会显示消息的处理上下文。" />;
+    return <EmptyState title={t("message.select")} detail={t("message.selectDetail")} />;
   }
   if (detail.isLoading) {
-    return <LoadingState title="正在读取消息详情" />;
+    return <LoadingState title={t("message.loading")} />;
   }
   if (detail.error) {
-    return <ErrorState title="无法读取消息详情" error={detail.error} />;
+    return <ErrorState title={t("message.error")} error={detail.error} />;
   }
   if (!detail.data) {
-    return <EmptyState title="找不到消息" detail="本地存储中没有这条消息的详情。" />;
+    return <EmptyState title={t("message.notFound")} detail={t("message.notFoundDetail")} />;
   }
 
   return (
     <div className="message-detail-stack">
       <div className="detail-panel">
-        <p className="eyebrow">消息详情</p>
+        <p className="eyebrow">{t("message.detail")}</p>
         <div className="detail-title-row">
-          <h2>{detail.data.message.message_id}</h2>
-          <Badge tone={statusTone(detail.data.message.sender_role)}>{detail.data.message.sender_role ?? "unknown"}</Badge>
+          <h2><CopyValue label={t("message.messageId")} value={detail.data.message.message_id} /></h2>
+          <Badge tone={statusTone(detail.data.message.sender_role)}>{enumLabel(t, "role", detail.data.message.sender_role)}</Badge>
         </div>
-        <p className="preview-copy">{shortText(detail.data.message.text, "无消息正文")}</p>
+        <p className="preview-copy">{shortText(detail.data.message.text, t("message.noBody"))}</p>
         <FieldList>
-          <FactRow label="会话" value={detail.data.message.chat_id ?? "未记录"} />
-          <FactRow label="发送时间" value={formatDate(detail.data.message.sent_at)} />
-          <FactRow label="话题" value={detail.data.message.thread_id ?? "无"} />
-          <FactRow label="回复消息" value={detail.data.message.reply_to_message_id ?? "无"} />
+          <FactRow label={t("message.chat")} value={detail.data.message.chat_id ?? t("common.notRecorded")} />
+          <FactRow label={t("message.sentAt")} value={formatDate(detail.data.message.sent_at)} />
+          <FactRow label={t("message.thread")} value={detail.data.message.thread_id ?? t("common.none")} />
+          <FactRow label={t("message.replyTo")} value={detail.data.message.reply_to_message_id ?? t("common.none")} />
         </FieldList>
       </div>
 
       <div className="detail-panel">
         <div className="subsection-title">
           <GitBranch aria-hidden="true" size={16} />
-          <h2>路由与任务</h2>
+          <h2>{t("message.routing")}</h2>
         </div>
         <ul className="timeline-list">
           {detail.data.routing_audits.map((audit, index) => (
@@ -105,11 +111,11 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
       <div className="detail-panel">
         <div className="subsection-title">
           <RotateCcw aria-hidden="true" size={16} />
-          <h2>消息重放预演</h2>
+          <h2>{t("message.replay")}</h2>
         </div>
         <Button disabled={replay.isPending} onClick={() => replay.mutate(messageId)} tone="info">
           <RotateCcw aria-hidden="true" size={15} />
-          预演重放
+          {t("message.previewReplay")}
         </Button>
         <CommandResultPanel result={replayResult} />
       </div>
@@ -117,7 +123,7 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
       <div className="detail-panel">
         <div className="subsection-title">
           <PackageSearch aria-hidden="true" size={16} />
-          <h2>处理阶段</h2>
+          <h2>{t("message.processing")}</h2>
         </div>
         {detail.data.processing.length ? (
           <ul className="timeline-list">
@@ -126,15 +132,15 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
               return (
                 <li key={item.id}>
                   <PackageSearch aria-hidden="true" size={14} />
-                  <span>{item.stage}</span>
-                  <small>{`${item.status}${item.terminal_reason ? ` · ${item.terminal_reason}` : ""}`}</small>
+                  <span>{enumLabel(t, "stage", item.stage)}</span>
+                  <small title={`${item.status}${item.terminal_reason ? ` · ${item.terminal_reason}` : ""}`}>{`${enumLabel(t, "status", item.status)}${item.terminal_reason ? ` · ${item.terminal_reason}` : ""}`}</small>
                   {["processing_failed_terminal", "blocked_waiting_external"].includes(item.status) ? (
                     <Button
                       disabled={retryProcessing.isPending || activeRetry}
                       onClick={() => retryProcessing.mutate({ targetMessageId: messageId, stage: item.stage })}
                       tone="warning"
                     >
-                      {activeRetry ? "已排队" : "重试"}
+                      {activeRetry ? t("message.queued") : t("message.retry")}
                     </Button>
                   ) : null}
                 </li>
@@ -142,7 +148,7 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
             })}
           </ul>
         ) : (
-          <p className="detail-note">这条消息没有处理阶段记录。</p>
+          <p className="detail-note">{t("message.noProcessing")}</p>
         )}
         <CommandResultPanel result={retryResult} />
       </div>
@@ -150,44 +156,44 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
       <div className="detail-panel">
         <div className="subsection-title">
           <PackageSearch aria-hidden="true" size={16} />
-          <h2>资源</h2>
+          <h2>{t("message.resources")}</h2>
         </div>
         {detail.data.resources.length ? (
           <ul className="audit-list">
             {detail.data.resources.map((resource) => (
               <li key={resource.id}>
                 <div className="audit-row-head">
-                  <Badge tone={statusTone(resource.download_status)}>{resource.download_status}</Badge>
+                  <Badge tone={statusTone(resource.download_status)}>{enumLabel(t, "status", resource.download_status)}</Badge>
                   <strong>{resource.resource_type}</strong>
                   <span>{resource.file_key}</span>
                 </div>
                 <FieldList>
-                  <FactRow label="路径" value={resource.path ?? "未记录"} />
-                  <FactRow label="路径存在" value={resource.path_exists === null ? "未检查" : resource.path_exists ? "是" : "否"} />
-                  <FactRow label="SHA-256" value={resource.sha256_short ?? "未记录"} />
+                  <FactRow label={t("message.path")} value={resource.path ?? t("common.notRecorded")} />
+                  <FactRow label={t("message.pathExists")} value={resource.path_exists === null ? t("common.notChecked") : resource.path_exists ? t("common.yes") : t("common.no")} />
+                  <FactRow label="SHA-256" value={resource.sha256_short ?? t("common.notRecorded")} />
                 </FieldList>
                 {Object.keys(resource.raw_summary).length ? (
                   <details>
-                    <summary>原始摘要</summary>
+                    <summary>{t("common.rawSummary")}</summary>
                     <JsonBlock value={resource.raw_summary} />
                   </details>
                 ) : null}
                 <details>
-                  <summary>原始 JSON</summary>
+                  <summary>{t("common.rawJson")}</summary>
                   <JsonBlock value={resource.raw} />
                 </details>
               </li>
             ))}
           </ul>
         ) : (
-          <p className="detail-note">这条消息没有可下载资源记录。</p>
+          <p className="detail-note">{t("message.noResources")}</p>
         )}
       </div>
 
       <div className="detail-panel">
         <div className="subsection-title">
           <Bot aria-hidden="true" size={16} />
-          <h2>Agent 审计</h2>
+          <h2>{t("message.agentAudit")}</h2>
         </div>
         <AgentAuditList audits={detail.data.agent_audits} compact />
       </div>
@@ -195,7 +201,7 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
       <div className="detail-panel">
         <div className="subsection-title">
           <FileText aria-hidden="true" size={16} />
-          <h2>审批</h2>
+          <h2>{t("message.approvals")}</h2>
         </div>
         {detail.data.approvals.length ? (
           <ul className="timeline-list">
@@ -203,24 +209,26 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
               <li key={approval.approval_id}>
                 <FileText aria-hidden="true" size={14} />
                 <span>{approval.approval_id}</span>
-                <small>{approval.status}</small>
+                <small title={approval.status}>{enumLabel(t, "status", approval.status)}</small>
               </li>
             ))}
           </ul>
         ) : (
-          <p className="detail-note">这条消息没有关联审批记录。</p>
+          <p className="detail-note">{t("message.noApprovals")}</p>
         )}
       </div>
 
       <div className="detail-panel">
         <div className="subsection-title">
           <Send aria-hidden="true" size={16} />
-          <h2>发送结果</h2>
+          <h2>{t("message.dispatchOutcomes")}</h2>
         </div>
         {detail.data.recorded_dispatch_outcomes.length ? (
-          <JsonBlock value={detail.data.recorded_dispatch_outcomes} />
+          <TechnicalDetails>
+            <JsonBlock value={detail.data.recorded_dispatch_outcomes} />
+          </TechnicalDetails>
         ) : (
-          <p className="detail-note">没有已记录的发送结果。</p>
+          <p className="detail-note">{t("message.noDispatchOutcomes")}</p>
         )}
       </div>
     </div>
@@ -236,7 +244,7 @@ function FactRow({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
-function errorResult(command: string, error: unknown): CommandResult {
+function errorResult(command: string, error: unknown, t: TFunction): CommandResult {
   return {
     status: "failed",
     command,
@@ -244,7 +252,7 @@ function errorResult(command: string, error: unknown): CommandResult {
     reason: null,
     target: {},
     changed: false,
-    result: { error: error instanceof Error ? error.message : "Request failed." },
+    result: { error: error instanceof Error ? error.message : t("common.requestFailed") },
     warnings: [],
     next_actions: []
   };
