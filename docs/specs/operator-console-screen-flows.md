@@ -510,6 +510,7 @@ Sections:
 Local preferences (appearance, language)   always visible, above the catalog
 Normal
 Advanced
+Policy fields
 Diagnostics
 Hidden fields omitted by default
 ```
@@ -518,6 +519,12 @@ The two layers are ordered deliberately. Local preferences are the only editable
 controls on the page, and they sit above the catalog rather than inside it: a
 preference is not a product field, it is never searched or filtered, and it must
 stay reachable while the catalog is filtered down to nothing.
+
+Policy-owned fields are collected into their own group. Grouping by visibility
+alone left the default group 69% policy-owned: the operator landed on a screen of
+cards they could not act on, most of which only said "edit this elsewhere". The
+policy group is not a second editor; it is the part of the index whose write path
+lives on the Policy screen.
 
 Rules:
 
