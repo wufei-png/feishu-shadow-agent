@@ -1,0 +1,1 @@
+function e(e,t,n){return{status:`failed`,command:e,actor:`local_console`,reason:null,target:{},changed:!1,result:{error:t instanceof Error?t.message:n},warnings:[],next_actions:[]}}export{e as t};
