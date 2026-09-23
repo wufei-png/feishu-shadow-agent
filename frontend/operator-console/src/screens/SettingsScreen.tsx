@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
-import { Database, LockKeyhole, Search, Settings2, SlidersHorizontal, SunMoon } from "lucide-react";
+import { ArrowUpRight, Database, LockKeyhole, Search, Settings2, ShieldCheck, SlidersHorizontal, SunMoon } from "lucide-react";
 import { AnimatePresence, m } from "motion/react";
 import { useTranslation } from "react-i18next";
 import { getSettingsCatalog, getSettingsRuntime } from "../api";
@@ -26,15 +26,24 @@ import { queryKeys } from "../queryKeys";
 import type { ThemePreference } from "../theme";
 import type { SettingsCatalogEntry, SettingsRuntime } from "../types";
 
-type SettingsGroup = "normal" | "advanced" | "diagnostics";
+type SettingsGroup = "normal" | "advanced" | "policy" | "diagnostics";
 
 const groupLabels: Record<SettingsGroup, { eyebrowKey: string; titleKey: string; labelKey: string; icon: typeof Settings2 }> = {
   normal: { eyebrowKey: "settings.group.normal.eyebrow", titleKey: "settings.group.normal.title", labelKey: "settings.group.normal", icon: Settings2 },
   advanced: { eyebrowKey: "settings.group.advanced.eyebrow", titleKey: "settings.group.advanced.title", labelKey: "settings.group.advanced", icon: SlidersHorizontal },
+  policy: { eyebrowKey: "settings.group.policy.eyebrow", titleKey: "settings.group.policy.title", labelKey: "settings.group.policy", icon: ShieldCheck },
   diagnostics: { eyebrowKey: "settings.group.diagnostics.eyebrow", titleKey: "settings.group.diagnostics.title", labelKey: "settings.group.diagnostics", icon: Database }
 };
 
-const settingsGroups: SettingsGroup[] = ["normal", "advanced", "diagnostics"];
+const settingsGroups: SettingsGroup[] = ["normal", "advanced", "policy", "diagnostics"];
+
+/**
+ * Scopes whose write path belongs to the Policy screen. They are collected into
+ * their own group because grouping by visibility alone left the default group
+ * 69% policy-owned: the operator landed on a screen of cards they could not act
+ * on, most of which only said "edit this elsewhere".
+ */
+const policyScopes = new Set(["global_policy", "chat_policy", "policy_status", "policy_audit", "policy_import"]);
 
 export function SettingsScreen({ token }: { token: string }) {
   const { t } = useTranslation();
@@ -249,7 +258,16 @@ function SettingsField({ entry, runtime }: { entry: SettingsCatalogEntry; runtim
             {help ? <><br />{help}</> : null}
           </HelpTooltip>
         </span>
-        <Badge tone={entry.editable_v1 ? "info" : "muted"}>{editableLabel(t, entry)}</Badge>
+        {isPolicyOwned(entry) ? (
+          // A card whose only content is "edit this elsewhere" is a dead end, so
+          // the badge becomes the route to the screen that owns the write path.
+          <a className="settings-field-link" href="#policy">
+            {t("settings.editPolicy")}
+            <ArrowUpRight aria-hidden="true" size={13} />
+          </a>
+        ) : (
+          <Badge tone={entry.editable_v1 ? "info" : "muted"}>{editableLabel(t, entry)}</Badge>
+        )}
       </div>
       <div className="settings-current-value">
         <span>{t("settings.currentValue")}</span>
@@ -282,11 +300,14 @@ function groupSettings(entries: SettingsCatalogEntry[]): Record<SettingsGroup, S
       groups[groupForEntry(entry)].push(entry);
       return groups;
     },
-    { normal: [], advanced: [], diagnostics: [] }
+    { normal: [], advanced: [], policy: [], diagnostics: [] }
   );
 }
 
 function groupForEntry(entry: SettingsCatalogEntry): SettingsGroup {
+  if (policyScopes.has(entry.scope)) {
+    return "policy";
+  }
   if (entry.visibility === "advanced") {
     return "advanced";
   }
@@ -297,9 +318,15 @@ function groupForEntry(entry: SettingsCatalogEntry): SettingsGroup {
 }
 
 function settingValue(t: TFunction, entry: SettingsCatalogEntry, runtime: SettingsRuntime): unknown {
-  if (entry.key in runtime.values) {
-    return runtime.values[entry.key];
+  const stored = runtime.values[entry.key];
+  // Presence is not enough: the API lists derived fields with a null value, so
+  // checking only for the key made the audit card claim "not set" while records
+  // existed.
+  if (stored !== undefined && stored !== null) {
+    return stored;
   }
+  // Per-chat fields have no single current value, so the copy says where the
+  // value lives rather than presenting a chat count as if it were the value.
   if (entry.scope === "chat_policy") {
     return runtime.chat_policies.length ? t("settings.chatPolicyValue", { count: runtime.chat_policies.length }) : t("settings.noChatPolicyValue");
   }
@@ -307,6 +334,11 @@ function settingValue(t: TFunction, entry: SettingsCatalogEntry, runtime: Settin
     return t("settings.auditValue", { count: runtime.policy_audit_history.length });
   }
   return null;
+}
+
+/** True when the Policy screen owns this field's write path. */
+function isPolicyOwned(entry: SettingsCatalogEntry): boolean {
+  return entry.source === "product_policy_store" && entry.editable_v1 === true;
 }
 
 function editableLabel(t: TFunction, entry: SettingsCatalogEntry): string {

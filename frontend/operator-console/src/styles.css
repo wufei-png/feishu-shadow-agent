@@ -1525,6 +1525,37 @@ dd {
   font-weight: 650;
 }
 
+/*
+ * The route to the screen that owns a field's write path. Styled as a quiet
+ * action rather than a status badge, because it is the one thing on the card the
+ * operator can actually do.
+ */
+.settings-field-link {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 3px;
+  min-height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--accent-outline);
+  border-radius: 999px;
+  background: var(--accent-wash);
+  color: var(--accent-primary);
+  font-size: var(--text-label);
+  font-weight: 650;
+  text-decoration: none;
+  white-space: nowrap;
+  transition:
+    background-color var(--duration-quick) var(--ease-out),
+    border-color var(--duration-quick) var(--ease-out);
+}
+
+.settings-field-link:hover,
+.settings-field-link:focus-visible {
+  border-color: var(--accent-primary);
+  background: var(--surface-hover);
+}
+
 .settings-current-value {
   display: grid;
   gap: 4px;
