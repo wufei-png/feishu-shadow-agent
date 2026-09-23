@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
 import { Database, LockKeyhole, Search, Settings2, SlidersHorizontal } from "lucide-react";
@@ -60,6 +60,16 @@ export function SettingsScreen({ token }: { token: string }) {
       : visibleEntries;
     return groupSettings(matched);
   }, [search, t, visibleEntries]);
+
+  useEffect(() => {
+    if (!search.trim() || grouped[activeGroup].length) {
+      return;
+    }
+    const firstMatchingGroup = settingsGroups.find((group) => grouped[group].length > 0);
+    if (firstMatchingGroup) {
+      setActiveGroup(firstMatchingGroup);
+    }
+  }, [activeGroup, grouped, search]);
 
   if (catalog.isLoading || runtime.isLoading) {
     return <LoadingState title={t("settings.loading")} />;

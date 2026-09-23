@@ -36,11 +36,9 @@ describe("SettingsScreen", () => {
     expect(await screen.findByText("任务观察窗口")).toBeTruthy();
     expect(screen.queryByText("Codex 模型")).toBeNull();
 
-    await user.click(screen.getByRole("button", { name: "高级 (1)" }));
-    expect(screen.getByText("Codex 模型")).toBeTruthy();
-
     await user.type(screen.getByRole("searchbox", { name: "搜索设置" }), "Codex");
     expect(screen.getByText("Codex 模型")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "高级 (1)" }).getAttribute("aria-pressed")).toBe("true");
     await user.click(screen.getByText("技术信息"));
     expect(screen.getByText("agent_backend.codex.model")).toBeTruthy();
   });

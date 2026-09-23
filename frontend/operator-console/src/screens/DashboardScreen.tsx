@@ -133,7 +133,7 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
           {recentErrors.length ? (
             <ul className="timeline-list">
               {recentErrors.slice(0, 5).map((item, index) => (
-                <li key={`${String(item.type)}-${index}`}><AlertTriangle aria-hidden="true" size={14} /><span>{String(item.message ?? item.type ?? "recent issue")}</span><small>{String(item.status ?? "")}</small></li>
+                <li key={`${String(item.type)}-${index}`}><AlertTriangle aria-hidden="true" size={14} /><span>{String(item.message ?? item.type ?? "recent issue")}</span><small title={String(item.status ?? "")}>{item.status ? enumLabel(t, "status", String(item.status)) : ""}</small></li>
               ))}
             </ul>
           ) : <div className="quiet-empty"><CheckCircle2 aria-hidden="true" size={18} /><span>{t("dashboard.noRecentErrors")}</span></div>}
@@ -192,7 +192,7 @@ function IngestionPanel({ status }: { status: IngestionStatus | undefined }) {
             <li key={source.checkpoint_key}>
               <AlertTriangle aria-hidden="true" size={14} />
               <span>{source.checkpoint_key}</span>
-              <small>{t("dashboard.backlogProgress", { reason: source.backlog?.reason ?? "deferred", pages: source.backlog?.pages_fetched ?? 0, messages: source.backlog?.messages_fetched ?? 0 })}</small>
+              <small title={source.backlog?.reason ?? "deferred"}>{t("dashboard.backlogProgress", { reason: enumLabel(t, "reason", source.backlog?.reason ?? "deferred"), pages: source.backlog?.pages_fetched ?? 0, messages: source.backlog?.messages_fetched ?? 0 })}</small>
             </li>
           ))}
         </ul>

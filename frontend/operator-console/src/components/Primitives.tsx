@@ -198,6 +198,7 @@ export function CommandResultPanel({ result }: { result: CommandResult | null })
         </ul>
       ) : null}
       <TechnicalDetails>
+        <p className="detail-note"><strong>{t("common.rawCommand")}:</strong> <code>{result.command}</code></p>
         <JsonBlock value={result.result} />
       </TechnicalDetails>
     </section>

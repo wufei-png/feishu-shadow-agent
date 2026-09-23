@@ -13,7 +13,7 @@ export function enumLabel(
   if (!value) {
     return fallback ?? t("common.notRecorded");
   }
-  return t(`enums.${group}.${keyPart(value)}`, { defaultValue: fallback ?? value });
+  return t(`enums.${group}.${keyPart(value)}`, { defaultValue: fallback ?? t("common.unknown") });
 }
 
 export function commandLabel(t: TFunction, value: string): string {

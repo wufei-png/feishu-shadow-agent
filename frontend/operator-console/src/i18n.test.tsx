@@ -3,12 +3,13 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { useTranslation } from "react-i18next";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
+import i18n, {
   CONSOLE_LANGUAGE_STORAGE_KEY,
   formatDateTime,
   normalizeLanguage,
   setConsoleLanguage
 } from "./i18n";
+import { commandLabel, enumLabel } from "./presentation";
 
 function LanguageProbe() {
   const { t } = useTranslation();
@@ -51,5 +52,17 @@ describe("console localization", () => {
         second: "2-digit"
       }).format(new Date(value))
     );
+  });
+
+  it("localizes command summaries and falls back for unknown enums", async () => {
+    expect(commandLabel(i18n.t, "policy.update_global")).toBe("更新全局策略");
+    expect(enumLabel(i18n.t, "category", "approval_command")).toBe("审批操作");
+    expect(enumLabel(i18n.t, "status", "schema_uninitialized")).toBe("尚未初始化");
+    expect(enumLabel(i18n.t, "status", "future_status")).toBe("未知");
+
+    await setConsoleLanguage("en-US");
+
+    expect(commandLabel(i18n.t, "policy.update_global")).toBe("Update global policy");
+    expect(enumLabel(i18n.t, "status", "future_status")).toBe("Unknown");
   });
 });
