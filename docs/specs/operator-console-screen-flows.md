@@ -49,18 +49,18 @@ The console must not become:
 
 ## Navigation
 
-Primary navigation is fixed:
+Primary navigation is fixed, and it is grouped into three sections rather than
+presented as one flat list, because the grouping states what each destination is
+for:
 
 ```text
-Dashboard
-Approvals
-Tasks
-Dispatch
-Policy
-Settings
-Health
-Maintenance
+Duty        Dashboard, Approvals, Tasks, Dispatch, Feedback
+Configure   Policy, Settings
+System      Health, Maintenance
 ```
+
+Below 900px the section labels drop but hairline dividers keep the grouping
+legible, so the structure survives the compressed layout.
 
 The shell layout remains:
 
@@ -76,6 +76,51 @@ commands such as doctor, config validation, retention pruning, and reply style
 refresh. It must not become a miscellaneous command drawer. Commands whose
 operator context is a queue or task workflow, such as expiring approvals, remain
 on the workflow screen even if their backend API namespace is maintenance.
+
+The runtime strip reports and does not control. It carries the four live readings
+(daemon liveness, policy initialization, policy import diff, data freshness) and
+nothing else; operator preferences live in Settings. Each reading is a tell-tale
+lamp plus its value in text, and the lamp is decorative reinforcement of what the
+words already say, so it stays out of the accessibility tree.
+
+## Materials, Motion, and Shell Behaviour
+
+Material is a rule, not a style: **glass marks where the machine reports on
+itself, and anything the operator must read verbatim stays opaque.**
+
+```text
+Real glass (backdrop-filter)   sticky runtime strip, overlays, tooltips, inline confirmation
+Tonal material (no blur)       navigation rail, toolbars, segmented-control track
+Opaque                         every content panel: evidence, messages, policy text
+```
+
+Apply a real blur only where content genuinely passes underneath. A surface with a
+flat canvas behind it takes a tonal step instead, because a blur there costs a
+compositor layer and is indistinguishable from the tint. Degrade glass to an
+opaque surface under `prefers-reduced-transparency` and where `backdrop-filter` is
+unsupported: losing the glass is preferable to setting body text over a smear.
+
+The navigation rail and the runtime strip are sticky, so content scrolls under the
+strip and the shell never scrolls away from the operator. Below 900px the rail
+moves to the top and takes over the glass; the runtime strip goes opaque there
+because nothing passes beneath it any more.
+
+Motion expresses spatial continuity, not decoration. The animation library owns
+mount, unmount, and layout; CSS owns hover, press, colour, and focus.
+
+```text
+Route change        140ms opacity fade, no travel, no exit animation
+Settings group      180ms cross-fade in, 80ms out, no overlap between grids
+Detail panel        200ms, 6px rise, keyed on the selected item
+List row / result   fade in with a 4px rise on mount
+Selection           one shared indicator that travels between options
+```
+
+A route change does not animate its exit. Holding the outgoing screen for even
+100ms makes a high-frequency sidebar click feel slow, and a true cross-fade would
+require overlapping both screens in the layout. Under `prefers-reduced-motion` the
+library drops transforms and keeps opacity, so the state change is still reported
+without movement.
 
 ## Shared Screen States
 
@@ -98,7 +143,24 @@ Mutations must use command results for feedback and then refresh authoritative
 read models.
 
 Do not use optimistic UI for backend state changes. Optimistic UI is acceptable
-only for local selection, expansion, and panel visibility.
+only for local selection, expansion, and panel visibility. Concretely: clearing a
+task's owner background drops the local draft instead of blanking it, so the field
+falls back to what the server actually stores and a failed command cannot look
+like a successful one.
+
+Every command must be able to say it failed. A mutation that surfaces a command
+result has to build a failure result when the request never reached the daemon,
+using the shared `failedCommandResult` helper. A result panel that stays empty on
+failure reads as "nothing happened" rather than "this failed".
+
+Destructive commands confirm in place. The first click arms the action and states
+exactly what will happen, the second commits, and an armed button disarms itself
+after a few seconds so a half-pressed destructive command cannot sit waiting on
+screen. Escape cancels. Do not use `window.confirm`: it blocks the page, cannot be
+styled or tested, and reports nothing when the operator cancels.
+
+Headings carry structure, not emphasis. One `h1` per view; empty, loading, and
+error states are `h2`; readouts nested inside a panel are `h3`.
 
 ## Dashboard
 
@@ -432,7 +494,8 @@ POST /api/policy/chats/{chat_id}/delete-preview
 
 Purpose:
 
-The Settings screen presents console-exposed settings in product language.
+The Settings screen owns the operator's own preferences and presents
+console-exposed product fields in product language.
 
 Ownership:
 
@@ -444,11 +507,17 @@ Ownership:
 Sections:
 
 ```text
+Local preferences (appearance, language)   always visible, above the catalog
 Normal
 Advanced
 Diagnostics
 Hidden fields omitted by default
 ```
+
+The two layers are ordered deliberately. Local preferences are the only editable
+controls on the page, and they sit above the catalog rather than inside it: a
+preference is not a product field, it is never searched or filtered, and it must
+stay reachable while the catalog is filtered down to nothing.
 
 Rules:
 
@@ -457,6 +526,14 @@ Rules:
 - Do not write `config.yaml` in v1.
 - If a future config write path is added, it must go through a command facade and
   explicit audit behavior.
+- A catalog card whose only content is "edit this elsewhere" is a dead end. If a
+  field is owned by another screen, the card links to that screen.
+- A card that claims to show a current value must show a value. Fields that are
+  set per chat report that they are per-chat rather than reporting a count of
+  chats as if it were the value.
+- Chinese catalog copy is a frontend override of the API's English source copy, so
+  it is scoped to Chinese. English mode reads the API copy directly; the console
+  must never render Chinese product copy in an English session.
 
 Primary API needs:
 
