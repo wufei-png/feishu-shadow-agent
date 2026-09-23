@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, Bot, MessageSquare, RotateCcw, Send, XCircle } from "lucide-react";
+import { m } from "motion/react";
 import { useTranslation } from "react-i18next";
 import { closeTask, getTask, listTasks, reopenTask, retryMessageProcessing, updateTaskBackground } from "../api";
 import {
+  Fact,
   Badge,
   Button,
   CommandResultPanel,
+  ConfirmButton,
   CopyValue,
   EmptyState,
   ErrorState,
@@ -23,6 +25,7 @@ import {
   TextareaField
 } from "../components/Primitives";
 import { invalidateAfterTaskCommand, queryKeys } from "../queryKeys";
+import { panelTransition, panelVariants } from "../motionTokens";
 import { enumLabel } from "../presentation";
 import type { CommandResult, TaskStatus } from "../types";
 import { AgentAuditList } from "./AgentAuditList";
@@ -243,7 +246,18 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
         </div>
       </div>
 
-      <aside className="work-detail">
+      {/*
+        Keyed on the selection so switching rows reads as the detail being
+        replaced rather than as every field changing at once.
+      */}
+      <m.aside
+        animate="visible"
+        className="work-detail"
+        key={selectedTaskId ?? "none"}
+        initial="hidden"
+        transition={panelTransition}
+        variants={panelVariants}
+      >
         {selectedTaskId && detail.isLoading ? <LoadingState title={t("tasks.detailLoading")} /> : null}
         {detail.error ? <ErrorState title={t("tasks.detailUnavailable")} error={detail.error} /> : null}
         {detail.data ? (
@@ -255,11 +269,11 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
                 <Badge tone={statusTone(detail.data.status)}>{enumLabel(t, "status", detail.data.status)}</Badge>
               </div>
               <FieldList>
-                <FactRow label={t("tasks.taskId")} value={<CopyValue label={t("tasks.taskId")} value={detail.data.task_id} />} />
-                <FactRow label={t("tasks.chat")} value={detail.data.chat_id ? <CopyValue label={t("tasks.chat")} value={detail.data.chat_id} /> : t("common.notRecorded")} />
-                <FactRow label={t("tasks.watchUntil")} value={formatDate(detail.data.watch_until)} />
-                <FactRow label={t("tasks.agentWorkingDir")} value={detail.data.agent_working_dir ?? t("common.notRecorded")} />
-                <FactRow label={t("tasks.policySource")} value={enumLabel(t, "source", detail.data.effective_policy.policy_source)} />
+                <Fact label={t("tasks.taskId")} value={<CopyValue label={t("tasks.taskId")} value={detail.data.task_id} />} />
+                <Fact label={t("tasks.chat")} value={detail.data.chat_id ? <CopyValue label={t("tasks.chat")} value={detail.data.chat_id} /> : t("common.notRecorded")} />
+                <Fact label={t("tasks.watchUntil")} value={formatDate(detail.data.watch_until)} />
+                <Fact label={t("tasks.agentWorkingDir")} value={detail.data.agent_working_dir ?? t("common.notRecorded")} />
+                <Fact label={t("tasks.policySource")} value={enumLabel(t, "source", detail.data.effective_policy.policy_source)} />
               </FieldList>
               {detail.data.recommended_actions.length ? (
                 <div className="inline-badges">
@@ -295,18 +309,27 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
                 <Button disabled={selectedTaskBusy || !backgroundDraft.trim()} onClick={() => updateBackground(backgroundDraft)} tone="info">
                   {t("tasks.saveBackground")}
                 </Button>
-                <Button
+                <ConfirmButton
+                  confirmLabel={t("tasks.confirmClearBackground")}
                   disabled={selectedTaskBusy || (!detail.data.task_background?.content && !backgroundDraft)}
-                  onClick={() => {
+                  onConfirm={() => {
+                    // Drop the local draft instead of blanking it. Blanking it
+                    // here would show an empty field before the command resolves,
+                    // so a failed clear would look like a successful one; falling
+                    // back to the server value shows what is actually stored.
                     if (selectedTaskId) {
-                      setBackgroundDrafts((current) => ({ ...current, [selectedTaskId]: "" }));
+                      setBackgroundDrafts((current) => {
+                        const next = { ...current };
+                        delete next[selectedTaskId];
+                        return next;
+                      });
                     }
                     updateBackground(null);
                   }}
                   tone="danger"
                 >
                   {t("tasks.clearBackground")}
-                </Button>
+                </ConfirmButton>
               </div>
             </div>
 
@@ -427,7 +450,7 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
         ) : (
           <EmptyState title={t("tasks.selectTitle")} detail={t("tasks.selectDetail")} />
         )}
-      </aside>
+      </m.aside>
 
       <aside className="message-drawer" aria-label={t("tasks.messageDetail")}>
         <MessageDetailPanel messageId={messageId} token={token} />
@@ -436,14 +459,6 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
   );
 }
 
-function FactRow({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div>
-      <dt>{label}</dt>
-      <dd>{value}</dd>
-    </div>
-  );
-}
 
 function clean(value: string): string | undefined {
   const trimmed = value.trim();

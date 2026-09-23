@@ -5,6 +5,7 @@ import { MessageSquareDiff } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { getFeedbackOverview } from "../api";
 import {
+  Fact,
   Badge,
   EmptyState,
   ErrorState,
@@ -106,7 +107,11 @@ export function FeedbackScreen({ token }: { token: string }) {
               ]}
             />
           </div>
-          {metrics ? <MetricSummary metrics={metrics} /> : null}
+          {metrics ? (
+            <MetricSummary metrics={metrics} />
+          ) : (
+            <EmptyState title={t("feedback.noMetrics")} detail={t("feedback.noMetricsDetail")} />
+          )}
         </div>
 
         <div className="split-panels feedback-breakdowns">
@@ -227,11 +232,11 @@ function FeedbackDetail({ record }: { record: FeedbackRecord | null }) {
         <Badge tone={outcomeTone(record.outcome)}>{outcomeLabel(t, record.outcome)}</Badge>
       </div>
       <FieldList>
-        <FactRow label={t("feedback.task")} value={record.task_id ?? t("common.notRecorded")} />
-        <FactRow label={t("feedback.decisionReasons")} value={reasonLabel(t, record.decision_reason)} />
-        <FactRow label={t("feedback.feedbackReasons")} value={reasonLabel(t, record.feedback_reason)} />
-        <FactRow label={t("common.actor")} value={record.actor} />
-        <FactRow label={t("feedback.recordedAt")} value={formatDate(record.created_at)} />
+        <Fact label={t("feedback.task")} value={record.task_id ?? t("common.notRecorded")} />
+        <Fact label={t("feedback.decisionReasons")} value={reasonLabel(t, record.decision_reason)} />
+        <Fact label={t("feedback.feedbackReasons")} value={reasonLabel(t, record.feedback_reason)} />
+        <Fact label={t("common.actor")} value={record.actor} />
+        <Fact label={t("feedback.recordedAt")} value={formatDate(record.created_at)} />
       </FieldList>
       {record.note ? <p className="detail-note">{record.note}</p> : null}
       <ReplyComparison record={record} />
@@ -292,9 +297,6 @@ function ReplyText({ label, value, tone }: { label: string; value: string; tone:
   );
 }
 
-function FactRow({ label, value }: { label: string; value: string }) {
-  return <div><dt>{label}</dt><dd>{value}</dd></div>;
-}
 
 function formatRate(value: number | null): string {
   return value === null ? "—" : `${Math.round(value * 100)}%`;

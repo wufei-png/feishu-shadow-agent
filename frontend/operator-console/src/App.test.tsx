@@ -47,7 +47,8 @@ describe("dashboard attention navigation", () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={queryClient}><App /></QueryClientProvider>);
 
-    await user.click(screen.getByRole("button", { name: "查看发送待办" }));
+    // Screens are code-split, so the first visit resolves asynchronously.
+    await user.click(await screen.findByRole("button", { name: "查看发送待办" }));
     expect(await screen.findByText("发送筛选：attention")).toBeTruthy();
     expect(window.location.hash).toBe("#dispatch?view=attention");
 
@@ -57,15 +58,21 @@ describe("dashboard attention navigation", () => {
     expect(window.location.hash).toBe("#tasks?view=all");
   });
 
-  it("switches the application shell to English without reloading", async () => {
-    const user = userEvent.setup();
+  it("groups navigation into duty, configure, and system sections", async () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={queryClient}><App /></QueryClientProvider>);
 
-    await user.selectOptions(screen.getByRole("combobox", { name: "语言" }), "en-US");
+    expect(await screen.findByRole("link", { name: "待我处理" })).toBeTruthy();
+    expect(screen.getByText("值守")).toBeTruthy();
+    expect(screen.getByText("配置")).toBeTruthy();
+    expect(screen.getByText("系统")).toBeTruthy();
+  });
 
-    expect(await screen.findByRole("link", { name: "Approvals" })).toBeTruthy();
-    expect(screen.getByRole("combobox", { name: "Language" })).toBeTruthy();
-    expect(document.documentElement.lang).toBe("en-US");
+  it("keeps operator preferences out of the shell so the runtime strip only reports", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><App /></QueryClientProvider>);
+
+    expect(await screen.findByText("运行状态")).toBeTruthy();
+    expect(screen.queryAllByRole("combobox")).toHaveLength(0);
   });
 });

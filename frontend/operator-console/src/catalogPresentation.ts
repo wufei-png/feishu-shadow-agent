@@ -87,3 +87,28 @@ export function chineseCatalogResources(): Record<string, string> {
 export function catalogText(t: TFunction, entry: SettingsCatalogEntry, field: keyof CatalogTranslation): string {
   return t(resourceKey(entry.key, field), { defaultValue: entry[field] ?? "" });
 }
+
+/**
+ * Renders a catalog value for display. Settings shows these read-only while
+ * Policy shows the same values as edit targets and in before/after diffs, so the
+ * formatting has to live in one place or the two screens drift apart on what a
+ * value looks like.
+ */
+export function formatSettingValue(t: TFunction, value: unknown): string {
+  if (value === true) {
+    return t("common.yes");
+  }
+  if (value === false) {
+    return t("common.no");
+  }
+  if (value === null || value === undefined || value === "") {
+    return t("common.notSet");
+  }
+  if (Array.isArray(value)) {
+    return value.length ? value.join(", ") : t("common.none");
+  }
+  if (typeof value === "object") {
+    return JSON.stringify(value);
+  }
+  return String(value);
+}

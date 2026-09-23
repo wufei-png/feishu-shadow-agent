@@ -1,45 +1,104 @@
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import { Activity, Bell, ClipboardList, Database, FileText, HeartPulse, Home, Languages, MessageSquareDiff, Send, Settings, ShieldCheck, SunMoon, Wrench } from "lucide-react";
+import { Activity, Bell, ClipboardList, Database, FileText, HeartPulse, Home, MessageSquareDiff, Send, Settings, ShieldCheck, Wrench } from "lucide-react";
+import { LazyMotion, MotionConfig, m } from "motion/react";
 import { getDashboard } from "./api";
-import { Badge, EmptyState } from "./components/Primitives";
+import { Badge, EmptyState, LoadingState } from "./components/Primitives";
 import { bootstrapTokenFromHash, decodeHashSegment } from "./consoleSession";
-import { normalizeLanguage, setConsoleLanguage, type ConsoleLanguage } from "./i18n";
+import { panelTransition, routeTransition, routeVariants } from "./motionTokens";
 import { enumLabel } from "./presentation";
+import { PreferencesProvider } from "./preferences";
 import { queryKeys } from "./queryKeys";
-import { useThemePreference, type ThemePreference } from "./theme";
-import { ApprovalsScreen } from "./screens/ApprovalsScreen";
-import { DashboardScreen } from "./screens/DashboardScreen";
-import { DispatchScreen } from "./screens/DispatchScreen";
-import { FeedbackScreen } from "./screens/FeedbackScreen";
-import { HealthScreen } from "./screens/HealthScreen";
-import { MaintenanceScreen } from "./screens/MaintenanceScreen";
-import { PolicyScreen } from "./screens/PolicyScreen";
-import { SettingsScreen } from "./screens/SettingsScreen";
-import { TasksScreen } from "./screens/TasksScreen";
 import type { DashboardSnapshot, RouteKey, Tone } from "./types";
 
 const TOKEN_STORAGE_KEY = "feishu_shadow_agent_console_token";
 
-const navItems: Array<{ key: RouteKey; labelKey: string; icon: typeof Home }> = [
-  { key: "dashboard", labelKey: "navigation.dashboard", icon: Home },
-  { key: "approvals", labelKey: "navigation.approvals", icon: Bell },
-  { key: "tasks", labelKey: "navigation.tasks", icon: ClipboardList },
-  { key: "dispatch", labelKey: "navigation.dispatch", icon: Send },
-  { key: "feedback", labelKey: "navigation.feedback", icon: MessageSquareDiff },
-  { key: "policy", labelKey: "navigation.policy", icon: ShieldCheck },
-  { key: "settings", labelKey: "navigation.settings", icon: Settings },
-  { key: "health", labelKey: "navigation.health", icon: HeartPulse },
-  { key: "maintenance", labelKey: "navigation.maintenance", icon: Wrench }
+/*
+ * Loading the feature set as a function keeps it in its own chunk instead of the
+ * initial bundle. `domMax` is the only set that includes layout projection, which
+ * the sliding selection indicators need; everything else is unused here.
+ */
+const loadMotionFeatures = () => import("motion/react").then((module) => module.domMax);
+
+type NavItem = { key: RouteKey; labelKey: string; icon: typeof Home };
+
+/**
+ * Three sections rather than nine peers: work the operator acts on, configuration
+ * they own, and the machine's own condition. The split is what makes a nine-item
+ * rail scannable.
+ */
+const navSections: Array<{ key: string; labelKey: string; items: NavItem[] }> = [
+  {
+    key: "duty",
+    labelKey: "navigation.section.duty",
+    items: [
+      { key: "dashboard", labelKey: "navigation.dashboard", icon: Home },
+      { key: "approvals", labelKey: "navigation.approvals", icon: Bell },
+      { key: "tasks", labelKey: "navigation.tasks", icon: ClipboardList },
+      { key: "dispatch", labelKey: "navigation.dispatch", icon: Send },
+      { key: "feedback", labelKey: "navigation.feedback", icon: MessageSquareDiff }
+    ]
+  },
+  {
+    key: "configure",
+    labelKey: "navigation.section.configure",
+    items: [
+      { key: "policy", labelKey: "navigation.policy", icon: ShieldCheck },
+      { key: "settings", labelKey: "navigation.settings", icon: Settings }
+    ]
+  },
+  {
+    key: "system",
+    labelKey: "navigation.section.system",
+    items: [
+      { key: "health", labelKey: "navigation.health", icon: HeartPulse },
+      { key: "maintenance", labelKey: "navigation.maintenance", icon: Wrench }
+    ]
+  }
 ];
 
+const navItems: NavItem[] = navSections.flatMap((section) => section.items);
+
+/**
+ * One screen renders at a time, so bundling all nine into the first payload makes
+ * every visit pay for the screens it will not open. Each loads on first visit and
+ * is cached by the browser afterwards; on a loopback console that fetch is free.
+ */
+const ApprovalsScreen = lazy(() => import("./screens/ApprovalsScreen").then((module) => ({ default: module.ApprovalsScreen })));
+const DashboardScreen = lazy(() => import("./screens/DashboardScreen").then((module) => ({ default: module.DashboardScreen })));
+const DispatchScreen = lazy(() => import("./screens/DispatchScreen").then((module) => ({ default: module.DispatchScreen })));
+const FeedbackScreen = lazy(() => import("./screens/FeedbackScreen").then((module) => ({ default: module.FeedbackScreen })));
+const HealthScreen = lazy(() => import("./screens/HealthScreen").then((module) => ({ default: module.HealthScreen })));
+const MaintenanceScreen = lazy(() => import("./screens/MaintenanceScreen").then((module) => ({ default: module.MaintenanceScreen })));
+const PolicyScreen = lazy(() => import("./screens/PolicyScreen").then((module) => ({ default: module.PolicyScreen })));
+const SettingsScreen = lazy(() => import("./screens/SettingsScreen").then((module) => ({ default: module.SettingsScreen })));
+const TasksScreen = lazy(() => import("./screens/TasksScreen").then((module) => ({ default: module.TasksScreen })));
+
 export function App() {
+  return (
+    /*
+     * LazyMotion keeps the layout-animation feature set lazily loaded, and
+     * `reducedMotion="user"` makes the OS setting authoritative: transform
+     * animations are dropped while opacity transitions still report that state
+     * changed. Both live here rather than in the entry point so tests exercise
+     * the same tree the app runs.
+     */
+    <LazyMotion features={loadMotionFeatures} strict>
+      <MotionConfig reducedMotion="user">
+        <PreferencesProvider>
+          <ConsoleShell />
+        </PreferencesProvider>
+      </MotionConfig>
+    </LazyMotion>
+  );
+}
+
+function ConsoleShell() {
   const { i18n, t } = useTranslation();
   const [token, setToken] = useState(() => sessionStorage.getItem(TOKEN_STORAGE_KEY) ?? "");
   const [location, setLocation] = useState(() => currentLocation());
-  const [themePreference, setThemePreference] = useThemePreference();
   const dashboard = useQuery({
     queryKey: queryKeys.dashboard(),
     queryFn: () => getDashboard(token),
@@ -92,75 +151,91 @@ export function App() {
           </div>
         </div>
         <nav className="nav-list">
-          {navItems.map((item) => (
-            <a
-              aria-current={location.route === item.key ? "page" : undefined}
-              className="nav-item"
-              href={`#${item.key}`}
-              key={item.key}
-              title={t(item.labelKey)}
-            >
-              <item.icon aria-hidden="true" size={17} />
-              <span>{t(item.labelKey)}</span>
-            </a>
+          {navSections.map((section) => (
+            <div className="nav-section" key={section.key}>
+              <p className="nav-section-label">{t(section.labelKey)}</p>
+              {section.items.map((item) => (
+                <a
+                  aria-current={location.route === item.key ? "page" : undefined}
+                  className="nav-item"
+                  href={`#${item.key}`}
+                  key={item.key}
+                  title={t(item.labelKey)}
+                >
+                  {/*
+                    The selected pill is one shared element that travels between
+                    items, so selection reads as having moved rather than as one
+                    item switching off and another switching on.
+                  */}
+                  {location.route === item.key ? (
+                    <m.span aria-hidden="true" className="nav-active-pill" layoutId="nav-active-pill" transition={panelTransition} />
+                  ) : null}
+                  <item.icon aria-hidden="true" size={17} />
+                  <span>{t(item.labelKey)}</span>
+                </a>
+              ))}
+            </div>
           ))}
         </nav>
       </aside>
 
       <div className="workspace">
-        <RuntimeStrip
-          language={normalizeLanguage(i18n.resolvedLanguage)}
-          onLanguageChange={(language) => void setConsoleLanguage(language)}
-          onThemeChange={setThemePreference}
-          preference={themePreference}
-          status={runtimeStatus}
-        />
+        <RuntimeStrip status={runtimeStatus} />
         <main className="main-surface">
-          {!token ? (
-            <EmptyState title={t("app.missingToken")} detail={t("app.missingTokenDetail")} />
-          ) : location.route === "dashboard" ? (
-            <DashboardScreen navigate={navigate} token={token} />
-          ) : location.route === "approvals" ? (
-            <ApprovalsScreen selectedId={location.selectedId} token={token} />
-          ) : location.route === "tasks" ? (
-            <TasksScreen initialFilter={location.view === "all" ? "all" : undefined} selectedId={location.selectedId} token={token} />
-          ) : location.route === "dispatch" ? (
-            <DispatchScreen initialFilter={location.view === "attention" ? "attention" : undefined} selectedId={location.selectedId} token={token} />
-          ) : location.route === "feedback" ? (
-            <FeedbackScreen token={token} />
-          ) : location.route === "policy" ? (
-            <PolicyScreen selectedId={location.selectedId} token={token} />
-          ) : location.route === "settings" ? (
-            <SettingsScreen token={token} />
-          ) : location.route === "health" ? (
-            <HealthScreen token={token} />
-          ) : location.route === "maintenance" ? (
-            <MaintenanceScreen token={token} />
-          ) : (
-            <FollowUpScreen route={location.route} />
-          )}
+          {/*
+            Keyed so each destination mounts fresh and fades in. There is no
+            exit animation: holding the outgoing screen on screen for even 100ms
+            would make a high-frequency sidebar click feel slow, and a real
+            cross-fade would require overlapping both screens in the layout.
+            Suspense sits outside the animated wrapper so a first visit shows the
+            loading state immediately and the loaded screen still fades in.
+          */}
+          <Suspense fallback={<LoadingState />}>
+          <m.div animate="visible" initial="hidden" key={location.route} variants={routeVariants} transition={routeTransition}>
+            {!token ? (
+              <EmptyState title={t("app.missingToken")} detail={t("app.missingTokenDetail")} />
+            ) : location.route === "dashboard" ? (
+              <DashboardScreen navigate={navigate} token={token} />
+            ) : location.route === "approvals" ? (
+              <ApprovalsScreen selectedId={location.selectedId} token={token} />
+            ) : location.route === "tasks" ? (
+              <TasksScreen initialFilter={location.view === "all" ? "all" : undefined} selectedId={location.selectedId} token={token} />
+            ) : location.route === "dispatch" ? (
+              <DispatchScreen initialFilter={location.view === "attention" ? "attention" : undefined} selectedId={location.selectedId} token={token} />
+            ) : location.route === "feedback" ? (
+              <FeedbackScreen token={token} />
+            ) : location.route === "policy" ? (
+              <PolicyScreen selectedId={location.selectedId} token={token} />
+            ) : location.route === "settings" ? (
+              <SettingsScreen token={token} />
+            ) : location.route === "health" ? (
+              <HealthScreen token={token} />
+            ) : location.route === "maintenance" ? (
+              <MaintenanceScreen token={token} />
+            ) : (
+              <FollowUpScreen route={location.route} />
+            )}
+          </m.div>
+          </Suspense>
         </main>
       </div>
     </div>
   );
 }
 
-function RuntimeStrip({
-  status,
-  language,
-  onLanguageChange,
-  preference,
-  onThemeChange
-}: {
-  status: Array<{ label: string; value: string; tone: Tone }>;
-  language: ConsoleLanguage;
-  onLanguageChange: (language: ConsoleLanguage) => void;
-  preference: ThemePreference;
-  onThemeChange: (preference: ThemePreference) => void;
-}) {
+/**
+ * Reports the machine, and only reports. Appearance and language are the
+ * operator's own preferences, so they live in Settings instead of competing with
+ * live system state for the top of every screen.
+ *
+ * Each reading is a tell-tale lamp plus its value in text: the lamp is redundant
+ * reinforcement of what the words already say, so it stays out of the
+ * accessibility tree.
+ */
+function RuntimeStrip({ status }: { status: Array<{ label: string; value: string; tone: Tone }> }) {
   const { t } = useTranslation();
   return (
-    <header className="runtime-strip">
+    <header className="runtime-strip material-glass">
       <div className="runtime-heading">
         <Activity aria-hidden="true" size={16} />
         <span>{t("app.runtime")}</span>
@@ -168,28 +243,12 @@ function RuntimeStrip({
       <div className="runtime-items">
         {status.map((item) => (
           <div className="runtime-item" key={item.label}>
+            <span aria-hidden="true" className={`tell-tale ${item.tone}`} />
             <span className="runtime-label">{item.label}</span>
-            <Badge tone={item.tone}>{item.value}</Badge>
+            <span className="runtime-value">{item.value}</span>
           </div>
         ))}
       </div>
-      <label className="theme-control locale-control">
-        <Languages aria-hidden="true" size={16} />
-        <span>{t("language.label")}</span>
-        <select aria-label={t("language.label")} onChange={(event) => onLanguageChange(event.target.value as ConsoleLanguage)} value={language}>
-          <option value="zh-CN">{t("language.chinese")}</option>
-          <option value="en-US">{t("language.english")}</option>
-        </select>
-      </label>
-      <label className="theme-control">
-        <SunMoon aria-hidden="true" size={16} />
-        <span>{t("app.appearance")}</span>
-        <select aria-label={t("app.appearanceLabel")} onChange={(event) => onThemeChange(event.target.value as ThemePreference)} value={preference}>
-          <option value="system">{t("app.themeSystem")}</option>
-          <option value="light">{t("app.themeLight")}</option>
-          <option value="dark">{t("app.themeDark")}</option>
-        </select>
-      </label>
     </header>
   );
 }

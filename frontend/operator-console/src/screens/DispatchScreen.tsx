@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { RotateCcw, Send, ShieldCheck, XCircle } from "lucide-react";
+import { m } from "motion/react";
 import { useTranslation } from "react-i18next";
 import { cancelDispatchAction, getDispatchAction, listDispatchActions, markDispatchSent, retryDispatchAction } from "../api";
 import {
+  Fact,
   Badge,
   Button,
   CommandResultPanel,
@@ -26,6 +27,7 @@ import {
   TextField
 } from "../components/Primitives";
 import { invalidateAfterDispatchCommand, queryKeys } from "../queryKeys";
+import { panelTransition, panelVariants } from "../motionTokens";
 import { enumLabel } from "../presentation";
 import type { ActionStatus, CommandResult } from "../types";
 
@@ -228,7 +230,18 @@ export function DispatchScreen({ token, selectedId, initialFilter }: { token: st
         </div>
       </div>
 
-      <aside className="work-detail">
+      {/*
+        Keyed on the selection so switching rows reads as the detail being
+        replaced rather than as every field changing at once.
+      */}
+      <m.aside
+        animate="visible"
+        className="work-detail"
+        key={selectedActionId ?? "none"}
+        initial="hidden"
+        transition={panelTransition}
+        variants={panelVariants}
+      >
         {selectedActionId !== null && detail.isLoading ? <LoadingState title={t("dispatch.detailLoading")} /> : null}
         {detail.error ? <ErrorState title={t("dispatch.detailUnavailable")} error={detail.error} /> : null}
         {detail.data ? (
@@ -240,19 +253,19 @@ export function DispatchScreen({ token, selectedId, initialFilter }: { token: st
                 <Badge tone={statusTone(detail.data.action.status)}>{enumLabel(t, "status", detail.data.action.status)}</Badge>
               </div>
               <FieldList>
-                <FactRow label={t("dispatch.kind")} value={enumLabel(t, "kind", detail.data.action.kind)} />
-                <FactRow label={t("dispatch.linkedTask")} value={detail.data.action.task_short_id ?? t("common.notLinked")} />
-                <FactRow label={t("dispatch.targetMessage")} value={detail.data.action.target_message_id ? <CopyValue label={t("dispatch.targetMessage")} value={detail.data.action.target_message_id} /> : t("common.notRecorded")} />
-                <FactRow label={t("dispatch.updatedAt")} value={formatDate(detail.data.action.updated_at)} />
+                <Fact label={t("dispatch.kind")} value={enumLabel(t, "kind", detail.data.action.kind)} />
+                <Fact label={t("dispatch.linkedTask")} value={detail.data.action.task_short_id ?? t("common.notLinked")} />
+                <Fact label={t("dispatch.targetMessage")} value={detail.data.action.target_message_id ? <CopyValue label={t("dispatch.targetMessage")} value={detail.data.action.target_message_id} /> : t("common.notRecorded")} />
+                <Fact label={t("dispatch.updatedAt")} value={formatDate(detail.data.action.updated_at)} />
               </FieldList>
               {postprocessInfo(detail.data.action.payload) ? (
                 <div className="subsection">
                   <p className="eyebrow">{t("dispatch.postprocess")}</p>
                   <FieldList>
-                    <FactRow label={t("dispatch.applied")} value={postprocessInfo(detail.data.action.payload)?.applied ?? t("common.unknown")} />
-                    <FactRow label={t("dispatch.guidance")} value={postprocessInfo(detail.data.action.payload)?.guidance || t("common.none")} />
-                    <FactRow label={t("dispatch.original")} value={shortText(postprocessInfo(detail.data.action.payload)?.original, t("common.notRecorded"))} />
-                    <FactRow label={t("dispatch.final")} value={shortText(postprocessInfo(detail.data.action.payload)?.final, t("common.notRecorded"))} />
+                    <Fact label={t("dispatch.applied")} value={postprocessInfo(detail.data.action.payload)?.applied ?? t("common.unknown")} />
+                    <Fact label={t("dispatch.guidance")} value={postprocessInfo(detail.data.action.payload)?.guidance || t("common.none")} />
+                    <Fact label={t("dispatch.original")} value={shortText(postprocessInfo(detail.data.action.payload)?.original, t("common.notRecorded"))} />
+                    <Fact label={t("dispatch.final")} value={shortText(postprocessInfo(detail.data.action.payload)?.final, t("common.notRecorded"))} />
                   </FieldList>
                 </div>
               ) : null}
@@ -265,10 +278,10 @@ export function DispatchScreen({ token, selectedId, initialFilter }: { token: st
               <p className="eyebrow">{t("dispatch.readback")}</p>
               <h2>{t("dispatch.attempts")}</h2>
               <FieldList>
-                <FactRow label={t("dispatch.attemptCount")} value={String(detail.data.readback_summary.attempt_count ?? 0)} />
-                <FactRow label={t("dispatch.latestStatus")} value={enumLabel(t, "status", String(detail.data.readback_summary.latest_status ?? ""), t("common.none"))} />
-                <FactRow label={t("dispatch.sentMessage")} value={detail.data.readback_summary.sent_message_id ? <CopyValue label={t("dispatch.sentMessage")} value={String(detail.data.readback_summary.sent_message_id)} /> : t("common.notRecorded")} />
-                <FactRow label={t("dispatch.readbackMessage")} value={detail.data.readback_summary.readback_message_id ? <CopyValue label={t("dispatch.readbackMessage")} value={String(detail.data.readback_summary.readback_message_id)} /> : t("common.notRecorded")} />
+                <Fact label={t("dispatch.attemptCount")} value={String(detail.data.readback_summary.attempt_count ?? 0)} />
+                <Fact label={t("dispatch.latestStatus")} value={enumLabel(t, "status", String(detail.data.readback_summary.latest_status ?? ""), t("common.none"))} />
+                <Fact label={t("dispatch.sentMessage")} value={detail.data.readback_summary.sent_message_id ? <CopyValue label={t("dispatch.sentMessage")} value={String(detail.data.readback_summary.sent_message_id)} /> : t("common.notRecorded")} />
+                <Fact label={t("dispatch.readbackMessage")} value={detail.data.readback_summary.readback_message_id ? <CopyValue label={t("dispatch.readbackMessage")} value={String(detail.data.readback_summary.readback_message_id)} /> : t("common.notRecorded")} />
               </FieldList>
               {detail.data.attempts.length ? (
                 <ul className="timeline-list">
@@ -354,19 +367,11 @@ export function DispatchScreen({ token, selectedId, initialFilter }: { token: st
         ) : (
           <EmptyState title={t("dispatch.selectTitle")} detail={t("dispatch.selectDetail")} />
         )}
-      </aside>
+      </m.aside>
     </section>
   );
 }
 
-function FactRow({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div>
-      <dt>{label}</dt>
-      <dd>{value}</dd>
-    </div>
-  );
-}
 
 function hasRecommendedCommand(actions: string[], command: string): boolean {
   return actions.some((action) => action.startsWith(command));
