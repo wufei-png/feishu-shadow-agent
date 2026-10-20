@@ -1,8 +1,7 @@
 BEGIN IMMEDIATE;
 
 PRAGMA application_id = 1179861319;
-PRAGMA application_id = 1179861319;
-PRAGMA user_version = 7;
+PRAGMA user_version = 8;
 
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -371,6 +370,15 @@ CREATE INDEX IF NOT EXISTS idx_policy_audits_policy ON policy_audits(policy_key,
 CREATE INDEX IF NOT EXISTS idx_approval_feedback_created_at ON approval_feedback(created_at);
 CREATE INDEX IF NOT EXISTS idx_approval_feedback_outcome_reason
 ON approval_feedback(outcome, decision_reason, created_at);
+
+-- Latest-state-per-check lookups stay indexed as health_checks grows; the
+-- correlated "newer row" probe otherwise degrades quadratically.
+CREATE INDEX IF NOT EXISTS idx_health_checks_name_checked
+ON health_checks(check_name, checked_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_actions_status_updated
+ON actions(status, updated_at, id);
+CREATE INDEX IF NOT EXISTS idx_approvals_status_expires
+ON approvals(status, expires_at, id);
 
 DROP INDEX IF EXISTS idx_actions_active_send_reply_target;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_active_send_reply_target

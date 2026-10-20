@@ -92,6 +92,16 @@ ON task_background_versions(task_id, version DESC);
 """
 
 
+_QUERY_INDEXES_V8_SQL = """
+CREATE INDEX IF NOT EXISTS idx_health_checks_name_checked
+ON health_checks(check_name, checked_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_actions_status_updated
+ON actions(status, updated_at, id);
+CREATE INDEX IF NOT EXISTS idx_approvals_status_expires
+ON approvals(status, expires_at, id);
+"""
+
+
 def migrate_schema(
     conn: sqlite3.Connection, *, current_version: int, target_version: int
 ) -> None:
@@ -99,7 +109,7 @@ def migrate_schema(
 
     Empty databases use schema.sql directly. This path handles in-place
     upgrades of an already-marked database through the current additive
-    processing-retry and task-background schemas.
+    processing-retry, task-background, and query-index schemas.
     """
 
     if current_version == target_version:
@@ -116,6 +126,9 @@ def migrate_schema(
     if current_version == 6 and target_version >= 7:
         conn.executescript(_TASK_BACKGROUND_V7_SQL)
         current_version = 7
+    if current_version == 7 and target_version >= 8:
+        conn.executescript(_QUERY_INDEXES_V8_SQL)
+        current_version = 8
     if current_version == target_version:
         conn.execute(f"PRAGMA user_version = {int(target_version)}")
         return
