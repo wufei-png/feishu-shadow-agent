@@ -372,7 +372,8 @@ CREATE INDEX IF NOT EXISTS idx_approval_feedback_outcome_reason
 ON approval_feedback(outcome, decision_reason, created_at);
 
 -- Latest-state-per-check lookups stay indexed as health_checks grows; the
--- correlated "newer row" probe otherwise degrades quadratically.
+-- correlated "newer row" probe otherwise degrades quadratically. The DESC keys
+-- are load-bearing: they let the probe stop at the newest row for a check.
 CREATE INDEX IF NOT EXISTS idx_health_checks_name_checked
 ON health_checks(check_name, checked_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_actions_status_updated

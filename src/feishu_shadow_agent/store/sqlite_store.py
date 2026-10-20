@@ -66,6 +66,27 @@ WHERE hc.status != 'ok'
 ORDER BY julianday(hc.checked_at) DESC, hc.id DESC
 LIMIT ?
 """
+LATEST_HEALTH_CHECK_STATUS_SQL = """
+SELECT status
+FROM health_checks
+WHERE check_name = ?
+ORDER BY julianday(checked_at) DESC, id DESC
+LIMIT 1
+"""
+STALE_SENDING_ACTIONS_SQL = """
+SELECT *
+FROM actions
+WHERE status = 'sending'
+  AND julianday(updated_at) <= julianday(?)
+ORDER BY updated_at, id
+"""
+EXPIRE_PENDING_APPROVALS_SQL = """
+SELECT id
+FROM approvals
+WHERE status = 'pending'
+  AND expires_at IS NOT NULL
+  AND julianday(expires_at) < julianday(?)
+"""
 
 
 class SQLiteStore:
@@ -642,13 +663,7 @@ class SQLiteStore:
         self.initialize()
         with self.connect() as conn:
             row = conn.execute(
-                """
-                SELECT status
-                FROM health_checks
-                WHERE check_name = ?
-                ORDER BY julianday(checked_at) DESC, id DESC
-                LIMIT 1
-                """,
+                LATEST_HEALTH_CHECK_STATUS_SQL,
                 (check_name,),
             ).fetchone()
         return str(row["status"]) if row is not None else None
@@ -2494,13 +2509,7 @@ class SQLiteStore:
         cutoff = _minus_seconds(now or self.clock(), stale_after_seconds)
         with self.connect() as conn:
             rows = conn.execute(
-                """
-                SELECT *
-                FROM actions
-                WHERE status = 'sending'
-                  AND julianday(updated_at) <= julianday(?)
-                ORDER BY updated_at, id
-                """,
+                STALE_SENDING_ACTIONS_SQL,
                 (cutoff,),
             ).fetchall()
         return [_action_from_row(row) for row in rows]
@@ -2517,13 +2526,7 @@ class SQLiteStore:
         recovered: list[dict[str, Any]] = []
         with self.connect() as conn:
             rows = conn.execute(
-                """
-                SELECT *
-                FROM actions
-                WHERE status = 'sending'
-                  AND julianday(updated_at) <= julianday(?)
-                ORDER BY updated_at, id
-                """,
+                STALE_SENDING_ACTIONS_SQL,
                 (cutoff,),
             ).fetchall()
             for row in rows:
@@ -3581,13 +3584,7 @@ class SQLiteStore:
         now: str,
         exclude_task_id: int | None = None,
     ) -> int:
-        query = """
-            SELECT id
-            FROM approvals
-            WHERE status = 'pending'
-              AND expires_at IS NOT NULL
-              AND julianday(expires_at) < julianday(?)
-        """
+        query = EXPIRE_PENDING_APPROVALS_SQL
         params: list[Any] = [now]
         if exclude_task_id is not None:
             query += " AND (task_id IS NULL OR task_id != ?)"

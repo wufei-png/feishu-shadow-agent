@@ -5,34 +5,15 @@ import time
 from pathlib import Path
 
 from feishu_shadow_agent.store.sqlite_store import (
+    EXPIRE_PENDING_APPROVALS_SQL,
+    LATEST_HEALTH_CHECK_STATUS_SQL,
     LATEST_NON_OK_HEALTH_CHECKS_SQL,
+    STALE_SENDING_ACTIONS_SQL,
     SQLiteStore,
 )
 
-# Hot runtime queries kept here in the shape the store actually issues, so the
-# plan assertions protect the access path rather than a rewritten variant.
-LATEST_HEALTH_STATUS_SQL = """
-SELECT status
-FROM health_checks
-WHERE check_name = ?
-ORDER BY julianday(checked_at) DESC, id DESC
-LIMIT 1
-"""
-STALE_SENDING_SQL = """
-SELECT *
-FROM actions
-WHERE status = 'sending'
-  AND julianday(updated_at) <= julianday(?)
-ORDER BY updated_at, id
-"""
-EXPIRE_APPROVALS_SQL = """
-SELECT *
-FROM approvals
-WHERE status = 'pending'
-  AND expires_at IS NOT NULL
-  AND julianday(expires_at) < julianday(?)
-ORDER BY expires_at, id
-"""
+# Queries are imported from the store rather than copied so these guards keep
+# following the statements the runtime actually issues.
 NOW = "2026-01-01T00:00:00+00:00"
 SEEDED_RENDER_BUDGET_SECONDS = 5.0
 
@@ -125,9 +106,30 @@ def test_latest_health_issue_query_uses_covering_index(tmp_path: Path) -> None:
         plan = _plan(conn, LATEST_NON_OK_HEALTH_CHECKS_SQL, (20,))
 
     assert any("idx_health_checks_name_checked" in step for step in plan)
-    assert not any(
-        step.startswith("SCAN TABLE health_checks AS newer") for step in plan
-    )
+    # The correlated probe must read the index; a bare SCAN here is the
+    # quadratic path this index exists to remove.
+    assert any("newer" in step and "INDEX" in step for step in plan)
+    assert not any(step.startswith("SCAN") and "newer" in step for step in plan)
+
+
+def test_health_index_keeps_descending_key_for_early_exit(tmp_path: Path) -> None:
+    """Descending order lets the probe stop at the newest row for a check.
+
+    An ascending index yields the same query plan but degrades to a full scan
+    per check, so the DDL itself has to stay ordered.
+    """
+    store = _initialized_store(tmp_path)
+    with store.connect() as conn:
+        ddl = conn.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'index' AND name = 'idx_health_checks_name_checked'
+            """
+        ).fetchone()[0]
+
+    assert "checked_at DESC" in ddl
+    assert "id DESC" in ddl
 
 
 def test_latest_health_issue_query_stays_linear_with_many_warnings(
@@ -153,7 +155,7 @@ def test_latest_health_status_lookup_uses_index(tmp_path: Path) -> None:
     _seed_health_rows(store, names=("check_a",), rows_per_name=2_000, status="ok")
 
     with store.connect() as conn:
-        plan = _plan(conn, LATEST_HEALTH_STATUS_SQL, ("check_a",))
+        plan = _plan(conn, LATEST_HEALTH_CHECK_STATUS_SQL, ("check_a",))
 
     assert any("idx_health_checks_name_checked" in step for step in plan)
 
@@ -179,8 +181,8 @@ def test_dispatch_and_approval_hot_queries_use_indexes(tmp_path: Path) -> None:
             [(f"ap_{index}", NOW, NOW) for index in range(100)],
         )
 
-        stale_plan = _plan(conn, STALE_SENDING_SQL, (NOW,))
-        expire_plan = _plan(conn, EXPIRE_APPROVALS_SQL, (NOW,))
+        stale_plan = _plan(conn, STALE_SENDING_ACTIONS_SQL, (NOW,))
+        expire_plan = _plan(conn, EXPIRE_PENDING_APPROVALS_SQL, (NOW,))
 
     assert any("idx_actions_status_updated" in step for step in stale_plan)
     assert any("idx_approvals_status_expires" in step for step in expire_plan)
