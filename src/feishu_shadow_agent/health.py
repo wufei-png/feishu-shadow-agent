@@ -541,6 +541,16 @@ class HealthSuite:
             )
         total_bytes = usage.filesystem_total_bytes
         free_bytes = usage.filesystem_free_bytes
+        if total_bytes <= 0 or free_bytes < 0:
+            # Some mounts report a degenerate statvfs instead of raising. That is
+            # a measurement failure, not evidence that storage is full.
+            return HealthCheckResult(
+                "runtime_storage_capacity",
+                "warning",
+                "failed",
+                "runtime storage capacity could not be measured",
+                usage.as_dict() | {"reason": "implausible_filesystem_size"},
+            )
         warning_floor = max(
             STORAGE_WARNING_FLOOR_BYTES, int(total_bytes * STORAGE_WARNING_RATIO)
         )

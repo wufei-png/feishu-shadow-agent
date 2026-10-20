@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 from feishu_shadow_agent.config import ConfigService, LoadedConfig
@@ -202,6 +203,7 @@ def test_doctor_all_green_and_default_owner_notification_is_dry_run(
         feishu_client=client,
         hermes_checker=ok_hermes,
         run_id="doctor_1",
+        disk_usage=roomy_disk_usage,
     )
 
     results = suite.run(send_test=False)
@@ -270,7 +272,11 @@ def test_doctor_rejects_wrong_storage_type_and_read_only_directory(
 
 
 def _storage_capacity_suite(
-    tmp_path: Path, *, total_bytes: int, free_bytes: int
+    tmp_path: Path,
+    *,
+    total_bytes: int = 0,
+    free_bytes: int = 0,
+    probe: Callable[[Path], tuple[int, int, int]] | None = None,
 ) -> HealthSuite:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
@@ -280,8 +286,41 @@ def _storage_capacity_suite(
         store=_initialized_store(tmp_path, loaded),
         feishu_client=FakeFeishuClient(),
         hermes_checker=ok_hermes,
-        disk_usage=lambda path: (total_bytes, total_bytes - free_bytes, free_bytes),
+        disk_usage=probe
+        or (lambda path: (total_bytes, total_bytes - free_bytes, free_bytes)),
     )
+
+
+def test_runtime_storage_capacity_measurement_failure_does_not_block(
+    tmp_path: Path,
+) -> None:
+    def broken(path: Path) -> tuple[int, int, int]:
+        raise OSError("statvfs failed")
+
+    result = _storage_capacity_suite(
+        tmp_path, probe=broken
+    )._check_runtime_storage_capacity()
+
+    assert result.status == "failed"
+    assert result.severity == "warning"
+    assert result.is_critical_failure is False
+
+
+def test_runtime_storage_capacity_ignores_implausible_measurements(
+    tmp_path: Path,
+) -> None:
+    gib = 1024**3
+    empty = _storage_capacity_suite(
+        tmp_path, total_bytes=0, free_bytes=0
+    )._check_runtime_storage_capacity()
+    negative = _storage_capacity_suite(
+        tmp_path, total_bytes=100 * gib, free_bytes=-1
+    )._check_runtime_storage_capacity()
+
+    assert empty.details["reason"] == "implausible_filesystem_size"
+    assert negative.details["reason"] == "implausible_filesystem_size"
+    assert empty.is_critical_failure is False
+    assert negative.is_critical_failure is False
 
 
 def test_runtime_storage_capacity_is_ok_on_a_roomy_volume(tmp_path: Path) -> None:
