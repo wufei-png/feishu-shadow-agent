@@ -143,6 +143,52 @@ def _reply_decision(
     }
 
 
+class CountingPolicyRepository:
+    """Count repository reads so one resolution cannot re-read global policy."""
+
+    def __init__(self, store: SQLiteStore):
+        self.store = store
+        self.global_reads = 0
+        self.chat_reads = 0
+        self.membership_reads = 0
+
+    def get_product_policy(self) -> dict[str, Any] | None:
+        self.global_reads += 1
+        return self.store.get_product_policy()
+
+    def get_chat_product_policy(self, chat_id: str) -> dict[str, Any] | None:
+        self.chat_reads += 1
+        return self.store.get_chat_product_policy(chat_id)
+
+    def get_bot_membership_fact(self, chat_id: str) -> dict[str, Any] | None:
+        self.membership_reads += 1
+        return self.store.get_bot_membership_fact(chat_id)
+
+
+def test_reply_policy_resolution_reads_global_policy_once(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.import_product_policy_from_config(
+        _config(
+            reply_policy=ReplyPolicyConfig(
+                p2p_auto_reply=False, unknown_group_auto_reply=True
+            )
+        )
+    )
+    repository = CountingPolicyRepository(store)
+    resolver = PolicyResolver(repository)
+
+    p2p = _reply_decision(resolver, chat_id="ou_chat", chat_type="p2p")
+    group = _reply_decision(resolver, chat_id="oc_unknown")
+
+    assert p2p["reason"] == "p2p_auto_reply_disabled"
+    assert group["reason"] == "ok"
+    # One resolution per case: the P2P gate reuses the already-read global policy
+    # instead of loading it a second time.
+    assert repository.global_reads == 2
+    assert repository.chat_reads == 2
+    assert repository.membership_reads == 1
+
+
 def test_policy_resolver_requires_initialized_product_policy(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     resolver = PolicyResolver(store)
