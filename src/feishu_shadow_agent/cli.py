@@ -568,7 +568,7 @@ def _handle_status(args: argparse.Namespace) -> int:
     if sqlite_path.exists():
         store.initialize()
     snapshot = OperatorQueryService(
-        store, policy_import_source=loaded.config
+        store, policy_import_source=loaded.config, base_dir=loaded.base_dir
     ).dashboard_snapshot()
     print(yaml.safe_dump(snapshot, allow_unicode=True, sort_keys=False), end="")
     return 0

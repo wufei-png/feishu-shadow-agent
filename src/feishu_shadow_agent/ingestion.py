@@ -27,6 +27,7 @@ from .policy import PolicyResolver
 from .processing import ApprovalService, TaskProcessingService
 from .revision import message_semantic_hash
 from .routing import MessageRouter, RoutingResult
+from .storage_usage import directory_bytes
 from .store.sqlite_store import SQLiteStore
 from .time_utils import (
     format_instant,
@@ -843,17 +844,7 @@ class ResourceQuotaGuard:
         return ResourceQuotaDecision(allow=True)
 
     def resource_dir_usage_bytes(self) -> int:
-        if not self.resource_root.exists():
-            return 0
-        total = 0
-        for path in self.resource_root.rglob("*"):
-            try:
-                if path.is_symlink() or not path.is_file():
-                    continue
-                total += path.stat().st_size
-            except OSError:
-                continue
-        return total
+        return directory_bytes(self.resource_root)
 
     def delete_downloaded_file(self, path: Path) -> str | None:
         try:

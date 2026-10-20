@@ -36,6 +36,7 @@ from .operator_queries.health import (
 )
 from .operator_queries.message_detail import MessageDetailQuery
 from .operator_queries.policy import PolicyQuery
+from .operator_queries.storage import StorageQuery
 from .store.sqlite_store import (
     RUN_HEARTBEAT_STALE_AFTER_SECONDS,
     SQLiteStore,
@@ -77,7 +78,14 @@ class OperatorQueryService:
             validate_policy_store=self._policy_query.validate_policy_store,
         )
         self._feedback_query = FeedbackQuery(connect=self._connect, now=self._now)
+        self._storage_query = StorageQuery(
+            config=policy_import_source, base_dir=base_dir
+        )
         self.policy_resolver = self._policy_query.policy_resolver
+
+    def storage_summary(self) -> dict[str, Any] | None:
+        """Storage footprint read model; None when no runtime config is bound."""
+        return self._storage_query.storage_summary()
 
     def dashboard_snapshot(
         self,
@@ -124,7 +132,7 @@ class OperatorQueryService:
             stale_after_seconds=stale_after_seconds,
             limit=limit,
         )
-        return {
+        snapshot: dict[str, Any] = {
             "daemon_liveness": daemon_liveness(
                 run_runtime_summary(daemon_run) if daemon_run else None,
                 now=now,
@@ -161,6 +169,10 @@ class OperatorQueryService:
             ),
             "recent_failed_actions": failed_or_needs_review,
         }
+        storage = self.storage_summary()
+        if storage is not None:
+            snapshot["storage"] = storage
+        return snapshot
 
     def _attention_work(
         self, *, now: str, stale_after_seconds: int, limit: int
