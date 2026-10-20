@@ -3,9 +3,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from feishu_shadow_agent.config import AppConfig, OwnerConfig
+from feishu_shadow_agent.config import AppConfig, LoggingConfig, OwnerConfig
+from feishu_shadow_agent.operator_queries.storage import StorageQuery
 from feishu_shadow_agent.operator_query import OperatorQueryService
-from feishu_shadow_agent.storage_usage import directory_bytes, resolve_storage_usage
+from feishu_shadow_agent.storage_usage import (
+    directory_bytes,
+    file_bytes,
+    resolve_storage_usage,
+)
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 
 
@@ -93,6 +98,41 @@ def test_directory_bytes_skips_symlinks_and_directories(tmp_path: Path) -> None:
     (root / "link.bin").symlink_to(target)
 
     assert directory_bytes(root) == 50
+
+
+def test_file_bytes_follows_a_symlinked_file(tmp_path: Path) -> None:
+    target = tmp_path / "agent.sqlite3"
+    target.write_bytes(b"x" * 64)
+    (tmp_path / "agent.sqlite3.link").symlink_to(target)
+
+    assert file_bytes(tmp_path / "agent.sqlite3.link") == 64
+    assert file_bytes(tmp_path / "missing.sqlite3") == 0
+
+
+def test_storage_usage_reports_a_configured_text_log(tmp_path: Path) -> None:
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "agent.log").write_bytes(b"t" * 7)
+    config = AppConfig(
+        owner=OwnerConfig(open_id="ou_owner", name="Owner"),
+        logging=LoggingConfig(text_path="logs/agent.log"),
+    )
+
+    usage = resolve_storage_usage(
+        config,
+        tmp_path,
+        disk_usage=_fixed_disk_usage({str(tmp_path): 9, str(tmp_path / "logs"): 1}),
+    )
+
+    assert usage.text_log_bytes == 7
+
+
+def test_storage_query_hides_storage_when_measurement_fails(tmp_path: Path) -> None:
+    def broken(path: Path) -> tuple[int, int, int]:
+        raise OSError("statvfs failed")
+
+    query = StorageQuery(config=_config(), base_dir=tmp_path, disk_usage=broken)
+
+    assert query.storage_summary() is None
 
 
 def test_dashboard_includes_storage_when_runtime_config_is_bound(

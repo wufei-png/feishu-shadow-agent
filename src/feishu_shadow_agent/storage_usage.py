@@ -59,10 +59,13 @@ def directory_bytes(root: Path) -> int:
 
 
 def file_bytes(path: Path) -> int:
+    """Size of one configured file; a symlinked path still describes its data.
+
+    Directory walks skip links to avoid double counting, but a single configured
+    sqlite or log path is the operator's chosen file, so follow the link.
+    """
     try:
-        if path.is_symlink() or not path.is_file():
-            return 0
-        return path.stat().st_size
+        return path.stat().st_size if path.is_file() else 0
     except OSError:
         return 0
 
@@ -76,8 +79,9 @@ def resolve_storage_usage(
     """Measure runtime storage and report the tightest runtime filesystem.
 
     The sqlite, log, and resource roots can live on different mounts, so the
-    reported filesystem is the one with the least free space among the distinct
-    existing volumes those roots resolve to.
+    reported filesystem is the one with the least free space among the runtime
+    roots that exist. Roots sharing one volume are measured independently; they
+    report the same free space, and the tie-break keeps the result stable.
     """
     base = Path(base_dir).expanduser().resolve()
     sqlite_path = resolve_relative_path(config.storage.sqlite_path, base)
