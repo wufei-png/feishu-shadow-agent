@@ -38,6 +38,7 @@ These rules belong in deterministic code and tests. Do not delegate them to prom
 - Deterministic routing ownership and shortcuts: a revision stays with its original active task; otherwise reply-to, thread, and burst-window attachment are evaluated in that order before TaskRouter. Every structural lookup remains scoped to the current chat.
 - Product Policy resolution: Product Policy Store as runtime truth, explicit Policy Import Source comparison, and fail-closed behavior when global policy is missing.
 - Resource gates: bot joined, resource download enabled, size/quota checks, retryable download failures, and owner notification on blocked resources.
+- Storage capacity guard: `runtime_storage_capacity` measures the sqlite, log, and resource roots and blocks ingestion and real sends only when free space on the tightest runtime filesystem drops below the fixed critical floor. A low-space warning never blocks runtime work, and a measurement failure never becomes a blocking verdict.
 - Bot membership facts: active probes and attributed bot send/download failures may derive present, absent, or unknown runtime state; they never mutate owner-authored Product Policy or auto-join a chat.
 - Reply gates: answerability/decision-reason combination validation, direct group mention requirement, empty reply rejection, forbidden mention cleanup, and identity fallback rules.
 - Dispatch safety: dry-run before send, idempotency key reuse, single active send constraint, readback verification, owner notification for failed/uncertain reply sends, and manual recovery for uncertain sends.
@@ -87,6 +88,7 @@ If an agent output crosses these bounds, the code should reject it, downgrade to
 - `operator_queries/`: read-only operator DTOs. It may derive status, overdue fields, feedback metrics, health issues, and recommended actions, but it must not mutate state.
 - `operator_commands.py`: explicit operator mutations, including auditable processing and dispatch recovery. Console and CLI commands should call this facade instead of reaching into store transactions directly.
 - `store/sqlite_store.py`: SQLite persistence and transactional primitives. Avoid adding new product-facing read models here.
+- `storage_usage.py`: read-only storage measurement shared by operator reads and health checks. It only stats and walks configured paths, and never creates, truncates, or rewrites them.
 - `prompt.py` and `context_access.py`: agent input contracts. Every model-visible field must have a current decision purpose.
 - `console_api.py`: local HTTP adapter only. Keep business decisions in query/command services.
 

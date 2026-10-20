@@ -127,6 +127,8 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 
 P8 暂不启用 `PRAGMA journal_mode=WAL`。当前部署形态以本地单文件 SQLite、手工复制/回放和简单清理为主；WAL 会额外生成 `-wal`/`-shm` 文件，容易让 operator 复制数据库或清理 `data/` 时漏文件。现阶段先用 busy timeout 改善短暂写锁等待，后续如果需要更高并发再单独评估 WAL。
 
+`storage`、`logging` 和 `storage.resource_dir` 可能位于不同挂载点。`doctor` 与运行时 health 共用同一套只读测量（`runtime_storage_capacity`），检查这些路径所在文件系统的剩余空间：低于 `max(1 GiB, 总量 10%)` 记为 warning，低于 `max(256 MiB, 总量 2%)`（上限 `1 GiB`）记为 critical。critical 会阻断 ingest 与真实发送，并让 daemon 拒绝启动；warning 不阻断任何运行时行为；无法测量只记为 warning，不当作磁盘已满。阈值由代码固定，不可配置。具体用量可在 `status` 的 `storage` 段看到：SQLite、JSONL/文本日志、资源目录用量与配额，以及剩余空间最少的运行时文件系统。
+
 `status` 输出中的 `daemon_liveness` 来自最新有 daemon tick 的 run（例如 `last_tick_started_at IS NOT NULL`）的 heartbeat；`last_run` 仍保留最新任意 run，包括 doctor 等非 daemon run。该 daemon run 仍是 `running` 且 `last_heartbeat_at` 超过固定阈值未更新时，会显示为 `stale`；这表示上一次 daemon 可能卡住或崩溃，需要结合 JSONL 日志和进程状态确认。`runs.last_tick_summary_json` 只保留最近一个 tick 的阶段摘要，详细历史仍以 JSONL 为准。
 
 Product Policy Store 是运行时 Product Policy 真相来源，包含全局 `product_policies`、复用的 per-chat `chat_policies` 和 `policy_audits`。默认导入只填缺失的全局策略和缺失的 chat policy；如果 `config.yaml` 省略 `reply_policy`，导入会使用 Pydantic 默认值并在结果中报告 `used_defaults: true`。`--replace` 会替换全局策略和 config 中列出的 chat policy，但不会删除 DB 中存在而 config 缺失的 chat policy。每个插入或替换都会写入 `policy_audits`。这类比较和导入语义叫 Policy Import Source / Policy Import Diff，不叫 config drift。

@@ -21,8 +21,19 @@ from .paths import (
     resolve_agent_working_dir,
     resolve_relative_path,
 )
+from .storage_usage import DiskUsageProbe, resolve_storage_usage
 from .store.sqlite_store import SQLiteStore
 from .types import HealthCheckResult, LarkCliResult, new_run_id
+
+# Free-space floors scale with the volume so large disks are not considered
+# healthy too early and small disks are not warned about forever. The critical
+# floor is capped because 2% of a very large volume is still plenty of headroom
+# for this workload, and blocking the daemon there would be a false positive.
+STORAGE_WARNING_FLOOR_BYTES = 1024**3
+STORAGE_WARNING_RATIO = 0.10
+STORAGE_CRITICAL_FLOOR_BYTES = 256 * 1024**2
+STORAGE_CRITICAL_RATIO = 0.02
+STORAGE_CRITICAL_CEILING_BYTES = 1024**3
 
 
 class HealthFeishuClient(Protocol):
@@ -310,6 +321,7 @@ class HealthSuite:
         agent_backend_checker: BackendReadinessChecker | None = None,
         hermes_checker: HermesChecker | None = None,
         run_id: str | None = None,
+        disk_usage: DiskUsageProbe | None = None,
     ):
         if agent_backend_checker is not None and hermes_checker is not None:
             raise ValueError("configure either agent_backend_checker or hermes_checker")
@@ -320,11 +332,13 @@ class HealthSuite:
             SelectedBackendReadinessChecker(hermes_checker=hermes_checker)
         )
         self.run_id = run_id
+        self.disk_usage = disk_usage or shutil.disk_usage
 
     def run(self, *, send_test: bool = False) -> list[HealthCheckResult]:
         results: list[HealthCheckResult] = [
             self._check_config_schema(),
             self._check_runtime_storage_paths(),
+            self._check_runtime_storage_capacity(),
             self._check_sqlite_writable(),
             self._check_product_policy_initialized(),
             self._check_lark_cli_version(),
@@ -353,6 +367,7 @@ class HealthSuite:
         results: list[HealthCheckResult] = [
             self._check_config_schema(),
             self._check_runtime_storage_paths(),
+            self._check_runtime_storage_capacity(),
             self._check_sqlite_writable(),
             self._check_product_policy_initialized(),
             self._check_lark_cli_version(),
@@ -505,6 +520,62 @@ class HealthSuite:
             "ok",
             "runtime storage paths have safe types and permissions",
             {"paths": checked},
+        )
+
+    def _check_runtime_storage_capacity(self) -> HealthCheckResult:
+        try:
+            usage = resolve_storage_usage(
+                self.loaded_config.config,
+                self.loaded_config.base_dir,
+                disk_usage=self.disk_usage,
+            )
+        except (OSError, RuntimeError) as exc:
+            # Capacity is unmeasurable, which is not proof that storage is full:
+            # report it without blocking runtime work.
+            return HealthCheckResult(
+                "runtime_storage_capacity",
+                "warning",
+                "failed",
+                "runtime storage capacity could not be measured",
+                {"error": str(exc)},
+            )
+        total_bytes = usage.filesystem_total_bytes
+        free_bytes = usage.filesystem_free_bytes
+        warning_floor = max(
+            STORAGE_WARNING_FLOOR_BYTES, int(total_bytes * STORAGE_WARNING_RATIO)
+        )
+        critical_floor = min(
+            max(
+                STORAGE_CRITICAL_FLOOR_BYTES, int(total_bytes * STORAGE_CRITICAL_RATIO)
+            ),
+            STORAGE_CRITICAL_CEILING_BYTES,
+        )
+        details = usage.as_dict() | {
+            "warning_floor_bytes": warning_floor,
+            "critical_floor_bytes": critical_floor,
+        }
+        if free_bytes < critical_floor:
+            return HealthCheckResult(
+                "runtime_storage_capacity",
+                "critical",
+                "failed",
+                "runtime storage is nearly full; ingestion and real sends are blocked",
+                details,
+            )
+        if free_bytes < warning_floor:
+            return HealthCheckResult(
+                "runtime_storage_capacity",
+                "warning",
+                "failed",
+                "runtime storage is running low",
+                details,
+            )
+        return HealthCheckResult(
+            "runtime_storage_capacity",
+            "warning",
+            "ok",
+            "runtime storage has sufficient free space",
+            details,
         )
 
     def _check_product_policy_initialized(self) -> HealthCheckResult:

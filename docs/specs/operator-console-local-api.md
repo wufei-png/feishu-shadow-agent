@@ -148,6 +148,40 @@ since
 Exact filters are route-specific and should stay aligned with
 `OperatorQueryService` capabilities.
 
+## Dashboard
+
+Route:
+
+```text
+GET /api/dashboard
+```
+
+Query-service method:
+
+```text
+OperatorQueryService.dashboard_snapshot()
+```
+
+The snapshot includes an optional `storage` block when the service was built
+with the runtime config and its base directory:
+
+```text
+storage.sqlite_bytes
+storage.jsonl_log_bytes
+storage.text_log_bytes
+storage.resource_dir_bytes
+storage.resource_dir_quota_bytes
+storage.filesystem_path
+storage.filesystem_total_bytes
+storage.filesystem_free_bytes
+```
+
+`sqlite_bytes`, `jsonl_log_bytes`, and `resource_dir_bytes` report `0` for a
+missing path; `text_log_bytes` is `null` when no text log is configured. The
+filesystem fields describe the runtime volume with the least free space, so a
+console or CLI reader can explain a `runtime_storage_capacity` issue without
+running `du` or `df` itself.
+
 ## Health Issues
 
 Route:
