@@ -189,6 +189,49 @@ def test_reply_policy_resolution_reads_global_policy_once(tmp_path: Path) -> Non
     assert repository.membership_reads == 1
 
 
+def test_p2p_gate_uses_global_auto_reply_not_the_chat_policy(tmp_path: Path) -> None:
+    """The P2P gate is a global switch even when a chat row overrides auto_reply.
+
+    This is the invariant the single-snapshot refactor could most easily break:
+    reading ``policy.auto_reply`` instead of the global ``p2p_auto_reply`` would
+    keep every other test green.
+    """
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.import_product_policy_from_config(
+        _config(
+            reply_policy=ReplyPolicyConfig(
+                p2p_auto_reply=True, unknown_group_auto_reply=False
+            ),
+            chats={"ou_chat": ChatPolicyConfig(auto_reply=False, bot_joined=True)},
+        )
+    )
+    allowed = _reply_decision(PolicyResolver(store), chat_id="ou_chat", chat_type="p2p")
+
+    assert allowed == {
+        "allow": True,
+        "reason": "ok",
+        "identity": "user",
+        "policy_source": "explicit_chat",
+    }
+
+    blocked_store = SQLiteStore(tmp_path / "blocked.sqlite3")
+    blocked_store.import_product_policy_from_config(
+        _config(
+            reply_policy=ReplyPolicyConfig(
+                p2p_auto_reply=False, unknown_group_auto_reply=False
+            ),
+            chats={"ou_chat": ChatPolicyConfig(auto_reply=True, bot_joined=True)},
+        )
+    )
+    blocked = _reply_decision(
+        PolicyResolver(blocked_store), chat_id="ou_chat", chat_type="p2p"
+    )
+
+    assert blocked["allow"] is False
+    assert blocked["reason"] == "p2p_auto_reply_disabled"
+    assert blocked["policy_source"] == "explicit_chat"
+
+
 def test_policy_resolver_requires_initialized_product_policy(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     resolver = PolicyResolver(store)
