@@ -360,6 +360,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="read_stdin",
         help="read final reply from stdin",
     )
+    send.add_argument("--location", choices=("main", "thread"))
     send.add_argument("task_id")
     send.add_argument("text", nargs=argparse.REMAINDER)
     send.set_defaults(handler=_handle_send)
@@ -596,6 +597,7 @@ def _handle_send(args: argparse.Namespace) -> int:
         verb="send",
         target_id=args.task_id,
         final_reply=final_reply,
+        reply_location=args.location,
     )
 
 
@@ -663,6 +665,7 @@ def _handle_local_approval_command(
     verb: str,
     target_id: str,
     final_reply: str | None = None,
+    reply_location: str | None = None,
 ) -> int:
     loaded, store, _ = _load_runtime(config_path)
     service = OperatorCommandService(
@@ -676,7 +679,12 @@ def _handle_local_approval_command(
     elif verb == "reject":
         result = service.reject(target_id, actor="local_cli")
     else:
-        result = service.send(target_id, final_reply or "", actor="local_cli")
+        result = service.send(
+            target_id,
+            final_reply or "",
+            actor="local_cli",
+            reply_location=reply_location,
+        )
     return _emit_command_result(result)
 
 

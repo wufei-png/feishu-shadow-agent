@@ -229,6 +229,7 @@ class MessagePage:
     has_more: bool = False
     raw: Any | None = None
     page_count: int = 1
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

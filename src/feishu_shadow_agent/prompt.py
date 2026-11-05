@@ -94,6 +94,7 @@ def build_task_session_prompt(
     task: TaskRecord,
     current_message_id: str,
     reply_target_message_ids: list[str],
+    reply_candidates: list[dict[str, Any]] | None = None,
     messages: list[Any],
     resources: list[Any],
     output_model: type[BaseTaskSessionOutput] = InitialTaskSessionOutput,
@@ -111,6 +112,7 @@ def build_task_session_prompt(
             current_message_id=current_message_id,
             root_message_id=task.root_message_id,
             reply_target_message_ids=reply_target_message_ids,
+            reply_candidates=reply_candidates,
             chat_type=chat_type or task.chat_type,
         ),
     ]
@@ -238,6 +240,7 @@ def _reply_context_section(
     current_message_id: str,
     root_message_id: str | None,
     reply_target_message_ids: list[str],
+    reply_candidates: list[dict[str, Any]] | None,
     chat_type: str | None,
 ) -> str:
     lines = [
@@ -253,6 +256,11 @@ def _reply_context_section(
         "- `allowed_reply_target_message_ids`: "
         f"{json.dumps(reply_target_message_ids, ensure_ascii=False)}"
     )
+    if reply_candidates is not None:
+        lines.append(
+            "- `allowed_reply_locations_by_target`: "
+            f"{json.dumps(reply_candidates, ensure_ascii=False)}"
+        )
     if chat_type:
         lines.append(f"- `chat_type`: {json.dumps(chat_type, ensure_ascii=False)}")
     return "\n".join(lines)

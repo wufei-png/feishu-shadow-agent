@@ -1247,6 +1247,7 @@ def _message(
         "message_id": message_id,
         "chat_id": "oc_test",
         "chat_type": "group",
+        "message_position": str(minute),
         "sender_id": "ou_user",
         "sender_name": "User",
         "create_time": f"2026-07-10T10:{minute:02d}:00+08:00",

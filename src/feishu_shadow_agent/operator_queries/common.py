@@ -258,7 +258,11 @@ def _readback_summary(attempts: list[dict[str, Any]]) -> dict[str, Any]:
         "latest_status": None if latest is None else latest["status"],
         "sent_message_id": None if latest is None else latest["sent_message_id"],
         "error_stage": None if latest is None else latest["error_stage"],
-        "readback_ok": readback_data.get("ok") is True,
+        "readback_ok": bool(
+            latest
+            and latest["status"] == "readback_ok"
+            and readback_data.get("ok") is True
+        ),
         "readback_message_id": readback_data.get("message_id"),
     }
 

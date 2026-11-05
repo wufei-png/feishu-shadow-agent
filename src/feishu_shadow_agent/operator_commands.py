@@ -153,6 +153,7 @@ class ApprovalCommandService:
         final_reply: str,
         *,
         actor: str,
+        reply_location: str | None = None,
         reason: str | None = None,
         command_id: str | None = None,
         feedback_reason: FeedbackReason | None = None,
@@ -164,6 +165,7 @@ class ApprovalCommandService:
             "send",
             task_id,
             final_reply=final_reply,
+            reply_location=reply_location,
             actor=actor,
             reason=reason,
             command_id=command_id,
@@ -194,6 +196,20 @@ class ApprovalCommandService:
         verb = match.group(1)
         target_id = match.group(2)
         final_reply = match.group(3)
+        reply_location: str | None = None
+        if (
+            verb == "send"
+            and final_reply
+            and re.match(r"^--location(?=\s|=|$)", final_reply)
+        ):
+            location_match = re.match(
+                r"^--location(?:\s+|=)(main|thread)\s+([\s\S]+)$", final_reply
+            )
+            if location_match is None:
+                verb = "invalid"
+            else:
+                reply_location = location_match.group(1)
+                final_reply = location_match.group(2)
         valid = (
             verb in {"approve", "reject"}
             and target_id is not None
@@ -203,6 +219,7 @@ class ApprovalCommandService:
             verb if valid else "invalid",
             target_id if valid and target_id is not None else "",
             final_reply=final_reply if valid else None,
+            reply_location=reply_location,
             actor=actor,
             reason=None,
             command_id=command_id,
@@ -223,6 +240,7 @@ class ApprovalCommandService:
         reason: str | None,
         command_id: str | None,
         final_reply: str | None = None,
+        reply_location: str | None = None,
         feedback_reason: FeedbackReason | None = None,
         note: str | None = None,
         execution_mode: ExecutionMode = "production",
@@ -231,10 +249,11 @@ class ApprovalCommandService:
         keep_watching_until: str | None = None,
         target_binding: ApprovalTargetBinding | None = None,
     ) -> CommandResult:
+        command_prefix = f"/{verb} {target_id}"
+        if reply_location is not None:
+            command_prefix += f" --location {reply_location}"
         effective_command_text = command_text or (
-            f"/{verb} {target_id}"
-            if final_reply is None
-            else f"/{verb} {target_id} {final_reply}"
+            command_prefix if final_reply is None else f"{command_prefix} {final_reply}"
         )
         raw = self.store.apply_approval_command(
             message_id=command_id or new_run_id(f"operator_{verb}"),
@@ -242,6 +261,7 @@ class ApprovalCommandService:
             verb=verb,
             target_id=target_id,
             final_reply=final_reply,
+            reply_location=reply_location,
             keep_watching_until=(
                 keep_watching_until
                 if keep_watching_until is not None
@@ -916,6 +936,7 @@ class OperatorCommandService:
         final_reply: str,
         *,
         actor: str = "operator",
+        reply_location: str | None = None,
         reason: str | None = None,
         command_id: str | None = None,
         feedback_reason: FeedbackReason | None = None,
@@ -927,6 +948,7 @@ class OperatorCommandService:
             task_id,
             final_reply,
             actor=actor,
+            reply_location=reply_location,
             reason=reason,
             command_id=command_id,
             feedback_reason=feedback_reason,

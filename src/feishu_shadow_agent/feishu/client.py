@@ -35,6 +35,7 @@ class FeishuClient(Protocol):
         message_id: str,
         text: str,
         idempotency_key: str,
+        reply_in_thread: bool = False,
         dry_run: bool = True,
     ) -> LarkCliResult: ...
 

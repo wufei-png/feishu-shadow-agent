@@ -38,6 +38,25 @@ def test_revision_assessment_keeps_identical_reply_audit_only() -> None:
     assert result.reply_changed is False
 
 
+def test_revision_assessment_escalates_a_destination_change() -> None:
+    result = assess_revision_impact(
+        previous_reply="same reply",
+        current_reply="same reply",
+        answerability="auto_reply",
+        decision_reason=None,
+        current_target_message_id="om_1",
+        previous_target_message_id="om_1",
+        previous_reply_destination={"chat_id": "oc_1", "location": "main"},
+        current_reply_destination={
+            "chat_id": "oc_1",
+            "location": "thread",
+            "thread_id": "omt_1",
+        },
+    )
+    assert result.impact == "high"
+    assert "reply_destination_changed" in result.reasons
+
+
 def test_revision_assessment_marks_low_risk_change_for_owner_choice() -> None:
     result = assess_revision_impact(
         previous_reply="可以，明天处理。",
@@ -110,6 +129,7 @@ def _message(text: str, *, is_deleted: bool = False) -> NormalizedMessage:
         direct_mention=False,
         at_all=False,
         is_deleted=is_deleted,
+        raw={"message_position": "1"},
     )
 
 
@@ -514,6 +534,7 @@ def _raw_message(message_id: str, text: str, **extra: Any) -> dict[str, Any]:
         "message_id": message_id,
         "chat_id": "ou_chat",
         "chat_type": "p2p",
+        "message_position": "1",
         "sender_id": "ou_a",
         "sender_name": "Alice",
         "sender_type": "user",
@@ -760,6 +781,43 @@ def _group_auto_reply_config() -> AppConfig:
         owner=OwnerConfig(open_id="ou_owner", name="Owner"),
         chats={"oc_1": ChatPolicyConfig(auto_reply=True, allow_user_fallback=True)},
     )
+
+
+def test_identical_revision_reply_at_different_location_requires_owner_review(
+    tmp_path: Path,
+) -> None:
+    backend = _SessionBackend()
+    backend.session_outputs.extend(
+        [
+            _session_output(reply_location="main"),
+            _session_output(
+                include_task_label=False, reply_location="thread", _session_id="sid_2"
+            ),
+        ]
+    )
+    store, service = _processing_service(
+        tmp_path, backend, config=_group_auto_reply_config()
+    )
+    raw = _raw_group_mention("om_source", "hello") | {
+        "thread_id": "omt_1",
+        "thread_message_position": "-1",
+    }
+    service.process_raw_message(
+        raw, source="group_at_me", default_chat_type="group", run_id="run_1"
+    )
+    _mark_pending_send_replies_sent(store)
+    edited = raw | {"content": {"text": "hello edited"}}
+    service.process_raw_message(
+        edited, source="group_at_me", default_chat_type="group", run_id="run_2"
+    )
+    notifications = _owner_notifications(store)
+    assert len(notifications) == 1
+    assert notifications[0]["reason"] == "revision_identical_text_review"
+    assert notifications[0]["impact"] == "high"
+    assert "reply_destination_changed" in notifications[0]["impact_reasons"]
+    assert notifications[0]["previous_reply_destination"]["location"] == "main"
+    assert notifications[0]["reply_destination"]["location"] == "thread"
+    assert "--location thread" in notifications[0]["commands"][0]
 
 
 def test_at_all_edit_without_sent_reply_stays_ineligible(tmp_path: Path) -> None:

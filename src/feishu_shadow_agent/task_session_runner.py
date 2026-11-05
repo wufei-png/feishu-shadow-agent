@@ -18,6 +18,7 @@ from .prompt import (
     InitialTaskSessionOutput,
     build_task_session_prompt,
 )
+from .reply_destination import ReplyCandidate, candidate_from_message
 from .resource_preflight import (
     P2P_UNAVAILABLE_RESOURCE_STATUSES,
     has_substantive_resource_text,
@@ -29,6 +30,10 @@ P2P_ADJACENT_RESOURCE_CONTEXT_LIMIT = 32
 
 
 def _empty_revisions() -> list[int]:
+    return []
+
+
+def _empty_reply_candidates() -> list[ReplyCandidate]:
     return []
 
 
@@ -46,6 +51,9 @@ class TaskSessionPromptPlan:
     prompt_message_ids: list[str]
     output_model: type[BaseTaskSessionOutput]
     reply_target_message_ids: list[str]
+    reply_candidates: list[ReplyCandidate] = field(
+        default_factory=_empty_reply_candidates
+    )
     task_background: str | None = None
     revision_context: RevisionReviewContext | None = None
     prompt_message_revisions: list[int] = field(default_factory=_empty_revisions)
@@ -114,14 +122,43 @@ class TaskSessionRunner:
                 if session_id is None
                 else FollowupRevisionTaskSessionOutput
             )
+        target_ids = reply_target_message_ids(
+            task=task, current_message_id=message.message_id
+        )
+        target_rows = {
+            str(row["message_id"]): dict(row)
+            for row in self.store.get_messages_by_ids(target_ids)
+        }
+        target_rows.setdefault(
+            message.message_id,
+            {
+                "message_id": message.message_id,
+                "chat_id": message.chat_id,
+                "thread_id": message.thread_id,
+                "raw_json": message.raw,
+                "is_deleted": message.is_deleted,
+            },
+        )
+        candidates = [
+            candidate
+            for target_id in target_ids
+            if (row := target_rows.get(target_id)) is not None
+            if (
+                candidate := candidate_from_message(
+                    row,
+                    expected_chat_id=task.chat_id,
+                    chat_type=task.chat_type or message.chat_type,
+                )
+            )
+            is not None
+        ]
         return TaskSessionPromptPlan(
             session_id=session_id,
             task_message_ids=task_message_ids,
             prompt_message_ids=prompt_message_ids,
             output_model=output_model,
-            reply_target_message_ids=reply_target_message_ids(
-                task=task, current_message_id=message.message_id
-            ),
+            reply_target_message_ids=target_ids,
+            reply_candidates=candidates,
             task_background=(
                 self.store.get_task_background(task.id) if session_id is None else None
             ),
@@ -230,6 +267,9 @@ class TaskSessionRunner:
             task=task,
             current_message_id=message.message_id,
             reply_target_message_ids=plan.reply_target_message_ids,
+            reply_candidates=[
+                candidate.prompt_value() for candidate in plan.reply_candidates
+            ],
             messages=self.store.get_messages_by_ids(plan.prompt_message_ids),
             resources=resources,
             output_model=plan.output_model,

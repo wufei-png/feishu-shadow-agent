@@ -21,6 +21,7 @@ def build_approval_card(payload: dict[str, Any]) -> dict[str, Any]:
     reason = _string(payload.get("reason")) or "human review required"
     incoming = _incoming_text(payload.get("incoming_message"))
     suggested = _string(payload.get("suggested_reply"))
+    display_suggestion = suggested or _string(payload.get("preview"))
     source = _source_text(payload.get("source"))
     approvable = payload.get("approvable") is not False and bool(suggested.strip())
 
@@ -42,10 +43,35 @@ def build_approval_card(payload: dict[str, Any]) -> dict[str, Any]:
         details.append(f"来源：{source}")
     if incoming:
         details.append(f"原消息：{incoming}")
+    destination = payload.get("reply_destination")
+    if isinstance(destination, dict):
+        location = cast(dict[str, Any], destination).get("location")
+        if location in {"main", "thread"}:
+            details.append(f"回复位置：{'话题' if location == 'thread' else '群主楼'}")
+    target = _string(payload.get("reply_target_message_id"))
+    if target:
+        details.append(f"回复目标：{target}")
+    if not approvable and not isinstance(destination, dict):
+        available = payload.get("allowed_reply_locations")
+        locations = (
+            [
+                item
+                for item in cast(list[object], available)
+                if isinstance(item, str) and item in {"main", "thread"}
+            ]
+            if isinstance(available, list)
+            else []
+        )
+        if locations:
+            details.append(
+                f"回复位置待确认：/send {task_id} --location <{'|'.join(locations)}> <最终回复>"
+            )
+        else:
+            details.append("无法确认回复位置，请检查原消息并手动处理。")
     previous_reply = _string(payload.get("previous_reply"))
     if previous_reply:
         details.append(f"旧回复：{previous_reply}")
-    details.append(f"建议回复：{suggested or '<无>'}")
+    details.append(f"建议回复：{display_suggestion or '<无>'}")
 
     buttons: list[dict[str, Any]] = []
     if approvable:

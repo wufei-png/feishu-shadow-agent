@@ -2090,6 +2090,16 @@ class IngestionService:
                     f"{page.page_count} pages outside remaining {remaining_pages}"
                 )
             page_number += page.page_count
+            if page.warnings:
+                self.logger.warning(
+                    "message_page_cli_warning",
+                    run_id=run_id,
+                    data={
+                        "source": source,
+                        "page_number": page_number,
+                        "warnings": list(page.warnings),
+                    },
+                )
             self.logger.debug(
                 "message_page_fetched",
                 run_id=run_id,
@@ -2104,8 +2114,16 @@ class IngestionService:
             )
             items.extend(page.items)
             next_token = page.next_page_token
-            if not page.has_more or not next_token:
+            if not next_token:
+                if page.has_more:
+                    raise RuntimeError(
+                        "message page has_more is true without a next token"
+                    )
                 return DrainResult(items, True, None, page_number)
+            if not page.has_more:
+                raise RuntimeError(
+                    "message page has a next token but has_more is false"
+                )
             if next_token == page_token or next_token in seen_tokens:
                 self.logger.error(
                     "message_pagination_token_loop",
@@ -2370,6 +2388,8 @@ def _processing_replay_identity(message: NormalizedMessage) -> dict[str, Any]:
         "sender_role": message.sender_role,
         "thread_id": message.thread_id,
         "reply_to_message_id": message.reply_to_message_id,
+        "message_position": message.raw.get("message_position"),
+        "thread_message_position": message.raw.get("thread_message_position"),
         "text": message.text,
         "direct_mention": message.direct_mention,
         "at_all": message.at_all,

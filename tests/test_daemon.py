@@ -1329,6 +1329,11 @@ def _insert_task(store: SQLiteStore) -> int:
             ("t_1", "watching", "oc_1", "om_target", "label", "now", "now", "p2p"),
         )
     assert cursor.lastrowid is not None
+    with store.connect() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO messages(message_id, chat_id, chat_type, raw_json, inserted_at) VALUES (?, ?, ?, ?, ?)",
+            ("om_target", "oc_1", "p2p", "{}", "now"),
+        )
     return cursor.lastrowid
 
 
@@ -1346,6 +1351,7 @@ def _raw_message(
         "message_id": message_id,
         "chat_id": chat_id,
         "chat_type": chat_type,
+        "message_position": "1",
         "sender_id": "ou_ext",
         "sender_type": "user",
         "sender_name": "Ext",

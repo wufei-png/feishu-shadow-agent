@@ -25,6 +25,7 @@ type CommandBody = {
   reason?: string;
   command_id?: string;
   final_reply?: string;
+  reply_location?: "main" | "thread";
   sent_message_id?: string;
 };
 

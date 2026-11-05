@@ -7,6 +7,8 @@ from threading import Event, Thread
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from feishu_shadow_agent import dispatcher as dispatcher_module
 from feishu_shadow_agent.config import (
     AppConfig,
@@ -15,6 +17,7 @@ from feishu_shadow_agent.config import (
     OwnerConfig,
 )
 from feishu_shadow_agent.dispatcher import Dispatcher
+from feishu_shadow_agent.ingestion import MessageNormalizer
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import LarkCliResult, MessagePage, NormalizedMessage
@@ -101,14 +104,431 @@ def _insert_task(store: SQLiteStore) -> int:
     return cursor.lastrowid
 
 
+def _create_reply_action(
+    store: SQLiteStore,
+    *,
+    task_id: int,
+    target_message_id: str,
+    payload: dict[str, Any],
+    **kwargs: Any,
+) -> int | None:
+    if store.get_message(target_message_id) is None:
+        task = store.get_task_by_id(task_id)
+        raw = {
+            "message_id": target_message_id,
+            "chat_id": task.chat_id,
+            "chat_type": task.chat_type,
+            "message_position": "1",
+            "content": {"text": "source"},
+        }
+        store.upsert_message(MessageNormalizer(owner_open_id="ou_owner").normalize(raw))
+    return store.create_send_reply_action(
+        task_id=task_id, target_message_id=target_message_id, payload=payload, **kwargs
+    )
+
+
 def _attempts(store: SQLiteStore, action_id: int):
     return store.list_dispatch_attempts(action_id)
+
+
+@pytest.mark.parametrize("matches", [True, False])
+def test_thread_dispatch_checks_destination_and_does_not_resend(
+    tmp_path: Path, matches: bool
+) -> None:
+    store, dispatcher, fake = _dispatcher(tmp_path)
+    task_id = _insert_task(store)
+    store.upsert_message(
+        MessageNormalizer(owner_open_id="ou_owner").normalize(
+            {
+                "message_id": "om_target",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "thread_id": "omt_expected",
+                "message_position": "42",
+                "thread_message_position": "-1",
+                "content": {"text": "source"},
+            }
+        )
+    )
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+            "reply_destination": {
+                "chat_id": "oc_1",
+                "location": "thread",
+                "thread_id": "omt_expected",
+            },
+        },
+    )
+    assert action_id is not None
+    fake.reply_results.extend(
+        [
+            LarkCliResult(["dry"], 0, json_data={"api": []}),
+            LarkCliResult(["send"], 0, json_data={"data": {"message_id": "om_sent"}}),
+        ]
+    )
+    fake.readback_pages.append(
+        MessagePage(
+            [
+                {
+                    "message_id": "om_sent",
+                    "chat_id": "oc_1",
+                    "chat_type": "group",
+                    "thread_id": "omt_expected" if matches else "omt_other",
+                    "message_position": "-3",
+                    "thread_message_position": "0",
+                    "reply_to_message_id": "om_target",
+                    "content": {"text": "hello"},
+                }
+            ]
+        )
+    )
+    dispatcher.dispatch(
+        run_id="run_1",
+        allow_send_reply_actual=True,
+        allow_owner_notification_actual=False,
+    )
+    action = store.get_action(action_id)
+    assert action is not None and action.status == "sent"
+    assert [call["reply_in_thread"] for call in fake.reply_calls] == [True, True]
+    assert _attempts(store, action_id)[-1].status == (
+        "readback_ok" if matches else "send_ok"
+    )
+    assert (store.get_message("om_sent") is not None) is matches
+    if not matches:
+        assert "readback_thread_mismatch" in action.result["warnings"]
+        with store.connect() as conn:
+            assert (
+                conn.execute(
+                    "SELECT 1 FROM task_watch_keys WHERE task_id = ? AND key = ?",
+                    (task_id, "thread:omt_other"),
+                ).fetchone()
+                is None
+            )
+            notification = conn.execute(
+                "SELECT payload_json FROM actions WHERE kind = 'owner_notification'"
+            ).fetchone()
+        assert (
+            notification is not None
+            and "dispatch_readback_unverified" in notification["payload_json"]
+        )
+        dispatcher.dispatch(
+            run_id="run_2",
+            allow_send_reply_actual=True,
+            allow_owner_notification_actual=False,
+        )
+        assert len(fake.reply_calls) == 2
+
+
+def test_unparseable_successful_send_stays_uncertain(tmp_path: Path) -> None:
+    store, dispatcher, fake = _dispatcher(tmp_path)
+    task_id = _insert_task(store)
+    action_id = _create_reply_action(
+        store,
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+        },
+    )
+    assert action_id is not None
+    fake.reply_results.extend(
+        [
+            LarkCliResult(["dry"], 0, json_data={"api": []}),
+            LarkCliResult(["send"], 0, error="stdout was empty instead of JSON"),
+        ]
+    )
+    dispatcher.dispatch(
+        run_id="run_1",
+        allow_send_reply_actual=True,
+        allow_owner_notification_actual=False,
+    )
+    action = store.get_action(action_id)
+    assert action is not None and action.status == "failed_needs_review"
+    assert _attempts(store, action_id)[-1].status == "uncertain"
+    dispatcher.dispatch(
+        run_id="run_2",
+        allow_send_reply_actual=True,
+        allow_owner_notification_actual=False,
+    )
+    assert len(fake.reply_calls) == 2
+
+
+def test_failed_action_does_not_reuse_idempotency_key_for_another_location(
+    tmp_path: Path,
+) -> None:
+    store, _, _ = _dispatcher(tmp_path)
+    task_id = _insert_task(store)
+    target = MessageNormalizer(owner_open_id="ou_owner").normalize(
+        {
+            "message_id": "om_target",
+            "chat_id": "oc_1",
+            "chat_type": "group",
+            "thread_id": "omt_1",
+            "message_position": "42",
+            "thread_message_position": "-1",
+            "content": {"text": "source"},
+        }
+    )
+    store.upsert_message(target)
+    base = {"reply_target_message_id": "om_target", "text": "hello", "identity": "user"}
+    main_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_target",
+        payload=base | {"reply_destination": {"chat_id": "oc_1", "location": "main"}},
+    )
+    assert main_id is not None
+    store.finish_action(main_id, status="failed", result={"error_stage": "dry_run"})
+    thread_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_target",
+        payload=base
+        | {
+            "reply_destination": {
+                "chat_id": "oc_1",
+                "location": "thread",
+                "thread_id": "omt_1",
+            }
+        },
+    )
+    assert thread_id is not None and thread_id != main_id
+    main_action, thread_action = store.get_action(main_id), store.get_action(thread_id)
+    assert main_action is not None and thread_action is not None
+    assert main_action.idempotency_key != thread_action.idempotency_key
+
+
+def test_sent_reply_deduplicates_only_the_same_destination(tmp_path: Path) -> None:
+    store, _, _ = _dispatcher(tmp_path)
+    task_id = _insert_task(store)
+    store.upsert_message(
+        MessageNormalizer(owner_open_id="ou_owner").normalize(
+            {
+                "message_id": "om_target",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "thread_id": "omt_1",
+                "message_position": "42",
+                "thread_message_position": "-1",
+                "content": {"text": "source"},
+            }
+        )
+    )
+    base = {"reply_target_message_id": "om_target", "text": "hello", "identity": "user"}
+    main = base | {"reply_destination": {"chat_id": "oc_1", "location": "main"}}
+    thread = base | {
+        "reply_destination": {
+            "chat_id": "oc_1",
+            "location": "thread",
+            "thread_id": "omt_1",
+        }
+    }
+    main_id = store.create_send_reply_action(
+        task_id=task_id, target_message_id="om_target", payload=main
+    )
+    assert main_id is not None
+    store.finish_action(main_id, status="sent", result={"sent_message_id": "om_sent"})
+    assert (
+        store.create_send_reply_action(
+            task_id=task_id, target_message_id="om_target", payload=main
+        )
+        is None
+    )
+    thread_id = store.create_send_reply_action(
+        task_id=task_id, target_message_id="om_target", payload=thread
+    )
+    assert thread_id is not None and thread_id != main_id
+
+
+def test_manual_mark_sent_rejects_wrong_thread_readback(tmp_path: Path) -> None:
+    store, dispatcher, fake = _dispatcher(tmp_path)
+    task_id = _insert_task(store)
+    store.upsert_message(
+        MessageNormalizer(owner_open_id="ou_owner").normalize(
+            {
+                "message_id": "om_target",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "thread_id": "omt_expected",
+                "message_position": "42",
+                "thread_message_position": "-1",
+                "content": {"text": "source"},
+            }
+        )
+    )
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+            "reply_destination": {
+                "chat_id": "oc_1",
+                "location": "thread",
+                "thread_id": "omt_expected",
+            },
+        },
+    )
+    assert action_id is not None
+    claim = store.claim_action_for_dispatch(action_id, run_id="run_1")
+    assert claim is not None
+    store.update_dispatch_attempt(
+        claim.attempt.id, status="uncertain", error_stage="send"
+    )
+    store.finish_action(
+        action_id, status="failed_needs_review", result={"error_stage": "send"}
+    )
+    fake.readback_pages.append(
+        MessagePage(
+            [
+                {
+                    "message_id": "om_sent",
+                    "chat_id": "oc_1",
+                    "chat_type": "group",
+                    "thread_id": "omt_other",
+                    "message_position": "-3",
+                    "thread_message_position": "0",
+                    "reply_to_message_id": "om_target",
+                    "content": {"text": "hello"},
+                }
+            ]
+        )
+    )
+    result = dispatcher.mark_action_sent_after_readback(
+        action_id, sent_message_id="om_sent", run_id="run_2"
+    )
+    assert result["status"] == "failed"
+    assert "readback_thread_mismatch" in result["result"]["warnings"]
+    action = store.get_action(action_id)
+    assert action is not None and action.status == "failed_needs_review"
+
+
+@pytest.mark.parametrize("manual", [False, True])
+def test_readback_rejects_a_single_message_with_the_wrong_id(
+    tmp_path: Path, manual: bool
+) -> None:
+    store, dispatcher, fake = _dispatcher(tmp_path)
+    task_id = _insert_task(store)
+    action_id = _create_reply_action(
+        store,
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+        },
+    )
+    assert action_id is not None
+    fake.readback_pages.append(
+        MessagePage(
+            [
+                {
+                    "message_id": "om_other",
+                    "chat_id": "oc_1",
+                    "chat_type": "group",
+                    "message_position": "42",
+                    "reply_to_message_id": "om_target",
+                    "content": {"text": "hello"},
+                }
+            ]
+        )
+    )
+    if manual:
+        claim = store.claim_action_for_dispatch(action_id, run_id="run_1")
+        assert claim is not None
+        store.update_dispatch_attempt(
+            claim.attempt.id, status="uncertain", error_stage="send"
+        )
+        store.finish_action(
+            action_id, status="failed_needs_review", result={"error_stage": "send"}
+        )
+        result = dispatcher.mark_action_sent_after_readback(
+            action_id, sent_message_id="om_expected", run_id="run_2"
+        )
+        assert result["status"] == "failed"
+        assert "readback_message_missing" in result["result"]["warnings"]
+        expected_status = "failed_needs_review"
+    else:
+        fake.reply_results.extend(
+            [
+                LarkCliResult(["dry"], 0, json_data={"api": []}),
+                LarkCliResult(
+                    ["send"], 0, json_data={"data": {"message_id": "om_expected"}}
+                ),
+            ]
+        )
+        dispatcher.dispatch(
+            run_id="run_1",
+            allow_send_reply_actual=True,
+            allow_owner_notification_actual=False,
+        )
+        assert _attempts(store, action_id)[-1].status == "send_ok"
+        expected_status = "sent"
+    action = store.get_action(action_id)
+    assert action is not None and action.status == expected_status
+    assert store.get_message("om_other") is None
+
+
+@pytest.mark.parametrize("matching_chat", [False, True])
+def test_p2p_readback_uses_known_chat_type_only_for_matching_chat(
+    tmp_path: Path, matching_chat: bool
+) -> None:
+    store, dispatcher, fake = _dispatcher(tmp_path)
+    task_id = _insert_task(store)
+    with store.connect() as conn:
+        conn.execute("UPDATE tasks SET chat_type = 'p2p' WHERE id = ?", (task_id,))
+    action_id = _create_reply_action(
+        store,
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+        },
+    )
+    assert action_id is not None
+    fake.reply_results.extend(
+        [
+            LarkCliResult(["dry"], 0, json_data={"api": []}),
+            LarkCliResult(["send"], 0, json_data={"data": {"message_id": "om_sent"}}),
+        ]
+    )
+    fake.readback_pages.append(
+        MessagePage(
+            [
+                {
+                    "message_id": "om_sent",
+                    "chat_id": "oc_1" if matching_chat else "oc_other",
+                    "reply_to_message_id": "om_target",
+                    "content": {"text": "hello"},
+                }
+            ]
+        )
+    )
+    dispatcher.dispatch(
+        run_id="run_1",
+        allow_send_reply_actual=True,
+        allow_owner_notification_actual=False,
+    )
+    assert _attempts(store, action_id)[-1].status == (
+        "readback_ok" if matching_chat else "send_ok"
+    )
+    assert (store.get_message("om_sent") is not None) is matching_chat
 
 
 def test_dry_run_preview_keeps_action_pending(tmp_path: Path) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
-    action_id = store.create_send_reply_action(
+    action_id = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload={
@@ -157,7 +577,8 @@ def test_confirmed_absence_uses_allowed_user_fallback_at_dispatch(
             "next_probe_at": "2999-01-01T00:00:00+00:00",
         },
     )
-    action_id = store.create_send_reply_action(
+    action_id = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload={
@@ -189,7 +610,8 @@ def test_bot_send_confirmed_not_in_chat_records_absence_and_notification(
 ) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
-    action_id = store.create_send_reply_action(
+    action_id = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload={
@@ -234,7 +656,8 @@ def test_bot_send_visibility_error_does_not_record_membership_absence(
 ) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
-    action_id = store.create_send_reply_action(
+    action_id = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload={
@@ -287,7 +710,8 @@ def test_stale_revision_action_is_cancelled_without_adapter_call(
         at_all=False,
     )
     store.upsert_message(source)
-    action_id = store.create_send_reply_action(
+    action_id = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload={
@@ -339,7 +763,8 @@ def test_revision_send_does_not_hold_sqlite_lock_during_external_send(
         at_all=False,
     )
     store.upsert_message(source)
-    action_id = store.create_send_reply_action(
+    action_id = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload={
@@ -414,7 +839,8 @@ def test_dry_run_provenance_cannot_be_promoted_by_production_dispatch(
 ) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
-    action_id = store.create_send_reply_action(
+    action_id = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload={
@@ -447,7 +873,8 @@ def test_actual_dispatch_dry_run_failure_marks_failed_without_send(
 ) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
-    action_id = store.create_send_reply_action(
+    action_id = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload={
@@ -484,7 +911,8 @@ def test_actual_dispatch_dry_run_exception_marks_failed_without_stuck_sending(
 ) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
-    action_id = store.create_send_reply_action(
+    action_id = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload={
@@ -518,7 +946,8 @@ def test_actual_dispatch_send_rejection_marks_failed_without_stuck_sending(
 ) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
-    action_id = store.create_send_reply_action(
+    action_id = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload={
@@ -562,7 +991,8 @@ def test_actual_dispatch_transient_nonzero_send_failure_needs_review_and_is_not_
         "text": "hello",
         "identity": "user",
     }
-    action_id = store.create_send_reply_action(
+    action_id = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload=payload,
@@ -589,7 +1019,8 @@ def test_actual_dispatch_transient_nonzero_send_failure_needs_review_and_is_not_
     assert attempts[0].status == "uncertain"
     assert attempts[0].error_stage == "send"
 
-    revived = store.create_send_reply_action(
+    revived = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload=payload,
@@ -599,7 +1030,8 @@ def test_actual_dispatch_transient_nonzero_send_failure_needs_review_and_is_not_
         "text": "different",
         "identity": "user",
     }
-    different_blocked = store.create_send_reply_action(
+    different_blocked = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload=different_payload,
@@ -609,7 +1041,8 @@ def test_actual_dispatch_transient_nonzero_send_failure_needs_review_and_is_not_
     assert different_blocked is None
     assert store.get_action(action_id).status == "failed_needs_review"  # type: ignore[union-attr]
     store.cancel_dispatch_action(action_id)
-    after_cancel = store.create_send_reply_action(
+    after_cancel = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload=different_payload,
@@ -622,7 +1055,8 @@ def test_actual_dispatch_send_exception_after_boundary_needs_review(
 ) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
-    action_id = store.create_send_reply_action(
+    action_id = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload={
@@ -662,7 +1096,8 @@ def test_actual_dispatch_send_exception_after_boundary_needs_review(
 def test_actual_dispatch_send_timeout_needs_review(tmp_path: Path) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
-    action_id = store.create_send_reply_action(
+    action_id = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload={
@@ -697,7 +1132,8 @@ def test_actual_dispatch_send_timeout_needs_review(tmp_path: Path) -> None:
 def test_actual_dispatch_missing_sent_message_id_needs_review(tmp_path: Path) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
-    action_id = store.create_send_reply_action(
+    action_id = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload={
@@ -745,7 +1181,8 @@ def test_actual_dispatch_records_sent_id_and_associates_readback(
         config=_config(lifecycle=LifecycleConfig(watch_minutes=5)),
     )
     task_id = _insert_task(store)
-    action_id = store.create_send_reply_action(
+    action_id = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload={
@@ -768,6 +1205,7 @@ def test_actual_dispatch_records_sent_id_and_associates_readback(
                     "message_id": "om_sent",
                     "chat_id": "oc_1",
                     "chat_type": "group",
+                    "message_position": "1",
                     "sender_id": "ou_bot",
                     "sender_type": "bot",
                     "create_time": "2026-06-22T10:00:00+08:00",
@@ -820,7 +1258,8 @@ def test_actual_dispatch_records_sent_id_and_associates_readback(
 def test_readback_exception_after_send_marks_sent_with_warning(tmp_path: Path) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
-    action_id = store.create_send_reply_action(
+    action_id = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload={
@@ -836,13 +1275,16 @@ def test_readback_exception_after_send_marks_sent_with_warning(tmp_path: Path) -
             LarkCliResult(["send"], 0, json_data={"data": {"message_id": "om_sent"}}),
         ]
     )
-    fake.readback_pages.append(MessagePage([{"content": {"text": "missing id"}}]))
+    fake.readback_pages.append(MessagePage([{"message_id": "om_sent"}]))
 
-    summary = dispatcher.dispatch(
-        run_id="run_1",
-        allow_send_reply_actual=True,
-        allow_owner_notification_actual=False,
-    )
+    with patch.object(
+        dispatcher.normalizer, "normalize", side_effect=ValueError("bad readback")
+    ):
+        summary = dispatcher.dispatch(
+            run_id="run_1",
+            allow_send_reply_actual=True,
+            allow_owner_notification_actual=False,
+        )
 
     action = store.get_action(action_id)
     assert summary.sent == 1
@@ -862,7 +1304,8 @@ def test_readback_target_mismatch_marks_attempt_send_ok_with_warning(
 ) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
-    action_id = store.create_send_reply_action(
+    action_id = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload={
@@ -885,6 +1328,7 @@ def test_readback_target_mismatch_marks_attempt_send_ok_with_warning(
                     "message_id": "om_sent",
                     "chat_id": "oc_1",
                     "chat_type": "group",
+                    "message_position": "1",
                     "sender_id": "ou_bot",
                     "sender_type": "bot",
                     "create_time": "2026-06-22T10:00:00+08:00",
@@ -915,7 +1359,8 @@ def test_actual_send_without_readback_still_marks_sent_with_warning(
 ) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
-    action_id = store.create_send_reply_action(
+    action_id = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload={
@@ -961,6 +1406,7 @@ def test_owner_notification_can_be_sent_independently(tmp_path: Path) -> None:
             "source": {
                 "chat_id": "oc_1",
                 "chat_type": "group",
+                "message_position": "1",
                 "sender_name": "Ext",
                 "task_label": "classification service",
             },
@@ -1100,6 +1546,7 @@ def test_owner_notification_neutralizes_freeform_mentions(tmp_path: Path) -> Non
             "source": {
                 "chat_id": "oc_1",
                 "chat_type": "group",
+                "message_position": "1",
                 "sender_name": 'Mallory <at user_id="ou_x">owner</at> @All',
                 "task_label": "classification @all",
             },
@@ -1164,7 +1611,8 @@ def test_stale_sending_is_marked_failed_needs_review_without_resend(
 ) -> None:
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
-    action_id = store.create_send_reply_action(
+    action_id = _create_reply_action(
+        store,
         task_id=task_id,
         target_message_id="om_target",
         payload={
@@ -1211,7 +1659,8 @@ def test_owner_notification_actual_has_budget_beyond_blocked_send_reply_previews
     store, dispatcher, fake = _dispatcher(tmp_path)
     task_id = _insert_task(store)
     for index in range(50):
-        action_id = store.create_send_reply_action(
+        action_id = _create_reply_action(
+            store,
             task_id=task_id,
             target_message_id=f"om_target_{index}",
             payload={

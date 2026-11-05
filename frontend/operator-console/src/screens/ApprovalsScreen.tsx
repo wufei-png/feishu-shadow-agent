@@ -34,6 +34,7 @@ import type { ApprovalDetail, ApprovalStatus, ApprovalSummary, CommandResult } f
 type ApprovalDraft = {
   reason: string;
   finalReply: string;
+  replyLocation: "" | "main" | "thread";
 };
 
 type ApprovalCommandInput = {
@@ -41,10 +42,11 @@ type ApprovalCommandInput = {
   approval: ApprovalDetail;
   reason?: string;
   finalReply?: string;
+  replyLocation?: "main" | "thread";
   commandId: string;
 };
 
-const emptyDraft: ApprovalDraft = { reason: "", finalReply: "" };
+const emptyDraft: ApprovalDraft = { reason: "", finalReply: "", replyLocation: "" };
 const pageSize = 50;
 
 export function ApprovalsScreen({ token, selectedId }: { token: string; selectedId: string | null }) {
@@ -113,7 +115,11 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
       if (input.kind === "reject") {
         return rejectApproval(token, input.approval.approval_id, body);
       }
-      return sendApproval(token, input.approval.approval_id, { ...body, final_reply: input.finalReply });
+      return sendApproval(token, input.approval.approval_id, {
+        ...body,
+        final_reply: input.finalReply,
+        reply_location: input.replyLocation
+      });
     },
     onSuccess: async (result, input) => {
       setCommandResults((current) => ({ ...current, [input.approval.approval_id]: result }));
@@ -153,6 +159,8 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
   const canApprove = detail.data?.available_commands.includes(`approve ${detail.data.approval_id}`) ?? false;
   const canReject = detail.data?.available_commands.includes(`reject ${detail.data.approval_id}`) ?? false;
   const canSend = detail.data?.available_commands.some((command) => command.startsWith("send ")) ?? false;
+  const existingLocation = replyLocation(detail.data?.payload);
+  const locationChoices = allowedLocations(detail.data?.payload);
   const approvalFilters: Array<{ value: ApprovalFilter; label: string }> = [
     { value: "pending", label: t("approvals.filters.pending") },
     { value: "expired", label: t("approvals.filters.expired") },
@@ -182,6 +190,7 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
       approval,
       reason: clean(selectedDraft.reason),
       finalReply: selectedDraft.finalReply,
+      replyLocation: selectedDraft.replyLocation || undefined,
       commandId: newCommandId()
     });
   }
@@ -279,6 +288,8 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
                 <Fact label={t("approvals.createdAt")} value={formatDate(detail.data.created_at)} />
                 <Fact label={t("approvals.expiresAt")} value={formatDate(detail.data.expires_at)} />
                 <Fact label={t("approvals.recommendedAction")} value={enumLabel(t, "action", detail.data.recommended_action)} />
+                <Fact label={t("approvals.replyTarget")} value={replyTarget(detail.data.payload) ?? t("common.notRecorded")} />
+                <Fact label={t("approvals.replyLocation")} value={existingLocation ? t(existingLocation === "thread" ? "approvals.locationThread" : "approvals.locationMain") : t("approvals.locationUnconfirmed")} />
               </FieldList>
               {postprocessInfo(detail.data.payload) ? (
                 <div className="subsection">
@@ -337,8 +348,20 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
                 rows={4}
                 value={selectedDraft.finalReply}
               />
+              {!existingLocation && locationChoices.length ? (
+                <SegmentedControl
+                  label={t("approvals.replyLocation")}
+                  value={selectedDraft.replyLocation}
+                  options={locationChoices.map((location) => ({
+                    value: location,
+                    label: t(location === "thread" ? "approvals.locationThread" : "approvals.locationMain")
+                  }))}
+                  onChange={(replyLocation) => updateDraft({ replyLocation })}
+                />
+              ) : null}
+              {!existingLocation && !locationChoices.length ? <p className="detail-note">{t("approvals.locationUnavailable")}</p> : null}
               <Button
-                disabled={!canSend || !taskId || !selectedDraft.finalReply.trim() || selectedApprovalBusy || expire.isPending}
+                disabled={!canSend || !taskId || !selectedDraft.finalReply.trim() || (!existingLocation && !selectedDraft.replyLocation) || selectedApprovalBusy || expire.isPending}
                 onClick={() => runApprovalCommand("send")}
                 tone="info"
               >
@@ -383,6 +406,22 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
   );
 }
 
+
+function replyLocation(payload: Record<string, unknown> | undefined): "main" | "thread" | null {
+  const destination = payload?.reply_destination;
+  if (!destination || typeof destination !== "object") return null;
+  const location = (destination as Record<string, unknown>).location;
+  return location === "main" || location === "thread" ? location : null;
+}
+
+function replyTarget(payload: Record<string, unknown> | undefined): string | null {
+  return typeof payload?.reply_target_message_id === "string" ? payload.reply_target_message_id : null;
+}
+
+function allowedLocations(payload: Record<string, unknown> | undefined): Array<"main" | "thread"> {
+  const value = payload?.allowed_reply_locations;
+  return Array.isArray(value) ? value.filter((item): item is "main" | "thread" => item === "main" || item === "thread") : [];
+}
 
 function clean(value: string): string | undefined {
   const trimmed = value.trim();

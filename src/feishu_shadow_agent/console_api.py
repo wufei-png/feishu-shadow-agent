@@ -87,6 +87,7 @@ class CommandRequest(BaseModel):
     reason: str | None = None
     command_id: str | None = None
     final_reply: str | None = None
+    reply_location: Literal["main", "thread"] | None = None
     sent_message_id: str | None = None
 
 
@@ -531,6 +532,7 @@ def create_console_app(
                 approval_id,
                 final_reply,
                 actor=LOCAL_CONSOLE_ACTOR,
+                reply_location=body.reply_location,
                 reason=body.reason,
                 command_id=body.command_id,
                 target_binding=body.target_binding(),
@@ -551,6 +553,7 @@ def create_console_app(
                 task_id,
                 final_reply,
                 actor=LOCAL_CONSOLE_ACTOR,
+                reply_location=payload.reply_location,
                 reason=payload.reason,
                 command_id=payload.command_id,
             )

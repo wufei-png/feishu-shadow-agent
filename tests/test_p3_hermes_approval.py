@@ -21,6 +21,7 @@ from feishu_shadow_agent.config import (
 )
 from feishu_shadow_agent.ingestion import IngestionService
 from feishu_shadow_agent.jsonl import JSONLLogger
+from feishu_shadow_agent.operator_commands import OperatorCommandService
 from feishu_shadow_agent.paths import resolve_agent_working_dir
 from feishu_shadow_agent.processing import (
     ApprovalService,
@@ -209,6 +210,7 @@ def _message(
         "message_id": message_id,
         "chat_id": chat_id,
         "chat_type": chat_type,
+        "message_position": "1",
         "sender_id": sender_id,
         "sender_name": sender_name,
         "sender_type": "user",
@@ -304,6 +306,220 @@ def _service(
         clock=lambda: "2026-06-22T10:10:00+08:00",
     )
     return store, service, fake_hermes
+
+
+@pytest.mark.parametrize("location", ["main", "thread"])
+def test_agent_selects_root_destination_and_persists_it(
+    tmp_path: Path, location: str
+) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(
+        _session_output(reply_target_message_id="om_root", reply_location=location)
+    )
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)})
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+    raw = _message("om_root", mentions=[{"open_id": "ou_owner"}]) | {
+        "thread_id": "omt_root",
+        "message_position": "42",
+        "thread_message_position": "-1",
+    }
+
+    service.process_raw_message(
+        raw, source="group_at_me", default_chat_type="group", run_id="run_1"
+    )
+
+    with store.connect() as conn:
+        action = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'send_reply'"
+        ).fetchone()
+    payload = json.loads(action["payload_json"])
+    expected = {"chat_id": "oc_1", "location": location}
+    if location == "thread":
+        expected["thread_id"] = "omt_root"
+    assert payload["reply_destination"] == expected
+    assert '"locations": ["main", "thread"]' in hermes.session_prompts[0]
+
+
+def test_ambiguous_agent_destination_requires_owner_location(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_root"))
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)})
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+    raw = _message("om_root", mentions=[{"open_id": "ou_owner"}]) | {
+        "thread_id": "omt_root",
+        "message_position": "42",
+        "thread_message_position": "-1",
+    }
+    service.process_raw_message(
+        raw, source="group_at_me", default_chat_type="group", run_id="run_1"
+    )
+    with store.connect() as conn:
+        approval = conn.execute(
+            "SELECT short_id, payload_json FROM approvals"
+        ).fetchone()
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM actions WHERE kind = 'send_reply'"
+            ).fetchone()[0]
+            == 0
+        )
+    assert json.loads(approval["payload_json"])["approvable"] is False
+    commands = OperatorCommandService(store)
+    denied = commands.approve(approval["short_id"], actor="owner")
+    assert denied.status != "applied"
+    result = commands.apply_approval_text(
+        f"/send {approval['short_id']} --location thread owner reply",
+        command_id="om_command",
+        actor="owner",
+        execution_mode="production",
+        keep_watching_until="2026-06-22T12:00:00+08:00",
+    )
+    assert result is not None and result.status == "applied"
+    with store.connect() as conn:
+        action = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'send_reply'"
+        ).fetchone()
+    assert json.loads(action["payload_json"])["reply_destination"] == {
+        "chat_id": "oc_1",
+        "location": "thread",
+        "thread_id": "omt_root",
+    }
+
+
+def test_invalid_agent_target_offers_current_messages_available_locations(
+    tmp_path: Path,
+) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_invalid"))
+    store, service, _ = _service(tmp_path, hermes=hermes)
+    raw = _message("om_root", mentions=[{"open_id": "ou_owner"}]) | {
+        "thread_id": "omt_root",
+        "message_position": "42",
+        "thread_message_position": "-1",
+    }
+    service.process_raw_message(
+        raw, source="group_at_me", default_chat_type="group", run_id="run_1"
+    )
+    with store.connect() as conn:
+        approval = conn.execute(
+            "SELECT short_id, payload_json FROM approvals"
+        ).fetchone()
+        notification = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'owner_notification'"
+        ).fetchone()
+    assert json.loads(approval["payload_json"])["allowed_reply_locations"] == [
+        "main",
+        "thread",
+    ]
+    assert json.loads(notification["payload_json"])["allowed_reply_locations"] == [
+        "main",
+        "thread",
+    ]
+    result = OperatorCommandService(store).send(
+        approval["short_id"], "owner reply", actor="owner", reply_location="thread"
+    )
+    assert result.status == "applied"
+    with store.connect() as conn:
+        action = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'send_reply'"
+        ).fetchone()
+    assert (
+        json.loads(action["payload_json"])["reply_destination"]["thread_id"]
+        == "omt_root"
+    )
+
+
+def test_agent_can_reply_in_selected_root_topic_from_another_topic(
+    tmp_path: Path,
+) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.extend(
+        [
+            _session_output(
+                answerability="no_reply",
+                proposed_reply="",
+                reply_target_message_id=None,
+            ),
+            _session_output(
+                include_task_label=False,
+                reply_target_message_id="om_root",
+                reply_location="thread",
+            ),
+        ]
+    )
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)})
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+    root = _message("om_root", mentions=[{"open_id": "ou_owner"}]) | {
+        "thread_id": "omt_b",
+        "message_position": "42",
+        "thread_message_position": "-1",
+    }
+    followup = _message("om_followup", mentions=[{"open_id": "ou_owner"}]) | {
+        "thread_id": "omt_a",
+        "message_position": "-3",
+        "thread_message_position": "0",
+        "reply_to_message_id": "om_root",
+    }
+    service.process_raw_message(
+        root, source="group_at_me", default_chat_type="group", run_id="run_1"
+    )
+    service.process_raw_message(
+        followup, source="group_at_me", default_chat_type="group", run_id="run_2"
+    )
+    with store.connect() as conn:
+        action = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'send_reply'"
+        ).fetchone()
+    payload = json.loads(action["payload_json"])
+    assert payload["reply_target_message_id"] == "om_root"
+    assert payload["reply_destination"] == {
+        "chat_id": "oc_1",
+        "location": "thread",
+        "thread_id": "omt_b",
+    }
+
+
+def test_owner_edited_reply_keeps_agent_selected_thread(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(
+        _session_output(
+            answerability="needs_owner",
+            reply_target_message_id="om_root",
+            reply_location="thread",
+        )
+    )
+    store, service, _ = _service(tmp_path, hermes=hermes)
+    raw = _message("om_root", mentions=[{"open_id": "ou_owner"}]) | {
+        "thread_id": "omt_root",
+        "message_position": "42",
+        "thread_message_position": "-1",
+    }
+    service.process_raw_message(
+        raw, source="group_at_me", default_chat_type="group", run_id="run_1"
+    )
+    with store.connect() as conn:
+        approval = conn.execute(
+            "SELECT short_id, payload_json FROM approvals"
+        ).fetchone()
+    assert (
+        json.loads(approval["payload_json"])["reply_destination"]["location"]
+        == "thread"
+    )
+    result = OperatorCommandService(store).send(
+        approval["short_id"], "edited reply", actor="owner"
+    )
+    assert result.status == "applied"
+    with store.connect() as conn:
+        action = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'send_reply'"
+        ).fetchone()
+    payload = json.loads(action["payload_json"])
+    assert payload["text"] == "edited reply"
+    assert payload["reply_destination"] == {
+        "chat_id": "oc_1",
+        "location": "thread",
+        "thread_id": "omt_root",
+    }
 
 
 def _assert_owner_notification_context(

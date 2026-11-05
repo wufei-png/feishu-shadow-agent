@@ -85,6 +85,11 @@ class BaseTaskSessionOutput(StrictModel):
             "reply_target_message_id",
             "one allowed Reply Context target for `auto_reply` or `needs_owner`; null for `no_reply`.",
         ),
+        (
+            "reply_location",
+            "for a reply, choose `main` or `thread` from the selected target's allowed locations; "
+            "if no location is available use `needs_owner` and null; null for `no_reply`.",
+        ),
         ("watch_action", "`keep_watching` or `close`."),
     )
 
@@ -115,6 +120,14 @@ class BaseTaskSessionOutput(StrictModel):
             "for no_reply. When present, it must be one of the allowed reply targets in Reply Context."
         ),
     )
+    reply_location: Literal["main", "thread"] | None = Field(
+        default=None,
+        description=(
+            "Where to send the reply: main chat or the selected message's existing thread. "
+            "Choose only a location listed for that target in Reply Context. Use needs_owner "
+            "and null when no location is available; null for no_reply."
+        ),
+    )
     watch_action: Literal["keep_watching", "close"] = Field(
         default="keep_watching",
         description="Whether to keep watching this task or close it.",
@@ -134,6 +147,8 @@ class BaseTaskSessionOutput(StrictModel):
                 raise ValueError("no_reply requires proposed_reply to be empty")
             if self.reply_target_message_id is not None:
                 raise ValueError("no_reply requires reply_target_message_id to be null")
+            if self.reply_location is not None:
+                raise ValueError("no_reply requires reply_location to be null")
             return self
         if not proposed_reply:
             raise ValueError(

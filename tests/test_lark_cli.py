@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from feishu_shadow_agent.feishu.lark_cli import LarkCliClient
+from feishu_shadow_agent.feishu.lark_cli import LarkCliClient, LarkCliCommandError
 from feishu_shadow_agent.types import LarkCliResult
 
 
@@ -135,6 +135,21 @@ def test_build_messages_send_defaults_to_dry_run_and_can_send_test() -> None:
     assert "--dry-run" not in send_argv
 
 
+@pytest.mark.parametrize("identity", ["user", "bot"])
+def test_reply_thread_flag_is_explicit_for_both_identities(identity: str) -> None:
+    client = LarkCliClient()
+    assert "--reply-in-thread" not in client.build_messages_reply(
+        as_identity=identity, message_id="om_root", text="hello", idempotency_key="idem"
+    )
+    assert "--reply-in-thread" in client.build_messages_reply(
+        as_identity=identity,
+        message_id="om_root",
+        text="hello",
+        idempotency_key="idem",
+        reply_in_thread=True,
+    )
+
+
 def test_build_messages_send_card_uses_interactive_content() -> None:
     client = LarkCliClient(path="lark-cli")
 
@@ -214,6 +229,107 @@ def test_run_json_returns_structured_error_for_non_json_stdout() -> None:
 
     assert not result.ok
     assert "not valid JSON" in (result.error or "")
+
+
+def test_run_json_accepts_only_the_known_warning_before_complete_json() -> None:
+    warning = "warning: reactions_partial_failed: 1 message(s) failed (om_1)"
+    stdout = f'{warning}\n{{"ok":true,"data":{{"messages":[]}}}}'
+
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        return LarkCliResult(argv=argv, exit_code=0, stdout=stdout)
+
+    client = LarkCliClient(path="lark-cli", runner=runner)
+    page = client.get_messages(as_identity="user", message_ids=["om_1"])
+    assert page.items == []
+    assert page.warnings == (warning,)
+    result = client.run_json(["lark-cli", "x"])
+    assert result.stdout == stdout
+
+    for invalid in (
+        'warning: something_else\n{"ok":true}',
+        'warning: reactions_partial_failed_extra: unexpected\n{"ok":true}',
+        'warning: reactions_partial_failed\n{"ok":true}\nextra',
+        'warning: reactions_partial_failed\n{"ok":true}{"ok":true}',
+        "",
+    ):
+        stdout = invalid
+        assert not client.run_json(["lark-cli", "x"]).ok
+
+
+def test_message_page_preserves_known_warning_from_stderr() -> None:
+    warning = "warning: reactions_partial_failed: 2 message(s) failed (om_1, om_2)"
+
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        return LarkCliResult(
+            argv=argv,
+            exit_code=0,
+            stdout='{"ok":true,"data":{"messages":[]}}',
+            stderr=f"unrelated diagnostic\n{warning}\n",
+        )
+
+    page = LarkCliClient(runner=runner).get_messages(
+        as_identity="user", message_ids=["om_1"]
+    )
+    assert page.warnings == (warning,)
+
+
+def test_run_json_does_not_treat_error_envelope_as_success() -> None:
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        return LarkCliResult(
+            argv=argv, exit_code=0, stdout='{"ok":false,"error":"failed"}'
+        )
+
+    result = LarkCliClient(runner=runner).run_json(["lark-cli", "x"])
+    assert not result.ok
+    assert result.json_data == {"ok": False, "error": "failed"}
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {},
+        {"ok": False, "data": {"messages": []}},
+        {"code": 10002, "data": {"messages": []}},
+        {"data": {}},
+        {"data": {"messages": None}},
+        {"data": {"messages": [{"message_id": "om_1"}, None]}},
+        {"data": {"messages": [], "has_more": True}},
+        {"data": {"messages": [], "has_more": "unknown"}},
+        {"data": [], "has_more": True},
+        {"data": [], "has_more": "unknown"},
+        {"data": {"messages": [], "page_token": "inner"}, "page_token": "outer"},
+    ],
+)
+def test_invalid_message_page_is_not_an_empty_success(data: object) -> None:
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        return LarkCliResult(argv=argv, exit_code=0, json_data=data)
+
+    with pytest.raises(LarkCliCommandError):
+        LarkCliClient(runner=runner).get_messages(
+            as_identity="user", message_ids=["om_1"]
+        )
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"data": [{"message_id": "om_1"}], "has_more": True, "page_token": "next"},
+        {
+            "data": {"messages": [{"message_id": "om_1"}]},
+            "has_more": True,
+            "page_token": "next",
+        },
+    ],
+)
+def test_message_page_preserves_pagination_from_outer_envelope(data: object) -> None:
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        return LarkCliResult(argv=argv, exit_code=0, json_data=data)
+
+    page = LarkCliClient(runner=runner).get_messages(
+        as_identity="user", message_ids=["om_1"]
+    )
+    assert page.items == [{"message_id": "om_1"}]
+    assert page.has_more and page.next_page_token == "next"
 
 
 def test_run_json_preserves_command_failure() -> None:

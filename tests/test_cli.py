@@ -53,6 +53,8 @@ def _insert_task(store: SQLiteStore, short_id: str, root_message_id: str) -> int
             ),
         )
     assert cursor.lastrowid is not None
+    if store.get_message(root_message_id) is None:
+        _insert_message(store, root_message_id)
     return cursor.lastrowid
 
 
@@ -61,7 +63,7 @@ def _insert_message(store: SQLiteStore, message_id: str) -> None:
     with store.connect() as conn:
         conn.execute(
             """
-            INSERT INTO messages(message_id, chat_id, chat_type, sender_id, sent_at, text, raw_json, inserted_at)
+            INSERT OR IGNORE INTO messages(message_id, chat_id, chat_type, sender_id, sent_at, text, raw_json, inserted_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (

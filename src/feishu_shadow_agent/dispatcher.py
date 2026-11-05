@@ -19,6 +19,7 @@ from .membership import (
     record_bot_membership_absence,
 )
 from .policy import PolicyResolver
+from .reply_destination import candidate_from_message, message_location
 from .store.sqlite_store import SQLiteStore
 from .time_utils import format_instant, utc_now
 from .types import (
@@ -41,6 +42,12 @@ READBACK_BLOCKING_WARNINGS = {
     "readback_reply_target_unavailable",
     "readback_mentions_mismatch",
     "readback_mentions_unavailable",
+    "readback_chat_mismatch",
+    "readback_chat_unavailable",
+    "readback_location_mismatch",
+    "readback_location_unavailable",
+    "readback_thread_mismatch",
+    "readback_thread_unavailable",
 }
 
 
@@ -208,6 +215,14 @@ class Dispatcher:
                         run_id=run_id,
                         dedupe_suffix=f"attempt:{claim.attempt.id}",
                     )
+                elif sent and result.get("warnings"):
+                    self._queue_failed_reply_notification(
+                        claimed,
+                        status=action_status,
+                        result=result,
+                        run_id=run_id,
+                        dedupe_suffix=f"readback:{claim.attempt.id}",
+                    )
                 summary = _bump(
                     summary, processed=1, sent=1 if sent else 0, failed=0 if sent else 1
                 )
@@ -239,7 +254,12 @@ class Dispatcher:
         if action.kind != "send_reply":
             return
         uncertain = status == ActionStatus.FAILED_NEEDS_REVIEW.value
-        stage = result.get("error_stage") or result.get("recovery_reason") or "unknown"
+        sent_unverified = status == ActionStatus.SENT.value
+        stage = (
+            "readback"
+            if sent_unverified
+            else result.get("error_stage") or result.get("recovery_reason") or "unknown"
+        )
         stage_result = result.get(str(result.get("error_stage") or ""))
         error = (
             cast(dict[str, Any], stage_result).get("error")
@@ -258,17 +278,26 @@ class Dispatcher:
             with suppress(KeyError):
                 task_id = self.store.get_task_by_id(action.task_id).short_id
         payload: dict[str, Any] = {
-            "type": "dispatch_uncertain" if uncertain else "dispatch_failed",
+            "type": "dispatch_readback_unverified"
+            if sent_unverified
+            else "dispatch_uncertain"
+            if uncertain
+            else "dispatch_failed",
             "task_id": task_id,
             "reason": status,
             "message": (
-                f"Reply dispatch action {action.id} is uncertain; inspect evidence "
+                f"Reply dispatch action {action.id} was sent, but readback could not "
+                "verify delivery; inspect evidence without resending."
+                if sent_unverified
+                else f"Reply dispatch action {action.id} is uncertain; inspect evidence "
                 "before retrying."
                 if uncertain
                 else f"Reply dispatch action {action.id} failed before completion."
             ),
             "stage": stage,
             "target": action.target_message_id,
+            "reply_destination": action.payload.get("reply_destination"),
+            "sent_message_id": result.get("sent_message_id"),
             "error": error,
             "dedupe_key": f"dispatch:{action.id}:{dedupe_suffix}",
         }
@@ -655,7 +684,33 @@ class Dispatcher:
                 return _local_error(action, "send_reply text is missing")
             if identity not in {"user", "bot"}:
                 return _local_error(action, "send_reply identity must be user or bot")
-            if identity == "bot" and action.task_id is not None:
+            destination = action.payload.get("reply_destination")
+            if not isinstance(destination, dict) or action.task_id is None:
+                return _local_error(action, "send_reply destination is missing")
+            destination = cast(dict[str, Any], destination)
+            try:
+                task = self.store.get_task_by_id(action.task_id)
+            except KeyError:
+                return _local_error(action, "send_reply task is missing")
+            target = self.store.get_message(target_message_id)
+            candidate = (
+                None
+                if target is None
+                else candidate_from_message(
+                    dict(target),
+                    expected_chat_id=task.chat_id,
+                    chat_type=task.chat_type,
+                    allow_deleted=action.payload.get("source") == "owner_send",
+                )
+            )
+            location = destination.get("location")
+            if (
+                candidate is None
+                or not isinstance(location, str)
+                or candidate.destination(location) != destination
+            ):
+                return _local_error(action, "send_reply destination cannot be verified")
+            if identity == "bot":
                 with suppress(KeyError):
                     task = self.store.get_task_by_id(action.task_id)
                     membership_status = effective_membership_status(
@@ -677,6 +732,7 @@ class Dispatcher:
                 message_id=target_message_id,
                 text=text,
                 idempotency_key=action.idempotency_key,
+                reply_in_thread=location == "thread",
                 dry_run=dry_run,
             )
         if action.kind == "owner_notification":
@@ -709,7 +765,9 @@ class Dispatcher:
         outcome = self._readback_outcome(
             action, sent_message_id=sent_message_id, run_id=run_id
         )
-        if outcome.message is not None:
+        if outcome.message is not None and _readback_attempt_verified(
+            action, readback=outcome.result, warnings=outcome.warnings
+        ):
             result = dict(outcome.result or {})
             result["inserted"] = self._persist_readback_message(action, outcome.message)
             return {"result": result, "warnings": outcome.warnings}
@@ -758,6 +816,12 @@ class Dispatcher:
                 result={"ok": False, "error": str(exc), "message_id": sent_message_id},
                 warnings=["readback_failed"],
             )
+        if page.warnings:
+            self.logger.warning(
+                "dispatch_readback_cli_warning",
+                run_id=run_id,
+                data={"action_id": action.id, "warnings": list(page.warnings)},
+            )
         item = _find_message(page.items, sent_message_id)
         if item is None:
             self.logger.warning(
@@ -776,6 +840,25 @@ class Dispatcher:
         raw = dict(item)
         raw["sent_by_agent"] = True
         message = self.normalizer.normalize(raw)
+        if (
+            action.kind == "send_reply"
+            and action.task_id is not None
+            and not message.chat_type
+        ):
+            try:
+                task = self.store.get_task_by_id(action.task_id)
+            except KeyError:
+                task = None
+            destination = action.payload.get("reply_destination")
+            if (
+                task is not None
+                and task.chat_type == "p2p"
+                and message.chat_id
+                and message.chat_id == task.chat_id
+                and isinstance(destination, dict)
+                and cast(dict[str, Any], destination).get("chat_id") == message.chat_id
+            ):
+                message = self.normalizer.normalize(raw, default_chat_type="p2p")
         if action.kind == "send_reply":
             target = _target_message_id(action)
             if (
@@ -786,6 +869,26 @@ class Dispatcher:
                 warnings.append("readback_reply_target_mismatch")
             elif not message.reply_to_message_id:
                 warnings.append("readback_reply_target_unavailable")
+            destination = action.payload.get("reply_destination")
+            expected = (
+                cast(dict[str, Any], destination)
+                if isinstance(destination, dict)
+                else {}
+            )
+            if not message.chat_id:
+                warnings.append("readback_chat_unavailable")
+            elif message.chat_id != expected.get("chat_id"):
+                warnings.append("readback_chat_mismatch")
+            actual_location = message_location(raw, chat_type=message.chat_type)
+            if actual_location is None:
+                warnings.append("readback_location_unavailable")
+            elif actual_location != expected.get("location"):
+                warnings.append("readback_location_mismatch")
+            if expected.get("location") == "thread":
+                if not message.thread_id:
+                    warnings.append("readback_thread_unavailable")
+                elif message.thread_id != expected.get("thread_id"):
+                    warnings.append("readback_thread_mismatch")
             expected_mentions = _expected_mentions(_payload_text(action))
             if expected_mentions and not message.mentions:
                 warnings.append("readback_mentions_unavailable")
@@ -797,6 +900,9 @@ class Dispatcher:
                 "message_id": sent_message_id,
                 "inserted": False,
                 "reply_to_message_id": message.reply_to_message_id,
+                "chat_id": message.chat_id,
+                "thread_id": message.thread_id,
+                "location": message_location(raw, chat_type=message.chat_type),
                 "mentions": message.mentions,
                 "text": message.text,
                 "raw": page.raw,
@@ -910,9 +1016,8 @@ def _mark_sent_evidence_error(
         or readback_map.get("reply_to_message_id") != target_message_id
     ):
         return "readback reply_to_message_id did not match action target"
-    blocking_warnings = {"readback_mentions_mismatch", "readback_mentions_unavailable"}
-    if blocking_warnings & set(warnings):
-        return "readback mentions did not match action text"
+    if READBACK_BLOCKING_WARNINGS & set(warnings):
+        return "readback destination or mentions did not match the action"
     text_error = _mark_sent_text_evidence_error(
         expected=_payload_text(action), readback=readback_map
     )
@@ -1013,6 +1118,10 @@ def _owner_notification_text(payload: dict[str, Any]) -> str:
         "stage",
         "target",
         "reply_target_message_id",
+        "previous_reply_destination",
+        "reply_destination",
+        "allowed_reply_locations",
+        "sent_message_id",
         "attempt_count",
         "pending_approval_ids",
         "statuses",
@@ -1180,8 +1289,6 @@ def _find_message(
         found = item.get("message_id") or item.get("messageId") or item.get("id")
         if found == message_id:
             return item
-    if len(items) == 1:
-        return items[0]
     return None
 
 

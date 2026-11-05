@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -486,6 +487,50 @@ def test_failed_pagination_does_not_advance_checkpoint(tmp_path: Path) -> None:
     assert store.get_checkpoint("ingest.p2p") is None
 
 
+def test_missing_next_cursor_does_not_advance_checkpoint(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    fake.search_pages[("p2p", False, None)] = MessagePage(
+        [_message("om_1", chat_type="p2p")], has_more=True
+    )
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+
+    with pytest.raises(RuntimeError, match="without a next token"):
+        service.ingest_p2p(run_id="run_1")
+
+    assert store.get_checkpoint("ingest.p2p") is None
+
+
+def test_accepted_cli_warning_is_logged(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    fake.search_pages[("p2p", False, None)] = MessagePage(
+        [], warnings=("warning: reactions_partial_failed",)
+    )
+    log_path = tmp_path / "agent.jsonl"
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(),
+        logger=JSONLLogger(log_path),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+
+    service.ingest_p2p(run_id="run_1")
+
+    records = [json.loads(line) for line in log_path.read_text().splitlines()]
+    warnings = [
+        record for record in records if record["event"] == "message_page_cli_warning"
+    ]
+    assert warnings[0]["data"]["warnings"] == ["warning: reactions_partial_failed"]
+
+
 def test_bounded_fixed_window_resumes_across_more_than_two_page_caps(
     tmp_path: Path,
 ) -> None:
@@ -841,6 +886,86 @@ def test_processing_cursor_ignores_nonsemantic_replay_enrichment(
     assert "ingestion_processing_cursor_reset" not in (
         tmp_path / "agent.jsonl"
     ).read_text(encoding="utf-8")
+
+
+def test_processing_cursor_replays_position_enrichment(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    first = _message("om_1", chat_type="p2p", create_time="2026-06-22T10:01:00+08:00")
+    second = _message("om_2", chat_type="p2p", create_time="2026-06-22T10:02:00+08:00")
+    fake.search_pages[("p2p", False, None)] = MessagePage([first, second])
+    config = _config(daemon=DaemonConfig(ingest_tick_budget_seconds=1))
+
+    first_clock = iter([0.0, 0.0, 0.0, 1.0])
+    IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+        monotonic=lambda: next(first_clock, 1.0),
+    ).ingest_p2p(run_id="run_1")
+
+    fake.search_pages[("p2p", False, None)] = MessagePage(
+        [first | {"message_position": "42"}, second]
+    )
+    second_clock = iter([0.0, 0.0, 0.0, 0.0])
+    IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+        monotonic=lambda: next(second_clock, 0.0),
+    ).ingest_p2p(run_id="run_2")
+
+    row = store.get_message("om_1")
+    assert row is not None and json.loads(row["raw_json"])["message_position"] == "42"
+    assert row["revision"] == 1
+    assert "ingestion_processing_cursor_reset" in (tmp_path / "agent.jsonl").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_position_conflict_refetches_current_snapshot_and_stays_blocked_on_failure(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    first = _message("om_1", thread_id="omt_1", mentions=[{"open_id": "ou_owner"}]) | {
+        "message_position": "42",
+        "thread_message_position": "-1",
+    }
+    conflict = first | {"message_position": "-3", "thread_message_position": "0"}
+    service.process_raw_message(
+        first, source="group_at_me", default_chat_type="group", run_id="run_1"
+    )
+    fake.current_message_error = RuntimeError("mget unavailable")
+    with pytest.raises(RuntimeError, match="mget unavailable"):
+        service.process_raw_message(
+            conflict, source="group_at_me", default_chat_type="group", run_id="run_2"
+        )
+    row = store.get_message("om_1")
+    assert row is not None and json.loads(row["raw_json"])["reply_position_conflict"]
+
+    fake.current_message_error = None
+    fake.current_messages["om_1"] = conflict
+    service.process_raw_message(
+        conflict, source="group_at_me", default_chat_type="group", run_id="run_3"
+    )
+    row = store.get_message("om_1")
+    assert row is not None
+    raw = json.loads(row["raw_json"])
+    assert "reply_position_conflict" not in raw
+    assert raw["thread_message_position"] == "0"
+    assert fake.calls.count("mget:user") == 2
 
 
 def test_fetch_reserve_leaves_time_to_process_before_the_tick_deadline(
@@ -1514,6 +1639,53 @@ def test_thread_unique_match_uses_thread_shortcut(tmp_path: Path) -> None:
     assert attached is not None
     assert attached.decision.route == "attach_task"
     assert attached.decision.matched_by == "thread"
+
+
+@pytest.mark.parametrize("root_in_main", [False, True])
+def test_active_watch_includes_main_when_root_with_thread_is_in_main(
+    tmp_path: Path, root_in_main: bool
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    fake = FakeFeishuClient()
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    root = _message(
+        "om_root", thread_id="omt_1", mentions=[{"open_id": "ou_owner"}]
+    ) | {
+        "message_position": "42" if root_in_main else "-3",
+        "thread_message_position": "-1" if root_in_main else "0",
+    }
+    service.process_raw_message(
+        root, source="group_at_me", default_chat_type="group", run_id="run_1"
+    )
+    fake.chat_pages[("oc_1", None)] = MessagePage(
+        [
+            _message(
+                "om_main_follow",
+                reply_to="om_root",
+                create_time="2026-06-22T10:09:00+08:00",
+            )
+        ]
+    )
+    fake.thread_pages[("omt_1", None)] = MessagePage(
+        [
+            _message(
+                "om_thread_follow",
+                thread_id="omt_1",
+                create_time="2026-06-22T10:09:10+08:00",
+            )
+        ]
+    )
+    service.run_active_watch(run_id="run_2")
+    assert "thread:omt_1:None" in fake.calls
+    assert ("chat:oc_1:None" in fake.calls) is root_in_main
+    assert (store.get_message("om_main_follow") is not None) is root_in_main
+    assert store.get_message("om_thread_follow") is not None
 
 
 def test_reply_to_wins_over_conflicting_thread_and_burst_signals(

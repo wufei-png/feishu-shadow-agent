@@ -11,6 +11,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 from ..config import AppConfig, ChatPolicyConfig, ReplyPolicyConfig
+from ..reply_destination import POSITION_FIELDS, candidate_from_message, position_value
 from ..revision import message_semantic_hash
 from ..time_utils import normalize_instant, parse_instant_or_none, shift_instant
 from ..types import (
@@ -2180,13 +2181,36 @@ class SQLiteStore:
                 """,
                 (len("thread:") + 1, now, len("thread:"), now),
             ).fetchall()
+            roots = conn.execute(
+                """
+                SELECT m.message_id, m.chat_id, m.thread_id, m.raw_json, m.is_deleted,
+                       t.chat_id AS task_chat_id, t.chat_type AS task_chat_type
+                FROM tasks t
+                JOIN messages m ON m.message_id = t.root_message_id
+                WHERE t.status = 'watching'
+                  AND (t.watch_until IS NULL OR julianday(t.watch_until) > julianday(?))
+                  AND t.chat_type = 'group'
+                  AND EXISTS (
+                    SELECT 1 FROM task_watch_keys wk
+                    WHERE wk.task_id = t.id AND wk.key LIKE 'thread:%'
+                  )
+                """,
+                (now,),
+            ).fetchall()
+        targets = {(row["chat_id"], row["chat_type"], row["thread_id"]) for row in rows}
+        for root in roots:
+            candidate = candidate_from_message(
+                dict(root),
+                expected_chat_id=root["task_chat_id"],
+                chat_type=root["task_chat_type"],
+            )
+            if candidate is not None and "main" in candidate.locations:
+                targets.add((root["task_chat_id"], root["task_chat_type"], None))
         return [
-            {
-                "chat_id": row["chat_id"],
-                "chat_type": row["chat_type"],
-                "thread_id": row["thread_id"],
-            }
-            for row in rows
+            {"chat_id": chat_id, "chat_type": chat_type, "thread_id": thread_id}
+            for chat_id, chat_type, thread_id in sorted(
+                targets, key=lambda target: (target[0] or "", target[2] or "")
+            )
         ]
 
     def record_routing_audit(
@@ -3290,6 +3314,12 @@ class SQLiteStore:
             payload = _bind_payload_to_latest_external_message_locked(
                 conn, task_id=task_id, payload=payload
             )
+            payload = _bind_unique_reply_destination_locked(
+                conn,
+                task_id=task_id,
+                target_message_id=target_message_id,
+                payload=payload,
+            )
             return self._create_send_reply_action_locked(
                 conn,
                 task_id=task_id,
@@ -3343,6 +3373,13 @@ class SQLiteStore:
             payload = _bind_payload_to_latest_external_message_locked(
                 conn, task_id=task_id, payload=payload
             )
+            target = payload.get("reply_target_message_id") or payload.get(
+                "target_message_id"
+            )
+            if isinstance(target, str) and target:
+                payload = _bind_unique_reply_destination_locked(
+                    conn, task_id=task_id, target_message_id=target, payload=payload
+                )
             source_message_id = _payload_source_message_id(payload)
             source_revision = _payload_source_revision(payload)
             short_id = self._unique_short_id_in_table(
@@ -3500,6 +3537,7 @@ class SQLiteStore:
         verb: str,
         target_id: str,
         final_reply: str | None = None,
+        reply_location: str | None = None,
         keep_watching_until: str | None = None,
         actor: str = "owner",
         feedback_reason: FeedbackReason | None = None,
@@ -3538,6 +3576,7 @@ class SQLiteStore:
                     verb=verb,
                     target_id=target_id,
                     final_reply=final_reply,
+                    reply_location=reply_location,
                     now=now,
                     keep_watching_until=keep_watching_until,
                     command_id=message_id,
@@ -3616,6 +3655,7 @@ class SQLiteStore:
         verb: str,
         target_id: str,
         final_reply: str | None,
+        reply_location: str | None,
         now: str,
         keep_watching_until: str | None,
         command_id: str,
@@ -3720,6 +3760,20 @@ class SQLiteStore:
                 }
             if verb == "approve" and not _task_is_watching(task):
                 raise ValueError("approval task is not watching")
+            if verb == "approve":
+                approval_target = payload.get("reply_target_message_id") or payload.get(
+                    "target_message_id"
+                )
+                if not isinstance(approval_target, str) or task is None:
+                    raise ValueError("approval reply target is missing")
+                _resolve_reply_destination_locked(
+                    conn,
+                    task=task,
+                    target_message_id=approval_target,
+                    existing=payload.get("reply_destination"),
+                    location=None,
+                    require_existing=True,
+                )
             conn.execute(
                 """
                 UPDATE approvals
@@ -3968,6 +4022,14 @@ class SQLiteStore:
                 "identity": "user",
                 "source": "owner_send",
             }
+            payload["reply_destination"] = _resolve_reply_destination_locked(
+                conn,
+                task=task,
+                target_message_id=target_message_id,
+                existing=original_payload.get("reply_destination"),
+                location=reply_location,
+                allow_deleted=True,
+            )
             if approval_id:
                 for key in ("source_message_id", "source_revision"):
                     if key in original_payload:
@@ -4985,7 +5047,7 @@ class SQLiteStore:
     ) -> MessageUpsertResult:
         existing = conn.execute(
             """
-            SELECT revision, semantic_hash, is_deleted, normalized_json
+            SELECT revision, semantic_hash, is_deleted, normalized_json, raw_json, thread_id
             FROM messages
             WHERE message_id = ?
             """,
@@ -5062,6 +5124,40 @@ class SQLiteStore:
                 is_deleted=True,
                 semantic_hash=previous_hash,
             )
+        raw = dict(message.raw)
+        if not message.is_deleted:
+            previous_raw = _loads_json_object(existing["raw_json"])
+            raw, position_conflict = _merge_reply_position_evidence(
+                previous_raw,
+                message.raw,
+                previous_thread_id=existing["thread_id"],
+                incoming_thread_id=message.thread_id,
+                confirmed_current=confirmed_current,
+            )
+            if semantic_hash == previous_hash or position_conflict:
+                stored_raw = dict(previous_raw)
+                for key in (*POSITION_FIELDS, "reply_position_conflict"):
+                    if key in raw:
+                        stored_raw[key] = raw[key]
+                    else:
+                        stored_raw.pop(key, None)
+                if stored_raw != previous_raw:
+                    conn.execute(
+                        "UPDATE messages SET raw_json = ? WHERE message_id = ?",
+                        (
+                            json.dumps(stored_raw, ensure_ascii=False, default=str),
+                            message.message_id,
+                        ),
+                    )
+            if position_conflict:
+                return MessageUpsertResult(
+                    inserted=False,
+                    changed=False,
+                    revision=previous_revision,
+                    is_deleted=False,
+                    semantic_hash=previous_hash,
+                    requires_confirmation=True,
+                )
         uninitialized_hash = previous_hash == ""
         semantic_hash_history = (
             []
@@ -5118,7 +5214,7 @@ class SQLiteStore:
             ensure_ascii=False,
             default=str,
         )
-        raw_json = json.dumps(message.raw, ensure_ascii=False, default=str)
+        raw_json = json.dumps(raw, ensure_ascii=False, default=str)
         cursor = conn.execute(
             """
             UPDATE messages
@@ -5280,6 +5376,70 @@ class SQLiteStore:
             """,
             [(task_id, key, created_at) for key in sorted(set(keys))],
         )
+
+
+def _bind_unique_reply_destination_locked(
+    conn: sqlite3.Connection,
+    *,
+    task_id: int,
+    target_message_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    if "reply_destination" in payload:
+        return payload
+    task = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if task is None:
+        return payload
+    try:
+        destination = _resolve_reply_destination_locked(
+            conn,
+            task=task,
+            target_message_id=target_message_id,
+            existing=None,
+            location=None,
+        )
+    except ValueError:
+        return payload
+    return payload | {"reply_destination": destination}
+
+
+def _resolve_reply_destination_locked(
+    conn: sqlite3.Connection,
+    *,
+    task: sqlite3.Row,
+    target_message_id: str,
+    existing: Any,
+    location: str | None,
+    require_existing: bool = False,
+    allow_deleted: bool = False,
+) -> dict[str, str]:
+    target = conn.execute(
+        "SELECT * FROM messages WHERE message_id = ?", (target_message_id,)
+    ).fetchone()
+    if target is None:
+        raise ValueError("reply destination target is unavailable")
+    candidate = candidate_from_message(
+        dict(target),
+        expected_chat_id=task["chat_id"],
+        chat_type=task["chat_type"],
+        allow_deleted=allow_deleted,
+    )
+    if candidate is None:
+        raise ValueError("reply destination target is not in the task chat")
+    if require_existing and not isinstance(existing, dict):
+        raise ValueError("reply destination is missing; use /send with --location")
+    chosen = location
+    if chosen is None and isinstance(existing, dict):
+        saved_location = cast(dict[str, Any], existing).get("location")
+        chosen = saved_location if isinstance(saved_location, str) else None
+    destination = candidate.destination(chosen)
+    if destination is None:
+        raise ValueError(
+            "reply destination is unavailable or requires --location main|thread"
+        )
+    if location is None and isinstance(existing, dict) and destination != existing:
+        raise ValueError("reply destination has changed; choose the location again")
+    return destination
 
 
 def _task_from_row(row: sqlite3.Row) -> TaskRecord:
@@ -5553,6 +5713,40 @@ def _cursor_lastrowid(cursor: sqlite3.Cursor) -> int:
     return int(lastrowid)
 
 
+def _merge_reply_position_evidence(
+    previous: dict[str, Any],
+    incoming: dict[str, Any],
+    *,
+    previous_thread_id: str | None,
+    incoming_thread_id: str | None,
+    confirmed_current: bool,
+) -> tuple[dict[str, Any], bool]:
+    raw = dict(incoming)
+    raw.pop("reply_position_conflict", None)
+    if confirmed_current:
+        return raw, False
+    conflict = previous.get("reply_position_conflict") is True or bool(
+        previous_thread_id
+        and incoming_thread_id
+        and previous_thread_id != incoming_thread_id
+    )
+    for key in POSITION_FIELDS:
+        old = previous.get(key)
+        new = incoming.get(key)
+        if old is not None and new is None:
+            raw[key] = old
+        elif old is not None and new is not None:
+            old_position = position_value(old)
+            new_position = position_value(new)
+            if old_position is None or new_position is None:
+                conflict = conflict or old != new
+            else:
+                conflict = conflict or old_position != new_position
+    if conflict:
+        raw["reply_position_conflict"] = True
+    return raw, conflict
+
+
 def _loads_json_object(value: Any) -> dict[str, Any]:
     loaded = _loads_json(value)
     return cast(dict[str, Any], loaded) if isinstance(loaded, dict) else {}
@@ -5624,6 +5818,7 @@ def _action_idempotency_key(
         {
             "task_id": task_id,
             "target_message_id": target_message_id,
+            "reply_destination": payload.get("reply_destination"),
             "text": payload.get("text") or payload.get("composed_text") or "",
             "source": payload.get("source") or "",
             "source_message_id": payload.get("source_message_id") or "",
@@ -5662,7 +5857,10 @@ def _find_failed_send_reply_action_for_payload(
         (task_id, target_message_id, execution_mode),
     ).fetchall()
     for row in rows:
-        if _payload_send_text(_loads_json_object(row["payload_json"])) == text:
+        previous = _loads_json_object(row["payload_json"])
+        if _payload_send_text(previous) == text and previous.get(
+            "reply_destination"
+        ) == payload.get("reply_destination"):
             return row
     return None
 
@@ -5685,6 +5883,10 @@ def _has_sent_send_reply_action_for_payload(
         target_message_id=target_message_id,
         text=text,
     ):
+        if _loads_json_object(row["payload_json"]).get(
+            "reply_destination"
+        ) != payload.get("reply_destination"):
+            continue
         row_source, row_revision = _action_source_binding(row)
         if source_message_id is None or source_revision is None:
             return True
@@ -6019,13 +6221,21 @@ def _approval_notification_payload(
             commands.append(f"/approve {approval_short_id}")
         commands.extend(
             [
-                f"/send {task_short_id} <final reply>",
+                f"/send {task_short_id} --location <main|thread> <final reply>"
+                if approval_payload.get("reply_destination") is None
+                else f"/send {task_short_id} <final reply>",
                 f"/reject {approval_short_id}",
             ]
         )
         payload["commands"] = commands
     payload["approval_id"] = approval_short_id
-    for key in ("source_message_id", "source_revision"):
+    for key in (
+        "source_message_id",
+        "source_revision",
+        "reply_destination",
+        "reply_target_message_id",
+        "allowed_reply_locations",
+    ):
         if key in approval_payload:
             payload[key] = approval_payload[key]
     return payload
@@ -6044,7 +6254,11 @@ def _pending_approval_notification_payload(
     if approvable:
         commands.append(f"/approve {approval_short_id}")
     if kind == "send_reply":
-        commands.append(f"/send {task_short_id} <final reply>")
+        commands.append(
+            f"/send {task_short_id} --location <main|thread> <final reply>"
+            if payload.get("reply_destination") is None
+            else f"/send {task_short_id} <final reply>"
+        )
     commands.append(f"/reject {approval_short_id}")
     return {
         "approval_id": approval_short_id,

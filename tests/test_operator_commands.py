@@ -53,6 +53,11 @@ def _insert_task(store: SQLiteStore, short_id: str, root_message_id: str) -> int
             ),
         )
     assert cursor.lastrowid is not None
+    with store.connect() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO messages(message_id, chat_id, chat_type, raw_json, inserted_at) VALUES (?, ?, ?, ?, ?)",
+            (root_message_id, "oc_1", "p2p", "{}", "now"),
+        )
     return cursor.lastrowid
 
 
@@ -108,6 +113,7 @@ def _processing_message(message_id: str = "om_processing") -> NormalizedMessage:
             "message_id": message_id,
             "chat_id": "oc_1",
             "chat_type": "group",
+            "message_position": "1",
             "sender_id": "ou_external",
             "sender_name": "External",
             "sender_type": "user",
@@ -118,6 +124,49 @@ def _processing_message(message_id: str = "om_processing") -> NormalizedMessage:
             },
         },
     )
+
+
+@pytest.mark.parametrize("location_argument", ["--location\tmain", "--location=main"])
+def test_send_text_parses_location_without_sending_option_as_message(
+    tmp_path: Path, location_argument: str
+) -> None:
+    store = _store(tmp_path)
+    _insert_task(store, "t_cmd", "om_root")
+    result = OperatorCommandService(store).apply_approval_text(
+        f"/send t_cmd {location_argument} hello",
+        command_id="om_command",
+        actor="owner",
+        execution_mode="production",
+        keep_watching_until="2026-12-01T00:00:00+08:00",
+    )
+    assert result is not None and result.status == "applied"
+    with store.connect() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'send_reply'"
+        ).fetchone()
+    payload = json.loads(row["payload_json"])
+    assert payload["text"] == "hello"
+    assert payload["reply_destination"]["location"] == "main"
+
+
+def test_send_text_rejects_incomplete_location_option(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    _insert_task(store, "t_cmd", "om_root")
+    result = OperatorCommandService(store).apply_approval_text(
+        "/send t_cmd --location",
+        command_id="om_command",
+        actor="owner",
+        execution_mode="production",
+        keep_watching_until="2026-12-01T00:00:00+08:00",
+    )
+    assert result is not None and result.status == "validation_failed"
+    with store.connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM actions WHERE kind = 'send_reply'"
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_operator_command_service_send_returns_stable_result_shape(
