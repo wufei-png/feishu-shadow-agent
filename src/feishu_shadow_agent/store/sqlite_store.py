@@ -13,7 +13,13 @@ from uuid import uuid4
 from ..config import AppConfig, ChatPolicyConfig, ReplyPolicyConfig
 from ..reply_destination import POSITION_FIELDS, candidate_from_message, position_value
 from ..revision import message_semantic_hash
-from ..time_utils import normalize_instant, parse_instant_or_none, shift_instant
+from ..time_utils import (
+    format_instant,
+    normalize_instant,
+    parse_instant_or_none,
+    shift_instant,
+    utc_now,
+)
 from ..types import (
     ActionKind,
     ActionRecord,
@@ -39,7 +45,6 @@ from ..types import (
     TaskRecord,
     TaskStatus,
     new_run_id,
-    utc_now_iso,
 )
 from .migrate import migrate_schema
 
@@ -90,8 +95,12 @@ WHERE status = 'pending'
 """
 
 
+def _store_now_iso() -> str:
+    return format_instant(utc_now())
+
+
 class SQLiteStore:
-    def __init__(self, path: str | Path, *, clock: Callable[[], str] = utc_now_iso):
+    def __init__(self, path: str | Path, *, clock: Callable[[], str] = _store_now_iso):
         self.path = Path(path)
         self.clock = lambda: normalize_instant(clock())
         self._initialize_lock = threading.Lock()
@@ -241,7 +250,6 @@ class SQLiteStore:
         reason: str | None = None,
     ) -> dict[str, Any]:
         self.initialize()
-        now = self.clock()
         audit_reason = reason or (
             "policy import-config --replace" if replace else "policy import-config"
         )
@@ -256,6 +264,8 @@ class SQLiteStore:
         }
         global_policy = _global_product_policy_from_config(config)
         with self.connect() as conn:
+            conn.execute("BEGIN EXCLUSIVE")
+            now = self.clock()
             existing_global = conn.execute(
                 "SELECT policy_json FROM product_policies WHERE key = ?",
                 (PRODUCT_POLICY_KEY,),
@@ -421,10 +431,11 @@ class SQLiteStore:
         reason: str | None = None,
     ) -> dict[str, Any]:
         self.initialize()
-        now = self.clock()
         new_policy = _normalize_chat_product_policy(policy)
         chat_id = str(new_policy["chat_id"])
         with self.connect() as conn:
+            conn.execute("BEGIN EXCLUSIVE")
+            now = self.clock()
             existing = conn.execute(
                 """
                 SELECT chat_id, name, auto_reply, bot_joined, reply_identity,
@@ -529,11 +540,11 @@ class SQLiteStore:
         normalized_chats = [_normalize_chat_product_policy(chat) for chat in chats]
         incoming = {str(chat["chat_id"]): chat for chat in normalized_chats}
         self.initialize()
-        now = self.clock()
         actor = "dry_run_policy_sync"
         reason = "production policy snapshot"
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("BEGIN EXCLUSIVE")
+            now = self.clock()
             global_row = conn.execute(
                 "SELECT policy_json FROM product_policies WHERE key = ?",
                 (PRODUCT_POLICY_KEY,),

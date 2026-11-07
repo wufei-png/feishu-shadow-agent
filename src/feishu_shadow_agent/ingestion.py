@@ -1215,7 +1215,7 @@ class IngestionService:
                 run_id=run_id,
                 chat_id=chat_id,
                 activation_id=int(activation_id),
-                not_before=str(activated_at),
+                not_before=_group_activation_lower_bound(str(activated_at)),
                 legacy_checkpoint_key="ingest.group_at_me",
             )
             processed += result.processed
@@ -1336,7 +1336,11 @@ class IngestionService:
             ):
                 continue
             suffix = "" if activation is None else f".{activation['activation_id']}"
-            not_before = None if activation is None else str(activation["activated_at"])
+            not_before = (
+                None
+                if activation is None
+                else _group_activation_lower_bound(str(activation["activated_at"]))
+            )
             active_id = None if activation is None else int(activation["activation_id"])
             if thread_id:
                 if (
@@ -1363,6 +1367,8 @@ class IngestionService:
                         f"active_watch.thread.{thread_id}" if activation else None
                     ),
                 )
+                if parse_instant(window.start) > parse_instant(window.end):
+                    continue
 
                 def fetch_thread(
                     token: str | None,
@@ -1411,6 +1417,8 @@ class IngestionService:
                         f"active_watch.chat.{chat_id}" if activation else None
                     ),
                 )
+                if parse_instant(window.start) > parse_instant(window.end):
+                    continue
                 window_start = window.start
                 window_end = window.end
 
@@ -1516,9 +1524,7 @@ class IngestionService:
             legacy_checkpoint_key=legacy_checkpoint_key,
         )
         if parse_instant(window.start) > parse_instant(window.end):
-            return StageResult(
-                name, ok=False, error="policy activation is in the future"
-            )
+            return StageResult(name, ok=True)
 
         def fetch_page(
             token: str | None, page_size: int, page_limit: int
@@ -2851,6 +2857,13 @@ def _should_process_resources(
         )
         and store.has_missing_resources(message.resources)
     )
+
+
+def _group_activation_lower_bound(value: str) -> str:
+    # Provider search timestamps can be second-precision. Exclude the whole
+    # activation second so older messages cannot be mistaken for new ones.
+    activated = parse_instant(value)
+    return format_instant(activated.replace(microsecond=0) + timedelta(seconds=1))
 
 
 def _minus_seconds(value: str, seconds: int) -> str:

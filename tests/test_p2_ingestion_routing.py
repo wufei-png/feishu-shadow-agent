@@ -248,7 +248,7 @@ def _seed_policy(store: SQLiteStore, config: AppConfig) -> None:
 
 def _allow_test_groups(store: SQLiteStore, *chat_ids: str) -> None:
     clock = store.clock
-    store.clock = lambda: "2026-06-22T02:00:00+00:00"
+    store.clock = lambda: "2026-06-22T01:59:59+00:00"
     try:
         for chat_id in chat_ids or ("oc_1",):
             store.upsert_chat_product_policy(
@@ -517,7 +517,7 @@ def test_group_search_scopes_queries_and_reactivation_to_current_policy(
     )
     assert service.ingest_group_at_me(run_id="first").processed == 1
     assert fake.search_chat_ids == ["oc_1"]
-    assert fake.search_windows[0][1] == "2026-06-22T02:00:00+00:00"
+    assert fake.search_windows[0][1] == "2026-06-22T02:00:01+00:00"
     assert store.get_message("om_before") is None
     assert store.get_message("om_after") is not None
     assert store.get_message("om_other") is None
@@ -543,8 +543,52 @@ def test_group_search_scopes_queries_and_reactivation_to_current_policy(
     )
     now[0] = "2026-06-22T11:05:00+08:00"
     assert service.ingest_group_at_me(run_id="second").processed == 1
-    assert fake.search_windows[-1][1] == "2026-06-22T03:00:00+00:00"
+    assert fake.search_windows[-1][1] == "2026-06-22T03:00:01+00:00"
     assert store.get_message("om_gap") is None
+    assert store.get_message("om_new") is not None
+
+
+def test_group_activation_excludes_ambiguous_same_second(tmp_path: Path) -> None:
+    store = SQLiteStore(
+        tmp_path / "agent.sqlite3", clock=lambda: "2026-06-22T02:00:00.900000+00:00"
+    )
+    store.upsert_chat_product_policy(
+        {"chat_id": "oc_1", **ChatPolicyConfig().model_dump()}, actor="owner"
+    )
+    assert store.list_chat_policy_activations()[0]["activated_at"] == (
+        "2026-06-22T02:00:00.900000+00:00"
+    )
+    fake = FakeFeishuClient()
+    fake.search_pages[("group", True, None)] = MessagePage(
+        [
+            _message(
+                "om_old",
+                create_time="2026-06-22T02:00:00.100000+00:00",
+                mentions=[{"open_id": "ou_owner"}],
+            ),
+            _message(
+                "om_ambiguous",
+                create_time="2026-06-22T02:00:00.950000+00:00",
+                mentions=[{"open_id": "ou_owner"}],
+            ),
+            _message(
+                "om_new",
+                create_time="2026-06-22T02:00:01+00:00",
+                mentions=[{"open_id": "ou_owner"}],
+            ),
+        ]
+    )
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T02:00:02+00:00",
+    )
+    assert service.ingest_group_at_me(run_id="run").processed == 1
+    assert fake.search_windows[0][1] == "2026-06-22T02:00:01+00:00"
+    assert store.get_message("om_old") is None
+    assert store.get_message("om_ambiguous") is None
     assert store.get_message("om_new") is not None
 
 
