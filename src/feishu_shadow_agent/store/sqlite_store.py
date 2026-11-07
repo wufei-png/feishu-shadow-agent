@@ -1152,10 +1152,17 @@ class SQLiteStore:
             raise ValueError("processing retry queue write failed")
         return {"changed": True, "attempt": _row_dict(attempt)}
 
-    def claim_next_processing_retry(self, *, run_id: str) -> dict[str, Any] | None:
+    def claim_next_processing_retry(
+        self, *, run_id: str, allowed_p2p_chat_ids: set[str] | None = None
+    ) -> dict[str, Any] | None:
         self.initialize()
         now = self.clock()
         claim_token = f"processing-retry-{uuid4()}"
+        allowed_p2p_json = (
+            None
+            if allowed_p2p_chat_ids is None
+            else json.dumps(sorted(allowed_p2p_chat_ids))
+        )
         with self.connect() as conn:
             candidate = conn.execute(
                 """
@@ -1167,9 +1174,13 @@ class SQLiteStore:
                   AND (m.chat_type != 'group' OR EXISTS (
                     SELECT 1 FROM chat_policies cp WHERE cp.chat_id = m.chat_id
                   ))
+                  AND (? IS NULL OR m.chat_type != 'p2p' OR m.chat_id IN (
+                    SELECT value FROM json_each(?)
+                  ))
                 ORDER BY r.created_at, r.id
                 LIMIT 1
-                """
+                """,
+                (allowed_p2p_json, allowed_p2p_json),
             ).fetchone()
             if candidate is None:
                 return None

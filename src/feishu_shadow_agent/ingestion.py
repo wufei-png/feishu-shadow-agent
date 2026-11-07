@@ -966,8 +966,12 @@ class IngestionService:
             return StageResult("processing_retries", ok=True)
         processed = 0
         failures = 0
-        for _ in range(max(0, limit)):
-            attempt = self.store.claim_next_processing_retry(run_id=run_id)
+        allowed_p2p: set[str] | None = None
+        scope_error: str | None = None
+        while processed < max(0, limit):
+            attempt = self.store.claim_next_processing_retry(
+                run_id=run_id, allowed_p2p_chat_ids=allowed_p2p
+            )
             if attempt is None:
                 break
             attempt_id = int(attempt["id"])
@@ -979,8 +983,9 @@ class IngestionService:
                 if self.dry_run and row is not None and row["chat_type"] == "p2p":
                     try:
                         allowed_p2p = self._dry_run_p2p_scope()
-                    except RuntimeError:
-                        allowed_p2p: set[str] = set()
+                    except RuntimeError as exc:
+                        allowed_p2p = set()
+                        scope_error = str(exc)
                     if row["chat_id"] not in allowed_p2p:
                         self.store.requeue_policy_held_retry(
                             attempt_id, claim_token=claim_token
@@ -1136,9 +1141,10 @@ class IngestionService:
                 )
         return StageResult(
             "processing_retries",
-            ok=failures == 0,
+            ok=failures == 0 and scope_error is None,
             processed=processed,
-            error=None if failures == 0 else f"{failures} processing retries failed",
+            error=scope_error
+            or (None if failures == 0 else f"{failures} processing retries failed"),
         )
 
     def run_approval_inbox(self, *, run_id: str) -> StageResult:
