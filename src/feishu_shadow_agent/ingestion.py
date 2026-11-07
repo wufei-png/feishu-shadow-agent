@@ -1216,6 +1216,7 @@ class IngestionService:
                 chat_id=chat_id,
                 activation_id=int(activation_id),
                 not_before=str(activated_at),
+                legacy_checkpoint_key="ingest.group_at_me",
             )
             processed += result.processed
             if not result.ok:
@@ -1354,7 +1355,13 @@ class IngestionService:
                     continue
                 key = f"active_watch.thread.{thread_id}{suffix}"
                 window = self._window(
-                    key, source="active_watch", run_id=run_id, not_before=not_before
+                    key,
+                    source="active_watch",
+                    run_id=run_id,
+                    not_before=not_before,
+                    legacy_checkpoint_key=(
+                        f"active_watch.thread.{thread_id}" if activation else None
+                    ),
                 )
 
                 def fetch_thread(
@@ -1396,7 +1403,13 @@ class IngestionService:
             else:
                 key = f"active_watch.chat.{chat_id}{suffix}"
                 window = self._window(
-                    key, source="active_watch", run_id=run_id, not_before=not_before
+                    key,
+                    source="active_watch",
+                    run_id=run_id,
+                    not_before=not_before,
+                    legacy_checkpoint_key=(
+                        f"active_watch.chat.{chat_id}" if activation else None
+                    ),
                 )
                 window_start = window.start
                 window_end = window.end
@@ -1493,9 +1506,14 @@ class IngestionService:
         chat_id: str | None = None,
         activation_id: int | None = None,
         not_before: str | None = None,
+        legacy_checkpoint_key: str | None = None,
     ) -> StageResult:
         window = self._window(
-            checkpoint_key, source=name, run_id=run_id, not_before=not_before
+            checkpoint_key,
+            source=name,
+            run_id=run_id,
+            not_before=not_before,
+            legacy_checkpoint_key=legacy_checkpoint_key,
         )
         if parse_instant(window.start) > parse_instant(window.end):
             return StageResult(
@@ -2140,8 +2158,16 @@ class IngestionService:
         source: str,
         run_id: str,
         not_before: str | None = None,
+        legacy_checkpoint_key: str | None = None,
     ) -> DrainWindow:
         checkpoint = self.store.get_checkpoint(checkpoint_key) or {}
+        if not checkpoint and legacy_checkpoint_key is not None:
+            legacy = self.store.get_checkpoint(legacy_checkpoint_key) or {}
+            last_success = legacy.get("last_success_at")
+            if isinstance(last_success, str) and parse_instant_or_none(last_success):
+                # Page tokens from the old global query are not valid for a
+                # per-chat search; restart at its last completed window.
+                checkpoint = {"last_success_at": last_success}
         end = self.clock()
         page_token: str | None = None
         last_success_at = checkpoint.get("last_success_at")

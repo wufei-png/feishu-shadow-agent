@@ -548,6 +548,58 @@ def test_group_search_scopes_queries_and_reactivation_to_current_policy(
     assert store.get_message("om_new") is not None
 
 
+def test_legacy_group_and_watch_checkpoints_do_not_replay_old_history(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(
+        tmp_path / "agent.sqlite3", clock=lambda: "2026-01-01T00:00:00+00:00"
+    )
+    store.upsert_chat_product_policy(
+        {"chat_id": "oc_1", **ChatPolicyConfig().model_dump()}, actor="owner"
+    )
+    store.set_checkpoint(
+        "ingest.group_at_me", {"last_success_at": "2026-06-22T02:00:00+00:00"}
+    )
+    fake = FakeFeishuClient()
+    fake.search_pages[("group", True, None)] = MessagePage(
+        [
+            _message(
+                "om_old",
+                create_time="2026-02-01T00:00:00+00:00",
+                mentions=[{"open_id": "ou_owner"}],
+            ),
+            _message(
+                "om_recent",
+                create_time="2026-06-22T02:01:00+00:00",
+                mentions=[{"open_id": "ou_owner"}],
+            ),
+        ]
+    )
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(daemon=DaemonConfig(overlap_seconds=120)),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T02:10:00+00:00",
+    )
+
+    assert service.ingest_group_at_me(run_id="upgrade").processed == 1
+    assert fake.search_windows[0][1] == "2026-06-22T01:58:00+00:00"
+    assert store.get_message("om_old") is None
+    assert store.get_message("om_recent") is not None
+
+    for old_key in ("active_watch.chat.oc_1", "active_watch.thread.omt_1"):
+        store.set_checkpoint(old_key, {"last_success_at": "2026-06-22T02:00:00+00:00"})
+        window = service._window(
+            f"{old_key}.123",
+            source="active_watch",
+            run_id="upgrade",
+            not_before="2026-01-01T00:00:00+00:00",
+            legacy_checkpoint_key=old_key,
+        )
+        assert window.start == "2026-06-22T01:58:00+00:00"
+
+
 def test_group_removed_during_pagination_discards_in_flight_batch(
     tmp_path: Path,
 ) -> None:
