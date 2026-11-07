@@ -1257,7 +1257,9 @@ def test_reply_postprocess_success_updates_needs_owner_approval_preview(
     hermes.postprocess_outputs.append(
         {"status": "ok", "final_reply": "owner-ish needs owner"}
     )
-    cfg = _config(reply_postprocess=_postprocess_config())
+    cfg = _config(
+        reply_postprocess=_postprocess_config(), chats={"oc_1": ChatPolicyConfig()}
+    )
     store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
 
     service.process_raw_message(
@@ -1632,7 +1634,9 @@ def test_empty_needs_owner_approval_notification_includes_context(
             watch_action="keep_watching",
         )
     )
-    store, service, _ = _service(tmp_path, hermes=hermes)
+    store, service, _ = _service(
+        tmp_path, hermes=hermes, config=_config(chats={"oc_1": ChatPolicyConfig()})
+    )
 
     service.process_raw_message(
         _message(
@@ -1761,63 +1765,28 @@ def test_explicit_group_auto_reply_false_overrides_global_default(
     assert send_count == 0
 
 
-def test_unknown_group_auto_reply_disabled_downgrades_to_approval(
-    tmp_path: Path,
+@pytest.mark.parametrize("unknown_auto_reply", [False, True])
+def test_unconfigured_group_never_reaches_agent(
+    tmp_path: Path, unknown_auto_reply: bool
 ) -> None:
     hermes = FakeHermes()
     hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
-    cfg = _config(reply_policy=ReplyPolicyConfig(unknown_group_auto_reply=False))
+    cfg = _config(
+        reply_policy=ReplyPolicyConfig(unknown_group_auto_reply=unknown_auto_reply)
+    )
     store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
 
-    service.process_raw_message(
+    result = service.process_raw_message(
         _message("om_1", mentions=[{"open_id": "ou_owner"}]),
         source="group_at_me",
         default_chat_type="group",
         run_id="run_1",
     )
 
-    with store.connect() as conn:
-        approval = conn.execute("SELECT status, payload_json FROM approvals").fetchone()
-        notification = conn.execute(
-            "SELECT kind, status FROM actions WHERE kind = 'owner_notification'"
-        ).fetchone()
-        send_count = conn.execute(
-            "SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'"
-        ).fetchone()["c"]
-    payload = json.loads(approval["payload_json"])
-    assert approval["status"] == "pending"
-    assert payload["reason"] == "unknown_group_auto_reply_disabled"
-    assert notification["kind"] == "owner_notification"
-    assert notification["status"] == "pending"
-    assert send_count == 0
-
-
-def test_unknown_group_auto_reply_enabled_can_use_user_fallback(tmp_path: Path) -> None:
-    hermes = FakeHermes()
-    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
-    cfg = _config(reply_policy=ReplyPolicyConfig(unknown_group_auto_reply=True))
-    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
-
-    service.process_raw_message(
-        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
-        source="group_at_me",
-        default_chat_type="group",
-        run_id="run_1",
-    )
-
-    with store.connect() as conn:
-        action = conn.execute(
-            "SELECT kind, status, payload_json FROM actions WHERE kind = 'send_reply'"
-        ).fetchone()
-        approval_count = conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()[
-            "c"
-        ]
-    payload = json.loads(action["payload_json"])
-    assert action["kind"] == "send_reply"
-    assert action["status"] == "pending"
-    assert payload["identity"] == "user"
-    assert payload["policy_source"] == "unknown_group"
-    assert approval_count == 0
+    assert result is None
+    assert store.get_message("om_1") is None
+    assert hermes.session_prompts == []
+    assert hermes.router_prompts == []
 
 
 def test_explicit_bot_identity_requires_bot_joined(tmp_path: Path) -> None:

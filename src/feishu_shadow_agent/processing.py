@@ -403,6 +403,17 @@ class TaskProcessingService:
         watch_until: str,
         run_id: str,
     ) -> ProcessingResult | None:
+        if message.chat_type == "group" and (
+            not message.chat_id
+            or self.store.get_chat_product_policy(message.chat_id) is None
+        ):
+            return ProcessingResult("watch_only", reason="group_policy_unconfigured")
+        if routing.task is not None and self.store.is_group_policy_held(
+            "task", routing.task.id
+        ):
+            return ProcessingResult(
+                "watch_only", routing.task.id, reason="group_policy_held"
+            )
         route = routing.decision.route
         reason = routing.decision.reason
         self.logger.debug(
@@ -671,6 +682,11 @@ class TaskProcessingService:
             ),
         )
         router_prompt_identity = identify_prompt("router", prompt)
+        if message.chat_type == "group" and (
+            not message.chat_id
+            or self.store.get_chat_product_policy(message.chat_id) is None
+        ):
+            return ProcessingResult("watch_only", reason="group_policy_unconfigured")
         outcome = self._call_agent_with_retries(
             lambda: self.agent_backend.task_router(prompt, cwd=self.agent_working_dir),
             run_id=run_id,
@@ -1015,6 +1031,11 @@ class TaskProcessingService:
         run_id: str,
     ) -> RoutingResult | ProcessingResult | None:
         """Run the production model-router stage for an existing placeholder."""
+        if message.chat_type == "group" and (
+            not message.chat_id
+            or self.store.get_chat_product_policy(message.chat_id) is None
+        ):
+            return ProcessingResult("watch_only", reason="group_policy_unconfigured")
         return self._run_task_router(
             message=message,
             source=source,
@@ -1184,6 +1205,15 @@ class TaskProcessingService:
                 "resource_count": len(resources),
             },
         )
+        if message.chat_type == "group" and (
+            not message.chat_id
+            or self.store.get_chat_product_policy(message.chat_id) is None
+        ):
+            return ProcessingResult(
+                "watch_only", task.id, reason="group_policy_unconfigured"
+            )
+        if self.store.is_group_policy_held("task", task.id):
+            return ProcessingResult("watch_only", task.id, reason="group_policy_held")
         session_run = self.task_sessions.run(
             task=task,
             message=message,

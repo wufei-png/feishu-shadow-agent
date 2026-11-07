@@ -1183,6 +1183,19 @@ class SQLiteStore:
                 )
         return cursor.rowcount == 1
 
+    def requeue_policy_held_retry(self, attempt_id: int, *, claim_token: str) -> bool:
+        self.initialize()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE processing_retry_attempts
+                SET status = 'queued', claim_token = NULL, run_id = NULL, claimed_at = NULL
+                WHERE id = ? AND status = 'claimed' AND claim_token = ?
+                """,
+                (attempt_id, claim_token),
+            )
+        return cursor.rowcount == 1
+
     def upsert_resource(
         self,
         resource: ResourceRef,
@@ -2323,6 +2336,19 @@ class SQLiteStore:
                 targets, key=lambda target: (target[0] or "", target[2] or "")
             )
         ]
+
+    def group_thread_is_known(self, *, chat_id: str, thread_id: str) -> bool:
+        """A thread-only API is safe to call only when its group is known locally."""
+        self.initialize()
+        with self.connect() as conn:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM messages WHERE chat_id = ? AND chat_type = 'group' "
+                    "AND thread_id = ? LIMIT 1",
+                    (chat_id, thread_id),
+                ).fetchone()
+                is not None
+            )
 
     def record_routing_audit(
         self,

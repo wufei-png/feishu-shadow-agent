@@ -832,6 +832,7 @@ def test_identical_revision_reply_at_different_location_requires_owner_review(
 
 def test_at_all_edit_without_sent_reply_stays_ineligible(tmp_path: Path) -> None:
     store, service = _processing_service(tmp_path, _SessionBackend())
+    _seed_group_policy(store)
     result = service.process_raw_message(
         {
             **_raw_message("om_source", "hello @所有人", at_all=True),

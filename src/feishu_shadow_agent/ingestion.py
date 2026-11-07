@@ -63,6 +63,7 @@ class IngestionFeishuClient(Protocol):
         is_at_me: bool,
         start: str | None,
         end: str | None,
+        chat_id: str | None = None,
         page_token: str | None = None,
         query: str = "",
         page_size: int = 50,
@@ -126,6 +127,10 @@ class StageResult:
     ok: bool
     processed: int = 0
     error: str | None = None
+
+
+class GroupPolicyChanged(RuntimeError):
+    """A group query lost its policy while the batch was in flight."""
 
 
 @dataclass(frozen=True)
@@ -380,6 +385,11 @@ class ResourceProcessor:
     def process(self, message: NormalizedMessage, *, run_id: str | None = None) -> None:
         if not message.resources:
             return
+        if message.chat_type == "group" and (
+            not message.chat_id
+            or self.store.get_chat_product_policy(message.chat_id) is None
+        ):
+            return
         stale_parts_deleted = self.quota.cleanup_stale_partial_downloads()
         if stale_parts_deleted:
             self.logger.info(
@@ -502,6 +512,11 @@ class ResourceProcessor:
                 local_output.parent.mkdir(parents=True, exist_ok=True)
                 self.quota.validate_download_target(local_output)
                 self.quota.validate_download_target(temporary_path)
+                if message.chat_type == "group" and (
+                    not message.chat_id
+                    or self.store.get_chat_product_policy(message.chat_id) is None
+                ):
+                    return
                 result = self.feishu_client.download_resource(
                     message_id=resource.message_id,
                     file_key=resource.file_key,
@@ -955,6 +970,18 @@ class IngestionService:
             error: str | None = "processing retry did not complete"
             try:
                 row = self.store.get_message(str(attempt["message_id"]))
+                if self.store.is_group_policy_held("retry", attempt_id) or (
+                    row is not None
+                    and row["chat_type"] == "group"
+                    and (
+                        not row["chat_id"]
+                        or self.store.get_chat_product_policy(row["chat_id"]) is None
+                    )
+                ):
+                    self.store.requeue_policy_held_retry(
+                        attempt_id, claim_token=claim_token
+                    )
+                    continue
                 if row is None:
                     completion = "cancelled"
                     error = "message not found"
@@ -1146,12 +1173,44 @@ class IngestionService:
         )
 
     def ingest_group_at_me(self, *, run_id: str) -> StageResult:
-        return self._run_search_stage(
-            name="group_at_me",
-            checkpoint_key="ingest.group_at_me",
-            chat_type="group",
-            is_at_me=True,
-            run_id=run_id,
+        activations = self.store.list_chat_policy_activations()
+        if not activations:
+            return StageResult("group_at_me", ok=True)
+        scheduler = self.store.get_checkpoint("ingest.scheduler.group_policies") or {}
+        index = int(scheduler.get("next_index", 0)) % len(activations)
+        self.store.set_checkpoint(
+            "ingest.scheduler.group_policies",
+            {"next_index": (index + 1) % len(activations)},
+        )
+        processed = 0
+        errors: list[str] = []
+        for activation in activations[index:] + activations[:index]:
+            chat_id = str(activation["chat_id"])
+            activation_id = activation["activation_id"]
+            activated_at = activation["activated_at"]
+            if activation_id is None or parse_instant_or_none(activated_at) is None:
+                errors.append(f"{chat_id}: missing policy activation")
+                continue
+            result = self._run_search_stage(
+                name="group_at_me",
+                checkpoint_key=f"ingest.group_at_me.{chat_id}.{activation_id}",
+                chat_type="group",
+                is_at_me=True,
+                run_id=run_id,
+                chat_id=chat_id,
+                activation_id=int(activation_id),
+                not_before=str(activated_at),
+            )
+            processed += result.processed
+            if not result.ok:
+                errors.append(result.error or f"{chat_id}: incomplete")
+            if self.monotonic() >= self.ingest_deadline:
+                break
+        return StageResult(
+            "group_at_me",
+            ok=not errors,
+            processed=processed,
+            error="; ".join(errors) or None,
         )
 
     def ingest_p2p(self, *, run_id: str) -> StageResult:
@@ -1167,6 +1226,10 @@ class IngestionService:
         now = self.clock()
         processed = 0
         targets = self.store.list_active_watch_targets(now=now)
+        activations = {
+            str(item["chat_id"]): item
+            for item in self.store.list_chat_policy_activations()
+        }
         targets = self._rotate_watch_targets(targets)
         self.logger.debug(
             "active_watch_targets_loaded",
@@ -1183,60 +1246,153 @@ class IngestionService:
                     data={"target": target},
                 )
                 continue
-            if thread_id:
-                key = f"active_watch.thread.{thread_id}"
-                window = self._window(key, source="active_watch", run_id=run_id)
-                drain = self._drain(
-                    lambda token, page_size, _page_limit, thread_id=thread_id: (
-                        self.feishu_client.list_thread_messages(
-                            thread_id=thread_id,
-                            page_token=token,
-                            page_size=page_size,
-                        )
-                    ),
-                    window=window,
+            if target["chat_type"] not in {"group", "p2p"}:
+                self.logger.warning(
+                    "active_watch_target_unknown_chat_type",
                     run_id=run_id,
-                    source="active_watch_thread",
-                    max_pages=self.config.daemon.ingest_watch_max_pages_per_target,
-                    max_messages=self.config.daemon.ingest_watch_max_messages_per_target,
+                    data={"chat_id": chat_id},
                 )
+                continue
+            activation = (
+                activations.get(chat_id) if target["chat_type"] == "group" else None
+            )
+            if target["chat_type"] == "group" and (
+                activation is None
+                or activation["activation_id"] is None
+                or parse_instant_or_none(activation["activated_at"]) is None
+            ):
+                continue
+            suffix = "" if activation is None else f".{activation['activation_id']}"
+            not_before = None if activation is None else str(activation["activated_at"])
+            active_id = None if activation is None else int(activation["activation_id"])
+            if thread_id:
+                if activation is not None and not self.store.group_thread_is_known(
+                    chat_id=chat_id, thread_id=thread_id
+                ):
+                    self.logger.warning(
+                        "active_watch_group_thread_unknown",
+                        run_id=run_id,
+                        data={"chat_id": chat_id, "thread_id": thread_id},
+                    )
+                    continue
+                key = f"active_watch.thread.{thread_id}{suffix}"
+                window = self._window(
+                    key, source="active_watch", run_id=run_id, not_before=not_before
+                )
+
+                def fetch_thread(
+                    token: str | None,
+                    page_size: int,
+                    _page_limit: int,
+                    *,
+                    selected_chat: str = chat_id,
+                    selected_thread: str = thread_id,
+                    selected_activation: int | None = active_id,
+                ) -> MessagePage:
+                    if (
+                        selected_activation is not None
+                        and not self._group_activation_is_current(
+                            selected_chat, selected_activation
+                        )
+                    ):
+                        raise GroupPolicyChanged(
+                            "group policy changed during thread search"
+                        )
+                    return self.feishu_client.list_thread_messages(
+                        thread_id=selected_thread, page_token=token, page_size=page_size
+                    )
+
+                try:
+                    drain = self._drain(
+                        fetch_thread,
+                        window=window,
+                        run_id=run_id,
+                        source="active_watch_thread",
+                        max_pages=self.config.daemon.ingest_watch_max_pages_per_target,
+                        max_messages=self.config.daemon.ingest_watch_max_messages_per_target,
+                    )
+                except GroupPolicyChanged:
+                    continue
                 raws = _filter_raws_in_window(
                     drain.items, start=window.start, end=window.end
                 )
             else:
-                key = f"active_watch.chat.{chat_id}"
-                window = self._window(key, source="active_watch", run_id=run_id)
+                key = f"active_watch.chat.{chat_id}{suffix}"
+                window = self._window(
+                    key, source="active_watch", run_id=run_id, not_before=not_before
+                )
                 window_start = window.start
                 window_end = window.end
-                drain = self._drain(
-                    lambda token, page_size, _page_limit, chat_id=chat_id, start=window_start, end=window_end: (
-                        self.feishu_client.list_chat_messages(
-                            chat_id=chat_id,
-                            start=start,
-                            end=end,
-                            page_token=token,
-                            page_size=page_size,
+
+                def fetch_chat(
+                    token: str | None,
+                    page_size: int,
+                    _page_limit: int,
+                    *,
+                    selected_chat: str = chat_id,
+                    selected_activation: int | None = active_id,
+                    selected_start: str = window_start,
+                    selected_end: str = window_end,
+                ) -> MessagePage:
+                    if (
+                        selected_activation is not None
+                        and not self._group_activation_is_current(
+                            selected_chat, selected_activation
                         )
-                    ),
-                    window=window,
-                    run_id=run_id,
-                    source="active_watch_chat",
-                    max_pages=self.config.daemon.ingest_watch_max_pages_per_target,
-                    max_messages=self.config.daemon.ingest_watch_max_messages_per_target,
-                )
+                    ):
+                        raise GroupPolicyChanged(
+                            "group policy changed during chat search"
+                        )
+                    return self.feishu_client.list_chat_messages(
+                        chat_id=selected_chat,
+                        start=selected_start,
+                        end=selected_end,
+                        page_token=token,
+                        page_size=page_size,
+                    )
+
+                try:
+                    drain = self._drain(
+                        fetch_chat,
+                        window=window,
+                        run_id=run_id,
+                        source="active_watch_chat",
+                        max_pages=self.config.daemon.ingest_watch_max_pages_per_target,
+                        max_messages=self.config.daemon.ingest_watch_max_messages_per_target,
+                    )
+                except GroupPolicyChanged:
+                    continue
                 raws = self._filter_active_watch_chat_followups(
                     drain.items,
                     default_chat_type=target["chat_type"],
                     now=now,
                 )
-            drain, batch = self._process_drain_batch(
-                window=window,
-                drain=drain,
-                raws=raws,
-                source="active_watch",
-                default_chat_type=target["chat_type"],
-                run_id=run_id,
-            )
+            if activation is not None:
+                if not self._group_activation_is_current(
+                    chat_id, int(activation["activation_id"])
+                ):
+                    continue
+                raws = [
+                    raw
+                    for raw in _filter_raws_in_window(
+                        raws, start=window.start, end=window.end, allow_unknown=False
+                    )
+                    if _first_string(raw, "chat_id", "chatId") == chat_id
+                ]
+            try:
+                drain, batch = self._process_drain_batch(
+                    window=window,
+                    drain=drain,
+                    raws=raws,
+                    source="active_watch",
+                    default_chat_type=target["chat_type"],
+                    run_id=run_id,
+                    group_activation=None
+                    if active_id is None
+                    else (chat_id, active_id),
+                )
+            except GroupPolicyChanged:
+                continue
             processed += batch.processed
             self._record_drain(
                 window,
@@ -1257,10 +1413,28 @@ class IngestionService:
         chat_type: str,
         is_at_me: bool,
         run_id: str,
+        chat_id: str | None = None,
+        activation_id: int | None = None,
+        not_before: str | None = None,
     ) -> StageResult:
-        window = self._window(checkpoint_key, source=name, run_id=run_id)
-        drain = self._drain(
-            lambda token, page_size, page_limit: self.feishu_client.search_messages(
+        window = self._window(
+            checkpoint_key, source=name, run_id=run_id, not_before=not_before
+        )
+        if parse_instant(window.start) > parse_instant(window.end):
+            return StageResult(
+                name, ok=False, error="policy activation is in the future"
+            )
+
+        def fetch_page(
+            token: str | None, page_size: int, page_limit: int
+        ) -> MessagePage:
+            if (
+                chat_id is not None
+                and activation_id is not None
+                and not self._group_activation_is_current(chat_id, activation_id)
+            ):
+                raise GroupPolicyChanged("group policy changed during message search")
+            return self.feishu_client.search_messages(
                 chat_type=chat_type,
                 is_at_me=is_at_me,
                 start=window.start,
@@ -1269,21 +1443,47 @@ class IngestionService:
                 query="",
                 page_size=page_size,
                 page_limit=page_limit,
-            ),
-            window=window,
-            run_id=run_id,
-            source=name,
-            max_pages=self.config.daemon.ingest_search_max_pages,
-            max_messages=self.config.daemon.ingest_search_max_messages,
-        )
-        drain, batch = self._process_drain_batch(
-            window=window,
-            drain=drain,
-            raws=drain.items,
-            source=name,
-            default_chat_type=chat_type,
-            run_id=run_id,
-        )
+                **({"chat_id": chat_id} if chat_id is not None else {}),
+            )
+
+        try:
+            drain = self._drain(
+                fetch_page,
+                window=window,
+                run_id=run_id,
+                source=name,
+                max_pages=self.config.daemon.ingest_search_max_pages,
+                max_messages=self.config.daemon.ingest_search_max_messages,
+            )
+        except GroupPolicyChanged as exc:
+            return StageResult(name, ok=False, error=str(exc))
+        raws = drain.items
+        if chat_id is not None and activation_id is not None:
+            if not self._group_activation_is_current(chat_id, activation_id):
+                return StageResult(
+                    name, ok=False, error="group policy changed during message search"
+                )
+            raws = [
+                raw
+                for raw in _filter_raws_in_window(
+                    raws, start=window.start, end=window.end, allow_unknown=False
+                )
+                if _first_string(raw, "chat_id", "chatId") == chat_id
+            ]
+        try:
+            drain, batch = self._process_drain_batch(
+                window=window,
+                drain=drain,
+                raws=raws,
+                source=name,
+                default_chat_type=chat_type,
+                run_id=run_id,
+                group_activation=(chat_id, activation_id)
+                if chat_id is not None and activation_id is not None
+                else None,
+            )
+        except GroupPolicyChanged as exc:
+            return StageResult(name, ok=False, error=str(exc))
         self._record_drain(
             window,
             drain,
@@ -1291,7 +1491,15 @@ class IngestionService:
             source=name,
             processing_cursor=batch.cursor,
         )
-        return StageResult(name, ok=True, processed=batch.processed)
+        return StageResult(
+            name, ok=drain.complete, processed=batch.processed, error=drain.reason
+        )
+
+    def _group_activation_is_current(self, chat_id: str, activation_id: int) -> bool:
+        return any(
+            item["chat_id"] == chat_id and item["activation_id"] == activation_id
+            for item in self.store.list_chat_policy_activations()
+        )
 
     def _process_raw_batch(
         self,
@@ -1301,6 +1509,7 @@ class IngestionService:
         default_chat_type: str | None,
         run_id: str,
         resume_cursor: ProcessingCursor | None = None,
+        group_activation: tuple[str, int] | None = None,
     ) -> RawBatchResult:
         ordered = sorted(raws, key=_raw_sort_key)
         completed_items = self._validated_processing_prefix(
@@ -1313,6 +1522,12 @@ class IngestionService:
         processed = 0
         handled_items = 0
         for raw in ordered[completed_items:]:
+            if group_activation is not None and not self._group_activation_is_current(
+                *group_activation
+            ):
+                raise GroupPolicyChanged(
+                    "group policy changed during message processing"
+                )
             if self.monotonic() >= self.ingest_deadline:
                 prefix_sha256 = self._processing_prefix_sha256(
                     ordered[:completed_items],
@@ -1354,6 +1569,7 @@ class IngestionService:
         source: str,
         default_chat_type: str | None,
         run_id: str,
+        group_activation: tuple[str, int] | None = None,
     ) -> tuple[DrainResult, RawBatchResult]:
         batch = self._process_raw_batch(
             raws,
@@ -1361,6 +1577,7 @@ class IngestionService:
             default_chat_type=default_chat_type,
             run_id=run_id,
             resume_cursor=self._processing_cursor(window),
+            group_activation=group_activation,
         )
         if batch.complete:
             return drain, batch
@@ -1519,8 +1736,19 @@ class IngestionService:
                 },
             )
             raise
+        if message.chat_type == "group" and (
+            not message.chat_id
+            or self.store.get_chat_product_policy(message.chat_id) is None
+        ):
+            self.logger.info("unconfigured_group_message_skipped", run_id=run_id)
+            return None
         upsert = self.store.upsert_message_with_revision(message)
         if upsert.requires_confirmation:
+            if message.chat_type == "group" and (
+                not message.chat_id
+                or self.store.get_chat_product_policy(message.chat_id) is None
+            ):
+                return None
             page = self.feishu_client.get_messages(
                 as_identity="user", message_ids=[message.message_id]
             )
@@ -1817,7 +2045,14 @@ class IngestionService:
             },
         )
 
-    def _window(self, checkpoint_key: str, *, source: str, run_id: str) -> DrainWindow:
+    def _window(
+        self,
+        checkpoint_key: str,
+        *,
+        source: str,
+        run_id: str,
+        not_before: str | None = None,
+    ) -> DrainWindow:
         checkpoint = self.store.get_checkpoint(checkpoint_key) or {}
         end = self.clock()
         page_token: str | None = None
@@ -1825,7 +2060,9 @@ class IngestionService:
         if isinstance(last_success_at, str):
             start = _minus_seconds(last_success_at, self.config.daemon.overlap_seconds)
         else:
-            start = _minus_seconds(end, self.config.daemon.overlap_seconds)
+            start = not_before or _minus_seconds(
+                end, self.config.daemon.overlap_seconds
+            )
         backlog_value = checkpoint.get("backlog")
         backlog = (
             cast(dict[str, Any], backlog_value)
@@ -1842,6 +2079,14 @@ class IngestionService:
                 page_token = backlog_token if isinstance(backlog_token, str) else None
             else:
                 backlog = None
+        if not_before is not None and parse_instant(start) < parse_instant(not_before):
+            start = not_before
+            if backlog is not None:
+                checkpoint = dict(checkpoint)
+                checkpoint.pop("backlog", None)
+                backlog = None
+                page_token = None
+                end = self.clock()
         self.logger.debug(
             "ingestion_window_selected",
             run_id=run_id,
@@ -2404,7 +2649,7 @@ def _processing_replay_identity(message: NormalizedMessage) -> dict[str, Any]:
 
 
 def _filter_raws_in_window(
-    raws: list[dict[str, Any]], *, start: str, end: str
+    raws: list[dict[str, Any]], *, start: str, end: str, allow_unknown: bool = True
 ) -> list[dict[str, Any]]:
     start_dt = parse_instant(start)
     end_dt = parse_instant(end)
@@ -2414,7 +2659,9 @@ def _filter_raws_in_window(
             raw, "create_time", "created_at", "sent_at", "timestamp"
         )
         sent_dt = _parse_dt_or_none(sent_at) if sent_at is not None else None
-        if sent_dt is None or start_dt <= sent_dt <= end_dt:
+        if (sent_dt is None and allow_unknown) or (
+            sent_dt is not None and start_dt <= sent_dt <= end_dt
+        ):
             filtered.append(raw)
     return filtered
 

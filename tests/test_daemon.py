@@ -193,7 +193,12 @@ class FakeAgentBackend:
 
 
 def _seed_policy(store: SQLiteStore, config: AppConfig) -> None:
-    store.import_product_policy_from_config(config)
+    previous_clock = store.clock
+    store.clock = lambda: "2026-06-22T01:00:00+00:00"
+    try:
+        store.import_product_policy_from_config(config)
+    finally:
+        store.clock = previous_clock
 
 
 def test_startup_critical_failure_does_not_enter_loop(tmp_path: Path) -> None:
@@ -1183,6 +1188,7 @@ def test_ingestion_budget_exhaustion_still_runs_dispatch_and_retention(
     config = AppConfig(
         owner=OwnerConfig(open_id="ou_owner"),
         daemon=DaemonConfig(ingest_tick_budget_seconds=1),
+        chats={"oc_group": ChatPolicyConfig()},
     )
     _seed_policy(store, config)
     daemon = Daemon(
@@ -1201,7 +1207,10 @@ def test_ingestion_budget_exhaustion_still_runs_dispatch_and_retention(
 
     assert [result.name for result in results][-2:] == ["dispatch", "retention"]
     assert not any(call.startswith("search:") for call in fake.calls)
-    checkpoint = store.get_checkpoint("ingest.group_at_me")
+    activation = store.list_chat_policy_activations()[0]
+    checkpoint = store.get_checkpoint(
+        f"ingest.group_at_me.oc_group.{activation['activation_id']}"
+    )
     assert checkpoint is not None
     assert checkpoint["backlog"]["reason"] == "tick_budget_exhausted"
     log_text = (tmp_path / "agent.jsonl").read_text(encoding="utf-8")
@@ -1212,7 +1221,7 @@ def test_ingestion_budget_exhaustion_still_runs_dispatch_and_retention(
 def test_source_rotation_lets_other_ingestion_progress_under_repeated_budget_pressure(
     tmp_path: Path,
 ) -> None:
-    monotonic_values = iter([0.0, 0.0, 0.0, 2.0, 2.0, 10.0, 10.0, 10.0, 12.0])
+    monotonic_values = iter([0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 10.0, 10.0, 10.0, 12.0])
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     logger = JSONLLogger(tmp_path / "agent.jsonl")
     suite = FakeHealthSuite(
@@ -1233,6 +1242,7 @@ def test_source_rotation_lets_other_ingestion_progress_under_repeated_budget_pre
     config = AppConfig(
         owner=OwnerConfig(open_id="ou_owner"),
         daemon=DaemonConfig(ingest_tick_budget_seconds=1),
+        chats={"oc_group": ChatPolicyConfig()},
     )
     _seed_policy(store, config)
     daemon = Daemon(
