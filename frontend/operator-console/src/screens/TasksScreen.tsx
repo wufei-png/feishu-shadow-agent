@@ -359,14 +359,15 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
               {(detail.data.processing ?? []).filter((item) => ["processing_failed_terminal", "blocked_waiting_external"].includes(item.status)).length ? (
                 <ul className="timeline-list">
                   {(detail.data.processing ?? []).filter((item) => ["processing_failed_terminal", "blocked_waiting_external"].includes(item.status)).map((item) => {
-                    const activeRetry = item.latest_retry?.status === "queued" || item.latest_retry?.status === "claimed";
+                    const heldRetry = item.latest_retry?.status === "queued" && item.latest_retry.policy_held;
+                    const activeRetry = !heldRetry && (item.latest_retry?.status === "queued" || item.latest_retry?.status === "claimed");
                     return (
                       <li key={`${item.message_id}-${item.revision}-${item.stage}`}>
                         <RotateCcw aria-hidden="true" size={14} />
                         <span>{enumLabel(t, "stage", item.stage)} · {item.message_id} r{item.revision}</span>
                         <small title={`${item.status}${item.terminal_reason ? ` · ${item.terminal_reason}` : ""}`}>{enumLabel(t, "status", item.status)}{item.terminal_reason ? ` · ${item.terminal_reason}` : ""}</small>
                         <Button disabled={selectedTaskBusy || activeRetry} onClick={() => retryProcessing(item.message_id, item.stage)} tone="warning">
-                          {activeRetry ? t("tasks.queued") : t("tasks.retry")}
+                          {heldRetry ? t("tasks.resumeRetry") : activeRetry ? t("tasks.queued") : t("tasks.retry")}
                         </Button>
                       </li>
                     );

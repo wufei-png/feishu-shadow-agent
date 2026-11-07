@@ -128,7 +128,8 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
         {detail.data.processing.length ? (
           <ul className="timeline-list">
             {detail.data.processing.map((item) => {
-              const activeRetry = item.latest_retry?.status === "queued" || item.latest_retry?.status === "claimed";
+              const heldRetry = item.latest_retry?.status === "queued" && item.latest_retry.policy_held;
+              const activeRetry = !heldRetry && (item.latest_retry?.status === "queued" || item.latest_retry?.status === "claimed");
               return (
                 <li key={item.id}>
                   <PackageSearch aria-hidden="true" size={14} />
@@ -140,7 +141,7 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
                       onClick={() => retryProcessing.mutate({ targetMessageId: messageId, stage: item.stage })}
                       tone="warning"
                     >
-                      {activeRetry ? t("message.queued") : t("message.retry")}
+                      {heldRetry ? t("message.resumeRetry") : activeRetry ? t("message.queued") : t("message.retry")}
                     </Button>
                   ) : null}
                 </li>

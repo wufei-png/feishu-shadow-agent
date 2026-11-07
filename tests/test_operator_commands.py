@@ -19,6 +19,7 @@ from feishu_shadow_agent.operator_commands import (
     OperatorCommandService,
     command_exit_code,
 )
+from feishu_shadow_agent.operator_query import OperatorQueryService
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import (
     LarkCliResult,
@@ -696,6 +697,46 @@ def test_dry_run_excluded_p2p_retry_does_not_starve_group_retry(
             conn.execute("SELECT message_id, status FROM processing_retry_attempts")
         )
     assert statuses == {"om_p2p": "queued", "om_group": "succeeded"}
+
+
+def test_policy_held_retry_is_visible_and_can_be_resumed_from_console(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.import_product_policy_from_config(_config(chats={"oc_1": ChatPolicyConfig()}))
+    message = _processing_message()
+    store.upsert_message(message)
+    task, _ = store.create_task_for_message_and_audit(
+        message, watch_until="2999-06-22T12:00:00+00:00"
+    )
+    store.record_message_processing(
+        message_id=message.message_id,
+        task_id=task.id,
+        stage="task_session",
+        status="processing_failed_terminal",
+    )
+    store.request_processing_retry(
+        message_id=message.message_id, stage="task_session", actor="owner"
+    )
+    store.delete_chat_product_policy("oc_1", actor="owner")
+    store.upsert_chat_product_policy(
+        {"chat_id": "oc_1", **ChatPolicyConfig().model_dump()}, actor="owner"
+    )
+    store.reopen_task_by_operator(task.id, watch_until="2999-06-23T12:00:00+00:00")
+    query = OperatorQueryService(store)
+    detail = query.task_detail(task.short_id)
+    message_detail = query.message_detail(message.message_id)
+    assert detail is not None and message_detail is not None
+    assert detail["processing"][0]["latest_retry"]["policy_held"] is True
+    assert message_detail["processing"][0]["latest_retry"]["policy_held"] is True
+
+    result = OperatorCommandService(store).retry_processing(
+        message.message_id, stage="task_session", actor="local_console"
+    )
+    assert result.status == "applied" and result.changed is True
+    updated = query.task_detail(task.short_id)
+    assert updated is not None
+    assert updated["processing"][0]["latest_retry"]["policy_held"] is False
 
 
 def test_processing_retry_worker_replays_task_router_from_original_placeholder(

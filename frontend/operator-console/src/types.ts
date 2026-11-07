@@ -462,6 +462,7 @@ export type MessageProcessing = {
   latest_retry?: {
     id: number;
     status: "queued" | "claimed" | "succeeded" | "failed" | "cancelled";
+    policy_held?: boolean;
     actor: string;
     reason: string | null;
     error: string | null;

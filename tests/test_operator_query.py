@@ -813,6 +813,7 @@ def test_task_detail_returns_related_read_models_and_effective_policy(
                 "error": None,
                 "created_at": detail["processing"][0]["latest_retry"]["created_at"],
                 "finished_at": None,
+                "policy_held": False,
             },
         }
     ]
