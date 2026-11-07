@@ -394,6 +394,54 @@ def test_runtime_membership_absence_dedupes_notification_and_recovers(
     assert policy_audits_after == policy_audits_before
 
 
+def test_group_removal_holds_related_owner_notifications(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    config = _config(chats={"oc_1": ChatPolicyConfig()})
+    store.import_product_policy_from_config(config)
+    message = _message(chat_id="oc_1")
+    store.upsert_message(message)
+    task = store.create_task_for_message(
+        message, watch_until="2999-01-01T00:00:00+00:00"
+    )
+    task_action = store.create_owner_notification_action(
+        task_id=task.id, payload={"type": "approval", "dedupe_key": "task"}
+    )
+    source_action = store.create_owner_notification_action(
+        task_id=None,
+        payload={"source_message_id": message.message_id, "dedupe_key": "source"},
+    )
+    membership_action = store.create_owner_notification_action(
+        task_id=None,
+        payload={
+            "type": "bot_membership_absent",
+            "chat_id": "oc_1",
+            "dedupe_key": "membership",
+        },
+    )
+    unrelated = store.create_owner_notification_action(
+        task_id=None, payload={"type": "other", "dedupe_key": "unrelated"}
+    )
+    store.delete_chat_product_policy("oc_1", actor="owner")
+    late_action = store.create_owner_notification_action(
+        task_id=task.id, payload={"type": "approval", "dedupe_key": "late"}
+    )
+
+    for action_id in (task_action, source_action, membership_action, late_action):
+        assert store.is_group_policy_held("action", action_id)
+        assert not store.group_send_allowed(action_id)
+        assert store.claim_action_for_dispatch(action_id) is None
+    assert [action.id for action in store.list_dispatchable_actions()] == [unrelated]
+    with pytest.raises(ValueError, match="group chat policy"):
+        store.retry_dispatch_action(source_action)
+    store.upsert_chat_product_policy(
+        {"chat_id": "oc_1", **ChatPolicyConfig().model_dump()}, actor="owner"
+    )
+    assert not store.group_send_allowed(source_action)
+    store.retry_dispatch_action(source_action)
+    assert store.group_send_allowed(source_action)
+    assert store.is_group_policy_held("action", task_action)
+
+
 def test_membership_only_probes_current_group_activations(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     config = _config(

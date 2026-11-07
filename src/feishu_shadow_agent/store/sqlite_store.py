@@ -2565,10 +2565,11 @@ class SQLiteStore:
             ).fetchone()
             if row is None or (row["held"] and not allow_held):
                 return False
-            if row["kind"] != "send_reply":
+            group_chat_id = _action_group_chat_id_locked(conn, action_id)
+            if group_chat_id is None:
                 return True
             try:
-                _require_group_policy_locked(conn, row["chat_id"], row["chat_type"])
+                _require_group_policy_locked(conn, group_chat_id, "group")
             except ValueError:
                 return False
             return True
@@ -2898,13 +2899,13 @@ class SQLiteStore:
             ).fetchone()
             if row["kind"] == "send_reply" and task is not None:
                 _require_group_policy_locked(conn, task["chat_id"], task["chat_type"])
-            held = (
-                conn.execute(
-                    "SELECT 1 FROM group_policy_holds WHERE kind = 'action' AND item_id = ?",
-                    (action_id,),
-                ).fetchone()
-                is not None
-            )
+            held_row = conn.execute(
+                "SELECT chat_id FROM group_policy_holds WHERE kind = 'action' AND item_id = ?",
+                (action_id,),
+            ).fetchone()
+            held = held_row is not None
+            if held_row is not None:
+                _require_group_policy_locked(conn, held_row["chat_id"], "group")
             if row["status"] not in {
                 ActionStatus.FAILED.value,
                 ActionStatus.FAILED_NEEDS_REVIEW.value,
@@ -4911,7 +4912,9 @@ class SQLiteStore:
             ),
         )
         if cursor.rowcount == 1:
-            return _cursor_lastrowid(cursor)
+            action_id = _cursor_lastrowid(cursor)
+            _hold_group_action_if_needed_locked(conn, action_id, task_id, now)
+            return action_id
         row = conn.execute(
             "SELECT id, status FROM actions WHERE idempotency_key = ? AND kind = 'owner_notification'",
             (idempotency_key,),
@@ -4947,7 +4950,9 @@ class SQLiteStore:
                     row["id"],
                 ),
             )
-        return int(row["id"])
+        action_id = int(row["id"])
+        _hold_group_action_if_needed_locked(conn, action_id, task_id, now)
+        return action_id
 
     def insert_action_for_test(
         self,
@@ -6071,16 +6076,42 @@ def _truncate(text: str, limit: int = 100) -> str:
     return f"{cleaned[: limit - 3]}..."
 
 
-def _hold_group_action_if_needed_locked(
-    conn: sqlite3.Connection, action_id: int, task_id: int, now: str
-) -> None:
-    task = conn.execute(
-        "SELECT chat_id, chat_type FROM tasks WHERE id = ?", (task_id,)
+def _action_group_chat_id_locked(
+    conn: sqlite3.Connection, action_id: int
+) -> str | None:
+    row = conn.execute(
+        """
+        SELECT t.chat_id AS task_chat_id, t.chat_type AS task_chat_type,
+               m.chat_id AS source_chat_id, m.chat_type AS source_chat_type,
+               a.payload_json
+        FROM actions a
+        LEFT JOIN tasks t ON t.id = a.task_id
+        LEFT JOIN messages m ON m.message_id = a.source_message_id
+        WHERE a.id = ?
+        """,
+        (action_id,),
     ).fetchone()
-    if task is None or task["chat_type"] != "group":
+    if row is None:
+        return None
+    if row["task_chat_type"] == "group":
+        return cast(str | None, row["task_chat_id"])
+    if row["source_chat_type"] == "group":
+        return cast(str | None, row["source_chat_id"])
+    payload = _loads_json_object(row["payload_json"])
+    if payload.get("type") in {"bot_membership_absent", "bot_membership_recovered"}:
+        chat_id = payload.get("chat_id")
+        return chat_id if isinstance(chat_id, str) else None
+    return None
+
+
+def _hold_group_action_if_needed_locked(
+    conn: sqlite3.Connection, action_id: int, task_id: int | None, now: str
+) -> None:
+    chat_id = _action_group_chat_id_locked(conn, action_id)
+    if not chat_id:
         return
     policy = conn.execute(
-        "SELECT 1 FROM chat_policies WHERE chat_id = ?", (task["chat_id"],)
+        "SELECT 1 FROM chat_policies WHERE chat_id = ?", (chat_id,)
     ).fetchone()
     held_task = conn.execute(
         "SELECT 1 FROM group_policy_holds WHERE kind = 'task' AND item_id = ?",
@@ -6089,7 +6120,7 @@ def _hold_group_action_if_needed_locked(
     if policy is None or held_task is not None:
         conn.execute(
             "INSERT OR IGNORE INTO group_policy_holds(kind, item_id, chat_id, created_at) VALUES ('action', ?, ?, ?)",
-            (action_id, task["chat_id"] or "", now),
+            (action_id, chat_id, now),
         )
 
 
@@ -6107,12 +6138,17 @@ def _hold_group_policy_items_locked(
     conn.execute(
         """
         INSERT OR IGNORE INTO group_policy_holds(kind, item_id, chat_id, created_at)
-        SELECT 'action', a.id, t.chat_id, ? FROM actions a
-        JOIN tasks t ON t.id = a.task_id
-        WHERE t.chat_id = ? AND t.chat_type = 'group'
-          AND a.kind = 'send_reply' AND a.status IN ('pending', 'sending')
+        SELECT 'action', a.id, ?, ? FROM actions a
+        LEFT JOIN tasks t ON t.id = a.task_id
+        LEFT JOIN messages m ON m.message_id = a.source_message_id
+        WHERE a.status IN ('pending', 'sending') AND (
+          (t.chat_type = 'group' AND t.chat_id = ?)
+          OR (m.chat_type = 'group' AND m.chat_id = ?)
+          OR (json_extract(a.payload_json, '$.type') IN ('bot_membership_absent', 'bot_membership_recovered')
+              AND json_extract(a.payload_json, '$.chat_id') = ?)
+        )
         """,
-        (now, chat_id),
+        (chat_id, now, chat_id, chat_id, chat_id),
     )
     conn.execute(
         """
