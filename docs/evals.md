@@ -11,6 +11,8 @@
 - case 内 `config.yaml` 是不可变的 Case Baseline Config；命令行 `--config` 是唯一 Evaluation Run Config，两者不合并。
 - Task Session 和 Full Chain 的 model candidate 与 semantic judge 使用同一 run config/backend；judge 始终以 `session_id: null` 运行。
 - Full Chain 不运行 Dispatcher，不发送飞书消息或 owner notification，但 `tool_permissions: full_access` 的 Agent 工具仍可能产生外部副作用。
+- 实时采集仅查询当前 Product Policy Store 中已配置的群；群消息的离线样本在传给真实模型前也须能确认来源群仍有配置。来源不明时拒绝调用模型。
+- 完全由人工构造的测试样本可以在 case 的 `metadata.yaml` 中显式写入 `source_kind: synthetic`；这是使用者的声明，程序无法证明样本确为合成数据。`--dry-run-backend` 使用本地假 backend，不调用真实模型。
 
 Artifact 状态由文件结构决定：
 
@@ -22,7 +24,7 @@ Artifact 状态由文件结构决定：
 
 ## 2. Capture
 
-列出最近 `@owner` 的群消息和 P2P 消息：
+列出最近已配置群中 `@owner` 的消息和 P2P 消息：
 
 ```bash
 python -m feishu_shadow_agent eval capture \
@@ -31,7 +33,7 @@ python -m feishu_shadow_agent eval capture \
   --limit 20
 ```
 
-人工选择 message id 后落盘：
+人工选择 message id 后落盘。为避免对未知来源的 message id 直接发起读取，命令先在已配置群和 P2P 的 `--lookback-days` 窗口中查找该消息；找不到时可显式扩大窗口：
 
 ```bash
 python -m feishu_shadow_agent eval capture \
@@ -55,7 +57,7 @@ data/evals/captured/<case_id>/
   metadata.yaml
 ```
 
-`messages.jsonl` 每行就是一个去重后的原始飞书消息，不再包 `{role, raw}`。Capture 可只读查询生产 DB 来建议 Router task fixture，但不会复制生产数据库。三个 review 的 scenario 相互独立，可直接作为 draft 运行；未填写 labels 时照常运行链路，`passed` 为 `null`。
+`messages.jsonl` 每行是一条去重后的飞书消息，不再包 `{role, raw}`；若接口未返回会话类型，capture 会根据查询范围补上 `chat_type`。Capture 可只读查询生产 DB 来建议 Router task fixture，但不会复制生产数据库。三个 review 的 scenario 相互独立，可直接作为 draft 运行；未填写 labels 时照常运行链路，`passed` 为 `null`。
 
 ## 3. Ingress
 
@@ -88,7 +90,7 @@ python -m feishu_shadow_agent eval run-ingress \
   --snapshot data/evals/ingress-runs/<run_id>
 ```
 
-`--snapshot` 必须指向完整 ingress run 目录，不能指向单个 raw 文件。Snapshot 冻结 Lark 返回的 `group_at_me` source，并用执行 live run 时捕获的 active task/watch-key fixture 重新计算本地 `active_watch` source；该模式不访问飞书或生产 DB。它不是历史 daemon acquisition 日志：早于 capture 时已经关闭或过期的 task 无法由当前 store 还原，因此历史窗口中的 `active_watch` 是 capture-time baseline 下的反事实重算，不代表消息当时实际被 daemon 拉取。
+`--snapshot` 必须指向完整 ingress run 目录，不能指向单个 raw 文件。Snapshot 冻结 Lark 返回的 `group_at_me` source，并用执行 live run 时捕获的 active task/watch-key fixture 重新计算本地 `active_watch` source；该模式不访问飞书。调用真实 judge 前会只读检查生产 DB 中的当前群策略。它不是历史 daemon acquisition 日志：早于 capture 时已经关闭或过期的 task 无法由当前 store 还原，因此历史窗口中的 `active_watch` 是 capture-time baseline 下的反事实重算，不代表消息当时实际被 daemon 拉取。
 
 Run 输出：
 

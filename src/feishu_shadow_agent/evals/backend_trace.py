@@ -14,8 +14,11 @@ from .schemas import IngressJudgeOutput, SemanticJudgeOutput
 
 
 class TracedAgentBackend:
-    def __init__(self, backend: AgentBackend):
+    def __init__(
+        self, backend: AgentBackend, *, before_call: Callable[[], None] | None = None
+    ):
         self.backend = backend
+        self.before_call = before_call
         self.provider = backend.provider
         self._prompts: dict[str, list[str]] = {}
         self._task_session_ids: list[str] = []
@@ -106,6 +109,8 @@ class TracedAgentBackend:
                 )
 
     def _record(self, prompt_type: str, prompt: str) -> None:
+        if self.before_call is not None:
+            self.before_call()
         self._prompts.setdefault(prompt_type, []).append(prompt)
 
 

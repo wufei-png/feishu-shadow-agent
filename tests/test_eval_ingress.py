@@ -18,6 +18,7 @@ from feishu_shadow_agent.evals.ingress import (
     compare_ingress_golden,
 )
 from feishu_shadow_agent.evals.service import EvalService
+from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import LarkCliResult, MessagePage
 
 
@@ -87,6 +88,33 @@ def test_live_ingress_paginates_fixed_window_and_freezes_group_at_source(
     by_id = {row["message_id"]: row for row in timeline["messages"]}
     assert by_id["om_1"]["sources"] == []
     assert by_id["om_2"]["sources"] == ["group_at_me"]
+
+
+def test_live_ingress_rejects_unconfigured_group_before_network(tmp_path: Path) -> None:
+    loaded = _loaded_config(tmp_path)
+
+    class NoNetwork:
+        def list_chat_messages(self, **kwargs) -> MessagePage:
+            raise AssertionError("network must not be called")
+
+        def search_messages(self, **kwargs) -> MessagePage:
+            raise AssertionError("network must not be called")
+
+        def version(self) -> LarkCliResult:
+            raise AssertionError("network must not be called")
+
+    service = EvalService(loaded=loaded, lark_client=NoNetwork())
+    with pytest.raises(EvalError, match="group policy is not configured"):
+        service.run_ingress(
+            chat_id="oc_other",
+            snapshot=None,
+            start=None,
+            end=None,
+            lookback_days=2,
+            label=None,
+            dry_run_backend=False,
+            allow_sensitive_config=False,
+        )
 
 
 def test_ingress_review_labels_sort_mismatches_first() -> None:
@@ -241,7 +269,11 @@ def _loaded_config(tmp_path: Path):
     source = Path("tests/fixtures/minimal.config.yaml")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
-    return ConfigService().load(config_path)
+    loaded = ConfigService().load(config_path)
+    SQLiteStore(
+        loaded.base_dir / loaded.config.storage.sqlite_path
+    ).import_product_policy_from_config(loaded.config)
+    return loaded
 
 
 def _message(*, direct: bool) -> dict:

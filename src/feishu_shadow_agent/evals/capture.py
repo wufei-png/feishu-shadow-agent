@@ -13,6 +13,7 @@ from ..paths import resolve_relative_path
 from ..revision import message_semantic_hash
 from ..time_utils import format_instant, parse_instant_or_none, utc_now
 from ..types import LarkCliResult, MessagePage, NormalizedMessage
+from .access import configured_group_ids, require_configured_group
 from .artifacts import (
     EvalError,
     copy_config_or_raise,
@@ -50,12 +51,18 @@ class CaptureService:
             raise EvalError("lookback-days and limit must be positive")
         start, end = _lookback_window(lookback_days)
         by_id: dict[str, dict[str, Any]] = {}
-        for chat_type, is_at_me in (("group", True), ("p2p", False)):
+        scopes: list[tuple[str, bool, str | None]] = [
+            ("group", True, chat_id)
+            for chat_id in sorted(configured_group_ids(self.loaded))
+        ]
+        scopes.append(("p2p", False, None))
+        for chat_type, is_at_me, chat_id in scopes:
             for raw in self._drain_search(
                 chat_type=chat_type,
                 is_at_me=is_at_me,
                 start=start,
                 end=end,
+                chat_id=chat_id,
             ):
                 message_id = message_id_from_raw(raw)
                 if message_id:
@@ -89,13 +96,39 @@ class CaptureService:
             loaded=self.loaded,
             allow_sensitive_config=allow_sensitive_config,
         )
-        seed_page = self.lark_client.get_messages(
-            as_identity="user", message_ids=[message_id]
-        )
-        if not seed_page.items:
-            raise EvalError(f"message not found: {message_id}")
-        seed = seed_page.items[0]
+        start, end = _lookback_window(lookback_days)
+        seed = None
+        scopes: list[tuple[str, bool, str | None]] = [
+            ("group", False, chat_id)
+            for chat_id in sorted(configured_group_ids(self.loaded))
+        ]
+        scopes.append(("p2p", False, None))
+        for chat_type, is_at_me, chat_id in scopes:
+            seed = next(
+                (
+                    raw
+                    for raw in self._drain_search(
+                        chat_type=chat_type,
+                        is_at_me=is_at_me,
+                        start=start,
+                        end=end,
+                        chat_id=chat_id,
+                    )
+                    if message_id_from_raw(raw) == message_id
+                ),
+                None,
+            )
+            if seed is not None:
+                break
+        if seed is None:
+            raise EvalError(
+                f"message not found in configured groups or p2p within lookback: {message_id}"
+            )
         message_sent_at(seed)
+        seed_chat = _raw_chat_id(seed)
+        is_group = seed.get("chat_type", seed.get("chatType")) == "group"
+        if is_group:
+            require_configured_group(self.loaded, seed_chat or "")
         context = self._capture_context(
             seed,
             context_before=context_before,
@@ -103,21 +136,32 @@ class CaptureService:
             lookback_days=lookback_days,
         )
         task_fixtures, task_raws = self._task_fixtures(seed=seed, context=context)
+        if is_group:
+            require_configured_group(self.loaded, seed_chat or "")
         if any(not message_id_from_raw(raw) for raw in [*context, *task_raws]):
             raise EvalError("captured context contains a message without message_id")
         raw_by_id = {message_id_from_raw(raw): raw for raw in [*context, *task_raws]}
         raw_by_id[message_id] = seed
+        if any(_raw_chat_id(raw) != seed_chat for raw in raw_by_id.values()):
+            raise EvalError("captured context contains a message from another chat")
         raws = sorted(
             raw_by_id.values(),
             key=lambda raw: (_raw_sent_at(raw) or "", message_id_from_raw(raw)),
         )
+        if is_group:
+            raws = [
+                raw
+                if raw.get("chat_type") or raw.get("chatType")
+                else raw | {"chat_type": "group"}
+                for raw in raws
+            ]
         self._record_message_provenance(raws)
         _, case_dir = reserve_run_dir(
             evals_base_dir(self.loaded) / "captured", "capture", label
         )
         write_jsonl(case_dir / "messages.jsonl", raws)
         resource_fixtures, resource_errors = self._capture_resources(
-            case_dir=case_dir, raws=raws
+            case_dir=case_dir, raws=raws, group_chat_id=seed_chat if is_group else None
         )
         config_info = copy_config_or_raise(
             loaded=self.loaded,
@@ -292,6 +336,7 @@ class CaptureService:
             return [seed]
         before = self._capture_direction(
             chat_id=chat_id,
+            group_scoped=seed.get("chat_type", seed.get("chatType")) == "group",
             start=(parsed - timedelta(days=lookback_days)).isoformat(),
             end=sent_at,
             order="desc",
@@ -300,6 +345,7 @@ class CaptureService:
         )
         after = self._capture_direction(
             chat_id=chat_id,
+            group_scoped=seed.get("chat_type", seed.get("chatType")) == "group",
             start=sent_at,
             end=(parsed + timedelta(days=lookback_days)).isoformat(),
             order="asc",
@@ -307,6 +353,7 @@ class CaptureService:
             seed_id=message_id_from_raw(seed),
         )
         rows = [*before, seed, *after]
+        rows = [row for row in rows if _raw_chat_id(row) == chat_id]
         by_id = {message_id_from_raw(row): row for row in rows}
         return sorted(
             by_id.values(),
@@ -453,7 +500,7 @@ class CaptureService:
         return fixtures, raw_messages
 
     def _capture_resources(
-        self, *, case_dir: Path, raws: list[dict[str, Any]]
+        self, *, case_dir: Path, raws: list[dict[str, Any]], group_chat_id: str | None
     ) -> tuple[list[ResourceFixture], list[dict[str, str]]]:
         fixtures: list[ResourceFixture] = []
         errors: list[dict[str, str]] = []
@@ -469,6 +516,8 @@ class CaptureService:
                 destination = resource_fixture_path(case_dir, provisional)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 relative_destination = destination.relative_to(self.loaded.base_dir)
+                if group_chat_id is not None:
+                    require_configured_group(self.loaded, group_chat_id)
                 try:
                     result = self.lark_client.download_resource(
                         message_id=resource.message_id,
@@ -503,6 +552,7 @@ class CaptureService:
         self,
         *,
         chat_id: str,
+        group_scoped: bool,
         start: str,
         end: str,
         order: str,
@@ -516,6 +566,8 @@ class CaptureService:
         seen_tokens: set[str] = set()
         token: str | None = None
         while len(rows) < limit:
+            if group_scoped:
+                require_configured_group(self.loaded, chat_id)
             page = self.lark_client.list_chat_messages(
                 chat_id=chat_id,
                 start=start,
@@ -524,7 +576,11 @@ class CaptureService:
                 page_size=min(max(limit + 1, 1), 50),
                 order=order,
             )
+            if group_scoped:
+                require_configured_group(self.loaded, chat_id)
             for row in page.items:
+                if _raw_chat_id(row) != chat_id:
+                    continue
                 message_id = message_id_from_raw(row)
                 if not message_id or message_id == seed_id or message_id in seen:
                     continue
@@ -549,19 +605,31 @@ class CaptureService:
         is_at_me: bool,
         start: str,
         end: str,
+        chat_id: str | None = None,
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         seen_tokens: set[str] = set()
         token: str | None = None
         while True:
+            if chat_type == "group":
+                require_configured_group(self.loaded, chat_id or "")
             page = self.lark_client.search_messages(
+                chat_id=chat_id,
                 chat_type=chat_type,
                 is_at_me=is_at_me,
                 start=start,
                 end=end,
                 page_token=token,
             )
-            rows.extend(page.items)
+            if chat_type == "group":
+                require_configured_group(self.loaded, chat_id or "")
+            for raw in page.items:
+                if chat_type == "group" and _raw_chat_id(raw) != chat_id:
+                    continue
+                actual_type = raw.get("chat_type") or raw.get("chatType")
+                if actual_type is not None and actual_type != chat_type:
+                    continue
+                rows.append(raw if actual_type else raw | {"chat_type": chat_type})
             if not page.has_more or not page.next_page_token:
                 break
             if page.next_page_token in seen_tokens:
