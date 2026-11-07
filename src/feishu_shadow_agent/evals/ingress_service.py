@@ -309,7 +309,13 @@ class IngressEvalService:
                 page_token=token,
             )
             require_configured_group(self.loaded, chat_id)
-            rows.extend(row for row in page.items if _raw_chat_id(row) == chat_id)
+            for row in page.items:
+                if _raw_chat_id(row) != chat_id:
+                    continue
+                chat_type = row.get("chat_type") or row.get("chatType")
+                if chat_type not in (None, "group"):
+                    raise EvalError("ingress message has a conflicting chat type")
+                rows.append({**row, "chat_type": "group"})
             if not page.has_more or not page.next_page_token:
                 return rows
             if page.next_page_token in seen_tokens:
@@ -381,6 +387,16 @@ def _load_snapshot(
     if not isinstance(chat, dict):
         raise EvalError("ingress snapshot timeline is missing chat metadata")
     chat_map = cast(dict[str, Any], chat)
+    snapshot_chat_id = chat_map.get("chat_id")
+    if not isinstance(snapshot_chat_id, str) or not snapshot_chat_id:
+        raise EvalError("ingress snapshot chat_id is missing")
+    for row in rows:
+        row_chat_id = _raw_chat_id(row)
+        if row_chat_id is not None and row_chat_id != snapshot_chat_id:
+            raise EvalError("ingress snapshot message belongs to another chat")
+        chat_type = row.get("chat_type") or row.get("chatType")
+        if chat_type not in (None, "group"):
+            raise EvalError("ingress snapshot message has a conflicting chat type")
     timeline_rows = timeline_messages(timeline)
     timeline_ids = [str(row.get("message_id") or "") for row in timeline_rows]
     raw_ids = [message_id_from_raw(row) for row in rows]

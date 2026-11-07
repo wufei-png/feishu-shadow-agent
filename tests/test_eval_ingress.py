@@ -12,6 +12,7 @@ from feishu_shadow_agent.evals.artifacts import (
     write_jsonl,
     write_yaml,
 )
+from feishu_shadow_agent.evals.dry_run import DryRunBackend
 from feishu_shadow_agent.evals.ingress import (
     GroupIngressEvaluator,
     build_review_labels,
@@ -113,6 +114,72 @@ def test_live_ingress_rejects_unconfigured_group_before_network(tmp_path: Path) 
             lookback_days=2,
             label=None,
             dry_run_backend=False,
+            allow_sensitive_config=False,
+        )
+
+
+def test_live_snapshot_adds_known_group_type_and_rejects_mixed_chats(
+    tmp_path: Path,
+) -> None:
+    class MissingTypeClient(PagedIngressClient):
+        def list_chat_messages(self, *, page_token=None, **kwargs):
+            page = super().list_chat_messages(page_token=page_token, **kwargs)
+            return MessagePage(
+                [
+                    {key: value for key, value in row.items() if key != "chat_type"}
+                    for row in page.items
+                ],
+                page.next_page_token,
+                page.has_more,
+            )
+
+    class FakeJudge(DryRunBackend):
+        calls = 0
+
+        def structured_output(self, *args, **kwargs):
+            self.calls += 1
+            return super().structured_output(*args, **kwargs)
+
+    loaded = _loaded_config(tmp_path)
+    judge = FakeJudge()
+    service = EvalService(
+        loaded=loaded, lark_client=MissingTypeClient(), backend_factory=lambda _: judge
+    )
+    live = service.run_ingress(
+        chat_id="oc_test",
+        snapshot=None,
+        start="2026-07-10T10:00:00+08:00",
+        end="2026-07-10T11:00:00+08:00",
+        lookback_days=None,
+        label=None,
+        dry_run_backend=True,
+        allow_sensitive_config=False,
+    )
+    raws = read_jsonl(live / "raw_messages.jsonl")
+    assert [row["chat_type"] for row in raws] == ["group", "group"]
+    service.run_ingress(
+        chat_id=None,
+        snapshot=live,
+        start=None,
+        end=None,
+        lookback_days=None,
+        label=None,
+        dry_run_backend=False,
+        allow_sensitive_config=False,
+    )
+    assert judge.calls == 1
+
+    raws[0]["chat_id"] = "oc_other"
+    write_jsonl(live / "raw_messages.jsonl", raws)
+    with pytest.raises(EvalError, match="belongs to another chat"):
+        service.run_ingress(
+            chat_id=None,
+            snapshot=live,
+            start=None,
+            end=None,
+            lookback_days=None,
+            label=None,
+            dry_run_backend=True,
             allow_sensitive_config=False,
         )
 
