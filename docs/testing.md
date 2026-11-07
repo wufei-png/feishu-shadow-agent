@@ -220,21 +220,24 @@ python -m feishu_shadow_agent daemon --config config.yaml --dry-run
 3. 查看状态：
 
 ```bash
-python -m feishu_shadow_agent status --config config.yaml
+python -m feishu_shadow_agent status --config config.yaml --mode dry-run
+python -m feishu_shadow_agent console --config config.yaml --mode dry-run
 ```
 
 4. 如知道 `message_id`，查看该消息的本地路由和 dispatch preview：
 
 ```bash
-python -m feishu_shadow_agent replay --config config.yaml --message-id <message_id> --dry-run
+python -m feishu_shadow_agent replay --config config.yaml --mode dry-run --message-id <message_id> --dry-run
 ```
 
 预期结果：
 
-- `data/agent.sqlite3` 中出现消息、任务、routing audit、Agent audit 或 approval/action 记录。
-- `logs/agent.jsonl` 中出现 `message_ingested`、`task_processing_completed`、`dispatch_action_previewed` 等事件。
+- 默认预演库 `data/agent.sqlite3.dry-run` 中出现消息、任务、routing audit、Agent audit 或 approval/action 记录；生产库不复制这些记录。
+- 默认预演日志 `logs/agent.jsonl.dry-run` 中出现 `message_ingested`、`task_processing_completed`、`dispatch_action_previewed` 等事件；资源使用 `data/resources.dry-run`。
 - dry-run 模式不会真实对外回复或发送 owner 通知；审批只通过本地 Console 处理。私聊仅在完整枚举并排除机器人会话后按 chat ID 查询，无法确认时暂停私聊采集。
 - dry-run 产生的 approval/action 带 dry-run provenance，切换到生产模式后不能复用；生产发送必须由生产运行重新生成 approval。
+- 首次创建预演状态时，若生产策略已初始化则复制其当前策略，此后两套策略独立；需要时用 `policy sync-production --config config.yaml --mode dry-run` 显式同步。生产策略未初始化时，可运行 `policy import-config --config config.yaml --mode dry-run`。
+- `full_access` Agent 可自行调用 shell 或飞书 CLI 并产生外部写入，项目的 dry-run 发送开关不限制这些工具。
 
 ## 5. 真实发送端到端
 

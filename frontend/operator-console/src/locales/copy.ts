@@ -1,6 +1,8 @@
 export const consoleCopy = {
   "app.title": ["Shadow Agent · 值守台", "Shadow Agent · Operator Console"],
   "app.brandSubtitle": ["值守台", "Operator Console"],
+  "app.modeProduction": ["生产状态", "Production"],
+  "app.modeDryRun": ["本地预演", "Local dry-run"],
   "app.mainNavigation": ["主导航", "Primary navigation"],
   "app.missingToken": ["缺少会话令牌", "Session token missing"],
   "app.missingTokenDetail": ["请使用服务启动时输出的本地控制台链接打开页面。", "Open the local console link printed when the service starts."],

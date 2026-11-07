@@ -275,7 +275,7 @@ reply_policy:
 
 - 不确定、涉及承诺/隐私/写操作/权限扩大/多人责任不清：bot 私聊 owner。
 - P2P：证据完整、`answerability=auto_reply` 且回复 gate 通过时允许自动回复；single-active-task 只作为语义候选，不作为确定性 attach。
-- 群聊：显式 per-chat policy 开启，或未知群 `unknown_group_auto_reply` 开启时，直接 `@我`、证据完整、全部确定性 gate 通过才自动回复。
+- 群聊：必须先有显式 per-chat policy 才会采集；开启自动回复后，直接 `@我`、证据完整、全部确定性 gate 通过才自动回复。`unknown_group_auto_reply` 为兼容字段，不能启用未配置群的采集。
 
 身份规则：
 

@@ -497,34 +497,7 @@ class SQLiteStore:
                     "new_policy": None,
                     "audit_id": None,
                 }
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO group_policy_holds(kind, item_id, chat_id, created_at)
-                SELECT 'task', id, chat_id, ? FROM tasks
-                WHERE chat_id = ? AND chat_type = 'group' AND status = 'watching'
-                """,
-                (now, normalized_chat_id),
-            )
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO group_policy_holds(kind, item_id, chat_id, created_at)
-                SELECT 'action', a.id, t.chat_id, ? FROM actions a
-                JOIN tasks t ON t.id = a.task_id
-                WHERE t.chat_id = ? AND t.chat_type = 'group'
-                  AND a.kind = 'send_reply' AND a.status IN ('pending', 'sending')
-                """,
-                (now, normalized_chat_id),
-            )
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO group_policy_holds(kind, item_id, chat_id, created_at)
-                SELECT 'retry', r.id, m.chat_id, ? FROM processing_retry_attempts r
-                JOIN messages m ON m.message_id = r.message_id
-                WHERE m.chat_id = ? AND m.chat_type = 'group'
-                  AND r.status IN ('queued', 'claimed')
-                """,
-                (now, normalized_chat_id),
-            )
+            _hold_group_policy_items_locked(conn, normalized_chat_id, now=now)
             conn.execute(
                 "DELETE FROM chat_policies WHERE chat_id = ?",
                 (normalized_chat_id,),
@@ -547,6 +520,83 @@ class SQLiteStore:
             "new_policy": None,
             "audit_id": audit_id,
         }
+
+    def replace_product_policy_snapshot(
+        self, global_policy: dict[str, Any], chats: list[dict[str, Any]], *, source: str
+    ) -> None:
+        """Atomically replace policy only, retaining and holding other local state."""
+        normalized_global = _normalize_global_product_policy(global_policy)
+        normalized_chats = [_normalize_chat_product_policy(chat) for chat in chats]
+        incoming = {str(chat["chat_id"]): chat for chat in normalized_chats}
+        self.initialize()
+        now = self.clock()
+        actor = "dry_run_policy_sync"
+        reason = "production policy snapshot"
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            global_row = conn.execute(
+                "SELECT policy_json FROM product_policies WHERE key = ?",
+                (PRODUCT_POLICY_KEY,),
+            ).fetchone()
+            old_global = (
+                None if global_row is None else json.loads(global_row["policy_json"])
+            )
+            if old_global != normalized_global:
+                conn.execute(
+                    "INSERT INTO product_policies(key, policy_json, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET policy_json = excluded.policy_json, updated_at = excluded.updated_at",
+                    (PRODUCT_POLICY_KEY, _policy_json(normalized_global), now),
+                )
+                self._record_policy_audit_locked(
+                    conn,
+                    scope="global",
+                    policy_key=PRODUCT_POLICY_KEY,
+                    old_policy=old_global,
+                    new_policy=normalized_global,
+                    actor=actor,
+                    reason=reason,
+                    now=now,
+                )
+            rows = conn.execute(
+                "SELECT chat_id, name, auto_reply, bot_joined, reply_identity, allow_user_fallback, resource_download FROM chat_policies"
+            ).fetchall()
+            existing = {str(row["chat_id"]): _chat_policy_from_row(row) for row in rows}
+            for chat_id in sorted(existing.keys() - incoming.keys()):
+                _hold_group_policy_items_locked(conn, chat_id, now=now)
+                conn.execute("DELETE FROM chat_policies WHERE chat_id = ?", (chat_id,))
+                self._record_policy_audit_locked(
+                    conn,
+                    scope="chat",
+                    policy_key=f"chat:{chat_id}",
+                    old_policy=existing[chat_id],
+                    new_policy=None,
+                    actor=actor,
+                    reason=reason,
+                    now=now,
+                )
+            for chat_id, policy in sorted(incoming.items()):
+                old_policy = existing.get(chat_id)
+                if old_policy == policy:
+                    continue
+                if old_policy is None:
+                    self._insert_chat_policy_locked(conn, policy, now=now)
+                else:
+                    self._update_chat_policy_locked(conn, policy, now=now)
+                self._record_policy_audit_locked(
+                    conn,
+                    scope="chat",
+                    policy_key=f"chat:{chat_id}",
+                    old_policy=old_policy,
+                    new_policy=policy,
+                    actor=actor,
+                    reason=reason,
+                    now=now,
+                )
+            conn.execute(
+                "INSERT INTO checkpoints(key, value_json, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+                ("dry_run.policy_initialized", _policy_json({"source": source}), now),
+            )
 
     def record_run_start(
         self,
@@ -6018,6 +6068,39 @@ def _hold_group_action_if_needed_locked(
             "INSERT OR IGNORE INTO group_policy_holds(kind, item_id, chat_id, created_at) VALUES ('action', ?, ?, ?)",
             (action_id, task["chat_id"] or "", now),
         )
+
+
+def _hold_group_policy_items_locked(
+    conn: sqlite3.Connection, chat_id: str, *, now: str
+) -> None:
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO group_policy_holds(kind, item_id, chat_id, created_at)
+        SELECT 'task', id, chat_id, ? FROM tasks
+        WHERE chat_id = ? AND chat_type = 'group' AND status = 'watching'
+        """,
+        (now, chat_id),
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO group_policy_holds(kind, item_id, chat_id, created_at)
+        SELECT 'action', a.id, t.chat_id, ? FROM actions a
+        JOIN tasks t ON t.id = a.task_id
+        WHERE t.chat_id = ? AND t.chat_type = 'group'
+          AND a.kind = 'send_reply' AND a.status IN ('pending', 'sending')
+        """,
+        (now, chat_id),
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO group_policy_holds(kind, item_id, chat_id, created_at)
+        SELECT 'retry', r.id, m.chat_id, ? FROM processing_retry_attempts r
+        JOIN messages m ON m.message_id = r.message_id
+        WHERE m.chat_id = ? AND m.chat_type = 'group'
+          AND r.status IN ('queued', 'claimed')
+        """,
+        (now, chat_id),
+    )
 
 
 def _require_group_policy_locked(

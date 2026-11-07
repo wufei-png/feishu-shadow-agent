@@ -70,7 +70,6 @@ type ChatPolicyForm = {
 
 const globalFields: Array<{ key: keyof GlobalPolicyForm; catalogKey: string; type: "boolean" | "identity" }> = [
   { key: "p2p_auto_reply", catalogKey: "policy.global.p2p_auto_reply", type: "boolean" },
-  { key: "unknown_group_auto_reply", catalogKey: "policy.global.unknown_group_auto_reply", type: "boolean" },
   { key: "bot_joined", catalogKey: "policy.global.default_bot_joined", type: "boolean" },
   { key: "reply_identity", catalogKey: "policy.global.default_reply_identity", type: "identity" },
   { key: "allow_user_fallback", catalogKey: "policy.global.default_allow_user_fallback", type: "boolean" },

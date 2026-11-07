@@ -16,6 +16,7 @@ export type CommandResult = {
 };
 
 export type DashboardSnapshot = {
+  runtime_mode?: "production" | "dry_run";
   daemon_liveness?: Record<string, unknown>;
   policy_status?: PolicyStatus;
   health_issue_summary?: HealthIssueSummary;

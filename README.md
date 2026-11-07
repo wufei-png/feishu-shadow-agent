@@ -61,6 +61,17 @@ python -m feishu_shadow_agent doctor --config config.yaml
 python -m feishu_shadow_agent daemon --config config.yaml --dry-run
 ```
 
+另开终端启动同一预演状态的 Console：
+
+```bash
+python -m feishu_shadow_agent console --config config.yaml --mode dry-run
+python -m feishu_shadow_agent status --config config.yaml --mode dry-run
+```
+
+预演首次创建时只从已初始化的生产库复制当前策略，数据库、资源和日志分别使用独立的 `.dry-run` 路径。之后两套策略独立修改；如需再次从生产库同步，运行 `python -m feishu_shadow_agent policy sync-production --config config.yaml --mode dry-run`。若生产策略尚未初始化，可用 `policy import-config --config config.yaml --mode dry-run` 直接初始化预演策略。
+
+项目自身不会在 dry-run 中发送消息，但 `tool_permissions: full_access` 的 Agent 可以独立调用 shell 或飞书 CLI 并产生外部写入；dry-run 不会限制这些 Agent 工具。首次验证建议使用 `read_only` 或外部沙箱。
+
 确认行为符合预期后，再去掉 `--dry-run` 进入真实发送模式：
 
 ```bash

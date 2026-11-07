@@ -4,6 +4,10 @@ Feishu Shadow Agent 的 `config.yaml` 结构真相来源是 `src/feishu_shadow_a
 
 `reply_policy` 和 `chats` 是 Product Policy Store 的 Policy Import Source：operator 必须显式运行 `policy import-config` 才会把这些字段写入 SQLite。daemon、资源下载 preflight 和回复 gate 的运行时 Product Policy 只从 SQLite Product Policy Store 读取；DB 全局策略未初始化时，`doctor` 和 daemon runtime health 会 critical fail closed。
 
+未配置群不会被查询或交给 Agent；设置群策略后仅处理启用时刻之后的新消息，正常运行中的重叠轮询和断线恢复仍会保留。删除群策略会暂停该群的未完成任务、重试和待发送动作；重新添加后不会自动恢复，需要在 Console 或 CLI 中显式处理。
+
+生产和 dry-run 使用独立的数据库、资源和日志路径。dry-run 初次创建时仅复制生产库中的当前策略，此后独立修改；`policy sync-production --config config.yaml --mode dry-run` 显式覆盖预演策略，并对被移除群的预演任务执行暂停。生产策略未初始化时，可用 `policy import-config --config config.yaml --mode dry-run` 导入 YAML。
+
 常用命令：
 
 ```bash
@@ -94,7 +98,7 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `agent_backend.claude_code.model` | string/null | `null` | 可选 Claude Code model 覆盖；`null` 时由 Claude Code CLI 决定。 |
 | `agent_backend.claude_code.timeout_seconds` | int `> 0`/null | `null` | Claude Code Agent 子进程超时；`null` 不设置 wall-clock 截止时间。readiness 探测使用 `health.timeout_seconds`。 |
 | `reply_policy.p2p_auto_reply` | bool | `true` | 导入 Product Policy Store 后，P2P 私聊在回复 gate 通过时是否允许自动回复。 |
-| `reply_policy.unknown_group_auto_reply` | bool | `false` | 导入 Product Policy Store 后，未显式配置的群是否允许自动回复；不影响资源下载、bot 是否入群或 user fallback。 |
+| `reply_policy.unknown_group_auto_reply` | bool | `false` | 保留的策略字段；未显式配置的群不会被采集或交给 Agent，因此该字段不会启用未知群的处理。 |
 | `reply_postprocess.enabled` | bool | `false` | 是否对 agent 生成的候选回复做一次性表达改写。关闭时不检查 profile/skill 路径，也不调用 backend postprocess。开启时至少需要启用 `owner_style` 或 `humanizer_zh` 之一。 |
 | `reply_postprocess.max_turns` | int `> 0` | `4` | 一次性 reply postprocess 和 owner style refresh 的 Hermes `--max-turns`；Codex 和 Claude Code 没有对应 max-turns flag。 |
 | `reply_postprocess.model` | string/null | `null` | postprocess/refresh 的模型覆盖；Hermes 继承 `agent_backend.hermes.model`，Codex 继承 `agent_backend.codex.model`，Claude Code 继承 `agent_backend.claude_code.model`。 |
@@ -175,16 +179,16 @@ Agent backend 的默认 `timeout_seconds: null` 允许模型完成配置的 turn
 
 ## 权限档位
 
-`tool_permissions` 控制传给 agent backend 的工具权限。Backend CLI 权限之外，本项目仍会叠加 reply policy、审批队列和 dispatch gate。它与飞书对外发送权限是两套机制。
+`tool_permissions` 控制传给 agent backend 的工具权限。本项目内置的发送路径还会执行 reply policy、审批队列和 dispatch gate；Agent 自行调用的外部工具不经过这些内置路径。
 
 | `tool_permissions` | Hermes CLI 参数 | Codex CLI 参数 | Claude Code CLI 参数 | 实际边界 |
 | --- | --- | --- | --- | --- |
 | `read_only` | `--toolsets safe` | top-level `--search --ask-for-approval never` + `exec --sandbox read-only` | `--permission-mode dontAsk --tools Read,Grep,Glob,LS,WebFetch,WebSearch --allowedTools Read,Grep,Glob,LS,WebFetch,WebSearch` | Hermes `safe` 禁用本地写操作类工具；Codex 在只读 sandbox 下运行并禁止交互审批，仍允许 live search；Claude Code 只暴露 read/search 类工具且不允许 Bash。它们都不是“零副作用”。 |
-| `full_access` | `--toolsets hermes-cli --yolo` | top-level `--search` + `exec --dangerously-bypass-approvals-and-sandbox` | `--permission-mode bypassPermissions --dangerously-skip-permissions --tools default` | 显式危险模式。Backend 可执行本地写工具；飞书侧写入仍必须经过本项目的 policy、approval、dry-run、幂等和 dispatch gate。 |
+| `full_access` | `--toolsets hermes-cli --yolo` | top-level `--search` + `exec --dangerously-bypass-approvals-and-sandbox` | `--permission-mode bypassPermissions --dangerously-skip-permissions --tools default` | 显式危险模式。Backend 可执行本地写工具，也可能自行调用飞书 CLI 产生外部写入；这些调用不经过项目内置的 policy、approval、dry-run 和 dispatch gate。 |
 
 `context_access` 不跟随写权限开放。只要本地 DB 存在，Router 会收到受 `query_scope` 限制的 bounded snapshot 和 read-only SQLite URI；Task Session 已由 Messages 提供会话正文，只收到 read-only URI、allowed tables 与当前 task scope，不再复制 snapshot。Hermes `safe` 没有本地 file/SQLite 工具：Router 使用 snapshot，Task Session 使用 Messages；具备只读 SQLite client 的 backend 才能直接查询 `read_only_uri`。
 
-这里的 read-only 是逻辑信任边界，不是物理沙箱：在 `full_access` 下，项目有意依赖模型遵循 prompt 中关于 URI、allowed tables 和 query scope 的约束；backend 仍可能拥有其他本地写工具。需要物理限制时使用 `read_only` 或外部 sandbox。该信任原则只适用于 Context Access，不适用于飞书对外写入；飞书写入仍由代码中的 schema、policy、approval、dry-run、幂等和 dispatch gate 保护。
+这里的 Context Access read-only 是逻辑信任边界，不是物理沙箱：在 `full_access` 下，项目依赖模型遵循 prompt 中关于 URI、allowed tables 和 query scope 的约束；backend 仍可能拥有其他本地写工具。需要更严格限制时使用 `read_only` 或外部 sandbox。项目内置飞书发送受代码 gate 保护，Agent 自行调用的 shell/CLI 不受该 gate 约束。
 
 ### 非交互子进程下的重要语义
 
@@ -193,7 +197,7 @@ daemon 通过 `subprocess` 以无 TTY 方式调用 `hermes chat -q -Q`。在此�
 因此：
 
 - `full_access` 是显式危险模式，会启用 Hermes 完整 CLI 工具集（file、terminal、browser、skills、memory 等）并传 `--yolo`；Codex 会传 `--dangerously-bypass-approvals-and-sandbox`；Claude Code 会传 `--permission-mode bypassPermissions --dangerously-skip-permissions --tools default`。
-- 飞书侧真正的写保护来自：结构化 JSON schema、`answerability`/置信度等级/风险 gate、owner 审批、`dry-run`、幂等和 dispatch 策略。
+- 项目内置飞书发送路径由结构化 JSON schema、风险 gate、owner 审批、`dry-run`、幂等和 dispatch 策略保护；这些不限制 Agent 自行运行外部命令。
 - 若需要更严格的本地副作用控制，应使用 `read_only`。
 
 ## Hermes 集成说明

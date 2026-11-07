@@ -40,6 +40,11 @@ from .processing import TaskProcessingService
 from .replay import replay_message_dry_run
 from .reply_style import ReplyStyleRefresher
 from .retention import RetentionService
+from .runtime_mode import (
+    dry_run_config,
+    initialize_dry_run_policy,
+    sync_production_policy,
+)
 from .store.sqlite_store import SQLiteStore
 from .time_utils import shift_instant
 from .types import new_run_id, utc_now_iso
@@ -51,6 +56,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not hasattr(args, "handler"):
         parser.print_help()
         return 0
+    mode = getattr(args, "mode", None)
+    if mode == "dry-run" and args.command in {"config", "eval"}:
+        print("error: --mode dry-run is not supported by this command", file=sys.stderr)
+        return 2
+    if mode == "dry-run" and args.command in {"approve", "reject", "send"}:
+        print(
+            "error: dry-run approvals are handled in the local Console", file=sys.stderr
+        )
+        return 2
+    if mode == "dry-run" and args.command == "doctor" and args.send_test:
+        print("error: dry-run doctor cannot send a test message", file=sys.stderr)
+        return 2
+    if (
+        mode == "dry-run"
+        and args.command == "dispatch"
+        and args.dispatch_command == "mark-sent"
+    ):
+        print(
+            "error: dry-run actions cannot be marked as actually sent", file=sys.stderr
+        )
+        return 2
+    if mode == "dry-run" and args.command == "reply-style" and not args.dry_run:
+        print("error: dry-run mode supports reply-style preview only", file=sys.stderr)
+        return 2
     try:
         return args.handler(args)
     except ConfigError as exc:
@@ -256,6 +285,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     policy_import_config.add_argument("--reason", help="optional policy audit reason")
     policy_import_config.set_defaults(handler=_handle_policy_import_config)
+    policy_sync = policy_subparsers.add_parser(
+        "sync-production", help="copy current production policy into dry-run"
+    )
+    _add_config_arg(policy_sync)
+    policy_sync.set_defaults(handler=_handle_policy_sync_production)
     policy_update_global = policy_subparsers.add_parser(
         "update-global",
         help="update Product Policy Store global policy fields",
@@ -420,10 +454,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _add_config_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", help="path to config.yaml")
+    parser.add_argument(
+        "--mode",
+        choices=("production", "dry-run"),
+        help="select production or isolated dry-run state",
+    )
 
 
 def _handle_doctor(args: argparse.Namespace) -> int:
-    loaded, store, logger = _load_runtime(args.config)
+    loaded, store, logger = _load_runtime(args.config, mode=args.mode)
     run_id = new_run_id("doctor")
     store.record_run_start(
         run_id=run_id, dry_run=not args.send_test, **_git_info(Path.cwd())
@@ -448,13 +487,21 @@ def _handle_doctor(args: argparse.Namespace) -> int:
 
 
 def _handle_daemon(args: argparse.Namespace) -> int:
+    if args.dry_run and args.mode == "production":
+        print(
+            "daemon error: --dry-run conflicts with --mode production", file=sys.stderr
+        )
+        return 2
+    args.dry_run = args.dry_run or args.mode == "dry-run"
     if args.dry_run and args.send_owner_notifications:
         print(
             "daemon error: --dry-run cannot send owner notifications; use the local Console",
             file=sys.stderr,
         )
         return 2
-    loaded, store, logger = _load_runtime(args.config)
+    loaded, store, logger = _load_runtime(
+        args.config, mode="dry-run" if args.dry_run else args.mode
+    )
     run_id = new_run_id("run")
     client = LarkCliClient(
         path=loaded.config.lark_cli.path,
@@ -519,11 +566,7 @@ def _handle_console(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    loaded = ConfigService().load(args.config)
-    sqlite_path = resolve_relative_path(
-        loaded.config.storage.sqlite_path, loaded.base_dir
-    )
-    store = SQLiteStore(sqlite_path)
+    loaded, store, _ = _load_runtime(args.config, mode=args.mode)
     store.initialize()
     token = generate_console_token()
     app = create_console_app(
@@ -533,9 +576,10 @@ def _handle_console(args: argparse.Namespace) -> int:
         host=host,
         port=args.port,
         static_dir=static_dir,
+        execution_mode="dry_run" if args.mode == "dry-run" else "production",
     )
     print(
-        f"Operator Console: {console_access_url(host=host, port=args.port, token=token)}",
+        f"Operator Console ({args.mode or 'production'}): {console_access_url(host=host, port=args.port, token=token)}",
         flush=True,
     )
     _run_console_server(app, host=host, port=args.port)
@@ -568,15 +612,21 @@ def _handle_config_validate(args: argparse.Namespace) -> int:
 
 def _handle_status(args: argparse.Namespace) -> int:
     loaded = ConfigService().load(args.config)
+    if args.mode == "dry-run":
+        loaded, store, _ = _load_runtime(args.config, mode=args.mode)
+    else:
+        store = SQLiteStore(
+            resolve_relative_path(loaded.config.storage.sqlite_path, loaded.base_dir)
+        )
     sqlite_path = resolve_relative_path(
         loaded.config.storage.sqlite_path, loaded.base_dir
     )
-    store = SQLiteStore(sqlite_path)
     if sqlite_path.exists():
         store.initialize()
     snapshot = OperatorQueryService(
         store, policy_import_source=loaded.config, base_dir=loaded.base_dir
     ).dashboard_snapshot()
+    snapshot["runtime_mode"] = args.mode or "production"
     print(yaml.safe_dump(snapshot, allow_unicode=True, sort_keys=False), end="")
     return 0
 
@@ -608,7 +658,7 @@ def _handle_send(args: argparse.Namespace) -> int:
 
 
 def _handle_task_close(args: argparse.Namespace) -> int:
-    _, store, _ = _load_runtime(args.config)
+    _, store, _ = _load_runtime(args.config, mode=args.mode)
     result = OperatorCommandService(store).close_task(
         args.task_id,
         actor="local_cli",
@@ -618,7 +668,7 @@ def _handle_task_close(args: argparse.Namespace) -> int:
 
 
 def _handle_task_reopen(args: argparse.Namespace) -> int:
-    loaded, store, _ = _load_runtime(args.config)
+    loaded, store, _ = _load_runtime(args.config, mode=args.mode)
     result = OperatorCommandService(store).reopen_task(
         args.task_id,
         watch_until=_watch_until_from_now(loaded.config.lifecycle.watch_minutes),
@@ -629,7 +679,7 @@ def _handle_task_reopen(args: argparse.Namespace) -> int:
 
 
 def _handle_task_retry_processing(args: argparse.Namespace) -> int:
-    _, store, _ = _load_runtime(args.config)
+    _, store, _ = _load_runtime(args.config, mode=args.mode)
     result = OperatorCommandService(store).retry_processing(
         args.message_id,
         stage=args.stage,
@@ -644,7 +694,7 @@ def _handle_task_set_background(args: argparse.Namespace) -> int:
     if not content.strip():
         print("set-background requires background text", file=sys.stderr)
         return 2
-    _, store, _ = _load_runtime(args.config)
+    _, store, _ = _load_runtime(args.config, mode=args.mode)
     result = OperatorCommandService(store).update_task_background(
         args.task_id,
         content=content,
@@ -655,7 +705,7 @@ def _handle_task_set_background(args: argparse.Namespace) -> int:
 
 
 def _handle_task_clear_background(args: argparse.Namespace) -> int:
-    _, store, _ = _load_runtime(args.config)
+    _, store, _ = _load_runtime(args.config, mode=args.mode)
     result = OperatorCommandService(store).update_task_background(
         args.task_id,
         content=None,
@@ -695,7 +745,7 @@ def _handle_local_approval_command(
 
 
 def _handle_replay(args: argparse.Namespace) -> int:
-    loaded, store, _ = _load_runtime(args.config)
+    loaded, store, _ = _load_runtime(args.config, mode=args.mode)
     output = replay_message_dry_run(
         loaded_config=loaded,
         store=store,
@@ -907,7 +957,7 @@ def _warn_eval_full_access_repeat(loaded: LoadedConfig, repeat: int) -> None:
 
 
 def _handle_retention_prune(args: argparse.Namespace) -> int:
-    loaded, store, logger = _load_runtime(args.config)
+    loaded, store, logger = _load_runtime(args.config, mode=args.mode)
     summary = RetentionService(
         store=store,
         config=loaded.config,
@@ -921,7 +971,7 @@ def _handle_retention_prune(args: argparse.Namespace) -> int:
 
 
 def _handle_reply_style_refresh(args: argparse.Namespace) -> int:
-    loaded, store, logger = _load_runtime(args.config)
+    loaded, store, logger = _load_runtime(args.config, mode=args.mode)
     client = LarkCliClient(
         path=loaded.config.lark_cli.path,
         timeout_seconds=loaded.config.lark_cli.timeout_seconds,
@@ -945,13 +995,13 @@ def _handle_reply_style_refresh(args: argparse.Namespace) -> int:
 
 
 def _handle_maintenance_expire_approvals(args: argparse.Namespace) -> int:
-    _, store, _ = _load_runtime(args.config)
+    _, store, _ = _load_runtime(args.config, mode=args.mode)
     result = OperatorCommandService(store).expire_approvals(actor="local_cli")
     return _emit_command_result(result)
 
 
 def _handle_policy_import_config(args: argparse.Namespace) -> int:
-    loaded, store, _ = _load_runtime(args.config)
+    loaded, store, _ = _load_runtime(args.config, mode=args.mode)
     result = OperatorCommandService(store).import_policy_config(
         loaded.config,
         replace=args.replace,
@@ -962,8 +1012,18 @@ def _handle_policy_import_config(args: argparse.Namespace) -> int:
     return _emit_command_result(result)
 
 
+def _handle_policy_sync_production(args: argparse.Namespace) -> int:
+    if args.mode != "dry-run":
+        print("policy sync-production requires --mode dry-run", file=sys.stderr)
+        return 2
+    _, store, _ = _load_runtime(args.config, mode="dry-run")
+    result = sync_production_policy(ConfigService().load(args.config), store)
+    print(yaml.safe_dump(result, allow_unicode=True, sort_keys=False), end="")
+    return 0
+
+
 def _handle_policy_update_global(args: argparse.Namespace) -> int:
-    _, store, _ = _load_runtime(args.config)
+    _, store, _ = _load_runtime(args.config, mode=args.mode)
     result = OperatorCommandService(store).update_global_policy(
         _global_policy_changes_from_args(args),
         actor="local_cli",
@@ -973,7 +1033,7 @@ def _handle_policy_update_global(args: argparse.Namespace) -> int:
 
 
 def _handle_policy_update_chat(args: argparse.Namespace) -> int:
-    _, store, _ = _load_runtime(args.config)
+    _, store, _ = _load_runtime(args.config, mode=args.mode)
     result = OperatorCommandService(store).update_chat_policy(
         args.chat_id,
         _chat_policy_changes_from_args(args),
@@ -984,7 +1044,7 @@ def _handle_policy_update_chat(args: argparse.Namespace) -> int:
 
 
 def _handle_policy_delete_chat(args: argparse.Namespace) -> int:
-    _, store, _ = _load_runtime(args.config)
+    _, store, _ = _load_runtime(args.config, mode=args.mode)
     result = OperatorCommandService(store).delete_chat_policy(
         args.chat_id,
         actor="local_cli",
@@ -994,7 +1054,7 @@ def _handle_policy_delete_chat(args: argparse.Namespace) -> int:
 
 
 def _handle_dispatch_inspect(args: argparse.Namespace) -> int:
-    _, store, _ = _load_runtime(args.config)
+    _, store, _ = _load_runtime(args.config, mode=args.mode)
     result = OperatorCommandService(store).inspect_dispatch_action(
         args.action_id, actor="local_cli"
     )
@@ -1002,7 +1062,7 @@ def _handle_dispatch_inspect(args: argparse.Namespace) -> int:
 
 
 def _handle_dispatch_mark_sent(args: argparse.Namespace) -> int:
-    loaded, store, logger = _load_runtime(args.config)
+    loaded, store, logger = _load_runtime(args.config, mode=args.mode)
     client = LarkCliClient(
         path=loaded.config.lark_cli.path,
         timeout_seconds=loaded.config.lark_cli.timeout_seconds,
@@ -1025,7 +1085,7 @@ def _handle_dispatch_mark_sent(args: argparse.Namespace) -> int:
 
 
 def _handle_dispatch_retry(args: argparse.Namespace) -> int:
-    _, store, _ = _load_runtime(args.config)
+    _, store, _ = _load_runtime(args.config, mode=args.mode)
     result = OperatorCommandService(store).retry_dispatch_action(
         args.action_id, actor="local_cli"
     )
@@ -1033,7 +1093,7 @@ def _handle_dispatch_retry(args: argparse.Namespace) -> int:
 
 
 def _handle_dispatch_cancel(args: argparse.Namespace) -> int:
-    _, store, _ = _load_runtime(args.config)
+    _, store, _ = _load_runtime(args.config, mode=args.mode)
     result = OperatorCommandService(store).cancel_dispatch_action(
         args.action_id, actor="local_cli"
     )
@@ -1078,8 +1138,13 @@ def _chat_policy_changes_from_args(args: argparse.Namespace) -> dict[str, object
 
 def _load_runtime(
     config_path: str | None,
+    *,
+    mode: str | None = None,
 ) -> tuple[LoadedConfig, SQLiteStore, JSONLLogger]:
     loaded = ConfigService().load(config_path)
+    production_loaded = loaded
+    if mode == "dry-run":
+        loaded = dry_run_config(loaded)
     sqlite_path = resolve_relative_path(
         loaded.config.storage.sqlite_path, loaded.base_dir
     )
@@ -1097,7 +1162,10 @@ def _load_runtime(
         console=loaded.config.logging.console,
         text_path=text_path,
     )
-    return loaded, SQLiteStore(sqlite_path), logger
+    store = SQLiteStore(sqlite_path)
+    if mode == "dry-run":
+        initialize_dry_run_policy(production_loaded, store)
+    return loaded, store, logger
 
 
 class GitInfo(TypedDict):
