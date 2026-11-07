@@ -27,6 +27,7 @@ class AgentAttemptOutcome:
     result: AgentRunResult | None
     attempt_count: int
     last_error: str | None = None
+    blocked: bool = False
 
 
 class AgentInvoker:
@@ -51,11 +52,19 @@ class AgentInvoker:
         stage: str,
         message_id: str,
         task_id: int | None = None,
+        before_attempt: Callable[[], bool] | None = None,
     ) -> AgentAttemptOutcome:
         last_result: AgentRunResult | None = None
         last_error: str | None = None
         attempts = 0
         for attempt in range(1, self.max_attempts + 1):
+            if before_attempt is not None and not before_attempt():
+                return AgentAttemptOutcome(
+                    result=last_result,
+                    attempt_count=attempts,
+                    last_error="agent call blocked by policy change",
+                    blocked=True,
+                )
             attempts = attempt
             self.logger.debug(
                 "agent_call_attempt_started",

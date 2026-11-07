@@ -215,8 +215,27 @@ class ReplyStyleRefresher:
             stage="owner_style_refresh",
             message_id="owner_style_refresh",
             task_id=None,
+            before_attempt=lambda: all(
+                self._activation_is_current(chat_id, activation_id)
+                for chat_id, activation_id in sampled_activations
+            ),
         )
         result = outcome.result
+        if outcome.blocked or any(
+            not self._activation_is_current(chat_id, activation_id)
+            for chat_id, activation_id in sampled_activations
+        ):
+            return ReplyStyleRefreshResult(
+                status="failed",
+                pulled_count=len(raws),
+                filtered_count=len(samples),
+                selected_count=len(selected),
+                profile_path=str(profile_path),
+                wrote_profile=False,
+                hermes_called=outcome.attempt_count > 0,
+                stats=stats,
+                error="group policy changed during reply style refresh",
+            )
         if result is None or not result.ok or not isinstance(result.json_data, dict):
             error = outcome.last_error or (
                 None if result is None else agent_result_error(result)

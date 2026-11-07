@@ -304,6 +304,33 @@ def test_reply_style_refresh_fails_without_replacing_old_profile_when_samples_ar
     assert profile.read_text(encoding="utf-8") == "old profile\n"
 
 
+def test_reply_style_does_not_retry_after_group_removal(tmp_path: Path) -> None:
+    class RevokingBackend(FakeBackend):
+        store: SQLiteStore
+
+        def owner_style_refresh(self, prompt: str, **kwargs: Any) -> AgentRunResult:
+            self.prompts.append(prompt)
+            self.store.delete_chat_product_policy("oc_allowed", actor="owner")
+            self.store.upsert_chat_product_policy(
+                {"chat_id": "oc_allowed", **ChatPolicyConfig().model_dump()},
+                actor="owner",
+            )
+            return AgentRunResult(["hermes"], 1, error="temporary failure")
+
+    backend = RevokingBackend()
+    refresher = _refresher(
+        tmp_path,
+        items=[_raw("om_1", "可以"), _raw("om_2", "先推进")],
+        backend=backend,
+    )
+    backend.store = refresher.store
+    result = refresher.refresh(dry_run=False, run_id="run")
+    assert result.status == "failed"
+    assert result.hermes_called is True
+    assert len(backend.prompts) == 1
+    assert not (tmp_path / "data" / "owner_style.zh.md").exists()
+
+
 def test_reply_style_refresh_success_writes_profile(tmp_path: Path) -> None:
     backend = FakeBackend()
     backend.outputs.append(

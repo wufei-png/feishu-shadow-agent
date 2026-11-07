@@ -25,6 +25,7 @@ from feishu_shadow_agent.operator_commands import OperatorCommandService
 from feishu_shadow_agent.paths import resolve_agent_working_dir
 from feishu_shadow_agent.processing import (
     ApprovalService,
+    ProcessingResult,
     SendComposer,
     TaskProcessingService,
 )
@@ -1117,6 +1118,142 @@ def test_group_auto_reply_disabled_downgrades_to_approval(tmp_path: Path) -> Non
         ).fetchone()
     action_payload = json.loads(action["payload_json"])
     assert action_payload["text"] == '<at user_id="ou_ext">Ext</at> reply text'
+
+
+@pytest.mark.parametrize("first_call_succeeds", [False, True])
+def test_group_removal_during_session_prevents_further_model_calls(
+    tmp_path: Path, first_call_succeeds: bool
+) -> None:
+    (tmp_path / "owner_style.md").write_text("# style\n", encoding="utf-8")
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+
+    class RevokingHermes(FakeHermes):
+        def task_session(self, prompt: str, **kwargs: Any) -> AgentRunResult:
+            result = super().task_session(prompt, **kwargs)
+            store.delete_chat_product_policy("oc_1", actor="owner")
+            store.upsert_chat_product_policy(
+                {"chat_id": "oc_1", **ChatPolicyConfig().model_dump()}, actor="owner"
+            )
+            return result
+
+    hermes = RevokingHermes()
+    hermes.session_outputs.append(
+        _session_output(reply_target_message_id="om_1")
+        if first_call_succeeds
+        else AgentRunResult(["hermes"], 1, error="temporary failure")
+    )
+    cfg = _config(
+        reply_postprocess=_postprocess_config(),
+        chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)},
+    )
+    _, service, _ = _service(tmp_path, config=cfg, hermes=hermes, store=store)
+    result = service.process_raw_message(
+        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert result is not None and result.task is not None
+    assert len(hermes.session_prompts) == 1
+    assert hermes.postprocess_prompts == []
+    assert store.is_group_policy_held("task", result.task.id)
+    with store.connect() as conn:
+        processing = conn.execute(
+            "SELECT status, terminal_reason FROM message_processing WHERE stage = 'task_session'"
+        ).fetchone()
+        audit = conn.execute(
+            "SELECT response_json FROM agent_audits WHERE request_type = 'task_session'"
+        ).fetchone()
+        send_count = conn.execute(
+            "SELECT COUNT(*) FROM actions WHERE kind = 'send_reply'"
+        ).fetchone()[0]
+    assert processing["status"] == "blocked_waiting_external"
+    assert processing["terminal_reason"] == "group_policy_changed"
+    assert audit is not None and send_count == 0
+    if first_call_succeeds:
+        assert store.get_task_by_id(result.task.id).agent_session_id == "sid_1"
+        assert json.loads(audit["response_json"])["proposed_reply"] == "reply text"
+
+
+@pytest.mark.parametrize("first_call_succeeds", [False, True])
+def test_group_removal_during_router_stops_retries_and_new_tasks(
+    tmp_path: Path, first_call_succeeds: bool
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+
+    class RevokingHermes(FakeHermes):
+        def task_router(self, prompt: str, **kwargs: Any) -> AgentRunResult:
+            result = super().task_router(prompt, **kwargs)
+            store.delete_chat_product_policy("oc_1", actor="owner")
+            store.upsert_chat_product_policy(
+                {"chat_id": "oc_1", **ChatPolicyConfig().model_dump()}, actor="owner"
+            )
+            return result
+
+    hermes = RevokingHermes()
+    hermes.router_outputs.append(
+        {"route": "new_task", "target_task_id": None, "reason": "new"}
+        if first_call_succeeds
+        else AgentRunResult(["hermes"], 1, error="temporary failure")
+    )
+    cfg = _config(chats={"oc_1": ChatPolicyConfig()})
+    _, service, _ = _service(tmp_path, config=cfg, hermes=hermes, store=store)
+    message = service.normalizer.normalize(
+        _message("om_router", mentions=[{"open_id": "ou_owner"}]),
+        default_chat_type="group",
+    )
+    store.upsert_message(message)
+    assert service.task_processor is not None
+    result = service.task_processor.run_task_router(
+        message=message,
+        source="group_at_me",
+        reason="router_placeholder",
+        now="2026-06-22T02:10:00+00:00",
+        watch_until="2026-06-23T02:10:00+00:00",
+        run_id="run",
+    )
+
+    assert (
+        isinstance(result, ProcessingResult) and result.reason == "group_policy_changed"
+    )
+    assert len(hermes.router_prompts) == 1
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM agent_audits").fetchone()[0] == 1
+
+
+def test_group_removal_during_postprocess_prevents_retry(tmp_path: Path) -> None:
+    (tmp_path / "owner_style.md").write_text("# style\n", encoding="utf-8")
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+
+    class RevokingHermes(FakeHermes):
+        def reply_postprocess(self, prompt: str, **kwargs: Any) -> AgentRunResult:
+            self.postprocess_prompts.append(prompt)
+            store.delete_chat_product_policy("oc_1", actor="owner")
+            return AgentRunResult(["hermes"], 1, error="temporary failure")
+
+    hermes = RevokingHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
+    cfg = _config(
+        reply_postprocess=_postprocess_config(), chats={"oc_1": ChatPolicyConfig()}
+    )
+    _, service, _ = _service(tmp_path, config=cfg, hermes=hermes, store=store)
+    service.process_raw_message(
+        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run",
+    )
+    assert len(hermes.postprocess_prompts) == 1
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM actions").fetchone()[0] == 0
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM agent_audits WHERE request_type = 'reply_postprocess'"
+            ).fetchone()[0]
+            == 1
+        )
 
 
 def test_reply_postprocess_success_updates_auto_reply_payload_before_composer(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -51,6 +52,7 @@ class ReplyPostprocessor:
         original_reply: str,
         run_id: str,
         cwd: str | Path | None,
+        before_attempt: Callable[[], bool] | None = None,
     ) -> ReplyPostprocessResult:
         cfg = self.config.reply_postprocess
         if not cfg.enabled:
@@ -92,6 +94,7 @@ class ReplyPostprocessor:
             stage="reply_postprocess",
             message_id=message_id,
             task_id=task.id,
+            before_attempt=before_attempt,
         )
         result = outcome.result
         audit = {
