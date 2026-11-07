@@ -474,10 +474,14 @@ class LarkCliClient:
         sender: str,
         start: str | None,
         end: str | None,
+        chat_type: str | None = None,
+        chat_id: str | None = None,
     ) -> MessagePage:
         result = self.run_json(
             self.build_messages_search(
                 sender=sender,
+                chat_type=chat_type,
+                chat_id=chat_id,
                 start=start,
                 end=end,
                 page_all=True,

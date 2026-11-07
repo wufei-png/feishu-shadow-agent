@@ -9,6 +9,7 @@ from feishu_shadow_agent.agent_backend import AgentRunResult
 from feishu_shadow_agent.agent_invocation import AgentInvoker
 from feishu_shadow_agent.config import (
     AppConfig,
+    ChatPolicyConfig,
     OwnerConfig,
     OwnerStyleRefreshConfig,
     ReplyPostprocessConfig,
@@ -16,6 +17,7 @@ from feishu_shadow_agent.config import (
 )
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.reply_style import ReplyStyleRefresher
+from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import LarkCliResult, MessagePage
 
 
@@ -44,7 +46,16 @@ class FakeFeishu:
 
     def search_owner_messages(self, **kwargs: Any) -> MessagePage:
         self.calls.append(kwargs)
-        return MessagePage(self.items)
+        return MessagePage(
+            [
+                row
+                for row in self.items
+                if row.get("chat_type") == kwargs.get("chat_type")
+                and (
+                    not kwargs.get("chat_id") or row.get("chat_id") == kwargs["chat_id"]
+                )
+            ]
+        )
 
     def list_chat_messages(self, **kwargs: Any) -> MessagePage:
         return MessagePage([])
@@ -100,6 +111,7 @@ class FakeBackend:
 def _config(*, min_samples: int = 2, max_samples: int = 5) -> AppConfig:
     return AppConfig(
         owner=OwnerConfig(open_id="ou_owner"),
+        chats={"oc_allowed": ChatPolicyConfig()},
         reply_postprocess=ReplyPostprocessConfig(
             owner_style=ReplyPostprocessOwnerStyleConfig(
                 profile_path="data/owner_style.zh.md",
@@ -114,6 +126,8 @@ def _config(*, min_samples: int = 2, max_samples: int = 5) -> AppConfig:
 def _raw(message_id: str, text: str) -> dict[str, Any]:
     return {
         "message_id": message_id,
+        "chat_id": "oc_allowed",
+        "chat_type": "group",
         "sender_id": "ou_owner",
         "sender_type": "user",
         "create_time": "2026-07-01T10:00:00+08:00",
@@ -128,8 +142,12 @@ def _refresher(
     backend: FakeBackend,
     config: AppConfig | None = None,
 ) -> ReplyStyleRefresher:
+    effective_config = config or _config()
+    store = SQLiteStore(tmp_path / "style.sqlite3")
+    store.import_product_policy_from_config(effective_config)
     return ReplyStyleRefresher(
-        config=config or _config(),
+        config=effective_config,
+        store=store,
         base_dir=tmp_path,
         feishu_client=FakeFeishu(items),
         agent_backend=backend,
@@ -163,6 +181,25 @@ def test_reply_style_refresh_dry_run_filters_samples_without_hermes_or_write(
     assert result.hermes_called is False
     assert backend.prompts == []
     assert not (tmp_path / "data" / "owner_style.zh.md").exists()
+
+
+def test_reply_style_samples_only_configured_groups_and_skips_p2p_preview(
+    tmp_path: Path,
+) -> None:
+    backend = FakeBackend()
+    allowed = _raw("om_allowed", "allowed")
+    foreign = _raw("om_foreign", "foreign") | {"chat_id": "oc_foreign"}
+    direct = _raw("om_p2p", "direct") | {"chat_id": "oc_p2p", "chat_type": "p2p"}
+    refresher = _refresher(tmp_path, items=[allowed, foreign, direct], backend=backend)
+
+    result = refresher.refresh(dry_run=True, run_id="run_1")
+
+    client = refresher.feishu_client
+    assert isinstance(client, FakeFeishu)
+    assert [(call["chat_type"], call["chat_id"]) for call in client.calls] == [
+        ("group", "oc_allowed")
+    ]
+    assert result.pulled_count == result.selected_count == 1
 
 
 def test_reply_style_refresh_fails_without_replacing_old_profile_when_samples_are_low(

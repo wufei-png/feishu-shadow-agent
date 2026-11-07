@@ -53,6 +53,7 @@ class FeishuClient(Protocol):
         is_at_me: bool,
         start: str | None,
         end: str | None,
+        chat_id: str | None = None,
         page_token: str | None = None,
         query: str = "",
         page_size: int = 50,
@@ -65,6 +66,8 @@ class FeishuClient(Protocol):
         sender: str,
         start: str | None,
         end: str | None,
+        chat_type: str | None = None,
+        chat_id: str | None = None,
     ) -> MessagePage: ...
 
     def list_chat_messages(

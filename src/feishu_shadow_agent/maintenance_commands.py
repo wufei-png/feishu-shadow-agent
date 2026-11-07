@@ -147,6 +147,7 @@ class MaintenanceCommandService:
         run_id = new_run_id("reply_style")
         result = ReplyStyleRefresher(
             config=self.loaded_config.config,
+            store=self.store,
             base_dir=self.loaded_config.base_dir,
             feishu_client=self._feishu_client(),
             agent_backend=self._agent_backend(),

@@ -915,7 +915,7 @@ def _handle_retention_prune(args: argparse.Namespace) -> int:
 
 
 def _handle_reply_style_refresh(args: argparse.Namespace) -> int:
-    loaded, _, logger = _load_runtime(args.config)
+    loaded, store, logger = _load_runtime(args.config)
     client = LarkCliClient(
         path=loaded.config.lark_cli.path,
         timeout_seconds=loaded.config.lark_cli.timeout_seconds,
@@ -924,6 +924,7 @@ def _handle_reply_style_refresh(args: argparse.Namespace) -> int:
     backend = create_agent_backend(loaded.config, base_dir=loaded.base_dir)
     refresher = ReplyStyleRefresher(
         config=loaded.config,
+        store=store,
         base_dir=loaded.base_dir,
         feishu_client=client,
         agent_backend=backend,

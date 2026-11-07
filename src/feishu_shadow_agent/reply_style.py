@@ -17,6 +17,7 @@ from .config import AppConfig
 from .ingestion import MessageNormalizer
 from .paths import resolve_agent_working_dir, resolve_relative_path
 from .prompt import OwnerStyleRefreshOutput, build_owner_style_refresh_prompt
+from .store.sqlite_store import SQLiteStore
 from .time_utils import shift_instant
 from .types import MessagePage, utc_now_iso
 
@@ -28,6 +29,8 @@ class ReplyStyleFeishuClient(Protocol):
         sender: str,
         start: str | None,
         end: str | None,
+        chat_type: str | None = None,
+        chat_id: str | None = None,
     ) -> MessagePage: ...
 
 
@@ -77,12 +80,14 @@ class ReplyStyleRefresher:
         self,
         *,
         config: AppConfig,
+        store: SQLiteStore,
         base_dir: str | Path,
         feishu_client: ReplyStyleFeishuClient,
         agent_backend: OwnerStyleBackend,
         agent_invoker: AgentInvoker,
     ):
         self.config = config
+        self.store = store
         self.base_dir = Path(base_dir)
         self.feishu_client = feishu_client
         self.agent_backend = agent_backend
@@ -93,12 +98,43 @@ class ReplyStyleRefresher:
         refresh_cfg = self.config.reply_postprocess.owner_style.refresh
         generated_at = utc_now_iso()
         start = _minus_days(generated_at, refresh_cfg.lookback_days)
-        page = self.feishu_client.search_owner_messages(
-            sender=self.config.owner.open_id,
-            start=start,
-            end=generated_at,
-        )
-        samples = self._filtered_samples(page.items)
+        raws: list[dict[str, Any]] = []
+        sampled_activations: set[tuple[str, int]] = set()
+        for activation in self.store.list_chat_policy_activations():
+            chat_id = str(activation["chat_id"])
+            activation_id = activation["activation_id"]
+            if activation_id is None or not self._activation_is_current(
+                chat_id, int(activation_id)
+            ):
+                continue
+            page = self.feishu_client.search_owner_messages(
+                sender=self.config.owner.open_id,
+                start=start,
+                end=generated_at,
+                chat_type="group",
+                chat_id=chat_id,
+            )
+            if not self._activation_is_current(chat_id, int(activation_id)):
+                continue
+            sampled_activations.add((chat_id, int(activation_id)))
+            raws.extend(
+                row
+                for row in page.items
+                if row.get("chat_id", row.get("chatId")) == chat_id
+            )
+        if not dry_run:
+            page = self.feishu_client.search_owner_messages(
+                sender=self.config.owner.open_id,
+                start=start,
+                end=generated_at,
+                chat_type="p2p",
+            )
+            raws.extend(
+                row
+                for row in page.items
+                if row.get("chat_type", row.get("chatType")) != "group"
+            )
+        samples = self._filtered_samples(raws)
         selected = samples[: refresh_cfg.max_samples]
         profile_path = resolve_relative_path(
             self.config.reply_postprocess.owner_style.profile_path, self.base_dir
@@ -107,7 +143,7 @@ class ReplyStyleRefresher:
         if dry_run:
             return ReplyStyleRefreshResult(
                 status="dry_run",
-                pulled_count=len(page.items),
+                pulled_count=len(raws),
                 filtered_count=len(samples),
                 selected_count=len(selected),
                 profile_path=str(profile_path),
@@ -118,7 +154,7 @@ class ReplyStyleRefresher:
         if len(selected) < refresh_cfg.min_samples:
             return ReplyStyleRefreshResult(
                 status="failed",
-                pulled_count=len(page.items),
+                pulled_count=len(raws),
                 filtered_count=len(samples),
                 selected_count=len(selected),
                 profile_path=str(profile_path),
@@ -126,6 +162,21 @@ class ReplyStyleRefresher:
                 hermes_called=False,
                 stats=stats,
                 error=f"not enough owner reply samples: {len(selected)} < {refresh_cfg.min_samples}",
+            )
+        if any(
+            not self._activation_is_current(chat_id, activation_id)
+            for chat_id, activation_id in sampled_activations
+        ):
+            return ReplyStyleRefreshResult(
+                status="failed",
+                pulled_count=len(raws),
+                filtered_count=len(samples),
+                selected_count=len(selected),
+                profile_path=str(profile_path),
+                wrote_profile=False,
+                hermes_called=False,
+                stats=stats,
+                error="group policy changed while selecting reply style samples",
             )
         prompt = build_owner_style_refresh_prompt(
             generated_at=generated_at,
@@ -149,7 +200,7 @@ class ReplyStyleRefresher:
             )
             return ReplyStyleRefreshResult(
                 status="failed",
-                pulled_count=len(page.items),
+                pulled_count=len(raws),
                 filtered_count=len(samples),
                 selected_count=len(selected),
                 profile_path=str(profile_path),
@@ -166,7 +217,7 @@ class ReplyStyleRefresher:
         except ValidationError as exc:
             return ReplyStyleRefreshResult(
                 status="failed",
-                pulled_count=len(page.items),
+                pulled_count=len(raws),
                 filtered_count=len(samples),
                 selected_count=len(selected),
                 profile_path=str(profile_path),
@@ -179,7 +230,7 @@ class ReplyStyleRefresher:
         if output.status != "ok" or not profile_markdown:
             return ReplyStyleRefreshResult(
                 status="failed",
-                pulled_count=len(page.items),
+                pulled_count=len(raws),
                 filtered_count=len(samples),
                 selected_count=len(selected),
                 profile_path=str(profile_path),
@@ -192,7 +243,7 @@ class ReplyStyleRefresher:
         if profile_error is not None:
             return ReplyStyleRefreshResult(
                 status="failed",
-                pulled_count=len(page.items),
+                pulled_count=len(raws),
                 filtered_count=len(samples),
                 selected_count=len(selected),
                 profile_path=str(profile_path),
@@ -204,13 +255,19 @@ class ReplyStyleRefresher:
         _atomic_write_text(profile_path, profile_markdown + "\n")
         return ReplyStyleRefreshResult(
             status="written",
-            pulled_count=len(page.items),
+            pulled_count=len(raws),
             filtered_count=len(samples),
             selected_count=len(selected),
             profile_path=str(profile_path),
             wrote_profile=True,
             hermes_called=True,
             stats=stats,
+        )
+
+    def _activation_is_current(self, chat_id: str, activation_id: int) -> bool:
+        return any(
+            row["chat_id"] == chat_id and row["activation_id"] == activation_id
+            for row in self.store.list_chat_policy_activations()
         )
 
     def _filtered_samples(self, raws: list[dict[str, Any]]) -> list[str]:
