@@ -32,6 +32,8 @@ class ReplyStyleFeishuClient(Protocol):
         end: str | None,
         chat_type: str | None = None,
         chat_id: str | None = None,
+        page_token: str | None = None,
+        page_all: bool = True,
     ) -> MessagePage: ...
 
 
@@ -108,21 +110,16 @@ class ReplyStyleRefresher:
                 chat_id, int(activation_id)
             ):
                 continue
-            page = self.feishu_client.search_owner_messages(
-                sender=self.config.owner.open_id,
+            group_raws = self._group_samples(
+                chat_id=chat_id,
+                activation_id=int(activation_id),
                 start=start,
                 end=generated_at,
-                chat_type="group",
-                chat_id=chat_id,
             )
-            if not self._activation_is_current(chat_id, int(activation_id)):
+            if group_raws is None:
                 continue
             sampled_activations.add((chat_id, int(activation_id)))
-            raws.extend(
-                row
-                for row in page.items
-                if row.get("chat_id", row.get("chatId")) == chat_id
-            )
+            raws.extend(group_raws)
         p2p_scope_error: str | None = None
         if dry_run:
             allowed_chats: set[str]
@@ -289,6 +286,39 @@ class ReplyStyleRefresher:
             hermes_called=True,
             stats=stats,
         )
+
+    def _group_samples(
+        self, *, chat_id: str, activation_id: int, start: str, end: str
+    ) -> list[dict[str, Any]] | None:
+        rows: list[dict[str, Any]] = []
+        token: str | None = None
+        seen_tokens: set[str] = set()
+        for _ in range(1000):
+            if not self._activation_is_current(chat_id, activation_id):
+                return None
+            page = self.feishu_client.search_owner_messages(
+                sender=self.config.owner.open_id,
+                start=start,
+                end=end,
+                chat_type="group",
+                chat_id=chat_id,
+                page_token=token,
+                page_all=False,
+            )
+            if not self._activation_is_current(chat_id, activation_id):
+                return None
+            rows.extend(
+                row
+                for row in page.items
+                if row.get("chat_id", row.get("chatId")) == chat_id
+            )
+            if not page.has_more:
+                return rows
+            token = page.next_page_token
+            if not token or token in seen_tokens:
+                raise ValueError("group reply-style pagination is incomplete")
+            seen_tokens.add(token)
+        raise ValueError("group reply-style pagination exceeded its safety limit")
 
     def _activation_is_current(self, chat_id: str, activation_id: int) -> bool:
         return any(

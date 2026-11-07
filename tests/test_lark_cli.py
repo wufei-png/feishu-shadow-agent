@@ -447,6 +447,17 @@ def test_search_owner_messages_uses_sender_time_filters_page_all_and_no_reaction
     assert "--end" in argv
     assert "--page-all" in argv
     assert "--no-reactions" in argv
+    client.search_owner_messages(
+        sender="ou_owner",
+        start=None,
+        end=None,
+        chat_type="group",
+        chat_id="oc_1",
+        page_token="next",
+        page_all=False,
+    )
+    assert "--page-all" not in seen[1]
+    assert seen[1][seen[1].index("--page-token") + 1] == "next"
 
 
 def test_download_resource_uses_bot_identity_and_actual_download() -> None:

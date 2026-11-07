@@ -1537,7 +1537,7 @@ class IngestionService:
                 page_token=token,
                 query="",
                 page_size=page_size,
-                page_limit=page_limit,
+                page_limit=1 if activation_id is not None else page_limit,
                 **({"chat_id": chat_id} if chat_id is not None else {}),
             )
 

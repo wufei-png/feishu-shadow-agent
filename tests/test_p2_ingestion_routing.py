@@ -607,6 +607,7 @@ def test_group_removed_during_pagination_discards_in_flight_batch(
         store: SQLiteStore
 
         def search_messages(self, **kwargs: Any) -> MessagePage:
+            assert kwargs["page_limit"] == 1
             self.store.delete_chat_product_policy("oc_1", actor="owner")
             return MessagePage(
                 [_message("om_1", mentions=[{"open_id": "ou_owner"}])],

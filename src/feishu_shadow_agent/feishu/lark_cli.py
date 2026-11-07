@@ -521,6 +521,8 @@ class LarkCliClient:
         end: str | None,
         chat_type: str | None = None,
         chat_id: str | None = None,
+        page_token: str | None = None,
+        page_all: bool = True,
     ) -> MessagePage:
         result = self.run_json(
             self.build_messages_search(
@@ -529,7 +531,8 @@ class LarkCliClient:
                 chat_id=chat_id,
                 start=start,
                 end=end,
-                page_all=True,
+                page_token=page_token,
+                page_all=page_all,
                 query="",
                 no_reactions=True,
             )

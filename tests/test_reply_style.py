@@ -176,6 +176,48 @@ def _refresher(
     )
 
 
+def test_group_sampling_checks_policy_before_each_page(tmp_path: Path) -> None:
+    backend = FakeBackend()
+    refresher = _refresher(tmp_path, items=[], backend=backend)
+
+    class RemovingClient(FakeFeishu):
+        def search_owner_messages(self, **kwargs: Any) -> MessagePage:
+            self.calls.append(kwargs)
+            if kwargs["chat_type"] == "group":
+                assert kwargs["page_all"] is False
+                refresher.store.delete_chat_product_policy("oc_allowed", actor="owner")
+                return MessagePage([_raw("om_1", "hello")], "next", True)
+            return MessagePage([])
+
+    client = RemovingClient([])
+    refresher.feishu_client = client
+    result = refresher.refresh(dry_run=False, run_id="run")
+
+    assert result.status == "failed"
+    assert len([call for call in client.calls if call["chat_type"] == "group"]) == 1
+    assert backend.prompts == []
+
+
+def test_group_sampling_follows_pages_while_policy_is_current(tmp_path: Path) -> None:
+    refresher = _refresher(tmp_path, items=[], backend=FakeBackend())
+
+    class PaginatedClient(FakeFeishu):
+        def search_owner_messages(self, **kwargs: Any) -> MessagePage:
+            self.calls.append(kwargs)
+            if kwargs["chat_type"] != "group":
+                return MessagePage([])
+            if kwargs["page_token"] is None:
+                return MessagePage([_raw("om_1", "hello")], "next", True)
+            return MessagePage([_raw("om_2", "world")])
+
+    client = PaginatedClient([])
+    refresher.feishu_client = client
+    result = refresher.refresh(dry_run=True, run_id="run")
+
+    assert result.pulled_count == 2
+    assert [call["page_token"] for call in client.calls] == [None, "next"]
+
+
 def test_reply_style_refresh_dry_run_filters_samples_without_hermes_or_write(
     tmp_path: Path,
 ) -> None:
