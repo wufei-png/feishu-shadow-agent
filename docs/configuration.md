@@ -8,6 +8,8 @@ Feishu Shadow Agent 的 `config.yaml` 结构真相来源是 `src/feishu_shadow_a
 
 生产和 dry-run 使用独立的数据库、资源和日志路径。dry-run 初次创建时仅复制生产库中的当前策略，此后独立修改；`policy sync-production --config config.yaml --mode dry-run` 显式覆盖预演策略，并对被移除群的预演任务执行暂停。生产策略未初始化时，可用 `policy import-config --config config.yaml --mode dry-run` 导入 YAML。
 
+dry-run 在查询私聊前完整枚举并排除机器人会话；枚举失败或超时时跳过本轮私聊。枚举单独使用最多约 10 秒的时间预算（最少 1 秒，实际子进程超时按整秒计算），不占用群消息采集预算，因此本轮总耗时可能增加。
+
 常用命令：
 
 ```bash

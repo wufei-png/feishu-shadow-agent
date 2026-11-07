@@ -34,6 +34,14 @@ class LarkCliClient:
         self.cwd = None if cwd is None else Path(cwd)
         self._runner = runner
 
+    def with_timeout(self, timeout_seconds: int) -> LarkCliClient:
+        return LarkCliClient(
+            path=self.path,
+            timeout_seconds=min(self.timeout_seconds, timeout_seconds),
+            cwd=self.cwd,
+            runner=self._runner,
+        )
+
     def build_version(self) -> list[str]:
         return [self.path, "--version"]
 

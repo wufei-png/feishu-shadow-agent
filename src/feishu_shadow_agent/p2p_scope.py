@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Protocol, cast
 
 from .types import LarkCliResult, MessagePage
@@ -27,9 +28,14 @@ def bot_open_id_from_auth(auth_json: Any) -> str | None:
     return None
 
 
-def list_non_bot_p2p_chats(client: P2PScopeClient) -> set[str]:
+def list_non_bot_p2p_chats(
+    client: P2PScopeClient,
+    *,
+    before_request: Callable[[], P2PScopeClient] | None = None,
+) -> set[str]:
     """Enumerate every peer before allowing any private-message query."""
-    auth = client.auth_status(verify=True)
+    auth_client = before_request() if before_request is not None else client
+    auth = auth_client.auth_status(verify=True)
     bot_id = bot_open_id_from_auth(auth.json_data) if auth.ok else None
     if not bot_id or not bot_id.startswith("ou_") or len(bot_id) <= 3:
         raise ValueError("bot open_id is unavailable")
@@ -38,7 +44,8 @@ def list_non_bot_p2p_chats(client: P2PScopeClient) -> set[str]:
     seen_tokens: set[str] = set()
     token: str | None = None
     for _ in range(1000):
-        page = client.list_user_p2p_chats(page_token=token)
+        page_client = before_request() if before_request is not None else client
+        page = page_client.list_user_p2p_chats(page_token=token)
         for chat in page.items:
             chat_id = chat.get("chat_id") or chat.get("chatId")
             target_id = chat.get("p2p_target_id")

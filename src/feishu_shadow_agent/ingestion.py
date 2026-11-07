@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import time
@@ -1285,12 +1286,37 @@ class IngestionService:
     def _dry_run_p2p_scope(self) -> set[str]:
         if not self._p2p_scope_attempted:
             self._p2p_scope_attempted = True
+            started = self.monotonic()
             try:
-                self._p2p_scope = list_non_bot_p2p_chats(
-                    cast(P2PScopeClient, self.feishu_client)
+                if started >= self.ingest_deadline:
+                    raise TimeoutError("ingestion time budget exhausted")
+                scope_deadline = started + min(
+                    10.0, max(1.0, self.config.daemon.ingest_tick_budget_seconds / 3)
                 )
+
+                def bounded_client() -> P2PScopeClient:
+                    remaining = scope_deadline - self.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("P2P enumeration time budget exhausted")
+                    with_timeout = getattr(self.feishu_client, "with_timeout", None)
+                    if callable(with_timeout):
+                        return cast(P2PScopeClient, with_timeout(math.ceil(remaining)))
+                    return cast(P2PScopeClient, self.feishu_client)
+
+                self._p2p_scope = list_non_bot_p2p_chats(
+                    cast(P2PScopeClient, self.feishu_client),
+                    before_request=bounded_client,
+                )
+                if self.monotonic() >= scope_deadline:
+                    raise TimeoutError("P2P enumeration time budget exhausted")
             except Exception as exc:  # noqa: BLE001
                 self._p2p_scope_error = f"dry-run P2P enumeration failed: {exc}"
+            finally:
+                # Enumeration has its own bounded allowance so a failure does
+                # not consume the budget reserved for group ingestion.
+                elapsed = max(0.0, self.monotonic() - started)
+                self.ingest_deadline += elapsed
+                self.ingest_fetch_deadline += elapsed
         if self._p2p_scope_error is not None:
             raise RuntimeError(self._p2p_scope_error)
         return self._p2p_scope

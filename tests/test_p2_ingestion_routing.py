@@ -17,6 +17,7 @@ from feishu_shadow_agent.config import (
     StorageConfig,
 )
 from feishu_shadow_agent.daemon import Daemon
+from feishu_shadow_agent.feishu.lark_cli import LarkCliClient
 from feishu_shadow_agent.ingestion import (
     IngestionService,
     MessageNormalizer,
@@ -3835,6 +3836,73 @@ def test_daemon_tick_runs_p2_stages_in_order(tmp_path: Path) -> None:
     ]
     assert fake.calls == []
     assert next(result for result in results if result.name == "p2p").ok is False
+
+
+def test_dry_run_slow_p2p_scope_preserves_group_ingestion_budget(
+    tmp_path: Path,
+) -> None:
+    monotonic_time = [0.0]
+
+    class SlowScopeClient(FakeFeishuClient):
+        def auth_status(self, *, verify: bool = True) -> LarkCliResult:
+            monotonic_time[0] = 31.0
+            return LarkCliResult(["lark-cli", "auth"], 1, error="timeout")
+
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    _allow_test_groups(store)
+    fake = SlowScopeClient()
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(daemon=DaemonConfig(ingest_tick_budget_seconds=30)),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+        monotonic=lambda: monotonic_time[0],
+        dry_run=True,
+    )
+
+    p2p = service.ingest_p2p(run_id="run")
+    group = service.ingest_group_at_me(run_id="run")
+    assert "search:group:True:None" in fake.calls
+    assert p2p.ok is False and group.ok is True
+    assert not any(call.startswith("search:p2p") for call in fake.calls)
+
+
+def test_dry_run_p2p_enumeration_bounds_each_cli_request(tmp_path: Path) -> None:
+    monotonic_time = [0.0]
+    timeouts: list[int] = []
+
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        timeouts.append(timeout)
+        monotonic_time[0] += 4
+        if "auth" in argv:
+            return LarkCliResult(
+                argv, 0, json_data={"identities": {"bot": {"openId": "ou_bot"}}}
+            )
+        return LarkCliResult(
+            argv,
+            0,
+            json_data={
+                "data": {
+                    "chats": [],
+                    "has_more": True,
+                    "page_token": f"p{len(timeouts)}",
+                }
+            },
+        )
+
+    service = IngestionService(
+        store=SQLiteStore(tmp_path / "agent.sqlite3"),
+        feishu_client=LarkCliClient(timeout_seconds=30, runner=runner),
+        config=_config(daemon=DaemonConfig(ingest_tick_budget_seconds=30)),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        monotonic=lambda: monotonic_time[0],
+        dry_run=True,
+    )
+    with pytest.raises(RuntimeError, match="enumeration time budget exhausted"):
+        service._dry_run_p2p_scope()
+    assert timeouts == [10, 6, 2]
+    assert service.ingest_deadline == 42.0
 
 
 def test_dry_run_queries_only_fully_enumerated_non_bot_p2p_chats(

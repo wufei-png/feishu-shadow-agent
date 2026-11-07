@@ -417,6 +417,19 @@ def test_search_messages_batches_within_requested_page_limit() -> None:
     assert seen[0][seen[0].index("--page-limit") + 1] == "2"
 
 
+def test_client_can_bound_one_scope_request_without_mutating_original() -> None:
+    timeouts: list[int] = []
+
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        timeouts.append(timeout)
+        return LarkCliResult(argv=argv, exit_code=0, json_data={})
+
+    client = LarkCliClient(timeout_seconds=30, runner=runner)
+    client.with_timeout(4).auth_status()
+    client.auth_status()
+    assert timeouts == [4, 30]
+
+
 def test_search_owner_messages_uses_sender_time_filters_page_all_and_no_reactions() -> (
     None
 ):

@@ -20,6 +20,7 @@ from feishu_shadow_agent.config import (
 )
 from feishu_shadow_agent.daemon import Daemon
 from feishu_shadow_agent.health import REQUIRED_USER_SCOPES, HealthSuite
+from feishu_shadow_agent.ingestion import IngestionService
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.operator_query import OperatorQueryService
 from feishu_shadow_agent.processing import TaskProcessingService
@@ -1263,8 +1264,17 @@ def test_ingestion_budget_exhaustion_still_runs_dispatch_and_retention(
 
 def test_source_rotation_lets_other_ingestion_progress_under_repeated_budget_pressure(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monotonic_values = iter([0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 2.0, 10.0, 10.0, 10.0, 12.0])
+    monotonic_time = [0.0]
+    ingest_group = IngestionService.ingest_group_at_me
+
+    def expensive_group_stage(self: IngestionService, *, run_id: str) -> Any:
+        result = ingest_group(self, run_id=run_id)
+        monotonic_time[0] += 2.0
+        return result
+
+    monkeypatch.setattr(IngestionService, "ingest_group_at_me", expensive_group_stage)
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     logger = JSONLLogger(tmp_path / "agent.jsonl")
     suite = FakeHealthSuite(
@@ -1297,7 +1307,7 @@ def test_source_rotation_lets_other_ingestion_progress_under_repeated_budget_pre
         app_config=config,
         feishu_client=fake,  # type: ignore[arg-type]
         runtime_health_interval_seconds=0,
-        ingestion_monotonic=lambda: next(monotonic_values, 12.0),
+        ingestion_monotonic=lambda: monotonic_time[0],
     )
 
     daemon.run_one_tick(run_id="run_fair")
