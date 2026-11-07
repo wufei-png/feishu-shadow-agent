@@ -419,6 +419,8 @@ class CaptureService:
                 FROM tasks t
                 LEFT JOIN task_messages tm ON tm.task_id = t.id
                 WHERE t.chat_id = ?
+                  AND NOT EXISTS (SELECT 1 FROM group_policy_holds h
+                                  WHERE h.kind = 'task' AND h.item_id = t.id)
                   AND (
                     ({active_condition})
                     {linked_condition}

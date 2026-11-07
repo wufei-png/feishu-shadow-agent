@@ -466,6 +466,8 @@ def _active_task_fixtures(
             FROM tasks t
             JOIN task_watch_keys wk ON wk.task_id = t.id
             WHERE t.status = 'watching'
+              AND NOT EXISTS (SELECT 1 FROM group_policy_holds h
+                              WHERE h.kind = 'task' AND h.item_id = t.id)
               AND (t.watch_until IS NULL OR julianday(t.watch_until) > julianday(?))
               AND t.chat_id = ?
             ORDER BY t.id, wk.key

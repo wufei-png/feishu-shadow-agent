@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from feishu_shadow_agent.config import ConfigService
+from feishu_shadow_agent.config import ChatPolicyConfig, ConfigService
 from feishu_shadow_agent.evals.artifacts import (
     EvalError,
     read_jsonl,
@@ -18,7 +18,9 @@ from feishu_shadow_agent.evals.ingress import (
     build_review_labels,
     compare_ingress_golden,
 )
+from feishu_shadow_agent.evals.ingress_service import _active_task_fixtures
 from feishu_shadow_agent.evals.service import EvalService
+from feishu_shadow_agent.ingestion import MessageNormalizer
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import LarkCliResult, MessagePage
 
@@ -116,6 +118,27 @@ def test_live_ingress_rejects_unconfigured_group_before_network(tmp_path: Path) 
             dry_run_backend=False,
             allow_sensitive_config=False,
         )
+
+
+def test_ingress_active_fixtures_exclude_policy_held_tasks(tmp_path: Path) -> None:
+    loaded = _loaded_config(tmp_path)
+    store = SQLiteStore(loaded.base_dir / loaded.config.storage.sqlite_path)
+    message = MessageNormalizer(owner_open_id="ou_owner").normalize(
+        _message(direct=True)
+    )
+    store.upsert_message(message)
+    task = store.create_task_for_message(
+        message, watch_until="2999-01-01T00:00:00+00:00"
+    )
+    now = "2026-07-10T02:00:00+00:00"
+    assert _active_task_fixtures(loaded=loaded, chat_id="oc_test", now=now)
+    store.delete_chat_product_policy("oc_test", actor="owner")
+    store.upsert_chat_product_policy(
+        {"chat_id": "oc_test", **ChatPolicyConfig().model_dump()}, actor="owner"
+    )
+    assert _active_task_fixtures(loaded=loaded, chat_id="oc_test", now=now) == {}
+    store.reopen_task_by_operator(task.id, watch_until="2999-01-01T00:00:00+00:00")
+    assert _active_task_fixtures(loaded=loaded, chat_id="oc_test", now=now)
 
 
 def test_live_snapshot_adds_known_group_type_and_rejects_mixed_chats(
