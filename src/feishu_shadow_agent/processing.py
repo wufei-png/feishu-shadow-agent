@@ -71,6 +71,23 @@ class ProcessingResult:
 
 
 @dataclass(frozen=True)
+class ModelAccessGuard:
+    store: SQLiteStore
+    chat_type: str | None
+    chat_id: str | None
+    activation_id: int | None
+
+    def __call__(self) -> bool:
+        if self.chat_type != "group":
+            return True
+        return self.activation_id is not None and any(
+            row["chat_id"] == self.chat_id
+            and row["activation_id"] == self.activation_id
+            for row in self.store.list_chat_policy_activations()
+        )
+
+
+@dataclass(frozen=True)
 class ComposedReply:
     text: str
     had_forbidden_mentions: bool
@@ -402,8 +419,11 @@ class TaskProcessingService:
         now: str,
         watch_until: str,
         run_id: str,
+        expected_group_activation_id: int | None = None,
     ) -> ProcessingResult | None:
-        access_allowed = self._model_access_guard(message)
+        access_allowed = self._model_access_guard(
+            message, expected_activation_id=expected_group_activation_id
+        )
         if message.chat_type == "group" and (
             not message.chat_id
             or self.store.get_chat_product_policy(message.chat_id) is None
@@ -473,11 +493,15 @@ class TaskProcessingService:
             )
         return None
 
-    def _model_access_guard(self, message: NormalizedMessage) -> Callable[[], bool]:
+    def _model_access_guard(
+        self, message: NormalizedMessage, *, expected_activation_id: int | None = None
+    ) -> ModelAccessGuard:
         if message.chat_type != "group":
-            return lambda: True
+            return ModelAccessGuard(
+                self.store, message.chat_type, message.chat_id, None
+            )
         chat_id = message.chat_id
-        activation_id = next(
+        activation_id = expected_activation_id or next(
             (
                 row["activation_id"]
                 for row in self.store.list_chat_policy_activations()
@@ -486,13 +510,7 @@ class TaskProcessingService:
             None,
         )
 
-        def allowed() -> bool:
-            return activation_id is not None and any(
-                row["chat_id"] == chat_id and row["activation_id"] == activation_id
-                for row in self.store.list_chat_policy_activations()
-            )
-
-        return allowed
+        return ModelAccessGuard(self.store, message.chat_type, chat_id, activation_id)
 
     def _call_agent_with_retries(
         self,
@@ -670,7 +688,7 @@ class TaskProcessingService:
         now: str,
         watch_until: str,
         run_id: str,
-        access_allowed: Callable[[], bool],
+        access_allowed: ModelAccessGuard,
     ) -> RoutingResult | ProcessingResult | None:
         active_candidates = self.collector.collect(message, now=now)
         historical = []
@@ -879,7 +897,20 @@ class TaskProcessingService:
                 router_called=True,
                 matched_by="task_router",
                 agent_working_dir=str(self.agent_working_dir),
+                expected_group_activation_id=access_allowed.activation_id,
             )
+            if self.store.is_group_policy_held("task", task.id):
+                self._mark_processing_blocked_external(
+                    message=message,
+                    stage="task_session",
+                    task_id=task.id,
+                    attempt_count=0,
+                    last_error="group policy changed while creating task",
+                    reason="group_policy_changed",
+                )
+                return ProcessingResult(
+                    "watch_only", task.id, reason="group_policy_changed"
+                )
             self._mark_processing_processed(
                 message=message,
                 stage="task_router",

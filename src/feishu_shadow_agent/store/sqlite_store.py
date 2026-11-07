@@ -1698,6 +1698,7 @@ class SQLiteStore:
         router_called: bool = False,
         matched_by: str = "new_trigger",
         agent_working_dir: str | None = None,
+        expected_group_activation_id: int | None = None,
     ) -> tuple[TaskRecord, RouteDecision]:
         self.initialize()
         now = self.clock()
@@ -1710,6 +1711,31 @@ class SQLiteStore:
                 agent_working_dir=agent_working_dir,
                 now=now,
             )
+            if (
+                message.chat_type == "group"
+                and expected_group_activation_id is not None
+            ):
+                activation = conn.execute(
+                    """
+                    SELECT pa.id FROM chat_policies cp
+                    JOIN policy_audits pa ON pa.id = (
+                      SELECT id FROM policy_audits
+                      WHERE scope = 'chat' AND policy_key = 'chat:' || cp.chat_id
+                        AND old_json IS NULL AND new_json IS NOT NULL
+                      ORDER BY id DESC LIMIT 1
+                    )
+                    WHERE cp.chat_id = ?
+                    """,
+                    (message.chat_id,),
+                ).fetchone()
+                if (
+                    activation is None
+                    or activation["id"] != expected_group_activation_id
+                ):
+                    conn.execute(
+                        "INSERT OR IGNORE INTO group_policy_holds(kind, item_id, chat_id, created_at) VALUES ('task', ?, ?, ?)",
+                        (task_id, message.chat_id or "", now),
+                    )
             task = self._get_task_by_id(conn, task_id)
             decision = RouteDecision(
                 RouteName.NEW_TASK,

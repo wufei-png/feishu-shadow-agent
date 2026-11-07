@@ -1650,6 +1650,7 @@ class IngestionService:
                 source=source,
                 default_chat_type=default_chat_type,
                 run_id=run_id,
+                group_activation=group_activation,
             )
             completed_items += 1
             handled_items += 1
@@ -1784,6 +1785,7 @@ class IngestionService:
         source: str,
         default_chat_type: str | None,
         run_id: str,
+        group_activation: tuple[str, int] | None = None,
     ) -> RoutingResult | None:
         return self._process_raw_message(
             raw,
@@ -1791,6 +1793,7 @@ class IngestionService:
             default_chat_type=default_chat_type,
             run_id=run_id,
             enforce_eligibility=True,
+            group_activation=group_activation,
         )
 
     def process_eligible_raw_message(
@@ -1818,6 +1821,7 @@ class IngestionService:
         default_chat_type: str | None,
         run_id: str,
         enforce_eligibility: bool,
+        group_activation: tuple[str, int] | None = None,
     ) -> RoutingResult | None:
         try:
             message = self.normalizer.normalize(
@@ -1843,6 +1847,28 @@ class IngestionService:
         ):
             self.logger.info("unconfigured_group_message_skipped", run_id=run_id)
             return None
+        activation_id: int | None = None
+        if message.chat_type == "group":
+            if group_activation is not None:
+                if group_activation[
+                    0
+                ] != message.chat_id or not self._group_activation_is_current(
+                    *group_activation
+                ):
+                    return None
+                activation_id = group_activation[1]
+            else:
+                activation_id = next(
+                    (
+                        int(row["activation_id"])
+                        for row in self.store.list_chat_policy_activations()
+                        if row["chat_id"] == message.chat_id
+                        and row["activation_id"] is not None
+                    ),
+                    None,
+                )
+                if activation_id is None:
+                    return None
         upsert = self.store.upsert_message_with_revision(message)
         if upsert.requires_confirmation:
             if message.chat_type == "group" and (
@@ -2029,6 +2055,7 @@ class IngestionService:
             watch_until=watch_until,
             retry_incomplete_processing=self.task_processor is not None,
             agent_working_dir=str(self.agent_working_dir),
+            expected_group_activation_id=activation_id,
         )
         self._log_routing_result(
             message=message,
@@ -2037,6 +2064,23 @@ class IngestionService:
             result=result,
             run_id=run_id,
         )
+        if result.task is not None and self.store.is_group_policy_held(
+            "task", result.task.id
+        ):
+            if self.task_processor is not None:
+                self.store.record_message_processing(
+                    message_id=message.message_id,
+                    revision=message.revision,
+                    task_id=result.task.id,
+                    stage="task_session",
+                    status="blocked_waiting_external",
+                    terminal_reason="group_policy_changed",
+                )
+            return result
+        if activation_id is not None and not self._group_activation_is_current(
+            str(message.chat_id), activation_id
+        ):
+            return result
         if _should_process_resources(
             store=self.store,
             inserted=inserted,
@@ -2071,6 +2115,7 @@ class IngestionService:
                 now=now,
                 watch_until=watch_until,
                 run_id=run_id,
+                expected_group_activation_id=activation_id,
             )
             if processing is not None:
                 self.logger.emit(

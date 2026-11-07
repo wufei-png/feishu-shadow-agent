@@ -90,6 +90,7 @@ class MessageRouter:
         watch_until: str,
         retry_incomplete_processing: bool = False,
         agent_working_dir: str | None = None,
+        expected_group_activation_id: int | None = None,
     ) -> RoutingResult:
         """Resolve audited deterministic routes before returning model-router placeholders.
 
@@ -241,6 +242,7 @@ class MessageRouter:
                 message,
                 watch_until=watch_until,
                 agent_working_dir=agent_working_dir,
+                expected_group_activation_id=expected_group_activation_id,
             )
             return RoutingResult(decision=decision, task=task)
 

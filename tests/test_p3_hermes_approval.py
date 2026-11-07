@@ -1223,6 +1223,103 @@ def test_group_removal_during_router_stops_retries_and_new_tasks(
         assert conn.execute("SELECT COUNT(*) FROM agent_audits").fetchone()[0] == 1
 
 
+def test_group_reactivation_before_task_insert_holds_router_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    hermes = FakeHermes()
+    hermes.router_outputs.append(
+        {"route": "new_task", "target_task_id": None, "reason": "new"}
+    )
+    _, service, _ = _service(
+        tmp_path,
+        config=_config(chats={"oc_1": ChatPolicyConfig()}),
+        hermes=hermes,
+        store=store,
+    )
+    message = service.normalizer.normalize(
+        _message("om_router", mentions=[{"open_id": "ou_owner"}]),
+        default_chat_type="group",
+    )
+    store.upsert_message(message)
+    create_task = store.create_task_for_message_and_audit
+
+    def reactivate_before_insert(*args: Any, **kwargs: Any) -> Any:
+        store.delete_chat_product_policy("oc_1", actor="owner")
+        store.upsert_chat_product_policy(
+            {"chat_id": "oc_1", **ChatPolicyConfig().model_dump()}, actor="owner"
+        )
+        return create_task(*args, **kwargs)
+
+    monkeypatch.setattr(
+        store, "create_task_for_message_and_audit", reactivate_before_insert
+    )
+    assert service.task_processor is not None
+    result = service.task_processor.run_task_router(
+        message=message,
+        source="group_at_me",
+        reason="router_placeholder",
+        now="2026-06-22T02:10:00+00:00",
+        watch_until="2026-06-23T02:10:00+00:00",
+        run_id="run",
+    )
+
+    assert isinstance(result, ProcessingResult)
+    assert result.task_id is not None and result.reason == "group_policy_changed"
+    assert store.is_group_policy_held("task", result.task_id)
+    assert hermes.session_prompts == []
+    with store.connect() as conn:
+        row = conn.execute(
+            "SELECT status, terminal_reason FROM message_processing WHERE stage = 'task_session'"
+        ).fetchone()
+    assert (row["status"], row["terminal_reason"]) == (
+        "blocked_waiting_external",
+        "group_policy_changed",
+    )
+
+
+def test_group_reactivation_before_deterministic_task_insert_holds_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    hermes = FakeHermes()
+    _, service, _ = _service(
+        tmp_path,
+        config=_config(chats={"oc_1": ChatPolicyConfig()}),
+        hermes=hermes,
+        store=store,
+    )
+    create_task = store.create_task_for_message_and_audit
+
+    def reactivate_before_insert(*args: Any, **kwargs: Any) -> Any:
+        store.delete_chat_product_policy("oc_1", actor="owner")
+        store.upsert_chat_product_policy(
+            {"chat_id": "oc_1", **ChatPolicyConfig().model_dump()}, actor="owner"
+        )
+        return create_task(*args, **kwargs)
+
+    monkeypatch.setattr(
+        store, "create_task_for_message_and_audit", reactivate_before_insert
+    )
+    result = service.process_raw_message(
+        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run",
+    )
+    assert result is not None and result.task is not None
+    assert store.is_group_policy_held("task", result.task.id)
+    assert hermes.session_prompts == []
+    with store.connect() as conn:
+        row = conn.execute(
+            "SELECT status, terminal_reason FROM message_processing WHERE stage = 'task_session'"
+        ).fetchone()
+    assert (row["status"], row["terminal_reason"]) == (
+        "blocked_waiting_external",
+        "group_policy_changed",
+    )
+
+
 def test_group_removal_during_postprocess_prevents_retry(tmp_path: Path) -> None:
     (tmp_path / "owner_style.md").write_text("# style\n", encoding="utf-8")
     store = SQLiteStore(tmp_path / "agent.sqlite3")
