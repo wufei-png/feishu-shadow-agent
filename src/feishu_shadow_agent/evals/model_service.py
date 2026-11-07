@@ -217,7 +217,13 @@ class ModelEvalService:
                 self.loaded, list(case.raw_messages.values()), directory=case.directory
             )
             if not dry_run_backend
-            else set()
+            else {
+                str(chat_id)
+                for raw in case.raw_messages.values()
+                if (raw.get("chat_type") or raw.get("chatType")) == "group"
+                and isinstance(chat_id := raw.get("chat_id") or raw.get("chatId"), str)
+                and chat_id
+            }
         )
         run_config_hash = file_sha256(self.loaded.path)
         case_backend = model_metadata(

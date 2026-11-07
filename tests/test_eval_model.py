@@ -1003,6 +1003,44 @@ def test_model_golden_rejects_wrong_provenance_source(tmp_path: Path) -> None:
     assert "source must be capture" in read_yaml(run_dir / "report.yaml")["error"]
 
 
+def test_dry_full_chain_supports_group_only_in_product_policy_store(
+    tmp_path: Path,
+) -> None:
+    loaded = _loaded(tmp_path)
+    store = SQLiteStore(loaded.base_dir / loaded.config.storage.sqlite_path)
+    store.import_product_policy_from_config(loaded.config)
+    store.upsert_chat_product_policy({"chat_id": "oc_dynamic"}, actor="operator")
+    raw = _message("om_1", minute=1) | {"chat_id": "oc_dynamic"}
+    case = _golden_case(
+        tmp_path,
+        loaded.path,
+        "full-chain-dynamic",
+        [raw],
+        {
+            "schema_version": "eval_case_v1",
+            "case_type": "full-chain",
+            "setup": [],
+            "target": {"message_id": "om_1", "source": "group_at_me"},
+            "resources": [],
+        },
+        {
+            "schema_version": "full_chain_labels_v1",
+            "router": {"route": "new_task"},
+            "task_session": {
+                "answerability": "no_reply",
+                "watch_action": "keep_watching",
+            },
+        },
+    )
+    write_yaml(case / "metadata.yaml", {"source_kind": "capture"})
+    run_dir, exit_code = EvalService(loaded=loaded).run_full_chain(
+        case_dir=case, label=None, dry_run_backend=True
+    )
+    assert exit_code == 0, read_yaml(run_dir / "report.yaml").get("error")
+    trial = read_yaml(run_dir / "trials/001/report.yaml")
+    assert trial["target"]["routing"]["route"] == "new_task"
+
+
 def test_full_chain_runs_setup_then_scores_target(tmp_path: Path) -> None:
     loaded = _loaded(tmp_path)
     setup = _message("om_1", minute=1)
