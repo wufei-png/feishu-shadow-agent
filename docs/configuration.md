@@ -229,7 +229,7 @@ Reply postprocess 和 owner style refresh 也是 `hermes chat -q -Q` 一次性�
 
 它们不传 `--resume`，不注入 native skill 请求或 `agent_backend.explicit_context.paths`，也不改变 task session。`reply_postprocess.model/provider` 为 `null` 时继承所选 backend 支持的 model/provider 配置。
 
-`reply-style refresh --dry-run` 只拉取和过滤 owner 样本，输出计数和基础字符统计，不调用 Hermes、不写 profile。非 dry-run 在样本数达到 `min_samples` 后调用 summarizer，成功后通过临时文件原子替换 `owner_style.profile_path`。
+`reply-style refresh --dry-run` 只拉取和过滤 owner 样本，输出计数和基础字符统计，不调用 Agent、不写 profile。群样本仅来自已配置群；私聊样本在完整枚举并排除机器人会话后按 chat ID 查询。枚举失败时只跳过私聊样本，并在统计中返回 `p2p_scope_error`。非 dry-run 在样本数达到 `min_samples` 后调用 summarizer，成功后通过临时文件原子替换 `owner_style.profile_path`。
 
 ### `mode: http` 的范围
 

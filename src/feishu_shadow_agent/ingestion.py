@@ -22,6 +22,7 @@ from .membership import (
     record_bot_membership_absence,
 )
 from .message_eligibility import MessageEligibilityPolicy
+from .p2p_scope import P2PScopeClient, list_non_bot_p2p_chats
 from .paths import resolve_agent_working_dir
 from .policy import PolicyResolver
 from .processing import ApprovalService, TaskProcessingService
@@ -47,10 +48,6 @@ from .types import (
     SenderRole,
     utc_now_iso,
 )
-
-
-class P2PListClient(Protocol):
-    def list_user_p2p_chats(self, *, page_token: str | None = None) -> MessagePage: ...
 
 
 class IngestionFeishuClient(Protocol):
@@ -1282,47 +1279,9 @@ class IngestionService:
         if not self._p2p_scope_attempted:
             self._p2p_scope_attempted = True
             try:
-                auth = self.feishu_client.auth_status(verify=True)
-                bot_id = _bot_open_id_from_auth(auth.json_data) if auth.ok else None
-                if not bot_id:
-                    raise ValueError("bot open_id is unavailable")
-                allowed: set[str] = set()
-                peers: dict[str, tuple[str, str]] = {}
-                seen_tokens: set[str] = set()
-                token: str | None = None
-                for _ in range(1000):
-                    page = cast(P2PListClient, self.feishu_client).list_user_p2p_chats(
-                        page_token=token
-                    )
-                    for chat in page.items:
-                        chat_id = _first_string(chat, "chat_id", "chatId")
-                        target_id = _first_string(chat, "p2p_target_id")
-                        target_type = _first_string(chat, "p2p_target_type")
-                        mode = _first_string(chat, "chat_mode")
-                        if (
-                            not chat_id
-                            or not target_id
-                            or target_type not in {"user", "bot"}
-                            or mode != "p2p"
-                        ):
-                            raise ValueError("P2P chat metadata is incomplete")
-                        if chat_id in peers and peers[chat_id] != (
-                            target_id,
-                            target_type,
-                        ):
-                            raise ValueError("P2P chat metadata is inconsistent")
-                        peers[chat_id] = (target_id, target_type)
-                        if target_id != bot_id and target_type != "bot":
-                            allowed.add(chat_id)
-                    if not page.has_more:
-                        self._p2p_scope = allowed
-                        break
-                    token = page.next_page_token
-                    if not token or token in seen_tokens:
-                        raise ValueError("P2P chat pagination is incomplete")
-                    seen_tokens.add(token)
-                else:
-                    raise ValueError("P2P chat pagination exceeded its safety limit")
+                self._p2p_scope = list_non_bot_p2p_chats(
+                    cast(P2PScopeClient, self.feishu_client)
+                )
             except Exception as exc:  # noqa: BLE001
                 self._p2p_scope_error = f"dry-run P2P enumeration failed: {exc}"
         if self._p2p_scope_error is not None:

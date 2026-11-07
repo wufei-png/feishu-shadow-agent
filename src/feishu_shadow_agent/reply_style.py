@@ -15,6 +15,7 @@ from .agent_backend import OwnerStyleBackend
 from .agent_invocation import AgentInvoker, agent_result_error, truncate_error
 from .config import AppConfig
 from .ingestion import MessageNormalizer
+from .p2p_scope import P2PScopeClient, list_non_bot_p2p_chats
 from .paths import resolve_agent_working_dir, resolve_relative_path
 from .prompt import OwnerStyleRefreshOutput, build_owner_style_refresh_prompt
 from .store.sqlite_store import SQLiteStore
@@ -122,7 +123,30 @@ class ReplyStyleRefresher:
                 for row in page.items
                 if row.get("chat_id", row.get("chatId")) == chat_id
             )
-        if not dry_run:
+        p2p_scope_error: str | None = None
+        if dry_run:
+            allowed_chats: set[str]
+            try:
+                allowed_chats = list_non_bot_p2p_chats(
+                    cast(P2PScopeClient, self.feishu_client)
+                )
+            except Exception as exc:  # noqa: BLE001
+                allowed_chats = set()
+                p2p_scope_error = str(exc)
+            for chat_id in sorted(allowed_chats):
+                page = self.feishu_client.search_owner_messages(
+                    sender=self.config.owner.open_id,
+                    start=start,
+                    end=generated_at,
+                    chat_type="p2p",
+                    chat_id=chat_id,
+                )
+                raws.extend(
+                    row
+                    for row in page.items
+                    if row.get("chat_id", row.get("chatId")) == chat_id
+                )
+        else:
             page = self.feishu_client.search_owner_messages(
                 sender=self.config.owner.open_id,
                 start=start,
@@ -140,6 +164,8 @@ class ReplyStyleRefresher:
             self.config.reply_postprocess.owner_style.profile_path, self.base_dir
         )
         stats = _sample_stats(selected)
+        if p2p_scope_error:
+            stats["p2p_scope_error"] = p2p_scope_error
         if dry_run:
             return ReplyStyleRefreshResult(
                 status="dry_run",

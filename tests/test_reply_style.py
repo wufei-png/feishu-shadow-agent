@@ -30,7 +30,25 @@ class FakeFeishu:
         return LarkCliResult(["lark-cli", "--version"], 0)
 
     def auth_status(self, *, verify: bool = True) -> LarkCliResult:
-        return LarkCliResult(["lark-cli", "auth"], 0, json_data={})
+        return LarkCliResult(
+            ["lark-cli", "auth"],
+            0,
+            json_data={"identities": {"bot": {"openId": "ou_bot"}}},
+        )
+
+    def list_user_p2p_chats(self, *, page_token: str | None = None) -> MessagePage:
+        return MessagePage(
+            [
+                {
+                    "chat_id": row["chat_id"],
+                    "chat_mode": "p2p",
+                    "p2p_target_id": row.get("peer_id", "ou_person"),
+                    "p2p_target_type": "user",
+                }
+                for row in self.items
+                if row.get("chat_type") == "p2p"
+            ]
+        )
 
     def owner_message(self, **kwargs: Any) -> LarkCliResult:
         return LarkCliResult(["lark-cli", "send"], 0)
@@ -183,23 +201,49 @@ def test_reply_style_refresh_dry_run_filters_samples_without_hermes_or_write(
     assert not (tmp_path / "data" / "owner_style.zh.md").exists()
 
 
-def test_reply_style_samples_only_configured_groups_and_skips_p2p_preview(
+def test_reply_style_preview_scopes_groups_and_excludes_bot_p2p(
     tmp_path: Path,
 ) -> None:
     backend = FakeBackend()
     allowed = _raw("om_allowed", "allowed")
     foreign = _raw("om_foreign", "foreign") | {"chat_id": "oc_foreign"}
     direct = _raw("om_p2p", "direct") | {"chat_id": "oc_p2p", "chat_type": "p2p"}
-    refresher = _refresher(tmp_path, items=[allowed, foreign, direct], backend=backend)
+    bot = _raw("om_bot", "bot") | {
+        "chat_id": "oc_bot",
+        "chat_type": "p2p",
+        "peer_id": "ou_bot",
+    }
+    refresher = _refresher(
+        tmp_path, items=[allowed, foreign, direct, bot], backend=backend
+    )
 
     result = refresher.refresh(dry_run=True, run_id="run_1")
 
     client = refresher.feishu_client
     assert isinstance(client, FakeFeishu)
     assert [(call["chat_type"], call["chat_id"]) for call in client.calls] == [
-        ("group", "oc_allowed")
+        ("group", "oc_allowed"),
+        ("p2p", "oc_p2p"),
     ]
-    assert result.pulled_count == result.selected_count == 1
+    assert result.pulled_count == result.selected_count == 2
+
+
+def test_reply_style_preview_skips_p2p_if_enumeration_fails(tmp_path: Path) -> None:
+    refresher = _refresher(
+        tmp_path, items=[_raw("om_allowed", "allowed")], backend=FakeBackend()
+    )
+
+    class FailedEnumeration(FakeFeishu):
+        def list_user_p2p_chats(self, *, page_token: str | None = None) -> MessagePage:
+            raise RuntimeError("incomplete enumeration")
+
+    client = FailedEnumeration([_raw("om_allowed", "allowed")])
+    refresher.feishu_client = client
+    result = refresher.refresh(dry_run=True, run_id="run_1")
+
+    assert result.selected_count == 1
+    assert result.stats["p2p_scope_error"] == "incomplete enumeration"
+    assert [call["chat_type"] for call in client.calls] == ["group"]
 
 
 def test_reply_style_refresh_fails_without_replacing_old_profile_when_samples_are_low(
