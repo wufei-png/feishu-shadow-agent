@@ -101,6 +101,16 @@ CREATE INDEX IF NOT EXISTS idx_approvals_status_expires
 ON approvals(status, expires_at, id);
 """
 
+_GROUP_POLICY_HOLDS_V9_SQL = """
+CREATE TABLE IF NOT EXISTS group_policy_holds (
+  kind TEXT NOT NULL CHECK (kind IN ('task', 'action', 'retry')),
+  item_id INTEGER NOT NULL,
+  chat_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (kind, item_id)
+);
+"""
+
 
 def migrate_schema(
     conn: sqlite3.Connection, *, current_version: int, target_version: int
@@ -129,6 +139,9 @@ def migrate_schema(
     if current_version == 7 and target_version >= 8:
         conn.executescript(_QUERY_INDEXES_V8_SQL)
         current_version = 8
+    if current_version == 8 and target_version >= 9:
+        conn.executescript(_GROUP_POLICY_HOLDS_V9_SQL)
+        current_version = 9
     if current_version == target_version:
         conn.execute(f"PRAGMA user_version = {int(target_version)}")
         return

@@ -316,6 +316,7 @@ export type TaskSummary = {
   task_short_id: string;
   short_id: string;
   status: TaskStatus;
+  policy_held?: boolean;
   chat_id: string | null;
   chat_type: string | null;
   thread_id: string | null;
@@ -378,6 +379,7 @@ export type DispatchActionSummary = {
   action_id: number;
   kind: string;
   status: ActionStatus;
+  policy_held?: boolean;
   task_id: number | null;
   task_short_id: string | null;
   approval_id: number | null;

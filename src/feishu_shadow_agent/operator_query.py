@@ -584,6 +584,7 @@ class OperatorQueryService:
                     SELECT t.id, t.short_id, t.status, t.chat_id, t.chat_type, t.thread_id,
                            t.root_message_id, t.task_label, t.watch_until, t.updated_at,
                            t.agent_working_dir,
+                           EXISTS(SELECT 1 FROM group_policy_holds h WHERE h.kind = 'task' AND h.item_id = t.id) AS policy_held,
                            COUNT(tm.message_id) AS message_count,
                            (
                              SELECT COUNT(*)
@@ -633,7 +634,8 @@ class OperatorQueryService:
                 task = conn.execute(
                     # `_id_lookup` returns fixed SQL fragments and bound values.
                     f"""
-                    SELECT t.*, COUNT(tm.message_id) AS message_count
+                    SELECT t.*, COUNT(tm.message_id) AS message_count,
+                           EXISTS(SELECT 1 FROM group_policy_holds h WHERE h.kind = 'task' AND h.item_id = t.id) AS policy_held
                     FROM tasks t
                     LEFT JOIN task_messages tm ON tm.task_id = t.id
                     WHERE {where_sql}
@@ -732,6 +734,7 @@ class OperatorQueryService:
                 actions,
                 status=task_summary["status"],
                 task_id=task_summary["task_id"],
+                policy_held=task_summary["policy_held"],
             ),
         }
 
@@ -761,7 +764,8 @@ class OperatorQueryService:
                     # `where_sql` is assembled from fixed query fragments; all
                     # caller values remain bound parameters.
                     f"""
-                    SELECT a.*, t.short_id AS task_short_id
+                    SELECT a.*, t.short_id AS task_short_id,
+                           EXISTS(SELECT 1 FROM group_policy_holds h WHERE h.kind = 'action' AND h.item_id = a.id) AS policy_held
                     FROM actions a
                     LEFT JOIN tasks t ON t.id = a.task_id
                     {where_sql}
@@ -779,7 +783,8 @@ class OperatorQueryService:
             with self._connect() as conn:
                 action = conn.execute(
                     """
-                    SELECT a.*, t.short_id AS task_short_id
+                    SELECT a.*, t.short_id AS task_short_id,
+                           EXISTS(SELECT 1 FROM group_policy_holds h WHERE h.kind = 'action' AND h.item_id = a.id) AS policy_held
                     FROM actions a
                     LEFT JOIN tasks t ON t.id = a.task_id
                     WHERE a.id = ?
@@ -908,11 +913,14 @@ def _task_recommended_actions(
     *,
     status: str | None = None,
     task_id: str | None = None,
+    policy_held: bool = False,
 ) -> list[str]:
     recommendations: list[str] = []
     if task_id:
         if status == TaskStatus.WATCHING.value:
             recommendations.append(f"task close --task-id {task_id}")
+            if policy_held:
+                recommendations.append(f"task reopen --task-id {task_id}")
         elif status in {
             TaskStatus.CLOSED.value,
             TaskStatus.CLOSED_BY_OWNER.value,

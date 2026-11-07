@@ -124,7 +124,7 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
   const commandResult = selectedTaskId ? (commandResults[selectedTaskId] ?? null) : null;
   const selectedTaskBusy = selectedTaskId ? busyTaskIds.has(selectedTaskId) : false;
   const canClose = detail.data?.status === "watching";
-  const canReopen = detail.data ? ["closed", "closed_by_owner", "human_taken_over"].includes(detail.data.status) : false;
+  const canReopen = detail.data ? Boolean(detail.data.policy_held) || ["closed", "closed_by_owner", "human_taken_over"].includes(detail.data.status) : false;
   const backgroundDraft = selectedTaskId ? (backgroundDrafts[selectedTaskId] ?? detail.data?.task_background?.content ?? "") : "";
   const taskFilters: Array<{ value: TaskFilter; label: string }> = [
     { value: "watching", label: t("tasks.filters.watching") },
@@ -336,6 +336,7 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
             <div className="detail-panel">
               <p className="eyebrow">{t("tasks.operations")}</p>
               <h2>{t("tasks.state")}</h2>
+              {detail.data.policy_held ? <p className="detail-note">{t("tasks.policyHeld")}</p> : null}
               <TextareaField label={t("common.reason")} onChange={setReason} placeholder={t("tasks.reasonPlaceholder")} rows={2} value={reason} />
               <div className="command-buttons">
                 <Button disabled={!canClose || selectedTaskBusy} onClick={() => runTaskCommand("close")} tone="danger">

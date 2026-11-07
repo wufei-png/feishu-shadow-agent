@@ -391,7 +391,9 @@ def test_invalid_agent_target_offers_current_messages_available_locations(
 ) -> None:
     hermes = FakeHermes()
     hermes.session_outputs.append(_session_output(reply_target_message_id="om_invalid"))
-    store, service, _ = _service(tmp_path, hermes=hermes)
+    store, service, _ = _service(
+        tmp_path, hermes=hermes, config=_config(chats={"oc_1": ChatPolicyConfig()})
+    )
     raw = _message("om_root", mentions=[{"open_id": "ou_owner"}]) | {
         "thread_id": "omt_root",
         "message_position": "42",
@@ -488,7 +490,9 @@ def test_owner_edited_reply_keeps_agent_selected_thread(tmp_path: Path) -> None:
             reply_location="thread",
         )
     )
-    store, service, _ = _service(tmp_path, hermes=hermes)
+    store, service, _ = _service(
+        tmp_path, hermes=hermes, config=_config(chats={"oc_1": ChatPolicyConfig()})
+    )
     raw = _message("om_root", mentions=[{"open_id": "ou_owner"}]) | {
         "thread_id": "omt_root",
         "message_position": "42",
@@ -1048,7 +1052,9 @@ def test_group_auto_reply_disabled_downgrades_to_approval(tmp_path: Path) -> Non
     hermes.session_outputs.append(
         _session_output(reply_target_message_id="om_1", watch_action="close")
     )
-    store, service, _ = _service(tmp_path, hermes=hermes)
+    store, service, _ = _service(
+        tmp_path, hermes=hermes, config=_config(chats={"oc_1": ChatPolicyConfig()})
+    )
 
     service.process_raw_message(
         _message("om_1", mentions=[{"open_id": "ou_owner"}]),

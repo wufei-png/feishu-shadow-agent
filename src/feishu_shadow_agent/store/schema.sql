@@ -1,7 +1,7 @@
 BEGIN IMMEDIATE;
 
 PRAGMA application_id = 1179861319;
-PRAGMA user_version = 8;
+PRAGMA user_version = 9;
 
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -200,6 +200,14 @@ CREATE TABLE IF NOT EXISTS chat_policies (
   allow_user_fallback INTEGER NOT NULL DEFAULT 1,
   resource_download INTEGER NOT NULL DEFAULT 1,
   updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS group_policy_holds (
+  kind TEXT NOT NULL CHECK (kind IN ('task', 'action', 'retry')),
+  item_id INTEGER NOT NULL,
+  chat_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (kind, item_id)
 );
 
 CREATE TABLE IF NOT EXISTS product_policies (

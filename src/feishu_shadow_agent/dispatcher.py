@@ -207,6 +207,9 @@ class Dispatcher:
                             "warnings": result.get("warnings", []),
                         },
                     )
+                if action_status == ActionStatus.PENDING.value:
+                    summary = _bump(summary, processed=1, skipped=1)
+                    continue
                 if not sent and not _stale_revision_cancelled(action_status, result):
                     self._queue_failed_reply_notification(
                         claimed,
@@ -352,6 +355,14 @@ class Dispatcher:
         run_id: str,
         blocked_actual_reason: str | None = None,
     ) -> dict[str, Any]:
+        if not self.store.group_send_allowed(action.id):
+            return {
+                "action_id": action.id,
+                "kind": action.kind,
+                "task_id": action.task_id,
+                "target_message_id": action.target_message_id,
+                "result": {"warnings": ["group_policy_blocked"]},
+            }
         result = self._execute_preview(action)
         if blocked_actual_reason:
             result["blocked_actual_reason"] = blocked_actual_reason
@@ -395,6 +406,8 @@ class Dispatcher:
         action = self.store.get_action(action_id)
         if action is None:
             return {"status": "failed", "error": f"action not found: {action_id}"}
+        if not self.store.group_send_allowed(action.id, allow_held=True):
+            return {"status": "failed", "error": "group policy blocks readback"}
         if not sent_message_id:
             return {"status": "failed", "error": "sent_message_id is required"}
         result = _empty_result()
@@ -447,6 +460,8 @@ class Dispatcher:
     ) -> tuple[dict[str, Any], str]:
         result = _empty_result()
         self._log_identical_correction_text(action, run_id=run_id)
+        if not self.store.group_send_allowed(action.id):
+            return self._group_policy_paused_result(attempt_id)
         if not self.store.action_revision_is_current(action):
             return self._stale_revision_result(
                 action, attempt_id=attempt_id, reason="stale_revision"
@@ -487,6 +502,8 @@ class Dispatcher:
         # successful send if a revision fence wins while it is in flight.
         send: LarkCliResult | None = None
         send_error: Exception | None = None
+        if not self.store.group_send_allowed(action.id):
+            return self._group_policy_paused_result(attempt_id)
         revision_current = self.store.revision_send_guard(action)
         if not revision_current:
             stale_reason = "stale_revision_before_send"
@@ -573,6 +590,8 @@ class Dispatcher:
             sent_message_id=sent_message_id,
         )
         try:
+            if not self.store.group_send_allowed(action.id):
+                raise RuntimeError("group policy blocks readback")
             readback = self._readback(
                 action, sent_message_id=sent_message_id, run_id=run_id
             )
@@ -613,6 +632,19 @@ class Dispatcher:
             finish=True,
         )
         return result, ActionStatus.SENT.value
+
+    def _group_policy_paused_result(
+        self, attempt_id: int
+    ) -> tuple[dict[str, Any], str]:
+        result = _empty_result()
+        result["warnings"].append("group_policy_blocked")
+        self.store.update_dispatch_attempt(
+            attempt_id,
+            status=DispatchAttemptStatus.FAILED.value,
+            error_stage=DispatchErrorStage.CLAIM.value,
+            finish=True,
+        )
+        return result, ActionStatus.PENDING.value
 
     def _stale_revision_result(
         self,

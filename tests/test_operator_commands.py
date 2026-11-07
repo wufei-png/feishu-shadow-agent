@@ -427,6 +427,7 @@ def test_processing_retry_dedupes_active_request_and_fences_claim_token(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
+    store.import_product_policy_from_config(_config(chats={"oc_1": ChatPolicyConfig()}))
     message = _processing_message()
     store.upsert_message(message)
     task, _ = store.create_task_for_message_and_audit(
@@ -513,6 +514,7 @@ def test_processing_retry_preserves_terminal_safety_gates(
     error_fragment: str,
 ) -> None:
     store = _store(tmp_path)
+    store.import_product_policy_from_config(_config(chats={"oc_1": ChatPolicyConfig()}))
     message = _processing_message()
     store.upsert_message(message)
     task, _ = store.create_task_for_message_and_audit(
@@ -557,6 +559,7 @@ def test_processing_retry_worker_replays_bound_stage_and_finishes_attempt(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
+    store.import_product_policy_from_config(_config(chats={"oc_1": ChatPolicyConfig()}))
     message = _processing_message()
     store.upsert_message(message)
     task, _ = store.create_task_for_message_and_audit(
@@ -629,6 +632,7 @@ def test_processing_retry_worker_replays_task_router_from_original_placeholder(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
+    store.import_product_policy_from_config(_config(chats={"oc_1": ChatPolicyConfig()}))
     message = _processing_message("om_router_retry")
     store.upsert_message(message)
     store.record_routing_audit(

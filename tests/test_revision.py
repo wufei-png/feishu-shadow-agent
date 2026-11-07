@@ -133,6 +133,14 @@ def _message(text: str, *, is_deleted: bool = False) -> NormalizedMessage:
     )
 
 
+def _seed_group_policy(store: SQLiteStore) -> None:
+    store.import_product_policy_from_config(
+        AppConfig(
+            owner=OwnerConfig(open_id="ou_owner"), chats={"oc_1": ChatPolicyConfig()}
+        )
+    )
+
+
 def test_message_normalizer_requires_an_explicit_tombstone_marker() -> None:
     normalizer = MessageNormalizer(owner_open_id="ou_owner")
 
@@ -390,6 +398,7 @@ def test_operator_command_reports_conflict_for_approval_invalidated_by_revision(
     tmp_path: Path,
 ) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
+    _seed_group_policy(store)
     source = _message("old source")
     store.upsert_message(source)
     task, _ = store.create_task_for_message_and_audit(
@@ -434,6 +443,7 @@ def test_completed_send_is_preserved_when_revision_fence_wins(
     tmp_path: Path,
 ) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
+    _seed_group_policy(store)
     source = _message("old source")
     store.upsert_message(source)
     task, _ = store.create_task_for_message_and_audit(
@@ -1077,6 +1087,7 @@ def test_revision_no_reply_notifies_owner(tmp_path: Path) -> None:
 
 def test_owner_send_identical_text_on_new_revision_is_allowed(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
+    _seed_group_policy(store)
     source = _message("old source")
     store.upsert_message(source)
     task, _ = store.create_task_for_message_and_audit(

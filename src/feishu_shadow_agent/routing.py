@@ -300,7 +300,12 @@ class MessageRouter:
             ]
             # Routing never crosses chat boundaries (ADR-0013): a reply target
             # in another chat is context here, never a takeover signal.
-            same_chat = [task for task in tasks if task.chat_id == message.chat_id]
+            same_chat = [
+                task
+                for task in tasks
+                if task.chat_id == message.chat_id
+                and not self.store.is_group_policy_held("task", task.id)
+            ]
             active = [task for task in same_chat if _is_active(task, now=now)]
             if len(active) == 1:
                 return active[0]
@@ -341,7 +346,9 @@ class MessageRouter:
         active: list[TaskRecord] = []
         for task_id in self.store.find_task_ids_for_message(message.message_id):
             task = self.store.get_task_by_id(task_id)
-            if _is_active(task, now=now):
+            if _is_active(task, now=now) and not self.store.is_group_policy_held(
+                "task", task.id
+            ):
                 active.append(task)
         if len(active) != 1:
             return None
