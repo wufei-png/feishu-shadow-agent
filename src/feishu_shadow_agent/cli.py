@@ -84,7 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     daemon.add_argument(
         "--send-owner-notifications",
         action="store_true",
-        help="with --dry-run, actually send and consume owner_notification actions; external replies stay pending",
+        help="deprecated; incompatible with --dry-run (approvals use the local Console)",
     )
     daemon.set_defaults(handler=_handle_daemon)
 
@@ -448,6 +448,12 @@ def _handle_doctor(args: argparse.Namespace) -> int:
 
 
 def _handle_daemon(args: argparse.Namespace) -> int:
+    if args.dry_run and args.send_owner_notifications:
+        print(
+            "daemon error: --dry-run cannot send owner notifications; use the local Console",
+            file=sys.stderr,
+        )
+        return 2
     loaded, store, logger = _load_runtime(args.config)
     run_id = new_run_id("run")
     client = LarkCliClient(
@@ -485,7 +491,7 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         run_metadata=dict(_git_info(Path.cwd())),
         config_base_dir=loaded.base_dir,
     )
-    if loaded.config.interactive_cards.enabled:
+    if loaded.config.interactive_cards.enabled and not args.dry_run:
         daemon.card_action_connection = create_card_action_connection(
             store=store,
             config=loaded.config,

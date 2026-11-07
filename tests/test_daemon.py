@@ -133,6 +133,18 @@ class FakeFeishu:
             raise RuntimeError("approval inbox failed")
         return MessagePage([])
 
+    def list_user_p2p_chats(self, **kwargs: Any) -> MessagePage:
+        return MessagePage(
+            [
+                {
+                    "chat_id": "ou_chat",
+                    "chat_mode": "p2p",
+                    "p2p_target_id": "ou_person",
+                    "p2p_target_type": "user",
+                }
+            ]
+        )
+
     def search_messages(self, **kwargs: Any) -> MessagePage:
         self.calls.append(f"search:{kwargs['chat_type']}:{kwargs['is_at_me']}")
         return MessagePage(
@@ -378,7 +390,7 @@ def test_daemon_tick_expires_overdue_approvals_before_approval_inbox(
     daemon.run_one_tick(run_id="run_1")
 
     assert events[0] == "expire"
-    assert events.index("expire") < events.index("approval_inbox")
+    assert "approval_inbox" not in events
     with store.connect() as conn:
         approval = conn.execute(
             "SELECT status, resolved_at FROM approvals WHERE short_id = ?",
@@ -386,6 +398,37 @@ def test_daemon_tick_expires_overdue_approvals_before_approval_inbox(
         ).fetchone()
     assert approval["status"] == "expired"
     assert approval["resolved_at"] is not None
+
+
+def test_dry_run_does_not_contact_owner_inbox_or_send_notifications(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    _seed_policy(store, config)
+    task_id = _insert_task(store)
+    action_id = store.create_owner_notification_action(
+        task_id=task_id, payload={"type": "notify"}
+    )
+    fake = FakeFeishu()
+    daemon = Daemon(
+        store=store,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        health_suite=FakeHealthSuite(
+            [HealthCheckResult("config_schema", "critical", "ok", "ok")]
+        ),  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=True,
+        app_config=config,
+        feishu_client=fake,  # type: ignore[arg-type]
+        runtime_health_interval_seconds=0,
+    )
+
+    daemon.run_one_tick(run_id="run_1")
+
+    assert "approval_inbox" not in fake.calls
+    assert fake.owner_calls == []
+    assert store.get_action(action_id).status == "pending"  # type: ignore[union-attr]
 
 
 def test_keyboard_interrupt_finishes_run(tmp_path: Path) -> None:
@@ -1221,7 +1264,7 @@ def test_ingestion_budget_exhaustion_still_runs_dispatch_and_retention(
 def test_source_rotation_lets_other_ingestion_progress_under_repeated_budget_pressure(
     tmp_path: Path,
 ) -> None:
-    monotonic_values = iter([0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 10.0, 10.0, 10.0, 12.0])
+    monotonic_values = iter([0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 2.0, 10.0, 10.0, 10.0, 12.0])
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     logger = JSONLLogger(tmp_path / "agent.jsonl")
     suite = FakeHealthSuite(

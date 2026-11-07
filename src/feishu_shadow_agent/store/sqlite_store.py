@@ -2337,15 +2337,17 @@ class SQLiteStore:
             )
         ]
 
-    def group_thread_is_known(self, *, chat_id: str, thread_id: str) -> bool:
-        """A thread-only API is safe to call only when its group is known locally."""
+    def conversation_thread_is_known(
+        self, *, chat_id: str, chat_type: str, thread_id: str
+    ) -> bool:
+        """Check thread ownership before using a thread-only API."""
         self.initialize()
         with self.connect() as conn:
             return (
                 conn.execute(
-                    "SELECT 1 FROM messages WHERE chat_id = ? AND chat_type = 'group' "
+                    "SELECT 1 FROM messages WHERE chat_id = ? AND chat_type = ? "
                     "AND thread_id = ? LIMIT 1",
-                    (chat_id, thread_id),
+                    (chat_id, chat_type, thread_id),
                 ).fetchone()
                 is not None
             )

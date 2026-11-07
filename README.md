@@ -55,10 +55,10 @@ python -m feishu_shadow_agent policy import-config --config config.yaml
 python -m feishu_shadow_agent doctor --config config.yaml
 ```
 
-推荐先用 dry-run 跑 daemon。这个模式会执行拉取、路由、Agent、审批和 dispatch preview，但不会真实对外回复；加上 `--send-owner-notifications` 后，owner 通知仍会真实发送，方便验证审批闭环。dry-run 中产生的审批和动作不会被提升为生产发送；生产模式必须重新生成审批。
+推荐先用 dry-run 跑 daemon。这个模式会执行拉取、路由、Agent 和 dispatch preview，但不会真实发送回复或 owner 通知；审批使用本地 Operator Console。dry-run 中产生的审批和动作不会被提升为生产发送；生产模式必须重新生成审批。
 
 ```bash
-python -m feishu_shadow_agent daemon --config config.yaml --dry-run --send-owner-notifications
+python -m feishu_shadow_agent daemon --config config.yaml --dry-run
 ```
 
 确认行为符合预期后，再去掉 `--dry-run` 进入真实发送模式：

@@ -3736,7 +3736,103 @@ def test_daemon_tick_runs_p2_stages_in_order(tmp_path: Path) -> None:
         "dispatch",
         "retention",
     ]
-    assert fake.calls == ["search:p2p:False:None"]
+    assert fake.calls == []
+    assert next(result for result in results if result.name == "p2p").ok is False
+
+
+def test_dry_run_queries_only_fully_enumerated_non_bot_p2p_chats(
+    tmp_path: Path,
+) -> None:
+    class ScopedClient(FakeFeishuClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.finished_enumerating = False
+
+        def auth_status(self, *, verify: bool = True) -> LarkCliResult:
+            return LarkCliResult(
+                ["lark-cli"], 0, json_data={"identities": {"bot": {"openId": "ou_bot"}}}
+            )
+
+        def list_user_p2p_chats(self, *, page_token: str | None = None) -> MessagePage:
+            if page_token is None:
+                return MessagePage(
+                    [
+                        {
+                            "chat_id": "oc_bot",
+                            "chat_mode": "p2p",
+                            "p2p_target_id": "ou_bot",
+                            "p2p_target_type": "user",
+                        }
+                    ],
+                    has_more=True,
+                    next_page_token="next",
+                )
+            assert page_token == "next"
+            self.finished_enumerating = True
+            return MessagePage(
+                [
+                    {
+                        "chat_id": "oc_person",
+                        "chat_mode": "p2p",
+                        "p2p_target_id": "ou_person",
+                        "p2p_target_type": "user",
+                    }
+                ]
+            )
+
+        def search_messages(self, **kwargs: Any) -> MessagePage:
+            assert self.finished_enumerating
+            assert kwargs["chat_id"] == "oc_person"
+            return super().search_messages(**kwargs)
+
+    fake = ScopedClient()
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        dry_run=True,
+    )
+
+    result = service.ingest_p2p(run_id="run_1")
+
+    assert result.ok
+    assert fake.search_chat_ids == ["oc_person"]
+
+
+@pytest.mark.parametrize("mode", ["missing_bot", "incomplete_page", "unknown_peer"])
+def test_dry_run_p2p_fails_closed_without_complete_identity_and_pagination(
+    tmp_path: Path, mode: str
+) -> None:
+    class IncompleteClient(FakeFeishuClient):
+        def auth_status(self, *, verify: bool = True) -> LarkCliResult:
+            payload = (
+                {}
+                if mode == "missing_bot"
+                else {"identities": {"bot": {"openId": "ou_bot"}}}
+            )
+            return LarkCliResult(["lark-cli"], 0, json_data=payload)
+
+        def list_user_p2p_chats(self, *, page_token: str | None = None) -> MessagePage:
+            if mode == "incomplete_page":
+                return MessagePage([], has_more=True)
+            return MessagePage([{"chat_id": "oc_x", "chat_mode": "p2p"}])
+
+    fake = IncompleteClient()
+    service = IngestionService(
+        store=SQLiteStore(tmp_path / "agent.sqlite3"),
+        feishu_client=fake,
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        dry_run=True,
+    )
+
+    result = service.ingest_p2p(run_id="run_1")
+
+    assert not result.ok
+    assert "enumeration failed" in (result.error or "")
+    assert not fake.search_chat_ids
 
 
 def test_approval_inbox_placeholder_does_not_write_checkpoint(tmp_path: Path) -> None:

@@ -90,6 +90,7 @@ class Dispatcher:
         run_id: str,
         allow_send_reply_actual: bool,
         allow_owner_notification_actual: bool,
+        include_owner_notifications: bool = True,
         blocked_send_reply_reason: str | None = None,
         limit: int = 50,
     ) -> DispatchSummary:
@@ -113,7 +114,9 @@ class Dispatcher:
                         run_id=run_id,
                         dedupe_suffix="stale_recovery",
                     )
-        actions = self.store.list_dispatchable_actions(limit=limit)
+        actions = self.store.list_dispatchable_actions(
+            limit=limit, kind=None if include_owner_notifications else "send_reply"
+        )
         if allow_owner_notification_actual:
             seen_action_ids = {action.id for action in actions}
             actions.extend(

@@ -210,7 +210,7 @@ python -m feishu_shadow_agent doctor --config config.yaml --send-test
 先用 dry-run 跑完整链路：
 
 ```bash
-python -m feishu_shadow_agent daemon --config config.yaml --dry-run --send-owner-notifications
+python -m feishu_shadow_agent daemon --config config.yaml --dry-run
 ```
 
 验证步骤：
@@ -233,7 +233,7 @@ python -m feishu_shadow_agent replay --config config.yaml --message-id <message_
 
 - `data/agent.sqlite3` 中出现消息、任务、routing audit、Agent audit 或 approval/action 记录。
 - `logs/agent.jsonl` 中出现 `message_ingested`、`task_processing_completed`、`dispatch_action_previewed` 等事件。
-- dry-run 模式不会真实对外回复；只有 owner notification 在显式加 `--send-owner-notifications` 时会真实发送。
+- dry-run 模式不会真实对外回复或发送 owner 通知；审批只通过本地 Console 处理。私聊仅在完整枚举并排除机器人会话后按 chat ID 查询，无法确认时暂停私聊采集。
 - dry-run 产生的 approval/action 带 dry-run provenance，切换到生产模式后不能复用；生产发送必须由生产运行重新生成 approval。
 
 ## 5. 真实发送端到端

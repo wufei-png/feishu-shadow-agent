@@ -49,6 +49,10 @@ from .types import (
 )
 
 
+class P2PListClient(Protocol):
+    def list_user_p2p_chats(self, *, page_token: str | None = None) -> MessagePage: ...
+
+
 class IngestionFeishuClient(Protocol):
     def auth_status(self, *, verify: bool = True) -> LarkCliResult: ...
 
@@ -895,10 +899,15 @@ class IngestionService:
         store_absolute_resource_paths: bool = False,
         preserve_resource_base_path: bool = False,
         monotonic: Callable[[], float] | None = None,
+        dry_run: bool = False,
     ):
         self.store = store
         self.feishu_client = feishu_client
         self.config = config
+        self.dry_run = dry_run
+        self._p2p_scope_attempted = False
+        self._p2p_scope: set[str] = set()
+        self._p2p_scope_error: str | None = None
         self.logger = logger
         self.normalizer = MessageNormalizer(owner_open_id=config.owner.open_id)
         self.eligibility = MessageEligibilityPolicy()
@@ -970,6 +979,16 @@ class IngestionService:
             error: str | None = "processing retry did not complete"
             try:
                 row = self.store.get_message(str(attempt["message_id"]))
+                if self.dry_run and row is not None and row["chat_type"] == "p2p":
+                    try:
+                        allowed_p2p = self._dry_run_p2p_scope()
+                    except RuntimeError:
+                        allowed_p2p: set[str] = set()
+                    if row["chat_id"] not in allowed_p2p:
+                        self.store.requeue_policy_held_retry(
+                            attempt_id, claim_token=claim_token
+                        )
+                        continue
                 if self.store.is_group_policy_held("retry", attempt_id) or (
                     row is not None
                     and row["chat_type"] == "group"
@@ -1214,6 +1233,43 @@ class IngestionService:
         )
 
     def ingest_p2p(self, *, run_id: str) -> StageResult:
+        if self.dry_run:
+            try:
+                chat_ids = sorted(self._dry_run_p2p_scope())
+            except RuntimeError as exc:
+                return StageResult("p2p", ok=False, error=str(exc))
+            processed = 0
+            errors: list[str] = []
+            if chat_ids:
+                scheduler = (
+                    self.store.get_checkpoint("ingest.scheduler.p2p_chats") or {}
+                )
+                index = int(scheduler.get("next_index", 0)) % len(chat_ids)
+                self.store.set_checkpoint(
+                    "ingest.scheduler.p2p_chats",
+                    {"next_index": (index + 1) % len(chat_ids)},
+                )
+                chat_ids = chat_ids[index:] + chat_ids[:index]
+            for chat_id in chat_ids:
+                result = self._run_search_stage(
+                    name="p2p",
+                    checkpoint_key=f"ingest.p2p.{chat_id}",
+                    chat_type="p2p",
+                    is_at_me=False,
+                    run_id=run_id,
+                    chat_id=chat_id,
+                )
+                processed += result.processed
+                if not result.ok:
+                    errors.append(result.error or f"{chat_id}: incomplete")
+                if self.monotonic() >= self.ingest_deadline:
+                    break
+            return StageResult(
+                "p2p",
+                ok=not errors,
+                processed=processed,
+                error="; ".join(errors) or None,
+            )
         return self._run_search_stage(
             name="p2p",
             checkpoint_key="ingest.p2p",
@@ -1221,6 +1277,57 @@ class IngestionService:
             is_at_me=False,
             run_id=run_id,
         )
+
+    def _dry_run_p2p_scope(self) -> set[str]:
+        if not self._p2p_scope_attempted:
+            self._p2p_scope_attempted = True
+            try:
+                auth = self.feishu_client.auth_status(verify=True)
+                bot_id = _bot_open_id_from_auth(auth.json_data) if auth.ok else None
+                if not bot_id:
+                    raise ValueError("bot open_id is unavailable")
+                allowed: set[str] = set()
+                peers: dict[str, tuple[str, str]] = {}
+                seen_tokens: set[str] = set()
+                token: str | None = None
+                for _ in range(1000):
+                    page = cast(P2PListClient, self.feishu_client).list_user_p2p_chats(
+                        page_token=token
+                    )
+                    for chat in page.items:
+                        chat_id = _first_string(chat, "chat_id", "chatId")
+                        target_id = _first_string(chat, "p2p_target_id")
+                        target_type = _first_string(chat, "p2p_target_type")
+                        mode = _first_string(chat, "chat_mode")
+                        if (
+                            not chat_id
+                            or not target_id
+                            or target_type not in {"user", "bot"}
+                            or mode != "p2p"
+                        ):
+                            raise ValueError("P2P chat metadata is incomplete")
+                        if chat_id in peers and peers[chat_id] != (
+                            target_id,
+                            target_type,
+                        ):
+                            raise ValueError("P2P chat metadata is inconsistent")
+                        peers[chat_id] = (target_id, target_type)
+                        if target_id != bot_id and target_type != "bot":
+                            allowed.add(chat_id)
+                    if not page.has_more:
+                        self._p2p_scope = allowed
+                        break
+                    token = page.next_page_token
+                    if not token or token in seen_tokens:
+                        raise ValueError("P2P chat pagination is incomplete")
+                    seen_tokens.add(token)
+                else:
+                    raise ValueError("P2P chat pagination exceeded its safety limit")
+            except Exception as exc:  # noqa: BLE001
+                self._p2p_scope_error = f"dry-run P2P enumeration failed: {exc}"
+        if self._p2p_scope_error is not None:
+            raise RuntimeError(self._p2p_scope_error)
+        return self._p2p_scope
 
     def run_active_watch(self, *, run_id: str) -> StageResult:
         now = self.clock()
@@ -1253,6 +1360,12 @@ class IngestionService:
                     data={"chat_id": chat_id},
                 )
                 continue
+            if self.dry_run and target["chat_type"] == "p2p":
+                try:
+                    if chat_id not in self._dry_run_p2p_scope():
+                        continue
+                except RuntimeError:
+                    continue
             activation = (
                 activations.get(chat_id) if target["chat_type"] == "group" else None
             )
@@ -1266,8 +1379,13 @@ class IngestionService:
             not_before = None if activation is None else str(activation["activated_at"])
             active_id = None if activation is None else int(activation["activation_id"])
             if thread_id:
-                if activation is not None and not self.store.group_thread_is_known(
-                    chat_id=chat_id, thread_id=thread_id
+                if (
+                    activation is not None
+                    or (self.dry_run and target["chat_type"] == "p2p")
+                ) and not self.store.conversation_thread_is_known(
+                    chat_id=chat_id,
+                    chat_type=str(target["chat_type"]),
+                    thread_id=thread_id,
                 ):
                     self.logger.warning(
                         "active_watch_group_thread_unknown",
@@ -1458,6 +1576,12 @@ class IngestionService:
         except GroupPolicyChanged as exc:
             return StageResult(name, ok=False, error=str(exc))
         raws = drain.items
+        if chat_id is not None and activation_id is None:
+            raws = [
+                raw
+                for raw in raws
+                if _first_string(raw, "chat_id", "chatId") == chat_id
+            ]
         if chat_id is not None and activation_id is not None:
             if not self._group_activation_is_current(chat_id, activation_id):
                 return StageResult(
@@ -1768,6 +1892,11 @@ class IngestionService:
             current = self.normalizer.normalize(
                 current_raw, default_chat_type=message.chat_type
             )
+            if (
+                current.chat_id != message.chat_id
+                or current.chat_type != message.chat_type
+            ):
+                raise RuntimeError("verified message belongs to another conversation")
             self.logger.info(
                 "message_current_snapshot_refetched",
                 run_id=run_id,

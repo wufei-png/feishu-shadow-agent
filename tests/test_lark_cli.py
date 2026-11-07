@@ -34,6 +34,22 @@ def test_build_messages_search_for_group_at_me() -> None:
     ]
 
 
+def test_p2p_chat_list_requires_complete_pagination_metadata() -> None:
+    seen: list[list[str]] = []
+
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        seen.append(argv)
+        return LarkCliResult(
+            argv, 0, json_data={"data": {"chats": [], "has_more": True}}
+        )
+
+    client = LarkCliClient(runner=runner)
+    with pytest.raises(ValueError, match="incomplete"):
+        client.list_user_p2p_chats()
+    assert seen[0][seen[0].index("--types") + 1] == "p2p"
+    assert seen[0][seen[0].index("--as") + 1] == "user"
+
+
 def test_build_chat_messages_list_uses_order_flag() -> None:
     client = LarkCliClient(path="lark-cli")
 
