@@ -1343,7 +1343,9 @@ def test_empty_auto_reply_candidate_is_schema_failure(tmp_path: Path) -> None:
     )
 
 
-def test_empty_needs_owner_candidate_is_schema_failure(tmp_path: Path) -> None:
+def test_empty_needs_owner_candidate_requires_owner_to_write_reply(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "owner_style.md").write_text("# style\n", encoding="utf-8")
     hermes = FakeHermes()
     hermes.session_outputs.append(
@@ -1365,9 +1367,9 @@ def test_empty_needs_owner_candidate_is_schema_failure(tmp_path: Path) -> None:
 
     assert hermes.postprocess_prompts == []
     with store.connect() as conn:
-        approval_count = conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()[
-            "c"
-        ]
+        approval = conn.execute(
+            "SELECT short_id, payload_json FROM approvals"
+        ).fetchone()
         notification = conn.execute(
             "SELECT payload_json FROM actions WHERE kind = 'owner_notification'"
         ).fetchone()
@@ -1379,15 +1381,73 @@ def test_empty_needs_owner_candidate_is_schema_failure(tmp_path: Path) -> None:
             """,
             ("om_1",),
         ).fetchone()
-    assert approval_count == 0
-    assert processing["status"] == "processing_failed_terminal"
-    assert processing["terminal_reason"] == "agent_schema_failed"
-    assert "needs_owner requires a non-empty proposed_reply" in processing["last_error"]
+    assert processing["status"] == "processed"
+    assert processing["terminal_reason"] is None
+    assert json.loads(approval["payload_json"])["approvable"] is False
     payload = json.loads(notification["payload_json"])
-    assert payload["type"] == "processing_failed"
+    assert payload["type"] == "approval_required"
     _assert_owner_notification_context(
         payload, message_id="om_1", text="hello", sender_name="Ext", chat_id="ou_chat"
     )
+    commands = OperatorCommandService(store)
+    assert commands.approve(approval["short_id"], actor="owner").status != "applied"
+    result = commands.send(approval["short_id"], "owner reply", actor="owner")
+    assert result.status == "applied"
+    with store.connect() as conn:
+        action = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'send_reply'"
+        ).fetchone()
+    assert json.loads(action["payload_json"])["text"] == "owner reply"
+
+
+def test_empty_needs_owner_with_unavailable_p2p_resource_records_approval(
+    tmp_path: Path,
+) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(
+        _session_output(
+            answerability="needs_owner",
+            proposed_reply="",
+            reply_target_message_id="om_request",
+        )
+    )
+    cfg = _config(chats={"ou_chat": ChatPolicyConfig(bot_joined=False)})
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+    service.process_raw_message(
+        _message(
+            "om_image",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            text="![Image](img_1)",
+            image_key="img_1",
+        ),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    service.process_raw_message(
+        _message(
+            "om_request",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            text="Can you investigate this image?",
+            create_time="2026-06-22T10:00:30+08:00",
+        ),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    with store.connect() as conn:
+        approval = conn.execute("SELECT payload_json FROM approvals").fetchone()
+        notification = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'owner_notification'"
+        ).fetchone()
+    assert json.loads(approval["payload_json"])["approvable"] is False
+    assert json.loads(notification["payload_json"])["resource_statuses"] == {
+        "bot_not_joined": 1
+    }
 
 
 def test_reply_postprocess_missing_profile_creates_keep_watching_approval_with_original_candidate(
@@ -1554,7 +1614,7 @@ def test_reply_postprocess_length_guard_routes_to_owner_review(tmp_path: Path) -
     assert audit["error"] == "postprocess_length_growth"
 
 
-def test_empty_needs_owner_reply_is_schema_failure_notification_includes_context(
+def test_empty_needs_owner_approval_notification_includes_context(
     tmp_path: Path,
 ) -> None:
     hermes = FakeHermes()
@@ -1580,9 +1640,7 @@ def test_empty_needs_owner_reply_is_schema_failure_notification_includes_context
     )
 
     with store.connect() as conn:
-        approval_count = conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()[
-            "c"
-        ]
+        approval = conn.execute("SELECT payload_json FROM approvals").fetchone()
         notification = conn.execute(
             "SELECT payload_json FROM actions WHERE kind = 'owner_notification'"
         ).fetchone()
@@ -1595,12 +1653,11 @@ def test_empty_needs_owner_reply_is_schema_failure_notification_includes_context
             ("om_1",),
         ).fetchone()
     notify_payload = json.loads(notification["payload_json"])
-    assert approval_count == 0
-    assert processing["status"] == "processing_failed_terminal"
-    assert processing["terminal_reason"] == "agent_schema_failed"
-    assert "needs_owner requires a non-empty proposed_reply" in processing["last_error"]
-    assert notify_payload["type"] == "processing_failed"
-    assert notify_payload["reason"].startswith("agent_schema_failed:")
+    assert json.loads(approval["payload_json"])["approvable"] is False
+    assert processing["status"] == "processed"
+    assert processing["terminal_reason"] is None
+    assert notify_payload["type"] == "approval_required"
+    assert notify_payload["reason"] == "needs_owner_no_draft"
     assert notify_payload["incoming_message"] == {
         "message_id": "om_1",
         "text": "classification service failed to start",

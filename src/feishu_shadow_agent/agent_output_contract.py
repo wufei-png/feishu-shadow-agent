@@ -79,7 +79,7 @@ class BaseTaskSessionOutput(StrictModel):
         ),
         (
             "proposed_reply",
-            "non-empty plain reply text for `auto_reply` or `needs_owner`; empty for `no_reply`.",
+            "non-empty plain reply text for `auto_reply`; optional for `needs_owner` when no safe draft is possible; empty for `no_reply`.",
         ),
         (
             "reply_target_message_id",
@@ -110,7 +110,7 @@ class BaseTaskSessionOutput(StrictModel):
         default="",
         description=(
             "Plain reply text without Feishu @ mentions. Required and non-empty for "
-            "auto_reply and needs_owner; must be empty for no_reply."
+            "auto_reply; optional for needs_owner; must be empty for no_reply."
         ),
     )
     reply_target_message_id: str | None = Field(
@@ -150,7 +150,7 @@ class BaseTaskSessionOutput(StrictModel):
             if self.reply_location is not None:
                 raise ValueError("no_reply requires reply_location to be null")
             return self
-        if not proposed_reply:
+        if self.answerability == "auto_reply" and not proposed_reply:
             raise ValueError(
                 f"{self.answerability} requires a non-empty proposed_reply"
             )

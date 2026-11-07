@@ -60,7 +60,7 @@ Runtime prompt responsibilities are split by authority:
 
 Context Access has an intentionally narrow trust boundary. Its URI, allowed tables, and query scope are logically read-only, enforced primarily by the model-visible instructions and the model's instruction following. This remains true when `tool_permissions: full_access` gives the backend other local write-capable tools; it is not a filesystem or security sandbox. Stronger local isolation requires `read_only` or an external sandbox. Feishu writes are a separate code-owned boundary and remain protected by schema validation, policy, approval, dry-run, idempotency, and dispatch gates regardless of backend permissions.
 
-Owner-provided task background is a separate, explicit evidence channel. Operator Command appends a task-scoped version for set, replace, or clear; it does not reset `agent_session_id` or change task ownership. `TaskSessionRunner` reads only the latest non-cleared value and injects it only when building a fresh provider session. Resumed sessions never receive it again. The prompt labels it as owner-supplied evidence rather than an instruction and tells the model to prefer newer Feishu messages on conflict.
+Owner-provided task background is a separate, explicit evidence channel. Operator Command appends a task-scoped version for set, replace, or clear; it does not reset `agent_session_id` or change task ownership. `TaskSessionRunner` reads only the latest non-cleared value and injects it only when building a fresh provider session. Changes made after a session is created apply only to a future fresh session; resumed sessions never receive them. The prompt labels background as owner-supplied evidence rather than an instruction. It asks the model to weigh the source, context and timing of conflicts and to request owner review when a material conflict remains unresolved. This is model judgment, not a deterministic conflict detector.
 
 ## Agent-Owned Judgement
 
@@ -100,6 +100,8 @@ The task-session output keeps `answerability` as the send decision and uses `dec
 - `auto_reply`: `decision_reason` may be `null`; if present it must be `sufficient_evidence_low_risk`.
 - `no_reply`: requires `no_response_needed`, `already_resolved`, or `duplicate_or_stale`.
 - `needs_owner`: requires `insufficient_evidence`, `commitment_or_authorization`, `sensitive_or_high_impact`, `write_or_permission`, or `human_judgment_required`.
+
+A `needs_owner` output may omit a reply draft. It becomes a pending approval that cannot be approved without a draft; the owner can supply a final reply through the existing send command, subject to destination validation.
 
 Owner resolution writes exactly one immutable feedback outcome: `suggestion_sent`, `edited_sent`, `no_send_keep_watching`, or `no_send_end_task`. A fixed optional feedback reason and short note may accompany the outcome. Metrics and UI can aggregate these facts, but runtime policy must not mutate itself from them.
 

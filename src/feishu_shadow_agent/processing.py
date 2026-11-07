@@ -225,6 +225,7 @@ class ApprovalService:
             "correction_delivery",
             "requires_owner_approval",
             "allowed_reply_locations",
+            "resource_statuses",
         ):
             if key in payload:
                 notify[key] = payload[key]
@@ -1312,7 +1313,11 @@ class TaskProcessingService:
                 },
             )
 
-        if output.answerability == "needs_owner" and p2p_resource_unavailable:
+        if (
+            output.answerability == "needs_owner"
+            and output.proposed_reply.strip()
+            and p2p_resource_unavailable
+        ):
             action_id = self.approvals.escalate_task_to_owner(
                 task=task,
                 message=message,
@@ -1536,6 +1541,44 @@ class TaskProcessingService:
                 task.id,
                 approval_id=approval_id,
                 reason="reply_destination_unavailable_or_invalid",
+            )
+        if output.answerability == "needs_owner" and not output.proposed_reply.strip():
+            self.store.update_task_after_agent(
+                task_id=task.id,
+                task_label=output.task_label
+                if isinstance(output, InitialTaskSessionOutput)
+                else None,
+                status="watching",
+                watch_until=watch_until,
+            )
+            payload_extra: dict[str, Any] = {}
+            if previous_sent_reply is not None:
+                payload_extra["previous_reply"] = previous_sent_reply.get("text", "")
+            if p2p_resource_unavailable:
+                payload_extra["resource_statuses"] = resource_status_counts(resources)
+            approval_id = self.approvals.request_send_reply(
+                task=task,
+                reply_target_message_id=reply_target_id,
+                incoming_message_id=message.message_id,
+                incoming_message_revision=message.revision,
+                proposed_reply="",
+                reason="needs_owner_no_draft",
+                reply_destination=destination,
+                approvable=False,
+                payload_extra=payload_extra,
+                decision_reason=output.decision_reason,
+            )
+            self._mark_processing_processed(
+                message=message,
+                stage="task_session",
+                task_id=task.id,
+                attempt_count=outcome.attempt_count,
+            )
+            return ProcessingResult(
+                "approval_created",
+                task.id,
+                approval_id=approval_id,
+                reason="needs_owner_no_draft",
             )
         postprocess = self._reply_postprocess(
             task=task,

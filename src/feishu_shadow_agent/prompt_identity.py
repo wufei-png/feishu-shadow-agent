@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from typing import Final
 
 PROMPT_VERSIONS: Final[dict[str, str]] = {
-    "router": "v2",
-    "task_session": "v2",
+    "router": "v3",
+    "task_session": "v3",
     "reply_postprocess": "v2",
     "owner_style_refresh": "v2",
     "ingress_judge": "v2",
