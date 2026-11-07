@@ -818,9 +818,6 @@ class SQLiteStore:
             rows = conn.execute(
                 """
                 SELECT chat_id FROM chat_policies
-                UNION
-                SELECT chat_id FROM tasks
-                WHERE chat_type = 'group' AND chat_id IS NOT NULL
                 ORDER BY chat_id
                 """
             ).fetchall()

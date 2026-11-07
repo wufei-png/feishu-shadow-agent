@@ -394,6 +394,51 @@ def test_runtime_membership_absence_dedupes_notification_and_recovers(
     assert policy_audits_after == policy_audits_before
 
 
+def test_membership_only_probes_current_group_activations(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    config = _config(
+        chats={name: ChatPolicyConfig() for name in ("oc_old", "oc_a", "oc_b")}
+    )
+    store.import_product_policy_from_config(config)
+    old_message = _message(chat_id="oc_old")
+    store.upsert_message(old_message)
+    store.create_task_for_message(old_message, watch_until="2999-01-01T00:00:00+00:00")
+    store.delete_chat_product_policy("oc_old", actor="owner")
+
+    class RevokingClient(FakeMembershipClient):
+        def auth_status(self, *, verify: bool = True) -> LarkCliResult:
+            store.delete_chat_product_policy("oc_b", actor="owner")
+            return super().auth_status(verify=verify)
+
+        def list_chat_bots(
+            self, *, chat_id: str, as_identity: str = "user"
+        ) -> LarkCliResult:
+            result = super().list_chat_bots(chat_id=chat_id, as_identity=as_identity)
+            store.delete_chat_product_policy("oc_a", actor="owner")
+            store.upsert_chat_product_policy(
+                {"chat_id": "oc_a", **ChatPolicyConfig().model_dump()}, actor="owner"
+            )
+            return result
+
+    client = RevokingClient(
+        [LarkCliResult(["probe"], 0, json_data={"data": {"items": []}})]
+    )
+    service = BotMembershipService(
+        store=store,
+        feishu_client=client,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+    )
+    summary = service.refresh(run_id="run")
+
+    assert client.probes == ["oc_a"]
+    assert summary.probed == 0
+    assert store.get_bot_membership_fact("oc_a") is None
+    assert store.get_bot_membership_fact("oc_old") is None
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM actions").fetchone()[0] == 0
+
+
 def test_unknown_membership_uses_short_retry_without_becoming_absent(
     tmp_path: Path,
 ) -> None:
