@@ -19,6 +19,8 @@ Feishu Shadow Agent 是一个本机运行的飞书个人办公影子助手。它
 
 ## 快速启动
 
+从零准备飞书应用、权限、账号和测试群，请按 [首次准备与预演](docs/getting-started.md) 操作。
+
 要求 Python 3.11+、uv 0.12.4，并确保本机已经可以使用 `lark-cli`，以及配置所选择的 Hermes、Codex 或 Claude Code CLI。
 
 ```bash

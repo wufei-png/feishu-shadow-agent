@@ -506,7 +506,12 @@ class Daemon:
                 "product_policy_initialized",
                 "critical",
                 "failed",
-                "Product Policy Store global policy is not initialized; run `policy import-config`.",
+                "Product Policy Store global policy is not initialized; run "
+                + (
+                    "`policy import-config --mode dry-run`."
+                    if self.dry_run
+                    else "`policy import-config`."
+                ),
                 {"missing": probe["missing"], "path": str(self.store.path)},
             )
         self.store.record_health_results(run_id=run_id, results=[result])

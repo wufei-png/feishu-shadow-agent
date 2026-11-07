@@ -473,7 +473,11 @@ def _handle_doctor(args: argparse.Namespace) -> int:
         cwd=loaded.base_dir,
     )
     suite = HealthSuite(
-        loaded_config=loaded, store=store, feishu_client=client, run_id=run_id
+        loaded_config=loaded,
+        store=store,
+        feishu_client=client,
+        run_id=run_id,
+        dry_run_mode=args.mode == "dry-run",
     )
     results = suite.run(send_test=args.send_test)
     summary = summarize_results(results)
@@ -509,7 +513,11 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         cwd=loaded.base_dir,
     )
     suite = HealthSuite(
-        loaded_config=loaded, store=store, feishu_client=client, run_id=run_id
+        loaded_config=loaded,
+        store=store,
+        feishu_client=client,
+        run_id=run_id,
+        dry_run_mode=args.dry_run,
     )
     backend_config = loaded.config.agent_backend
     agent_working_dir = resolve_agent_working_dir(

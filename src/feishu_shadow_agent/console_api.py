@@ -302,6 +302,7 @@ def create_console_app(
             loaded_config=loaded_config,
             store=store,
             logger=_build_jsonl_logger(loaded_config),
+            dry_run_mode=app_execution_mode == "dry_run",
         )
 
     def policy_preview_service() -> PolicyPreviewService:
