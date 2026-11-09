@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from fastapi.testclient import TestClient
@@ -56,6 +56,7 @@ def _client(
     token: str = "test-token",
     host: str = "127.0.0.1",
     readback_marker: Any | None = None,
+    execution_mode: Literal["production", "dry_run"] = "production",
 ) -> TestClient:
     config = ConfigService().load(_write_config(tmp_path))
     app = create_console_app(
@@ -66,6 +67,7 @@ def _client(
         port=8765,
         static_dir=_static_dir(tmp_path),
         readback_marker=readback_marker,
+        execution_mode=execution_mode,
     )
     return TestClient(app, base_url="http://127.0.0.1:8765")
 
@@ -563,6 +565,71 @@ def test_core_read_routes_return_standard_validation_errors(
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "validation_failed"
+
+
+def test_dry_run_console_approvals_create_only_dry_run_actions(tmp_path: Path) -> None:
+    client = _client(tmp_path, execution_mode="dry_run")
+    store = _store(tmp_path)
+    task_id = _seed_task_with_message(store, task_short_id="t_dry")
+    approval_id = store.create_send_reply_approval(
+        task_id=task_id,
+        preview="draft",
+        approval_timeout_hours=None,
+        payload={
+            "reply_target_message_id": "om_1",
+            "text": "draft",
+            "identity": "user",
+        },
+    )
+    with store.connect() as conn:
+        short_id = conn.execute(
+            "SELECT short_id FROM approvals WHERE id = ?", (approval_id,)
+        ).fetchone()["short_id"]
+    response = client.post(
+        f"/api/approvals/{short_id}/approve",
+        headers=_auth(),
+        json={
+            "expected_task_id": task_id,
+            "expected_source_message_id": "om_1",
+            "expected_source_revision": 1,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "applied"
+    assert (
+        client.get("/api/dashboard", headers=_auth()).json()["runtime_mode"]
+        == "dry_run"
+    )
+    with store.connect() as conn:
+        modes = [
+            row["execution_mode"]
+            for row in conn.execute(
+                "SELECT execution_mode FROM actions WHERE kind = 'send_reply'"
+            )
+        ]
+    assert modes == ["dry_run"]
+    assert (
+        client.post(
+            "/api/maintenance/doctor", headers=_auth(), json={"send_test": True}
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            "/api/maintenance/reply-style-refresh",
+            headers=_auth(),
+            json={"dry_run": False},
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            "/api/dispatch/actions/1/mark-sent",
+            headers=_auth(),
+            json={"sent_message_id": "om_sent"},
+        ).status_code
+        == 400
+    )
 
 
 def test_approval_and_task_command_routes_return_command_results(

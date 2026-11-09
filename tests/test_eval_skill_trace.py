@@ -716,6 +716,7 @@ def _golden_resume_case(tmp_path: Path, config_path: Path) -> Path:
     (case / "config.yaml").write_text(
         config_path.read_text(encoding="utf-8"), encoding="utf-8"
     )
+    write_yaml(case / "metadata.yaml", {"source_kind": "synthetic"})
     write_jsonl(
         case / "messages.jsonl",
         [_message("om_1", minute=1), _message("om_2", minute=2)],

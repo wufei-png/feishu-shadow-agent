@@ -148,6 +148,11 @@ function ConsoleShell() {
           <div>
             <span className="brand-title">Shadow Agent</span>
             <span className="brand-subtitle">{t("app.brandSubtitle")}</span>
+            {dashboard.data?.runtime_mode ? (
+              <Badge tone={dashboard.data.runtime_mode === "dry_run" ? "info" : "success"}>
+                {t(dashboard.data.runtime_mode === "dry_run" ? "app.modeDryRun" : "app.modeProduction")}
+              </Badge>
+            ) : null}
           </div>
         </div>
         <nav className="nav-list">
@@ -203,7 +208,7 @@ function ConsoleShell() {
             ) : location.route === "dispatch" ? (
               <DispatchScreen initialFilter={location.view === "attention" ? "attention" : undefined} selectedId={location.selectedId} token={token} />
             ) : location.route === "feedback" ? (
-              <FeedbackScreen token={token} />
+              <FeedbackScreen token={token} runtimeMode={dashboard.data?.runtime_mode} />
             ) : location.route === "policy" ? (
               <PolicyScreen selectedId={location.selectedId} token={token} />
             ) : location.route === "settings" ? (

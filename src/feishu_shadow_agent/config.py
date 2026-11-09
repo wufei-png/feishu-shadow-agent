@@ -424,7 +424,7 @@ class ReplyPolicyConfig(StrictModel):
     )
     unknown_group_auto_reply: StrictBool = Field(
         default=False,
-        description="Whether groups without an explicit chats entry may auto-reply when all gates pass.",
+        description="Compatibility field; unconfigured groups are not ingested or sent to the agent.",
     )
 
 

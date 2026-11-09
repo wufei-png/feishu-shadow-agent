@@ -20,6 +20,7 @@ from feishu_shadow_agent.config import (
 )
 from feishu_shadow_agent.daemon import Daemon
 from feishu_shadow_agent.health import REQUIRED_USER_SCOPES, HealthSuite
+from feishu_shadow_agent.ingestion import IngestionService
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.operator_query import OperatorQueryService
 from feishu_shadow_agent.processing import TaskProcessingService
@@ -133,6 +134,18 @@ class FakeFeishu:
             raise RuntimeError("approval inbox failed")
         return MessagePage([])
 
+    def list_user_p2p_chats(self, **kwargs: Any) -> MessagePage:
+        return MessagePage(
+            [
+                {
+                    "chat_id": "ou_chat",
+                    "chat_mode": "p2p",
+                    "p2p_target_id": "ou_person",
+                    "p2p_target_type": "user",
+                }
+            ]
+        )
+
     def search_messages(self, **kwargs: Any) -> MessagePage:
         self.calls.append(f"search:{kwargs['chat_type']}:{kwargs['is_at_me']}")
         return MessagePage(
@@ -193,7 +206,12 @@ class FakeAgentBackend:
 
 
 def _seed_policy(store: SQLiteStore, config: AppConfig) -> None:
-    store.import_product_policy_from_config(config)
+    previous_clock = store.clock
+    store.clock = lambda: "2026-06-22T01:00:00+00:00"
+    try:
+        store.import_product_policy_from_config(config)
+    finally:
+        store.clock = previous_clock
 
 
 def test_startup_critical_failure_does_not_enter_loop(tmp_path: Path) -> None:
@@ -373,7 +391,7 @@ def test_daemon_tick_expires_overdue_approvals_before_approval_inbox(
     daemon.run_one_tick(run_id="run_1")
 
     assert events[0] == "expire"
-    assert events.index("expire") < events.index("approval_inbox")
+    assert "approval_inbox" not in events
     with store.connect() as conn:
         approval = conn.execute(
             "SELECT status, resolved_at FROM approvals WHERE short_id = ?",
@@ -381,6 +399,37 @@ def test_daemon_tick_expires_overdue_approvals_before_approval_inbox(
         ).fetchone()
     assert approval["status"] == "expired"
     assert approval["resolved_at"] is not None
+
+
+def test_dry_run_does_not_contact_owner_inbox_or_send_notifications(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    _seed_policy(store, config)
+    task_id = _insert_task(store)
+    action_id = store.create_owner_notification_action(
+        task_id=task_id, payload={"type": "notify"}
+    )
+    fake = FakeFeishu()
+    daemon = Daemon(
+        store=store,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        health_suite=FakeHealthSuite(
+            [HealthCheckResult("config_schema", "critical", "ok", "ok")]
+        ),  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=True,
+        app_config=config,
+        feishu_client=fake,  # type: ignore[arg-type]
+        runtime_health_interval_seconds=0,
+    )
+
+    daemon.run_one_tick(run_id="run_1")
+
+    assert "approval_inbox" not in fake.calls
+    assert fake.owner_calls == []
+    assert store.get_action(action_id).status == "pending"  # type: ignore[union-attr]
 
 
 def test_keyboard_interrupt_finishes_run(tmp_path: Path) -> None:
@@ -1183,6 +1232,7 @@ def test_ingestion_budget_exhaustion_still_runs_dispatch_and_retention(
     config = AppConfig(
         owner=OwnerConfig(open_id="ou_owner"),
         daemon=DaemonConfig(ingest_tick_budget_seconds=1),
+        chats={"oc_group": ChatPolicyConfig()},
     )
     _seed_policy(store, config)
     daemon = Daemon(
@@ -1201,7 +1251,10 @@ def test_ingestion_budget_exhaustion_still_runs_dispatch_and_retention(
 
     assert [result.name for result in results][-2:] == ["dispatch", "retention"]
     assert not any(call.startswith("search:") for call in fake.calls)
-    checkpoint = store.get_checkpoint("ingest.group_at_me")
+    activation = store.list_chat_policy_activations()[0]
+    checkpoint = store.get_checkpoint(
+        f"ingest.group_at_me.oc_group.{activation['activation_id']}"
+    )
     assert checkpoint is not None
     assert checkpoint["backlog"]["reason"] == "tick_budget_exhausted"
     log_text = (tmp_path / "agent.jsonl").read_text(encoding="utf-8")
@@ -1211,8 +1264,17 @@ def test_ingestion_budget_exhaustion_still_runs_dispatch_and_retention(
 
 def test_source_rotation_lets_other_ingestion_progress_under_repeated_budget_pressure(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monotonic_values = iter([0.0, 0.0, 0.0, 2.0, 2.0, 10.0, 10.0, 10.0, 12.0])
+    monotonic_time = [0.0]
+    ingest_group = IngestionService.ingest_group_at_me
+
+    def expensive_group_stage(self: IngestionService, *, run_id: str) -> Any:
+        result = ingest_group(self, run_id=run_id)
+        monotonic_time[0] += 2.0
+        return result
+
+    monkeypatch.setattr(IngestionService, "ingest_group_at_me", expensive_group_stage)
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     logger = JSONLLogger(tmp_path / "agent.jsonl")
     suite = FakeHealthSuite(
@@ -1233,6 +1295,7 @@ def test_source_rotation_lets_other_ingestion_progress_under_repeated_budget_pre
     config = AppConfig(
         owner=OwnerConfig(open_id="ou_owner"),
         daemon=DaemonConfig(ingest_tick_budget_seconds=1),
+        chats={"oc_group": ChatPolicyConfig()},
     )
     _seed_policy(store, config)
     daemon = Daemon(
@@ -1244,7 +1307,7 @@ def test_source_rotation_lets_other_ingestion_progress_under_repeated_budget_pre
         app_config=config,
         feishu_client=fake,  # type: ignore[arg-type]
         runtime_health_interval_seconds=0,
-        ingestion_monotonic=lambda: next(monotonic_values, 12.0),
+        ingestion_monotonic=lambda: monotonic_time[0],
     )
 
     daemon.run_one_tick(run_id="run_fair")

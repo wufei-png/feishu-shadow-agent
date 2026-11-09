@@ -62,6 +62,9 @@ class EvalResourceClient:
     def search_messages(self, **kwargs: Any) -> NoReturn:
         return self._network_forbidden("search_messages")
 
+    def list_user_p2p_chats(self, **kwargs: Any) -> NoReturn:
+        return self._network_forbidden("list_user_p2p_chats")
+
     def search_owner_messages(self, **kwargs: Any) -> NoReturn:
         return self._network_forbidden("search_owner_messages")
 

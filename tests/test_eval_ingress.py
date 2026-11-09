@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from feishu_shadow_agent.config import ConfigService
+from feishu_shadow_agent.config import ChatPolicyConfig, ConfigService
 from feishu_shadow_agent.evals.artifacts import (
     EvalError,
     read_jsonl,
@@ -12,12 +12,16 @@ from feishu_shadow_agent.evals.artifacts import (
     write_jsonl,
     write_yaml,
 )
+from feishu_shadow_agent.evals.dry_run import DryRunBackend
 from feishu_shadow_agent.evals.ingress import (
     GroupIngressEvaluator,
     build_review_labels,
     compare_ingress_golden,
 )
+from feishu_shadow_agent.evals.ingress_service import _active_task_fixtures
 from feishu_shadow_agent.evals.service import EvalService
+from feishu_shadow_agent.ingestion import MessageNormalizer
+from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import LarkCliResult, MessagePage
 
 
@@ -87,6 +91,120 @@ def test_live_ingress_paginates_fixed_window_and_freezes_group_at_source(
     by_id = {row["message_id"]: row for row in timeline["messages"]}
     assert by_id["om_1"]["sources"] == []
     assert by_id["om_2"]["sources"] == ["group_at_me"]
+
+
+def test_live_ingress_rejects_unconfigured_group_before_network(tmp_path: Path) -> None:
+    loaded = _loaded_config(tmp_path)
+
+    class NoNetwork:
+        def list_chat_messages(self, **kwargs) -> MessagePage:
+            raise AssertionError("network must not be called")
+
+        def search_messages(self, **kwargs) -> MessagePage:
+            raise AssertionError("network must not be called")
+
+        def version(self) -> LarkCliResult:
+            raise AssertionError("network must not be called")
+
+    service = EvalService(loaded=loaded, lark_client=NoNetwork())
+    with pytest.raises(EvalError, match="group policy is not configured"):
+        service.run_ingress(
+            chat_id="oc_other",
+            snapshot=None,
+            start=None,
+            end=None,
+            lookback_days=2,
+            label=None,
+            dry_run_backend=False,
+            allow_sensitive_config=False,
+        )
+
+
+def test_ingress_active_fixtures_exclude_policy_held_tasks(tmp_path: Path) -> None:
+    loaded = _loaded_config(tmp_path)
+    store = SQLiteStore(loaded.base_dir / loaded.config.storage.sqlite_path)
+    message = MessageNormalizer(owner_open_id="ou_owner").normalize(
+        _message(direct=True)
+    )
+    store.upsert_message(message)
+    task = store.create_task_for_message(
+        message, watch_until="2999-01-01T00:00:00+00:00"
+    )
+    now = "2026-07-10T02:00:00+00:00"
+    assert _active_task_fixtures(loaded=loaded, chat_id="oc_test", now=now)
+    store.delete_chat_product_policy("oc_test", actor="owner")
+    store.upsert_chat_product_policy(
+        {"chat_id": "oc_test", **ChatPolicyConfig().model_dump()}, actor="owner"
+    )
+    assert _active_task_fixtures(loaded=loaded, chat_id="oc_test", now=now) == {}
+    store.reopen_task_by_operator(task.id, watch_until="2999-01-01T00:00:00+00:00")
+    assert _active_task_fixtures(loaded=loaded, chat_id="oc_test", now=now)
+
+
+def test_live_snapshot_adds_known_group_type_and_rejects_mixed_chats(
+    tmp_path: Path,
+) -> None:
+    class MissingTypeClient(PagedIngressClient):
+        def list_chat_messages(self, *, page_token=None, **kwargs):
+            page = super().list_chat_messages(page_token=page_token, **kwargs)
+            return MessagePage(
+                [
+                    {key: value for key, value in row.items() if key != "chat_type"}
+                    for row in page.items
+                ],
+                page.next_page_token,
+                page.has_more,
+            )
+
+    class FakeJudge(DryRunBackend):
+        calls = 0
+
+        def structured_output(self, *args, **kwargs):
+            self.calls += 1
+            return super().structured_output(*args, **kwargs)
+
+    loaded = _loaded_config(tmp_path)
+    judge = FakeJudge()
+    service = EvalService(
+        loaded=loaded, lark_client=MissingTypeClient(), backend_factory=lambda _: judge
+    )
+    live = service.run_ingress(
+        chat_id="oc_test",
+        snapshot=None,
+        start="2026-07-10T10:00:00+08:00",
+        end="2026-07-10T11:00:00+08:00",
+        lookback_days=None,
+        label=None,
+        dry_run_backend=True,
+        allow_sensitive_config=False,
+    )
+    raws = read_jsonl(live / "raw_messages.jsonl")
+    assert [row["chat_type"] for row in raws] == ["group", "group"]
+    service.run_ingress(
+        chat_id=None,
+        snapshot=live,
+        start=None,
+        end=None,
+        lookback_days=None,
+        label=None,
+        dry_run_backend=False,
+        allow_sensitive_config=False,
+    )
+    assert judge.calls == 1
+
+    raws[0]["chat_id"] = "oc_other"
+    write_jsonl(live / "raw_messages.jsonl", raws)
+    with pytest.raises(EvalError, match="belongs to another chat"):
+        service.run_ingress(
+            chat_id=None,
+            snapshot=live,
+            start=None,
+            end=None,
+            lookback_days=None,
+            label=None,
+            dry_run_backend=True,
+            allow_sensitive_config=False,
+        )
 
 
 def test_ingress_review_labels_sort_mismatches_first() -> None:
@@ -241,7 +359,11 @@ def _loaded_config(tmp_path: Path):
     source = Path("tests/fixtures/minimal.config.yaml")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
-    return ConfigService().load(config_path)
+    loaded = ConfigService().load(config_path)
+    SQLiteStore(
+        loaded.base_dir / loaded.config.storage.sqlite_path
+    ).import_product_policy_from_config(loaded.config)
+    return loaded
 
 
 def _message(*, direct: bool) -> dict:

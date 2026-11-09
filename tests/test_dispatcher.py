@@ -19,6 +19,8 @@ from feishu_shadow_agent.config import (
 from feishu_shadow_agent.dispatcher import Dispatcher
 from feishu_shadow_agent.ingestion import MessageNormalizer
 from feishu_shadow_agent.jsonl import JSONLLogger
+from feishu_shadow_agent.operator_commands import OperatorCommandService
+from feishu_shadow_agent.operator_query import OperatorQueryService
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import LarkCliResult, MessagePage, NormalizedMessage
 
@@ -77,12 +79,16 @@ def _dispatcher(
 ) -> tuple[SQLiteStore, Dispatcher, FakeFeishu]:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     client = fake or FakeFeishu()
+    cfg = config or _config()
+    store.import_product_policy_from_config(
+        cfg.model_copy(update={"chats": {"oc_1": ChatPolicyConfig(), **cfg.chats}})
+    )
     return (
         store,
         Dispatcher(
             store=store,
             feishu_client=client,  # type: ignore[arg-type]
-            config=config or _config(),
+            config=cfg,
             logger=JSONLLogger(tmp_path / "agent.jsonl"),
             interactive_cards_available=interactive_cards_available,
         ),
@@ -129,6 +135,97 @@ def _create_reply_action(
 
 def _attempts(store: SQLiteStore, action_id: int):
     return store.list_dispatch_attempts(action_id)
+
+
+def test_removed_group_keeps_tasks_and_actions_paused_after_readd(
+    tmp_path: Path,
+) -> None:
+    store, dispatcher, fake = _dispatcher(tmp_path)
+    task_id = _insert_task(store)
+    action_id = _create_reply_action(
+        store,
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+        },
+    )
+    assert action_id is not None
+    store.delete_chat_product_policy("oc_1", actor="owner")
+    assert store.is_group_policy_held("task", task_id)
+    assert store.is_group_policy_held("action", action_id)
+    assert (
+        OperatorCommandService(store)
+        .reopen_task("t_1", watch_until="2099-01-01T00:00:00+00:00", actor="owner")
+        .status
+        == "validation_failed"
+    )
+    task_detail = OperatorQueryService(store).task_detail("t_1")
+    action_detail = OperatorQueryService(store).dispatch_action_detail(action_id)
+    assert task_detail is not None and task_detail["policy_held"] is True
+    assert "task reopen --task-id t_1" in task_detail["recommended_actions"]
+    assert action_detail is not None and action_detail["action"]["policy_held"] is True
+    assert (
+        f"dispatch retry --action-id {action_id}"
+        in action_detail["recommended_actions"]
+    )
+    assert (
+        store.get_active_tasks_for_chat("oc_1", now="2026-06-22T10:00:00+08:00") == []
+    )
+    store.upsert_chat_product_policy(
+        {"chat_id": "oc_1", **ChatPolicyConfig().model_dump()}, actor="owner"
+    )
+    dispatcher.dispatch(
+        run_id="run_1",
+        allow_send_reply_actual=True,
+        allow_owner_notification_actual=False,
+    )
+    assert fake.reply_calls == []
+    assert store.get_action(action_id).status == "pending"  # type: ignore[union-attr]
+    store.reopen_task_by_operator("t_1", watch_until="2099-01-01T00:00:00+00:00")
+    assert not store.is_group_policy_held("task", task_id)
+    assert store.is_group_policy_held("action", action_id)
+    store.retry_dispatch_action(action_id)
+    assert not store.is_group_policy_held("action", action_id)
+
+
+def test_group_removed_during_preview_never_crosses_send_boundary(
+    tmp_path: Path,
+) -> None:
+    class RemovingClient(FakeFeishu):
+        store: SQLiteStore
+
+        def reply_message(self, **kwargs: Any) -> LarkCliResult:
+            result = super().reply_message(**kwargs)
+            if kwargs.get("dry_run"):
+                self.store.delete_chat_product_policy("oc_1", actor="owner")
+            return result
+
+    fake = RemovingClient()
+    store, dispatcher, _ = _dispatcher(tmp_path, fake=fake)
+    fake.store = store
+    task_id = _insert_task(store)
+    action_id = _create_reply_action(
+        store,
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+        },
+    )
+    assert action_id is not None
+    dispatcher.dispatch(
+        run_id="run_1",
+        allow_send_reply_actual=True,
+        allow_owner_notification_actual=False,
+    )
+    assert [call["dry_run"] for call in fake.reply_calls] == [True]
+    assert store.get_action(action_id).status == "pending"  # type: ignore[union-attr]
+    assert store.is_group_policy_held("action", action_id)
 
 
 @pytest.mark.parametrize("matches", [True, False])

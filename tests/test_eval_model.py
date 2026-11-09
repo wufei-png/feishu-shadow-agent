@@ -4,15 +4,23 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+import pytest
 from pydantic import BaseModel
 
 from feishu_shadow_agent.agent_backend import AgentRunResult
 from feishu_shadow_agent.config import ConfigService
-from feishu_shadow_agent.evals.artifacts import read_yaml, write_jsonl, write_yaml
+from feishu_shadow_agent.evals.access import validate_model_messages
+from feishu_shadow_agent.evals.artifacts import (
+    EvalError,
+    read_yaml,
+    write_jsonl,
+    write_yaml,
+)
 from feishu_shadow_agent.evals.cases import resource_fixture_path
 from feishu_shadow_agent.evals.dry_run import DryRunBackend
 from feishu_shadow_agent.evals.schemas import ResourceFixture
 from feishu_shadow_agent.evals.service import EvalService
+from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 
 
 class NoSessionBackend:
@@ -146,6 +154,33 @@ def test_dry_run_followup_does_not_infer_schema_from_untrusted_prompt_text() -> 
     assert result.ok
     assert isinstance(result.json_data, dict)
     assert "task_label" not in result.json_data
+
+
+def test_offline_model_sources_require_policy_or_explicit_synthetic_label(
+    tmp_path: Path,
+) -> None:
+    loaded = _loaded(tmp_path)
+    directory = tmp_path / "fixture"
+    directory.mkdir()
+    group = _message("om_1", minute=1)
+    unknown = group.copy()
+    unknown.pop("chat_type")
+
+    with pytest.raises(EvalError, match="not configured"):
+        validate_model_messages(loaded, [group], directory=directory)
+    with pytest.raises(EvalError, match="source is unknown"):
+        validate_model_messages(loaded, [unknown], directory=directory)
+
+    store = SQLiteStore(loaded.base_dir / loaded.config.storage.sqlite_path)
+    store.import_product_policy_from_config(loaded.config)
+    assert validate_model_messages(loaded, [group], directory=directory) == {"oc_test"}
+    store.delete_chat_product_policy("oc_test", actor="test")
+    with pytest.raises(EvalError, match="not configured"):
+        validate_model_messages(loaded, [group], directory=directory)
+    write_yaml(directory / "metadata.yaml", {"source_kind": "synthetic"})
+    assert validate_model_messages(loaded, [group, unknown], directory=directory) == {
+        "oc_test"
+    }
 
 
 def test_router_repeat_rebuilds_identical_db_state(tmp_path: Path) -> None:
@@ -406,6 +441,46 @@ def test_resume_runs_real_setup_then_target_only_prompt(tmp_path: Path) -> None:
     trial = read_yaml(run_dir / "trials/001/report.yaml")
     assert trial["setup"]["plan"]["prompt_message_ids"] == ["om_1"]
     assert trial["target"]["plan"]["prompt_message_ids"] == ["om_2"]
+
+
+def test_model_evaluation_stops_after_group_policy_is_removed(tmp_path: Path) -> None:
+    loaded = _loaded(tmp_path)
+    case = _golden_case(
+        tmp_path,
+        loaded.path,
+        "task-session-policy",
+        [_message("om_1", minute=1), _message("om_2", minute=2)],
+        {
+            "schema_version": "eval_case_v1",
+            "case_type": "task-session",
+            "mode": "resume",
+            "setup_message_ids": ["om_1"],
+            "target_message_id": "om_2",
+            "resources": [],
+        },
+        {
+            "schema_version": "task_session_labels_v1",
+            "answerability": "no_reply",
+            "watch_action": "keep_watching",
+        },
+    )
+    write_yaml(case / "metadata.yaml", {"source_kind": "capture"})
+    store = SQLiteStore(loaded.base_dir / loaded.config.storage.sqlite_path)
+    store.import_product_policy_from_config(loaded.config)
+
+    class RemovingBackend(StatefulNoReplyBackend):
+        def task_session(self, prompt: str, *, session_id=None, cwd=None):
+            result = super().task_session(prompt, session_id=session_id, cwd=cwd)
+            store.delete_chat_product_policy("oc_test", actor="test")
+            return result
+
+    backend = RemovingBackend()
+    _, exit_code = EvalService(
+        loaded=loaded, backend_factory=lambda _: backend
+    ).run_task_session(case_dir=case, label=None, dry_run_backend=False)
+
+    assert exit_code == 2
+    assert backend.session_ids == [None]
 
 
 def test_resume_replays_multiple_targets_and_scores_final_turn(tmp_path: Path) -> None:
@@ -928,6 +1003,44 @@ def test_model_golden_rejects_wrong_provenance_source(tmp_path: Path) -> None:
     assert "source must be capture" in read_yaml(run_dir / "report.yaml")["error"]
 
 
+def test_dry_full_chain_supports_group_only_in_product_policy_store(
+    tmp_path: Path,
+) -> None:
+    loaded = _loaded(tmp_path)
+    store = SQLiteStore(loaded.base_dir / loaded.config.storage.sqlite_path)
+    store.import_product_policy_from_config(loaded.config)
+    store.upsert_chat_product_policy({"chat_id": "oc_dynamic"}, actor="operator")
+    raw = _message("om_1", minute=1) | {"chat_id": "oc_dynamic"}
+    case = _golden_case(
+        tmp_path,
+        loaded.path,
+        "full-chain-dynamic",
+        [raw],
+        {
+            "schema_version": "eval_case_v1",
+            "case_type": "full-chain",
+            "setup": [],
+            "target": {"message_id": "om_1", "source": "group_at_me"},
+            "resources": [],
+        },
+        {
+            "schema_version": "full_chain_labels_v1",
+            "router": {"route": "new_task"},
+            "task_session": {
+                "answerability": "no_reply",
+                "watch_action": "keep_watching",
+            },
+        },
+    )
+    write_yaml(case / "metadata.yaml", {"source_kind": "capture"})
+    run_dir, exit_code = EvalService(loaded=loaded).run_full_chain(
+        case_dir=case, label=None, dry_run_backend=True
+    )
+    assert exit_code == 0, read_yaml(run_dir / "report.yaml").get("error")
+    trial = read_yaml(run_dir / "trials/001/report.yaml")
+    assert trial["target"]["routing"]["route"] == "new_task"
+
+
 def test_full_chain_runs_setup_then_scores_target(tmp_path: Path) -> None:
     loaded = _loaded(tmp_path)
     setup = _message("om_1", minute=1)
@@ -992,9 +1105,9 @@ def test_full_chain_runs_setup_then_scores_target(tmp_path: Path) -> None:
     metadata = read_yaml(run_dir / "metadata.yaml")
     assert set(report["prompt_hashes"]) == {"task_session"}
     assert metadata["prompt_hashes"] == report["prompt_hashes"]
-    assert report["prompt_versions"] == {"task_session": "v2"}
+    assert report["prompt_versions"] == {"task_session": "v3"}
     assert metadata["prompt_versions"] == report["prompt_versions"]
-    assert trial["state"]["agent_audits"][0]["prompt_version"] == "v2"
+    assert trial["state"]["agent_audits"][0]["prompt_version"] == "v3"
     assert trial["state"]["agent_audits"][0]["prompt_hash"]
     assert trial["state"]["agent_audits"][0]["input_message_revisions"] == [1]
     assert trial["state"]["routing"][0]["revision"] == 1
@@ -1225,6 +1338,7 @@ def _golden_case(
         config_path.read_text(encoding="utf-8"), encoding="utf-8"
     )
     write_jsonl(case / "messages.jsonl", messages)
+    write_yaml(case / "metadata.yaml", {"source_kind": "synthetic"})
     write_yaml(case / "eval_case.yaml", scenario)
     write_yaml(case / "labels.yaml", labels)
     write_yaml(
