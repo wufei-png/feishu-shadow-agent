@@ -86,7 +86,7 @@ write to Product Policy Store through policy command routes.
 | key | label | source | visibility | editable_v1 | requires_restart | audit_behavior | write_boundary |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `policy.global.p2p_auto_reply` | P2P auto reply | `product_policy_store` | `normal` | yes | no | `policy_audits` | `PATCH /api/policy/global` |
-| `policy.global.unknown_group_auto_reply` | Unknown group auto reply | `product_policy_store` | `normal` | yes | no | `policy_audits` | `PATCH /api/policy/global` |
+| `policy.global.unknown_group_auto_reply` | Legacy unknown group auto reply | `product_policy_store` | `readonly` | no | no | `policy_audits` | none |
 | `policy.global.default_bot_joined` | Default bot joined | `product_policy_store` | `advanced` | yes | no | `policy_audits` | `PATCH /api/policy/global` |
 | `policy.global.default_reply_identity` | Default reply identity | `product_policy_store` | `advanced` | yes | no | `policy_audits` | `PATCH /api/policy/global` |
 | `policy.global.default_allow_user_fallback` | Default user fallback | `product_policy_store` | `advanced` | yes | no | `policy_audits` | `PATCH /api/policy/global` |
@@ -94,8 +94,8 @@ write to Product Policy Store through policy command routes.
 
 Help notes:
 
-- `unknown_group_auto_reply`: Explain that this applies to groups without an
-  explicit chat policy.
+- `unknown_group_auto_reply`: Explain that this compatibility field does not
+  enable ingestion for unconfigured groups.
 - `default_reply_identity`: Explain `bot_preferred`, `bot`, and `user` in
   product language.
 - `default_allow_user_fallback`: Explain that it only matters when reply identity

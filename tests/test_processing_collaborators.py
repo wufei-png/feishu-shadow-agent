@@ -61,6 +61,7 @@ def _message(
         direct_mention=True,
         at_all=False,
         resources=resources or [],
+        raw={"message_position": "1"},
     )
 
 

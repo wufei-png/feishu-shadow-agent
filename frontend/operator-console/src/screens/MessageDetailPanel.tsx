@@ -1,11 +1,11 @@
 import { useMutation } from "@tanstack/react-query";
 import { useQuery } from "@tanstack/react-query";
-import type { ReactNode } from "react";
 import type { TFunction } from "i18next";
 import { Bot, FileText, GitBranch, PackageSearch, RotateCcw, Send } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { getMessageDetail, replayMessage, retryMessageProcessing } from "../api";
 import {
+  Fact,
   Badge,
   Button,
   CommandResultPanel,
@@ -76,10 +76,10 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
         </div>
         <p className="preview-copy">{shortText(detail.data.message.text, t("message.noBody"))}</p>
         <FieldList>
-          <FactRow label={t("message.chat")} value={detail.data.message.chat_id ?? t("common.notRecorded")} />
-          <FactRow label={t("message.sentAt")} value={formatDate(detail.data.message.sent_at)} />
-          <FactRow label={t("message.thread")} value={detail.data.message.thread_id ?? t("common.none")} />
-          <FactRow label={t("message.replyTo")} value={detail.data.message.reply_to_message_id ?? t("common.none")} />
+          <Fact label={t("message.chat")} value={detail.data.message.chat_id ?? t("common.notRecorded")} />
+          <Fact label={t("message.sentAt")} value={formatDate(detail.data.message.sent_at)} />
+          <Fact label={t("message.thread")} value={detail.data.message.thread_id ?? t("common.none")} />
+          <Fact label={t("message.replyTo")} value={detail.data.message.reply_to_message_id ?? t("common.none")} />
         </FieldList>
       </div>
 
@@ -128,7 +128,8 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
         {detail.data.processing.length ? (
           <ul className="timeline-list">
             {detail.data.processing.map((item) => {
-              const activeRetry = item.latest_retry?.status === "queued" || item.latest_retry?.status === "claimed";
+              const heldRetry = item.latest_retry?.status === "queued" && item.latest_retry.policy_held;
+              const activeRetry = !heldRetry && (item.latest_retry?.status === "queued" || item.latest_retry?.status === "claimed");
               return (
                 <li key={item.id}>
                   <PackageSearch aria-hidden="true" size={14} />
@@ -140,7 +141,7 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
                       onClick={() => retryProcessing.mutate({ targetMessageId: messageId, stage: item.stage })}
                       tone="warning"
                     >
-                      {activeRetry ? t("message.queued") : t("message.retry")}
+                      {heldRetry ? t("message.resumeRetry") : activeRetry ? t("message.queued") : t("message.retry")}
                     </Button>
                   ) : null}
                 </li>
@@ -168,9 +169,9 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
                   <span>{resource.file_key}</span>
                 </div>
                 <FieldList>
-                  <FactRow label={t("message.path")} value={resource.path ?? t("common.notRecorded")} />
-                  <FactRow label={t("message.pathExists")} value={resource.path_exists === null ? t("common.notChecked") : resource.path_exists ? t("common.yes") : t("common.no")} />
-                  <FactRow label="SHA-256" value={resource.sha256_short ?? t("common.notRecorded")} />
+                  <Fact label={t("message.path")} value={resource.path ?? t("common.notRecorded")} />
+                  <Fact label={t("message.pathExists")} value={resource.path_exists === null ? t("common.notChecked") : resource.path_exists ? t("common.yes") : t("common.no")} />
+                  <Fact label="SHA-256" value={resource.sha256_short ?? t("common.notRecorded")} />
                 </FieldList>
                 {Object.keys(resource.raw_summary).length ? (
                   <details>
@@ -235,14 +236,6 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
   );
 }
 
-function FactRow({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div>
-      <dt>{label}</dt>
-      <dd>{value}</dd>
-    </div>
-  );
-}
 
 function errorResult(command: string, error: unknown, t: TFunction): CommandResult {
   return {

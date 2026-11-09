@@ -79,11 +79,16 @@ class BaseTaskSessionOutput(StrictModel):
         ),
         (
             "proposed_reply",
-            "non-empty plain reply text for `auto_reply` or `needs_owner`; empty for `no_reply`.",
+            "non-empty plain reply text for `auto_reply`; optional for `needs_owner` when no safe draft is possible; empty for `no_reply`.",
         ),
         (
             "reply_target_message_id",
             "one allowed Reply Context target for `auto_reply` or `needs_owner`; null for `no_reply`.",
+        ),
+        (
+            "reply_location",
+            "for a reply, choose `main` or `thread` from the selected target's allowed locations; "
+            "if no location is available use `needs_owner` and null; null for `no_reply`.",
         ),
         ("watch_action", "`keep_watching` or `close`."),
     )
@@ -105,7 +110,7 @@ class BaseTaskSessionOutput(StrictModel):
         default="",
         description=(
             "Plain reply text without Feishu @ mentions. Required and non-empty for "
-            "auto_reply and needs_owner; must be empty for no_reply."
+            "auto_reply; optional for needs_owner; must be empty for no_reply."
         ),
     )
     reply_target_message_id: str | None = Field(
@@ -113,6 +118,14 @@ class BaseTaskSessionOutput(StrictModel):
         description=(
             "Message id to reply to. Required for auto_reply and needs_owner; must be null "
             "for no_reply. When present, it must be one of the allowed reply targets in Reply Context."
+        ),
+    )
+    reply_location: Literal["main", "thread"] | None = Field(
+        default=None,
+        description=(
+            "Where to send the reply: main chat or the selected message's existing thread. "
+            "Choose only a location listed for that target in Reply Context. Use needs_owner "
+            "and null when no location is available; null for no_reply."
         ),
     )
     watch_action: Literal["keep_watching", "close"] = Field(
@@ -134,8 +147,10 @@ class BaseTaskSessionOutput(StrictModel):
                 raise ValueError("no_reply requires proposed_reply to be empty")
             if self.reply_target_message_id is not None:
                 raise ValueError("no_reply requires reply_target_message_id to be null")
+            if self.reply_location is not None:
+                raise ValueError("no_reply requires reply_location to be null")
             return self
-        if not proposed_reply:
+        if self.answerability == "auto_reply" and not proposed_reply:
             raise ValueError(
                 f"{self.answerability} requires a non-empty proposed_reply"
             )

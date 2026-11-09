@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useEffect, useId, useState } from "react";
 import type { ReactNode } from "react";
 import * as Tooltip from "@radix-ui/react-tooltip";
+import { m } from "motion/react";
 import { AlertTriangle, Check, CheckCircle2, CircleHelp, Copy, Loader2, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import i18n, { formatDateTime } from "../i18n";
+import { groupTransition, listItemVariants, panelTransition, panelVariants } from "../motionTokens";
 import { commandLabel, enumLabel } from "../presentation";
 import type { CommandResult, Tone } from "../types";
 
@@ -90,6 +92,72 @@ export function Button({
   );
 }
 
+/**
+ * Two-step confirmation for destructive commands.
+ *
+ * The first click arms the action and states exactly what will happen; the
+ * second commits. An armed button disarms itself after a few seconds so a
+ * half-pressed destructive command cannot sit waiting on screen, and Escape
+ * cancels. This replaces `window.confirm`, which blocks the page, cannot be
+ * styled, cannot be tested, and reports nothing when the operator cancels.
+ */
+export function ConfirmButton({
+  children,
+  confirmLabel,
+  onConfirm,
+  disabled = false,
+  tone = "danger"
+}: {
+  children: ReactNode;
+  confirmLabel: string;
+  onConfirm: () => void;
+  disabled?: boolean;
+  tone?: Tone;
+}) {
+  const { t } = useTranslation();
+  const [armed, setArmed] = useState(false);
+
+  useEffect(() => {
+    if (!armed) {
+      return;
+    }
+    const timer = window.setTimeout(() => setArmed(false), 6000);
+    return () => window.clearTimeout(timer);
+  }, [armed]);
+
+  if (!armed) {
+    return (
+      <Button disabled={disabled} onClick={() => setArmed(true)} tone={tone}>
+        {children}
+      </Button>
+    );
+  }
+
+  return (
+    <span
+      className="confirm-group"
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          setArmed(false);
+        }
+      }}
+    >
+      <span className="confirm-prompt" role="status">{confirmLabel}</span>
+      <Button
+        disabled={disabled}
+        onClick={() => {
+          setArmed(false);
+          onConfirm();
+        }}
+        tone={tone}
+      >
+        {t("common.confirm")}
+      </Button>
+      <Button onClick={() => setArmed(false)}>{t("common.cancel")}</Button>
+    </span>
+  );
+}
+
 export function EmptyState({
   title,
   detail,
@@ -103,7 +171,7 @@ export function EmptyState({
     <div className="empty-state">
       <RotateCcw aria-hidden="true" className={tone} size={18} />
       <div>
-        <h1>{title}</h1>
+        <h2>{title}</h2>
         <p>{detail}</p>
       </div>
     </div>
@@ -116,7 +184,7 @@ export function LoadingState({ title, detail }: { title?: string; detail?: strin
     <div className="empty-state">
       <Loader2 aria-hidden="true" className="spin" size={18} />
       <div>
-        <h1>{title ?? t("common.loading")}</h1>
+        <h2>{title ?? t("common.loading")}</h2>
         <p>{detail ?? t("common.loadingDetail")}</p>
       </div>
     </div>
@@ -130,7 +198,7 @@ export function ErrorState({ title, error }: { title: string; error: unknown }) 
     <div className="empty-state">
       <AlertTriangle aria-hidden="true" className="danger" size={18} />
       <div>
-        <h1>{request?.status === 401 ? t("common.sessionExpired") : request?.status === 404 ? t("common.objectNotFound") : title}</h1>
+        <h2>{request?.status === 401 ? t("common.sessionExpired") : request?.status === 404 ? t("common.objectNotFound") : title}</h2>
         <p>{request?.message ?? (error instanceof Error ? error.message : t("common.requestFailed"))}</p>
         {request?.code ? <small>{request.code}</small> : null}
       </div>
@@ -179,7 +247,16 @@ export function CommandResultPanel({ result }: { result: CommandResult | null })
   }
   const tone = commandTone(result.status);
   return (
-    <section className={`command-result ${tone}`} aria-live="polite">
+    // A command result is the answer to something the operator just did, so it
+    // rises into place rather than appearing between two frames.
+    <m.section
+      animate="visible"
+      className={`command-result ${tone}`}
+      initial="hidden"
+      transition={panelTransition}
+      variants={panelVariants}
+      aria-live="polite"
+    >
       <div className="command-result-title">
         {tone === "success" ? <CheckCircle2 aria-hidden="true" size={16} /> : <AlertTriangle aria-hidden="true" size={16} />}
         <span title={result.command}>{commandLabel(t, result.command)}</span>
@@ -201,7 +278,7 @@ export function CommandResultPanel({ result }: { result: CommandResult | null })
         <p className="detail-note"><strong>{t("common.rawCommand")}:</strong> <code>{result.command}</code></p>
         <JsonBlock value={result.result} />
       </TechnicalDetails>
-    </section>
+    </m.section>
   );
 }
 
@@ -262,14 +339,23 @@ export function ListRow({
   children?: ReactNode;
 }) {
   return (
-    <button className="list-row" data-selected={selected ? "true" : undefined} onClick={onClick} type="button">
+    <m.button
+      animate="visible"
+      className="list-row"
+      data-selected={selected ? "true" : undefined}
+      initial="hidden"
+      onClick={onClick}
+      transition={panelTransition}
+      type="button"
+      variants={listItemVariants}
+    >
       <span className="list-row-main">
         <strong>{title}</strong>
         {meta ? <small>{meta}</small> : null}
         {children}
       </span>
       {badge}
-    </button>
+    </m.button>
   );
 }
 
@@ -284,18 +370,32 @@ export function SegmentedControl<T extends string>({
   options: Array<{ value: T; label: string }>;
   onChange: (value: T) => void;
 }) {
+  // Unique per instance: several controls share a screen, and a shared id would
+  // make the indicator fly between unrelated controls.
+  const indicatorId = useId();
   return (
     <div className="segmented-control" aria-label={label}>
-      {options.map((option) => (
-        <button
-          aria-pressed={value === option.value}
-          key={option.value}
-          onClick={() => onChange(option.value)}
-          type="button"
-        >
-          {option.label}
-        </button>
-      ))}
+      {options.map((option) => {
+        const selected = value === option.value;
+        return (
+          <button
+            aria-pressed={selected}
+            key={option.value}
+            onClick={() => onChange(option.value)}
+            type="button"
+          >
+            {selected ? (
+              <m.span
+                aria-hidden="true"
+                className="segmented-indicator"
+                layoutId={indicatorId}
+                transition={groupTransition}
+              />
+            ) : null}
+            <span className="segmented-option">{option.label}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }

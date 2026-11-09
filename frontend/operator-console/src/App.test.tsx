@@ -5,6 +5,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
+import { getDashboard } from "./api";
 import { setConsoleLanguage } from "./i18n";
 
 vi.mock("./api", () => ({ getDashboard: vi.fn().mockResolvedValue({}) }));
@@ -42,12 +43,21 @@ afterEach(() => {
 });
 
 describe("dashboard attention navigation", () => {
+  it("identifies the isolated dry-run console", async () => {
+    vi.mocked(getDashboard).mockResolvedValueOnce({ runtime_mode: "dry_run" });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><App /></QueryClientProvider>);
+
+    expect(await screen.findByText("本地预演")).toBeTruthy();
+  });
+
   it("preserves the requested list view in the URL and destination", async () => {
     const user = userEvent.setup();
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={queryClient}><App /></QueryClientProvider>);
 
-    await user.click(screen.getByRole("button", { name: "查看发送待办" }));
+    // Screens are code-split, so the first visit resolves asynchronously.
+    await user.click(await screen.findByRole("button", { name: "查看发送待办" }));
     expect(await screen.findByText("发送筛选：attention")).toBeTruthy();
     expect(window.location.hash).toBe("#dispatch?view=attention");
 
@@ -57,15 +67,21 @@ describe("dashboard attention navigation", () => {
     expect(window.location.hash).toBe("#tasks?view=all");
   });
 
-  it("switches the application shell to English without reloading", async () => {
-    const user = userEvent.setup();
+  it("groups navigation into duty, configure, and system sections", async () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={queryClient}><App /></QueryClientProvider>);
 
-    await user.selectOptions(screen.getByRole("combobox", { name: "语言" }), "en-US");
+    expect(await screen.findByRole("link", { name: "待我处理" })).toBeTruthy();
+    expect(screen.getByText("值守")).toBeTruthy();
+    expect(screen.getByText("配置")).toBeTruthy();
+    expect(screen.getByText("系统")).toBeTruthy();
+  });
 
-    expect(await screen.findByRole("link", { name: "Approvals" })).toBeTruthy();
-    expect(screen.getByRole("combobox", { name: "Language" })).toBeTruthy();
-    expect(document.documentElement.lang).toBe("en-US");
+  it("keeps operator preferences out of the shell so the runtime strip only reports", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><App /></QueryClientProvider>);
+
+    expect(await screen.findByText("运行状态")).toBeTruthy();
+    expect(screen.queryAllByRole("combobox")).toHaveLength(0);
   });
 });

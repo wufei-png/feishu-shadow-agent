@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Literal
@@ -68,18 +68,27 @@ def assess_revision_impact(
     decision_reason: DecisionReason | None,
     current_target_message_id: str | None,
     previous_target_message_id: str | None,
+    current_reply_destination: Mapping[str, str] | None = None,
+    previous_reply_destination: Mapping[str, str] | None = None,
     revision_signals: Iterable[str] = (),
 ) -> RevisionAssessment:
     """Classify a correction review; agent signals can only escalate risk."""
 
     reply_changed = _canonical_reply(previous_reply) != _canonical_reply(current_reply)
     target_changed = current_target_message_id != previous_target_message_id
+    destination_changed = (
+        current_reply_destination is not None
+        and previous_reply_destination is not None
+        and current_reply_destination != previous_reply_destination
+    )
     signals = {str(signal) for signal in revision_signals}
     reasons: list[str] = []
     if reply_changed:
         reasons.append("reply_changed")
     if target_changed:
         reasons.append("reply_target_changed")
+    if destination_changed:
+        reasons.append("reply_destination_changed")
     if answerability == "needs_owner":
         reasons.append("needs_owner")
     if decision_reason in HIGH_IMPACT_DECISION_REASONS:
@@ -94,6 +103,7 @@ def assess_revision_impact(
     if (
         not reply_changed
         and not target_changed
+        and not destination_changed
         and not decision_changed
         and not high_signals
     ):
@@ -103,6 +113,7 @@ def assess_revision_impact(
         or answerability == "needs_owner"
         or decision_reason in HIGH_IMPACT_DECISION_REASONS
         or target_changed
+        or destination_changed
     ):
         return RevisionAssessment("high", tuple(dict.fromkeys(reasons)), reply_changed)
     if answerability == "auto_reply" and decision_reason in {

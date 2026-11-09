@@ -5,6 +5,7 @@ import { MessageSquareDiff } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { getFeedbackOverview } from "../api";
 import {
+  Fact,
   Badge,
   EmptyState,
   ErrorState,
@@ -30,15 +31,16 @@ import type {
 type WindowDays = 7 | 30;
 type OutcomeFilter = "all" | FeedbackRecord["outcome"];
 
-export function FeedbackScreen({ token }: { token: string }) {
+export function FeedbackScreen({ token, runtimeMode = "production" }: { token: string; runtimeMode?: "production" | "dry_run" }) {
   const { t } = useTranslation();
   const [executionMode, setExecutionMode] = useState<FeedbackExecutionMode>("production");
+  const effectiveMode = runtimeMode === "dry_run" ? "dry_run" : executionMode;
   const [windowDays, setWindowDays] = useState<WindowDays>(30);
   const [outcomeFilter, setOutcomeFilter] = useState<OutcomeFilter>("all");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const overview = useQuery({
-    queryKey: queryKeys.feedbackOverview(executionMode),
-    queryFn: () => getFeedbackOverview(token, executionMode),
+    queryKey: queryKeys.feedbackOverview(effectiveMode),
+    queryFn: () => getFeedbackOverview(token, effectiveMode),
     enabled: Boolean(token),
     refetchInterval: 30_000
   });
@@ -79,14 +81,14 @@ export function FeedbackScreen({ token }: { token: string }) {
           <SectionHeader
             eyebrow={t("feedback.eyebrow")}
             title={t("feedback.title")}
-            badge={<Badge tone={executionMode === "production" ? "success" : "info"}>{executionMode === "production" ? t("feedback.production") : executionMode === "dry_run" ? t("feedback.dryRun") : t("feedback.all")}</Badge>}
+            badge={<Badge tone={effectiveMode === "production" ? "success" : "info"}>{effectiveMode === "production" ? t("feedback.production") : effectiveMode === "dry_run" ? t("feedback.dryRun") : t("feedback.all")}</Badge>}
           >
             <p className="section-note">
               {t("feedback.intro")}
             </p>
           </SectionHeader>
           <div className="feedback-controls">
-            <SegmentedControl
+            {runtimeMode !== "dry_run" ? <SegmentedControl
               label={t("feedback.executionMode")}
               value={executionMode}
               onChange={setExecutionMode}
@@ -95,7 +97,7 @@ export function FeedbackScreen({ token }: { token: string }) {
                 { value: "dry_run", label: t("feedback.dryRun") },
                 { value: "all", label: t("feedback.all") }
               ]}
-            />
+            /> : null}
             <SegmentedControl
               label={t("feedback.period")}
               value={String(windowDays)}
@@ -106,7 +108,11 @@ export function FeedbackScreen({ token }: { token: string }) {
               ]}
             />
           </div>
-          {metrics ? <MetricSummary metrics={metrics} /> : null}
+          {metrics ? (
+            <MetricSummary metrics={metrics} />
+          ) : (
+            <EmptyState title={t("feedback.noMetrics")} detail={t("feedback.noMetricsDetail")} />
+          )}
         </div>
 
         <div className="split-panels feedback-breakdowns">
@@ -227,11 +233,11 @@ function FeedbackDetail({ record }: { record: FeedbackRecord | null }) {
         <Badge tone={outcomeTone(record.outcome)}>{outcomeLabel(t, record.outcome)}</Badge>
       </div>
       <FieldList>
-        <FactRow label={t("feedback.task")} value={record.task_id ?? t("common.notRecorded")} />
-        <FactRow label={t("feedback.decisionReasons")} value={reasonLabel(t, record.decision_reason)} />
-        <FactRow label={t("feedback.feedbackReasons")} value={reasonLabel(t, record.feedback_reason)} />
-        <FactRow label={t("common.actor")} value={record.actor} />
-        <FactRow label={t("feedback.recordedAt")} value={formatDate(record.created_at)} />
+        <Fact label={t("feedback.task")} value={record.task_id ?? t("common.notRecorded")} />
+        <Fact label={t("feedback.decisionReasons")} value={reasonLabel(t, record.decision_reason)} />
+        <Fact label={t("feedback.feedbackReasons")} value={reasonLabel(t, record.feedback_reason)} />
+        <Fact label={t("common.actor")} value={record.actor} />
+        <Fact label={t("feedback.recordedAt")} value={formatDate(record.created_at)} />
       </FieldList>
       {record.note ? <p className="detail-note">{record.note}</p> : null}
       <ReplyComparison record={record} />
@@ -292,9 +298,6 @@ function ReplyText({ label, value, tone }: { label: string; value: string; tone:
   );
 }
 
-function FactRow({ label, value }: { label: string; value: string }) {
-  return <div><dt>{label}</dt><dd>{value}</dd></div>;
-}
 
 function formatRate(value: number | null): string {
   return value === null ? "—" : `${Math.round(value * 100)}%`;

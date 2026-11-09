@@ -21,9 +21,11 @@ from feishu_shadow_agent.config import (
 )
 from feishu_shadow_agent.ingestion import IngestionService
 from feishu_shadow_agent.jsonl import JSONLLogger
+from feishu_shadow_agent.operator_commands import OperatorCommandService
 from feishu_shadow_agent.paths import resolve_agent_working_dir
 from feishu_shadow_agent.processing import (
     ApprovalService,
+    ProcessingResult,
     SendComposer,
     TaskProcessingService,
 )
@@ -209,6 +211,7 @@ def _message(
         "message_id": message_id,
         "chat_id": chat_id,
         "chat_type": chat_type,
+        "message_position": "1",
         "sender_id": sender_id,
         "sender_name": sender_name,
         "sender_type": "user",
@@ -304,6 +307,224 @@ def _service(
         clock=lambda: "2026-06-22T10:10:00+08:00",
     )
     return store, service, fake_hermes
+
+
+@pytest.mark.parametrize("location", ["main", "thread"])
+def test_agent_selects_root_destination_and_persists_it(
+    tmp_path: Path, location: str
+) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(
+        _session_output(reply_target_message_id="om_root", reply_location=location)
+    )
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)})
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+    raw = _message("om_root", mentions=[{"open_id": "ou_owner"}]) | {
+        "thread_id": "omt_root",
+        "message_position": "42",
+        "thread_message_position": "-1",
+    }
+
+    service.process_raw_message(
+        raw, source="group_at_me", default_chat_type="group", run_id="run_1"
+    )
+
+    with store.connect() as conn:
+        action = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'send_reply'"
+        ).fetchone()
+    payload = json.loads(action["payload_json"])
+    expected = {"chat_id": "oc_1", "location": location}
+    if location == "thread":
+        expected["thread_id"] = "omt_root"
+    assert payload["reply_destination"] == expected
+    assert '"locations": ["main", "thread"]' in hermes.session_prompts[0]
+
+
+def test_ambiguous_agent_destination_requires_owner_location(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_root"))
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)})
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+    raw = _message("om_root", mentions=[{"open_id": "ou_owner"}]) | {
+        "thread_id": "omt_root",
+        "message_position": "42",
+        "thread_message_position": "-1",
+    }
+    service.process_raw_message(
+        raw, source="group_at_me", default_chat_type="group", run_id="run_1"
+    )
+    with store.connect() as conn:
+        approval = conn.execute(
+            "SELECT short_id, payload_json FROM approvals"
+        ).fetchone()
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM actions WHERE kind = 'send_reply'"
+            ).fetchone()[0]
+            == 0
+        )
+    assert json.loads(approval["payload_json"])["approvable"] is False
+    commands = OperatorCommandService(store)
+    denied = commands.approve(approval["short_id"], actor="owner")
+    assert denied.status != "applied"
+    result = commands.apply_approval_text(
+        f"/send {approval['short_id']} --location thread owner reply",
+        command_id="om_command",
+        actor="owner",
+        execution_mode="production",
+        keep_watching_until="2026-06-22T12:00:00+08:00",
+    )
+    assert result is not None and result.status == "applied"
+    with store.connect() as conn:
+        action = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'send_reply'"
+        ).fetchone()
+    assert json.loads(action["payload_json"])["reply_destination"] == {
+        "chat_id": "oc_1",
+        "location": "thread",
+        "thread_id": "omt_root",
+    }
+
+
+def test_invalid_agent_target_offers_current_messages_available_locations(
+    tmp_path: Path,
+) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_invalid"))
+    store, service, _ = _service(
+        tmp_path, hermes=hermes, config=_config(chats={"oc_1": ChatPolicyConfig()})
+    )
+    raw = _message("om_root", mentions=[{"open_id": "ou_owner"}]) | {
+        "thread_id": "omt_root",
+        "message_position": "42",
+        "thread_message_position": "-1",
+    }
+    service.process_raw_message(
+        raw, source="group_at_me", default_chat_type="group", run_id="run_1"
+    )
+    with store.connect() as conn:
+        approval = conn.execute(
+            "SELECT short_id, payload_json FROM approvals"
+        ).fetchone()
+        notification = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'owner_notification'"
+        ).fetchone()
+    assert json.loads(approval["payload_json"])["allowed_reply_locations"] == [
+        "main",
+        "thread",
+    ]
+    assert json.loads(notification["payload_json"])["allowed_reply_locations"] == [
+        "main",
+        "thread",
+    ]
+    result = OperatorCommandService(store).send(
+        approval["short_id"], "owner reply", actor="owner", reply_location="thread"
+    )
+    assert result.status == "applied"
+    with store.connect() as conn:
+        action = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'send_reply'"
+        ).fetchone()
+    assert (
+        json.loads(action["payload_json"])["reply_destination"]["thread_id"]
+        == "omt_root"
+    )
+
+
+def test_agent_can_reply_in_selected_root_topic_from_another_topic(
+    tmp_path: Path,
+) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.extend(
+        [
+            _session_output(
+                answerability="no_reply",
+                proposed_reply="",
+                reply_target_message_id=None,
+            ),
+            _session_output(
+                include_task_label=False,
+                reply_target_message_id="om_root",
+                reply_location="thread",
+            ),
+        ]
+    )
+    cfg = _config(chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)})
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+    root = _message("om_root", mentions=[{"open_id": "ou_owner"}]) | {
+        "thread_id": "omt_b",
+        "message_position": "42",
+        "thread_message_position": "-1",
+    }
+    followup = _message("om_followup", mentions=[{"open_id": "ou_owner"}]) | {
+        "thread_id": "omt_a",
+        "message_position": "-3",
+        "thread_message_position": "0",
+        "reply_to_message_id": "om_root",
+    }
+    service.process_raw_message(
+        root, source="group_at_me", default_chat_type="group", run_id="run_1"
+    )
+    service.process_raw_message(
+        followup, source="group_at_me", default_chat_type="group", run_id="run_2"
+    )
+    with store.connect() as conn:
+        action = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'send_reply'"
+        ).fetchone()
+    payload = json.loads(action["payload_json"])
+    assert payload["reply_target_message_id"] == "om_root"
+    assert payload["reply_destination"] == {
+        "chat_id": "oc_1",
+        "location": "thread",
+        "thread_id": "omt_b",
+    }
+
+
+def test_owner_edited_reply_keeps_agent_selected_thread(tmp_path: Path) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(
+        _session_output(
+            answerability="needs_owner",
+            reply_target_message_id="om_root",
+            reply_location="thread",
+        )
+    )
+    store, service, _ = _service(
+        tmp_path, hermes=hermes, config=_config(chats={"oc_1": ChatPolicyConfig()})
+    )
+    raw = _message("om_root", mentions=[{"open_id": "ou_owner"}]) | {
+        "thread_id": "omt_root",
+        "message_position": "42",
+        "thread_message_position": "-1",
+    }
+    service.process_raw_message(
+        raw, source="group_at_me", default_chat_type="group", run_id="run_1"
+    )
+    with store.connect() as conn:
+        approval = conn.execute(
+            "SELECT short_id, payload_json FROM approvals"
+        ).fetchone()
+    assert (
+        json.loads(approval["payload_json"])["reply_destination"]["location"]
+        == "thread"
+    )
+    result = OperatorCommandService(store).send(
+        approval["short_id"], "edited reply", actor="owner"
+    )
+    assert result.status == "applied"
+    with store.connect() as conn:
+        action = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'send_reply'"
+        ).fetchone()
+    payload = json.loads(action["payload_json"])
+    assert payload["text"] == "edited reply"
+    assert payload["reply_destination"] == {
+        "chat_id": "oc_1",
+        "location": "thread",
+        "thread_id": "omt_root",
+    }
 
 
 def _assert_owner_notification_context(
@@ -832,7 +1053,9 @@ def test_group_auto_reply_disabled_downgrades_to_approval(tmp_path: Path) -> Non
     hermes.session_outputs.append(
         _session_output(reply_target_message_id="om_1", watch_action="close")
     )
-    store, service, _ = _service(tmp_path, hermes=hermes)
+    store, service, _ = _service(
+        tmp_path, hermes=hermes, config=_config(chats={"oc_1": ChatPolicyConfig()})
+    )
 
     service.process_raw_message(
         _message("om_1", mentions=[{"open_id": "ou_owner"}]),
@@ -895,6 +1118,239 @@ def test_group_auto_reply_disabled_downgrades_to_approval(tmp_path: Path) -> Non
         ).fetchone()
     action_payload = json.loads(action["payload_json"])
     assert action_payload["text"] == '<at user_id="ou_ext">Ext</at> reply text'
+
+
+@pytest.mark.parametrize("first_call_succeeds", [False, True])
+def test_group_removal_during_session_prevents_further_model_calls(
+    tmp_path: Path, first_call_succeeds: bool
+) -> None:
+    (tmp_path / "owner_style.md").write_text("# style\n", encoding="utf-8")
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+
+    class RevokingHermes(FakeHermes):
+        def task_session(self, prompt: str, **kwargs: Any) -> AgentRunResult:
+            result = super().task_session(prompt, **kwargs)
+            store.delete_chat_product_policy("oc_1", actor="owner")
+            store.upsert_chat_product_policy(
+                {"chat_id": "oc_1", **ChatPolicyConfig().model_dump()}, actor="owner"
+            )
+            return result
+
+    hermes = RevokingHermes()
+    hermes.session_outputs.append(
+        _session_output(reply_target_message_id="om_1")
+        if first_call_succeeds
+        else AgentRunResult(["hermes"], 1, error="temporary failure")
+    )
+    cfg = _config(
+        reply_postprocess=_postprocess_config(),
+        chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)},
+    )
+    _, service, _ = _service(tmp_path, config=cfg, hermes=hermes, store=store)
+    result = service.process_raw_message(
+        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert result is not None and result.task is not None
+    assert len(hermes.session_prompts) == 1
+    assert hermes.postprocess_prompts == []
+    assert store.is_group_policy_held("task", result.task.id)
+    with store.connect() as conn:
+        processing = conn.execute(
+            "SELECT status, terminal_reason FROM message_processing WHERE stage = 'task_session'"
+        ).fetchone()
+        audit = conn.execute(
+            "SELECT response_json FROM agent_audits WHERE request_type = 'task_session'"
+        ).fetchone()
+        send_count = conn.execute(
+            "SELECT COUNT(*) FROM actions WHERE kind = 'send_reply'"
+        ).fetchone()[0]
+    assert processing["status"] == "blocked_waiting_external"
+    assert processing["terminal_reason"] == "group_policy_changed"
+    assert audit is not None and send_count == 0
+    if first_call_succeeds:
+        assert store.get_task_by_id(result.task.id).agent_session_id == "sid_1"
+        assert json.loads(audit["response_json"])["proposed_reply"] == "reply text"
+
+
+@pytest.mark.parametrize("first_call_succeeds", [False, True])
+def test_group_removal_during_router_stops_retries_and_new_tasks(
+    tmp_path: Path, first_call_succeeds: bool
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+
+    class RevokingHermes(FakeHermes):
+        def task_router(self, prompt: str, **kwargs: Any) -> AgentRunResult:
+            result = super().task_router(prompt, **kwargs)
+            store.delete_chat_product_policy("oc_1", actor="owner")
+            store.upsert_chat_product_policy(
+                {"chat_id": "oc_1", **ChatPolicyConfig().model_dump()}, actor="owner"
+            )
+            return result
+
+    hermes = RevokingHermes()
+    hermes.router_outputs.append(
+        {"route": "new_task", "target_task_id": None, "reason": "new"}
+        if first_call_succeeds
+        else AgentRunResult(["hermes"], 1, error="temporary failure")
+    )
+    cfg = _config(chats={"oc_1": ChatPolicyConfig()})
+    _, service, _ = _service(tmp_path, config=cfg, hermes=hermes, store=store)
+    message = service.normalizer.normalize(
+        _message("om_router", mentions=[{"open_id": "ou_owner"}]),
+        default_chat_type="group",
+    )
+    store.upsert_message(message)
+    assert service.task_processor is not None
+    result = service.task_processor.run_task_router(
+        message=message,
+        source="group_at_me",
+        reason="router_placeholder",
+        now="2026-06-22T02:10:00+00:00",
+        watch_until="2026-06-23T02:10:00+00:00",
+        run_id="run",
+    )
+
+    assert (
+        isinstance(result, ProcessingResult) and result.reason == "group_policy_changed"
+    )
+    assert len(hermes.router_prompts) == 1
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM agent_audits").fetchone()[0] == 1
+
+
+def test_group_reactivation_before_task_insert_holds_router_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    hermes = FakeHermes()
+    hermes.router_outputs.append(
+        {"route": "new_task", "target_task_id": None, "reason": "new"}
+    )
+    _, service, _ = _service(
+        tmp_path,
+        config=_config(chats={"oc_1": ChatPolicyConfig()}),
+        hermes=hermes,
+        store=store,
+    )
+    message = service.normalizer.normalize(
+        _message("om_router", mentions=[{"open_id": "ou_owner"}]),
+        default_chat_type="group",
+    )
+    store.upsert_message(message)
+    create_task = store.create_task_for_message_and_audit
+
+    def reactivate_before_insert(*args: Any, **kwargs: Any) -> Any:
+        store.delete_chat_product_policy("oc_1", actor="owner")
+        store.upsert_chat_product_policy(
+            {"chat_id": "oc_1", **ChatPolicyConfig().model_dump()}, actor="owner"
+        )
+        return create_task(*args, **kwargs)
+
+    monkeypatch.setattr(
+        store, "create_task_for_message_and_audit", reactivate_before_insert
+    )
+    assert service.task_processor is not None
+    result = service.task_processor.run_task_router(
+        message=message,
+        source="group_at_me",
+        reason="router_placeholder",
+        now="2026-06-22T02:10:00+00:00",
+        watch_until="2026-06-23T02:10:00+00:00",
+        run_id="run",
+    )
+
+    assert isinstance(result, ProcessingResult)
+    assert result.task_id is not None and result.reason == "group_policy_changed"
+    assert store.is_group_policy_held("task", result.task_id)
+    assert hermes.session_prompts == []
+    with store.connect() as conn:
+        row = conn.execute(
+            "SELECT status, terminal_reason FROM message_processing WHERE stage = 'task_session'"
+        ).fetchone()
+    assert (row["status"], row["terminal_reason"]) == (
+        "blocked_waiting_external",
+        "group_policy_changed",
+    )
+
+
+def test_group_reactivation_before_deterministic_task_insert_holds_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    hermes = FakeHermes()
+    _, service, _ = _service(
+        tmp_path,
+        config=_config(chats={"oc_1": ChatPolicyConfig()}),
+        hermes=hermes,
+        store=store,
+    )
+    create_task = store.create_task_for_message_and_audit
+
+    def reactivate_before_insert(*args: Any, **kwargs: Any) -> Any:
+        store.delete_chat_product_policy("oc_1", actor="owner")
+        store.upsert_chat_product_policy(
+            {"chat_id": "oc_1", **ChatPolicyConfig().model_dump()}, actor="owner"
+        )
+        return create_task(*args, **kwargs)
+
+    monkeypatch.setattr(
+        store, "create_task_for_message_and_audit", reactivate_before_insert
+    )
+    result = service.process_raw_message(
+        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run",
+    )
+    assert result is not None and result.task is not None
+    assert store.is_group_policy_held("task", result.task.id)
+    assert hermes.session_prompts == []
+    with store.connect() as conn:
+        row = conn.execute(
+            "SELECT status, terminal_reason FROM message_processing WHERE stage = 'task_session'"
+        ).fetchone()
+    assert (row["status"], row["terminal_reason"]) == (
+        "blocked_waiting_external",
+        "group_policy_changed",
+    )
+
+
+def test_group_removal_during_postprocess_prevents_retry(tmp_path: Path) -> None:
+    (tmp_path / "owner_style.md").write_text("# style\n", encoding="utf-8")
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+
+    class RevokingHermes(FakeHermes):
+        def reply_postprocess(self, prompt: str, **kwargs: Any) -> AgentRunResult:
+            self.postprocess_prompts.append(prompt)
+            store.delete_chat_product_policy("oc_1", actor="owner")
+            return AgentRunResult(["hermes"], 1, error="temporary failure")
+
+    hermes = RevokingHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
+    cfg = _config(
+        reply_postprocess=_postprocess_config(), chats={"oc_1": ChatPolicyConfig()}
+    )
+    _, service, _ = _service(tmp_path, config=cfg, hermes=hermes, store=store)
+    service.process_raw_message(
+        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run",
+    )
+    assert len(hermes.postprocess_prompts) == 1
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM actions").fetchone()[0] == 0
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM agent_audits WHERE request_type = 'reply_postprocess'"
+            ).fetchone()[0]
+            == 1
+        )
 
 
 def test_reply_postprocess_success_updates_auto_reply_payload_before_composer(
@@ -1035,7 +1491,9 @@ def test_reply_postprocess_success_updates_needs_owner_approval_preview(
     hermes.postprocess_outputs.append(
         {"status": "ok", "final_reply": "owner-ish needs owner"}
     )
-    cfg = _config(reply_postprocess=_postprocess_config())
+    cfg = _config(
+        reply_postprocess=_postprocess_config(), chats={"oc_1": ChatPolicyConfig()}
+    )
     store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
 
     service.process_raw_message(
@@ -1127,7 +1585,9 @@ def test_empty_auto_reply_candidate_is_schema_failure(tmp_path: Path) -> None:
     )
 
 
-def test_empty_needs_owner_candidate_is_schema_failure(tmp_path: Path) -> None:
+def test_empty_needs_owner_candidate_requires_owner_to_write_reply(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "owner_style.md").write_text("# style\n", encoding="utf-8")
     hermes = FakeHermes()
     hermes.session_outputs.append(
@@ -1149,9 +1609,9 @@ def test_empty_needs_owner_candidate_is_schema_failure(tmp_path: Path) -> None:
 
     assert hermes.postprocess_prompts == []
     with store.connect() as conn:
-        approval_count = conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()[
-            "c"
-        ]
+        approval = conn.execute(
+            "SELECT short_id, payload_json FROM approvals"
+        ).fetchone()
         notification = conn.execute(
             "SELECT payload_json FROM actions WHERE kind = 'owner_notification'"
         ).fetchone()
@@ -1163,15 +1623,73 @@ def test_empty_needs_owner_candidate_is_schema_failure(tmp_path: Path) -> None:
             """,
             ("om_1",),
         ).fetchone()
-    assert approval_count == 0
-    assert processing["status"] == "processing_failed_terminal"
-    assert processing["terminal_reason"] == "agent_schema_failed"
-    assert "needs_owner requires a non-empty proposed_reply" in processing["last_error"]
+    assert processing["status"] == "processed"
+    assert processing["terminal_reason"] is None
+    assert json.loads(approval["payload_json"])["approvable"] is False
     payload = json.loads(notification["payload_json"])
-    assert payload["type"] == "processing_failed"
+    assert payload["type"] == "approval_required"
     _assert_owner_notification_context(
         payload, message_id="om_1", text="hello", sender_name="Ext", chat_id="ou_chat"
     )
+    commands = OperatorCommandService(store)
+    assert commands.approve(approval["short_id"], actor="owner").status != "applied"
+    result = commands.send(approval["short_id"], "owner reply", actor="owner")
+    assert result.status == "applied"
+    with store.connect() as conn:
+        action = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'send_reply'"
+        ).fetchone()
+    assert json.loads(action["payload_json"])["text"] == "owner reply"
+
+
+def test_empty_needs_owner_with_unavailable_p2p_resource_records_approval(
+    tmp_path: Path,
+) -> None:
+    hermes = FakeHermes()
+    hermes.session_outputs.append(
+        _session_output(
+            answerability="needs_owner",
+            proposed_reply="",
+            reply_target_message_id="om_request",
+        )
+    )
+    cfg = _config(chats={"ou_chat": ChatPolicyConfig(bot_joined=False)})
+    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
+    service.process_raw_message(
+        _message(
+            "om_image",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            text="![Image](img_1)",
+            image_key="img_1",
+        ),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    service.process_raw_message(
+        _message(
+            "om_request",
+            chat_id="ou_chat",
+            chat_type="p2p",
+            sender_id="ou_a",
+            text="Can you investigate this image?",
+            create_time="2026-06-22T10:00:30+08:00",
+        ),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    with store.connect() as conn:
+        approval = conn.execute("SELECT payload_json FROM approvals").fetchone()
+        notification = conn.execute(
+            "SELECT payload_json FROM actions WHERE kind = 'owner_notification'"
+        ).fetchone()
+    assert json.loads(approval["payload_json"])["approvable"] is False
+    assert json.loads(notification["payload_json"])["resource_statuses"] == {
+        "bot_not_joined": 1
+    }
 
 
 def test_reply_postprocess_missing_profile_creates_keep_watching_approval_with_original_candidate(
@@ -1338,7 +1856,7 @@ def test_reply_postprocess_length_guard_routes_to_owner_review(tmp_path: Path) -
     assert audit["error"] == "postprocess_length_growth"
 
 
-def test_empty_needs_owner_reply_is_schema_failure_notification_includes_context(
+def test_empty_needs_owner_approval_notification_includes_context(
     tmp_path: Path,
 ) -> None:
     hermes = FakeHermes()
@@ -1350,7 +1868,9 @@ def test_empty_needs_owner_reply_is_schema_failure_notification_includes_context
             watch_action="keep_watching",
         )
     )
-    store, service, _ = _service(tmp_path, hermes=hermes)
+    store, service, _ = _service(
+        tmp_path, hermes=hermes, config=_config(chats={"oc_1": ChatPolicyConfig()})
+    )
 
     service.process_raw_message(
         _message(
@@ -1364,9 +1884,7 @@ def test_empty_needs_owner_reply_is_schema_failure_notification_includes_context
     )
 
     with store.connect() as conn:
-        approval_count = conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()[
-            "c"
-        ]
+        approval = conn.execute("SELECT payload_json FROM approvals").fetchone()
         notification = conn.execute(
             "SELECT payload_json FROM actions WHERE kind = 'owner_notification'"
         ).fetchone()
@@ -1379,12 +1897,11 @@ def test_empty_needs_owner_reply_is_schema_failure_notification_includes_context
             ("om_1",),
         ).fetchone()
     notify_payload = json.loads(notification["payload_json"])
-    assert approval_count == 0
-    assert processing["status"] == "processing_failed_terminal"
-    assert processing["terminal_reason"] == "agent_schema_failed"
-    assert "needs_owner requires a non-empty proposed_reply" in processing["last_error"]
-    assert notify_payload["type"] == "processing_failed"
-    assert notify_payload["reason"].startswith("agent_schema_failed:")
+    assert json.loads(approval["payload_json"])["approvable"] is False
+    assert processing["status"] == "processed"
+    assert processing["terminal_reason"] is None
+    assert notify_payload["type"] == "approval_required"
+    assert notify_payload["reason"] == "needs_owner_no_draft"
     assert notify_payload["incoming_message"] == {
         "message_id": "om_1",
         "text": "classification service failed to start",
@@ -1482,63 +1999,28 @@ def test_explicit_group_auto_reply_false_overrides_global_default(
     assert send_count == 0
 
 
-def test_unknown_group_auto_reply_disabled_downgrades_to_approval(
-    tmp_path: Path,
+@pytest.mark.parametrize("unknown_auto_reply", [False, True])
+def test_unconfigured_group_never_reaches_agent(
+    tmp_path: Path, unknown_auto_reply: bool
 ) -> None:
     hermes = FakeHermes()
     hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
-    cfg = _config(reply_policy=ReplyPolicyConfig(unknown_group_auto_reply=False))
+    cfg = _config(
+        reply_policy=ReplyPolicyConfig(unknown_group_auto_reply=unknown_auto_reply)
+    )
     store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
 
-    service.process_raw_message(
+    result = service.process_raw_message(
         _message("om_1", mentions=[{"open_id": "ou_owner"}]),
         source="group_at_me",
         default_chat_type="group",
         run_id="run_1",
     )
 
-    with store.connect() as conn:
-        approval = conn.execute("SELECT status, payload_json FROM approvals").fetchone()
-        notification = conn.execute(
-            "SELECT kind, status FROM actions WHERE kind = 'owner_notification'"
-        ).fetchone()
-        send_count = conn.execute(
-            "SELECT COUNT(*) AS c FROM actions WHERE kind = 'send_reply'"
-        ).fetchone()["c"]
-    payload = json.loads(approval["payload_json"])
-    assert approval["status"] == "pending"
-    assert payload["reason"] == "unknown_group_auto_reply_disabled"
-    assert notification["kind"] == "owner_notification"
-    assert notification["status"] == "pending"
-    assert send_count == 0
-
-
-def test_unknown_group_auto_reply_enabled_can_use_user_fallback(tmp_path: Path) -> None:
-    hermes = FakeHermes()
-    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
-    cfg = _config(reply_policy=ReplyPolicyConfig(unknown_group_auto_reply=True))
-    store, service, _ = _service(tmp_path, config=cfg, hermes=hermes)
-
-    service.process_raw_message(
-        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
-        source="group_at_me",
-        default_chat_type="group",
-        run_id="run_1",
-    )
-
-    with store.connect() as conn:
-        action = conn.execute(
-            "SELECT kind, status, payload_json FROM actions WHERE kind = 'send_reply'"
-        ).fetchone()
-        approval_count = conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()[
-            "c"
-        ]
-    payload = json.loads(action["payload_json"])
-    assert action["kind"] == "send_reply"
-    assert action["status"] == "pending"
-    assert payload["identity"] == "user"
-    assert payload["policy_source"] == "unknown_group"
-    assert approval_count == 0
+    assert result is None
+    assert store.get_message("om_1") is None
+    assert hermes.session_prompts == []
+    assert hermes.router_prompts == []
 
 
 def test_explicit_bot_identity_requires_bot_joined(tmp_path: Path) -> None:

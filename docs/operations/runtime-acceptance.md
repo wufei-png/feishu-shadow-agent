@@ -55,7 +55,7 @@ dry-run。临时库在进程结束时删除，未写入项目的 `data/`、`logs
 
 ## 运行库与执行界限
 
-原 `data/agent.sqlite3` 的 `PRAGMA user_version` 为 `1`，当前 runtime schema 为 `7`，
+原 `data/agent.sqlite3` 的 `PRAGMA user_version` 为 `1`，当时的 runtime schema 为 `7`，
 且迁移路径不接受 v1。经 owner 明确授权放弃历史后，旧库已归档在 ignored `data/` 目录，
 配置使用新的 v7 runtime store。新库已执行 `policy import-config`；一条 global policy 和
 一条 chat policy 回读为 `matches`，`doctor --config config.yaml` 的 13 项 critical 与 4 项

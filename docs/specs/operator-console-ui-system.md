@@ -87,7 +87,9 @@ Default UI library strategy:
 ```text
 Icons: lucide-react.
 Animation: motion, limited to state transitions, overlays, list entry/exit, and
-diff expansion; respect reduced motion.
+diff expansion; respect reduced motion. The library owns mount/unmount and layout
+(`AnimatePresence`, `layoutId`); hover, press, colour, and focus stay in CSS. Both
+theme modes are supported and verified; neither is a second-class target.
 Server state: TanStack Query for all local API queries, mutations, polling, and
 invalidation.
 Headless primitives: Radix UI Primitives when native HTML is insufficient; do
@@ -123,17 +125,29 @@ constraints.
 
 Visual rules:
 
-- Use a dark-first theme for v1.
-- Design tokens must be semantic and future-compatible with light mode.
-- Do not hard-code dark-only token names such as `--dark-bg`.
-- Use low-saturation neutral surfaces.
+- Support light and dark as peers, following the system appearance by default.
+- Design tokens must be semantic. Do not hard-code theme-only token names such as
+  `--dark-bg`.
+- Keep the neutral ramp free of hue so the single accent stays meaningful. Neutrals
+  shift in lightness only; status colors carry the meaning.
 - Use status colors only for state, command feedback, and attention.
 - Avoid decorative gradients, glowing backgrounds, large hero surfaces, and
   ornamental animation.
-- Prefer subtle borders and surface elevation over heavy shadows.
-- Use small, tool-like radius values.
+- Depth is ring-first. Build a numbered elevation scale and use depth shadows only
+  where a surface genuinely floats; on dark, collapse to the ring, because depth
+  shadows do not read there.
+- Material is a rule, not a style: translucent glass marks where the machine
+  reports on itself, and anything the operator must read verbatim stays opaque.
+  Apply real `backdrop-filter` only where content passes underneath; a surface with
+  a flat canvas behind it takes a tonal step instead, because a blur there costs a
+  compositor layer and is indistinguishable from the tint. Degrade glass to opaque
+  under `prefers-reduced-transparency` and where `backdrop-filter` is unsupported.
+- Use small, tool-like radius values, and keep nested radii concentric: an inner
+  radius is the outer radius minus the gap between them.
 - Use tabular numbers for counters, timings, and metrics.
 - Make hierarchy with weight, contrast, and spacing before adding color.
+- One `h1` per view. Empty, loading, and error states are `h2`; readouts nested
+  inside a panel are `h3`.
 
 Recommended semantic token families:
 
@@ -152,6 +166,12 @@ Recommended semantic token families:
 --status-warning
 --status-danger
 --status-info
+--material-glass
+--material-glass-strong
+--material-chrome
+--elevation-1
+--elevation-2
+--elevation-3
 ```
 
 ## Information Architecture
@@ -164,17 +184,17 @@ The console shell should use:
 - Persistent detail panel or drawer when detail context benefits from staying in
   the current workflow.
 
-Primary navigation:
+Primary navigation is grouped into three sections rather than presented as one
+flat list, because the grouping states what each destination is for:
 
 ```text
-Dashboard
-Approvals
-Tasks
-Dispatch
-Policy
-Settings
-Health
+Duty        Dashboard, Approvals, Tasks, Dispatch, Feedback
+Configure   Policy, Settings
+System      Health, Maintenance
 ```
+
+Below 900px the section labels drop but hairline dividers keep the grouping
+legible, so the structure survives the compressed layout.
 
 Navigation intent:
 
@@ -254,7 +274,6 @@ Allowed motion:
 - Detail panel transitions.
 - Drawer or panel expansion.
 - Policy diff expansion and collapse.
-- Toast entry and exit.
 - Very subtle skeleton loading, or static skeletons.
 - Button active press feedback.
 
@@ -276,6 +295,20 @@ Easing: ease-out or cubic-bezier(0.23, 1, 0.32, 1)
 Animated properties: transform, opacity, and color
 Reduced motion: always respect prefers-reduced-motion
 ```
+
+Boundary between the library and CSS:
+
+- The animation library owns mount, unmount, and layout: route content, detail
+  panels keyed on the selection, list rows, command results, and shared-element
+  selection indicators.
+- CSS owns hover, press, colour, and focus transitions.
+- Route changes cross-fade with no travel and no exit animation. A sidebar is a
+  high-frequency control and macOS does not translate between sidebar destinations
+  either; holding the outgoing screen for even 100ms reads as the app being slow,
+  and a true cross-fade would require overlapping both screens in the layout.
+- `reducedMotion="user"` is authoritative: under `prefers-reduced-motion` the
+  library drops transforms and keeps opacity, so the state change is still
+  reported without movement.
 
 ## Product Components
 
@@ -299,7 +332,6 @@ MessageDetailPanel
 SettingsCatalogSection
 SettingsField
 FieldHelpTooltip
-CommandResultToast
 EmptyQueueState
 HealthIssueList
 AuditTrail
@@ -309,6 +341,7 @@ Shared primitives may exist, but they support product components:
 
 ```text
 Button
+ConfirmButton
 IconButton
 TextField
 Textarea
@@ -316,10 +349,16 @@ Switch
 Select
 SegmentedControl
 Badge
-Toast
 Tooltip
 Panel
 ```
+
+`ConfirmButton` is the required pattern for destructive commands: the first click
+arms the action and states exactly what will happen, the second commits, and an
+armed button disarms itself after a few seconds so a half-pressed destructive
+command cannot sit waiting on screen. Do not use `window.confirm`, which blocks
+the page, cannot be styled or tested, and reports nothing when the operator
+cancels.
 
 Icon usage:
 
@@ -329,6 +368,19 @@ Icon usage:
 - Icon-only controls must have accessible labels and tooltips.
 
 ## Settings And Policy Fields
+
+The Settings screen has two layers, in this order:
+
+1. **Local preferences.** The operator's own appearance and language, stored on
+   this machine and applied immediately. These are the only editable controls on
+   the page. They sit above the catalog rather than inside it: a preference is not
+   a product field, it is never searched or filtered, and it must stay reachable
+   while the catalog is filtered down to nothing.
+2. **Product field catalog.** A read-only index of console-exposed fields, grouped
+   and searchable. Editing happens where the field's write boundary allows it:
+   Product Policy on the Policy page, `config.yaml` through its own command and
+   audit path.
+
 
 Every product-relevant configurable behavior should eventually have an
 operator-facing UI. Not every low-level config field should be editable in the

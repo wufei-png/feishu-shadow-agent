@@ -9,7 +9,9 @@ import i18n, {
   normalizeLanguage,
   setConsoleLanguage
 } from "./i18n";
+import { catalogText } from "./catalogPresentation";
 import { commandLabel, enumLabel } from "./presentation";
+import type { SettingsCatalogEntry } from "./types";
 
 function LanguageProbe() {
   const { t } = useTranslation();
@@ -64,5 +66,40 @@ describe("console localization", () => {
 
     expect(commandLabel(i18n.t, "policy.update_global")).toBe("Update global policy");
     expect(enumLabel(i18n.t, "status", "future_status")).toBe("Unknown");
+  });
+
+  it("resolves catalog copy in the active language instead of falling back to Chinese", async () => {
+    // The Chinese catalog copy is a frontend override of the API's English source.
+    // It used to be reachable from English through `fallbackLng`, which left every
+    // field label and description in Chinese during an English session.
+    const entry: SettingsCatalogEntry = {
+      key: "lifecycle.watch_minutes",
+      label: "Watch window",
+      description: "Minutes a task remains active after activity.",
+      help: null,
+      source: "config_yaml",
+      scope: "runtime",
+      visibility: "normal",
+      editable_v1: false,
+      requires_restart: false,
+      audit_behavior: "read only",
+      write_boundary: null
+    };
+
+    expect(catalogText(i18n.t, entry, "label")).toBe("任务观察窗口");
+    expect(catalogText(i18n.t, entry, "description")).toBe("任务在最近活动后继续保持活跃的分钟数。");
+
+    await setConsoleLanguage("en-US");
+
+    expect(catalogText(i18n.t, entry, "label")).toBe("Watch window");
+    expect(catalogText(i18n.t, entry, "description")).toBe("Minutes a task remains active after activity.");
+  });
+
+  it("keeps the language bundles symmetric outside the catalog override", async () => {
+    const { copyFor } = await import("./locales/copy");
+    const zh = Object.keys(copyFor(0));
+    const en = Object.keys(copyFor(1));
+    expect(zh.filter((key) => !en.includes(key))).toEqual([]);
+    expect(en.filter((key) => !zh.includes(key))).toEqual([]);
   });
 });

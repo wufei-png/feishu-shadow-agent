@@ -55,6 +55,29 @@ def test_product_policy_probe_reports_missing_then_initialized(tmp_path: Path) -
     }
 
 
+def test_chat_activation_changes_only_after_policy_is_removed_and_readded(
+    tmp_path: Path,
+) -> None:
+    now = ["2026-06-22T10:00:00+00:00"]
+    store = SQLiteStore(tmp_path / "agent.sqlite3", clock=lambda: now[0])
+    store.import_product_policy_from_config(_config(chats={"oc_1": ChatPolicyConfig()}))
+    first = store.list_chat_policy_activations()[0]
+    now[0] = "2026-06-22T11:00:00+00:00"
+    store.upsert_chat_product_policy(
+        {"chat_id": "oc_1", **ChatPolicyConfig(auto_reply=True).model_dump()},
+        actor="owner",
+    )
+    assert store.list_chat_policy_activations()[0] == first
+    store.delete_chat_product_policy("oc_1", actor="owner")
+    now[0] = "2026-06-22T12:00:00+00:00"
+    store.upsert_chat_product_policy(
+        {"chat_id": "oc_1", **ChatPolicyConfig().model_dump()}, actor="owner"
+    )
+    second = store.list_chat_policy_activations()[0]
+    assert second["activation_id"] != first["activation_id"]
+    assert second["activated_at"] == now[0]
+
+
 def test_default_import_skips_existing_policies_and_keeps_db_only_chats(
     tmp_path: Path,
 ) -> None:

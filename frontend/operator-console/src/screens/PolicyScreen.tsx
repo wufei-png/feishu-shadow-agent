@@ -17,6 +17,7 @@ import {
   updateGlobalPolicy
 } from "../api";
 import {
+  Fact,
   Badge,
   Button,
   CommandResultPanel,
@@ -33,7 +34,7 @@ import {
   statusTone,
   TextareaField
 } from "../components/Primitives";
-import { catalogText } from "../catalogPresentation";
+import { catalogText, formatSettingValue } from "../catalogPresentation";
 import { enumLabel } from "../presentation";
 import { invalidateAfterPolicyCommand, queryKeys } from "../queryKeys";
 import type {
@@ -69,7 +70,6 @@ type ChatPolicyForm = {
 
 const globalFields: Array<{ key: keyof GlobalPolicyForm; catalogKey: string; type: "boolean" | "identity" }> = [
   { key: "p2p_auto_reply", catalogKey: "policy.global.p2p_auto_reply", type: "boolean" },
-  { key: "unknown_group_auto_reply", catalogKey: "policy.global.unknown_group_auto_reply", type: "boolean" },
   { key: "bot_joined", catalogKey: "policy.global.default_bot_joined", type: "boolean" },
   { key: "reply_identity", catalogKey: "policy.global.default_reply_identity", type: "identity" },
   { key: "allow_user_fallback", catalogKey: "policy.global.default_allow_user_fallback", type: "boolean" },
@@ -753,7 +753,7 @@ function ImpactSummary({ summary }: { summary: Record<string, unknown> }) {
       <h3>{t("policy.impactSummary")}</h3>
       <FieldList>
         {rows.map(([key, value]) => (
-          <FactRow key={key} label={key} value={formatSettingValue(t, value)} />
+          <Fact key={key} label={key} value={formatSettingValue(t, value)} />
         ))}
       </FieldList>
     </div>
@@ -769,10 +769,10 @@ function ImportDiffDetails({ diff }: { diff: SettingsRuntime["policy_status"]["p
         <h2>{t("policy.importDetails")}</h2>
       </div>
       <FieldList>
-        <FactRow label={t("policy.missingGlobal")} value={diff?.missing_global ? t("common.yes") : t("common.no")} />
-        <FactRow label={t("policy.changedGlobal")} value={diff?.changed_global ? t("common.yes") : t("common.no")} />
-        <FactRow label={t("policy.missingChats")} value={(diff?.missing_chats ?? []).join(", ") || t("common.none")} />
-        <FactRow label={t("policy.changedChats")} value={(diff?.changed_chats ?? []).join(", ") || t("common.none")} />
+        <Fact label={t("policy.missingGlobal")} value={diff?.missing_global ? t("common.yes") : t("common.no")} />
+        <Fact label={t("policy.changedGlobal")} value={diff?.changed_global ? t("common.yes") : t("common.no")} />
+        <Fact label={t("policy.missingChats")} value={(diff?.missing_chats ?? []).join(", ") || t("common.none")} />
+        <Fact label={t("policy.changedChats")} value={(diff?.changed_chats ?? []).join(", ") || t("common.none")} />
       </FieldList>
     </div>
   );
@@ -836,9 +836,9 @@ function PolicyAuditHistory({
               </div>
               <p>{audit.reason || t("policy.noReason")}</p>
               <FieldList>
-                <FactRow label={t("common.actor")} value={audit.actor} />
-                <FactRow label={t("policy.before")} value={shortText(formatSettingValue(t, audit.old_summary), t("policy.emptyValue"))} />
-                <FactRow label={t("policy.after")} value={shortText(formatSettingValue(t, audit.new_summary), t("policy.emptyValue"))} />
+                <Fact label={t("common.actor")} value={audit.actor} />
+                <Fact label={t("policy.before")} value={shortText(formatSettingValue(t, audit.old_summary), t("policy.emptyValue"))} />
+                <Fact label={t("policy.after")} value={shortText(formatSettingValue(t, audit.new_summary), t("policy.emptyValue"))} />
               </FieldList>
               <details>
                 <summary>{t("policy.summaryJson")}</summary>
@@ -863,14 +863,6 @@ function FactTile({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
-function FactRow({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div>
-      <dt>{label}</dt>
-      <dd>{value}</dd>
-    </div>
-  );
-}
 
 function entryFor(entries: SettingsCatalogEntry[], key: string, t: TFunction): SettingsCatalogEntry {
   return (
@@ -927,21 +919,6 @@ function clean(value: string): string | undefined {
   return trimmed || undefined;
 }
 
-function formatSettingValue(t: TFunction, value: unknown): string {
-  if (value === true) {
-    return t("common.yes");
-  }
-  if (value === false) {
-    return t("common.no");
-  }
-  if (value === null || value === undefined || value === "") {
-    return t("policy.notSet");
-  }
-  if (typeof value === "object") {
-    return JSON.stringify(value);
-  }
-  return String(value);
-}
 
 function errorMessage(error: unknown, t: TFunction): string {
   return error instanceof Error ? error.message : t("common.requestFailed");

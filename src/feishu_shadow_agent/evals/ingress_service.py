@@ -13,6 +13,7 @@ from ..config import LoadedConfig
 from ..paths import resolve_relative_path
 from ..time_utils import format_instant, parse_instant, utc_now, utc_now_iso
 from ..types import LarkCliResult, MessagePage
+from .access import require_configured_group, validate_model_messages
 from .artifacts import (
     EvalError,
     copy_config_or_raise,
@@ -79,6 +80,7 @@ class IngressEvalService:
         if snapshot is None:
             if not chat_id:
                 raise EvalError("live run-ingress requires --chat-id")
+            require_configured_group(self.loaded, chat_id)
             effective_start, effective_end = _window(
                 start=start, end=end, lookback_days=lookback_days
             )
@@ -89,7 +91,7 @@ class IngressEvalService:
             group_at_ids = {
                 message_id_from_raw(raw)
                 for raw in self._drain_group_at_me(
-                    start=effective_start, end=effective_end
+                    chat_id=chat_id, start=effective_start, end=effective_end
                 )
                 if _raw_chat_id(raw) == chat_id
             }
@@ -121,6 +123,14 @@ class IngressEvalService:
             source_kind = "snapshot"
             lark_version = None
             case_config_hash = file_sha256(snapshot_dir / "config.yaml")
+
+        if not dry_run_backend:
+            if snapshot is None:
+                require_configured_group(self.loaded, str(chat["chat_id"]))
+            else:
+                validate_model_messages(
+                    self.loaded, raws, directory=snapshot.expanduser().resolve()
+                )
 
         sources_by_message = _sources_by_message(
             raws=raws,
@@ -154,12 +164,32 @@ class IngressEvalService:
             config_info=config_info,
             lark_cli_version=lark_version,
         )
+        if snapshot is not None:
+            source_metadata = snapshot.expanduser().resolve() / "metadata.yaml"
+            if (
+                source_metadata.is_file()
+                and read_yaml(source_metadata).get("source_kind") == "synthetic"
+            ):
+                metadata = read_yaml(run_dir / "metadata.yaml")
+                metadata["source_kind"] = "synthetic"
+                write_yaml(run_dir / "metadata.yaml", metadata)
         judge_labels: dict[str, dict[str, str]] = {}
         judge_error: str | None = None
         if not dry_run_backend:
             traced_backend: TracedAgentBackend | None = None
             try:
-                traced_backend = TracedAgentBackend(self.backend_factory(self.loaded))
+
+                def verify_ingress_access() -> None:
+                    if snapshot is None:
+                        require_configured_group(self.loaded, str(chat["chat_id"]))
+                    else:
+                        validate_model_messages(
+                            self.loaded, raws, directory=snapshot.expanduser().resolve()
+                        )
+
+                traced_backend = TracedAgentBackend(
+                    self.backend_factory(self.loaded), before_call=verify_ingress_access
+                )
                 judge_labels, judge_error = run_ingress_judge(
                     backend=traced_backend,
                     timeline=timeline,
@@ -271,13 +301,21 @@ class IngressEvalService:
         token: str | None = None
         seen_tokens: set[str] = set()
         while True:
+            require_configured_group(self.loaded, chat_id)
             page = self.lark_client.list_chat_messages(
                 chat_id=chat_id,
                 start=start,
                 end=end,
                 page_token=token,
             )
-            rows.extend(page.items)
+            require_configured_group(self.loaded, chat_id)
+            for row in page.items:
+                if _raw_chat_id(row) != chat_id:
+                    continue
+                chat_type = row.get("chat_type") or row.get("chatType")
+                if chat_type not in (None, "group"):
+                    raise EvalError("ingress message has a conflicting chat type")
+                rows.append({**row, "chat_type": "group"})
             if not page.has_more or not page.next_page_token:
                 return rows
             if page.next_page_token in seen_tokens:
@@ -287,19 +325,24 @@ class IngressEvalService:
             seen_tokens.add(page.next_page_token)
             token = page.next_page_token
 
-    def _drain_group_at_me(self, *, start: str, end: str) -> list[dict[str, Any]]:
+    def _drain_group_at_me(
+        self, *, chat_id: str, start: str, end: str
+    ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         token: str | None = None
         seen_tokens: set[str] = set()
         while True:
+            require_configured_group(self.loaded, chat_id)
             page = self.lark_client.search_messages(
+                chat_id=chat_id,
                 chat_type="group",
                 is_at_me=True,
                 start=start,
                 end=end,
                 page_token=token,
             )
-            rows.extend(page.items)
+            require_configured_group(self.loaded, chat_id)
+            rows.extend(row for row in page.items if _raw_chat_id(row) == chat_id)
             if not page.has_more or not page.next_page_token:
                 return rows
             if page.next_page_token in seen_tokens:
@@ -344,6 +387,16 @@ def _load_snapshot(
     if not isinstance(chat, dict):
         raise EvalError("ingress snapshot timeline is missing chat metadata")
     chat_map = cast(dict[str, Any], chat)
+    snapshot_chat_id = chat_map.get("chat_id")
+    if not isinstance(snapshot_chat_id, str) or not snapshot_chat_id:
+        raise EvalError("ingress snapshot chat_id is missing")
+    for row in rows:
+        row_chat_id = _raw_chat_id(row)
+        if row_chat_id is not None and row_chat_id != snapshot_chat_id:
+            raise EvalError("ingress snapshot message belongs to another chat")
+        chat_type = row.get("chat_type") or row.get("chatType")
+        if chat_type not in (None, "group"):
+            raise EvalError("ingress snapshot message has a conflicting chat type")
     timeline_rows = timeline_messages(timeline)
     timeline_ids = [str(row.get("message_id") or "") for row in timeline_rows]
     raw_ids = [message_id_from_raw(row) for row in rows]
@@ -413,6 +466,8 @@ def _active_task_fixtures(
             FROM tasks t
             JOIN task_watch_keys wk ON wk.task_id = t.id
             WHERE t.status = 'watching'
+              AND NOT EXISTS (SELECT 1 FROM group_policy_holds h
+                              WHERE h.kind = 'task' AND h.item_id = t.id)
               AND (t.watch_until IS NULL OR julianday(t.watch_until) > julianday(?))
               AND t.chat_id = ?
             ORDER BY t.id, wk.key

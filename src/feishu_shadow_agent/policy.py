@@ -60,7 +60,16 @@ class PolicyResolver:
     def resolve_chat_policy(
         self, chat_id: str | None, chat_type: str | None
     ) -> ResolvedChatPolicy:
-        global_policy = self._global_product_policy()
+        return self._resolve_chat_policy(
+            self._global_product_policy(), chat_id, chat_type
+        )
+
+    def _resolve_chat_policy(
+        self,
+        global_policy: dict[str, Any],
+        chat_id: str | None,
+        chat_type: str | None,
+    ) -> ResolvedChatPolicy:
         resolved: ResolvedChatPolicy
         if chat_id:
             chat_policy = self.repository.get_chat_product_policy(chat_id)
@@ -138,7 +147,12 @@ class PolicyResolver:
         final_reply: str,
     ) -> ReplyPolicyDecision:
         chat_type = task.chat_type or message.chat_type
-        policy = self.resolve_chat_policy(task.chat_id or message.chat_id, chat_type)
+        # Read the global policy once: it carries both the chat defaults and the
+        # P2P auto-reply gate applied below.
+        global_policy = self._global_product_policy()
+        policy = self._resolve_chat_policy(
+            global_policy, task.chat_id or message.chat_id, chat_type
+        )
         if answerability != "auto_reply":
             return ReplyPolicyDecision(
                 False, "needs_owner", "user", policy.policy_source
@@ -152,7 +166,7 @@ class PolicyResolver:
                 False, "empty_proposed_reply", "user", policy.policy_source
             )
         if chat_type == "p2p":
-            if not _reply_policy_config(self._global_product_policy()).p2p_auto_reply:
+            if not _reply_policy_config(global_policy).p2p_auto_reply:
                 return ReplyPolicyDecision(
                     False, "p2p_auto_reply_disabled", "user", policy.policy_source
                 )

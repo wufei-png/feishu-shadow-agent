@@ -104,6 +104,36 @@ describe("ApprovalsScreen", () => {
     expect(api.getApproval).toHaveBeenCalledWith("token", deepLinkedApproval.approval_id);
   });
 
+  it("shows the reply destination and requires a choice when it is unresolved", async () => {
+    vi.mocked(api.getApproval).mockResolvedValue({
+      ...approvalA,
+      payload: {
+        reply_target_message_id: "om_root",
+        allowed_reply_locations: ["main", "thread"]
+      }
+    });
+    const user = userEvent.setup();
+    renderScreen();
+    await screen.findByRole("heading", { name: approvalA.approval_id });
+    expect(screen.getByText("om_root")).toBeTruthy();
+    expect(screen.getByText("未确认")).toBeTruthy();
+    await user.type(screen.getByLabelText("最终回复"), "owner reply");
+    const send = screen.getByRole("button", { name: "发送最终回复" }) as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+    await user.click(screen.getByRole("button", { name: "已有话题" }));
+    expect(send.disabled).toBe(false);
+    await user.click(send);
+    await waitFor(() => expect(api.sendApproval).toHaveBeenCalledWith("token", approvalA.approval_id, {
+      command_id: "console_test-command-id",
+      expected_task_id: approvalA.task_id,
+      expected_source_message_id: approvalA.source_message_id,
+      expected_source_revision: approvalA.source_revision,
+      reason: undefined,
+      final_reply: "owner reply",
+      reply_location: "thread"
+    }));
+  });
+
   it("paginates beyond 50 rows and resets to the first page when filtering", async () => {
     const firstPage = Array.from({ length: 51 }, (_, index) =>
       approval(`a_page_${index}`, index + 10, `t_page_${index}`, `om_page_${index}`, 1)
@@ -161,7 +191,14 @@ function approval(
     recommended_action: "review",
     available_commands: [`approve ${approvalId}`, `reject ${approvalId}`, `send ${taskShortId}`]
   };
-  return { ...summary, payload: { text: summary.preview } };
+  return {
+    ...summary,
+    payload: {
+      text: summary.preview,
+      reply_target_message_id: sourceMessageId,
+      reply_destination: { chat_id: "oc_test", location: "main" }
+    }
+  };
 }
 
 function task(taskId: string): TaskDetail {

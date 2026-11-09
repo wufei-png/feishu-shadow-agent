@@ -87,6 +87,7 @@ class CommandRequest(BaseModel):
     reason: str | None = None
     command_id: str | None = None
     final_reply: str | None = None
+    reply_location: Literal["main", "thread"] | None = None
     sent_message_id: str | None = None
 
 
@@ -222,8 +223,10 @@ def create_console_app(
     port: int = 8765,
     static_dir: Path | None = None,
     readback_marker: DispatchReadbackMarker | None = None,
+    execution_mode: Literal["production", "dry_run"] = "production",
 ) -> FastAPI:
     validate_console_bind_host(host)
+    app_execution_mode = execution_mode
     app = FastAPI(title="Feishu Shadow Agent Operator Console")
     resolved_static_dir = static_dir or default_console_static_dir()
 
@@ -299,6 +302,7 @@ def create_console_app(
             loaded_config=loaded_config,
             store=store,
             logger=_build_jsonl_logger(loaded_config),
+            dry_run_mode=app_execution_mode == "dry_run",
         )
 
     def policy_preview_service() -> PolicyPreviewService:
@@ -308,7 +312,7 @@ def create_console_app(
 
     @api.get("/dashboard")
     def dashboard() -> dict[str, Any]:
-        return query_service().dashboard_snapshot()
+        return query_service().dashboard_snapshot() | {"runtime_mode": execution_mode}
 
     @api.get("/approvals")
     def approvals(
@@ -410,7 +414,9 @@ def create_console_app(
         execution_mode: Literal["production", "dry_run", "all"] = "production",
     ) -> dict[str, Any]:
         return query_service().feedback_overview(
-            execution_mode=execution_mode,
+            execution_mode="dry_run"
+            if app_execution_mode == "dry_run"
+            else execution_mode,
             recent_limit=limit,
         )
 
@@ -425,7 +431,9 @@ def create_console_app(
             days=days,
             limit=limit,
             offset=offset,
-            execution_mode=execution_mode,
+            execution_mode="dry_run"
+            if app_execution_mode == "dry_run"
+            else execution_mode,
         )
 
     @api.get("/messages/{message_id}/detail")
@@ -498,6 +506,7 @@ def create_console_app(
                 reason=body.reason,
                 command_id=body.command_id,
                 target_binding=body.target_binding(),
+                execution_mode=app_execution_mode,
             )
             .as_dict()
         )
@@ -515,6 +524,7 @@ def create_console_app(
                 reason=body.reason,
                 command_id=body.command_id,
                 target_binding=body.target_binding(),
+                execution_mode=app_execution_mode,
             )
             .as_dict()
         )
@@ -531,9 +541,11 @@ def create_console_app(
                 approval_id,
                 final_reply,
                 actor=LOCAL_CONSOLE_ACTOR,
+                reply_location=body.reply_location,
                 reason=body.reason,
                 command_id=body.command_id,
                 target_binding=body.target_binding(),
+                execution_mode=app_execution_mode,
             )
             .as_dict()
         )
@@ -551,8 +563,10 @@ def create_console_app(
                 task_id,
                 final_reply,
                 actor=LOCAL_CONSOLE_ACTOR,
+                reply_location=payload.reply_location,
                 reason=payload.reason,
                 command_id=payload.command_id,
+                execution_mode=app_execution_mode,
             )
             .as_dict()
         )
@@ -627,6 +641,10 @@ def create_console_app(
         body: Annotated[MaintenanceDoctorRequest | None, Body()] = None,
     ) -> dict[str, Any]:
         payload = body or MaintenanceDoctorRequest()
+        if app_execution_mode == "dry_run" and payload.send_test:
+            _raise_api_error(
+                400, "dry_run_restriction", "dry-run doctor cannot send a test message"
+            )
         return (
             maintenance_service()
             .doctor(
@@ -671,6 +689,12 @@ def create_console_app(
         body: Annotated[MaintenanceDryRunRequest | None, Body()] = None,
     ) -> dict[str, Any]:
         payload = body or MaintenanceDryRunRequest()
+        if app_execution_mode == "dry_run" and not payload.dry_run:
+            _raise_api_error(
+                400,
+                "dry_run_restriction",
+                "dry-run mode supports reply style preview only",
+            )
         return (
             maintenance_service()
             .reply_style_refresh(
@@ -718,6 +742,12 @@ def create_console_app(
         action_id: int,
         body: Annotated[CommandRequest | None, Body()] = None,
     ) -> dict[str, Any]:
+        if app_execution_mode == "dry_run":
+            _raise_api_error(
+                400,
+                "dry_run_restriction",
+                "dry-run actions cannot be marked as actually sent",
+            )
         payload = body or CommandRequest()
         sent_message_id = _required_text(
             payload.sent_message_id, field="sent_message_id"

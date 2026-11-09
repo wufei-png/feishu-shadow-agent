@@ -30,6 +30,7 @@ from .prompt import (
     build_router_prompt,
 )
 from .prompt_identity import identify_prompt
+from .reply_destination import candidate_from_message
 from .reply_postprocess import ReplyPostprocessor, ReplyPostprocessResult
 from .resource_preflight import (
     ResourcePreflight,
@@ -67,6 +68,23 @@ class ProcessingResult:
     action_id: int | None = None
     approval_id: int | None = None
     reason: str = ""
+
+
+@dataclass(frozen=True)
+class ModelAccessGuard:
+    store: SQLiteStore
+    chat_type: str | None
+    chat_id: str | None
+    activation_id: int | None
+
+    def __call__(self) -> bool:
+        if self.chat_type != "group":
+            return True
+        return self.activation_id is not None and any(
+            row["chat_id"] == self.chat_id
+            and row["activation_id"] == self.activation_id
+            for row in self.store.list_chat_policy_activations()
+        )
 
 
 @dataclass(frozen=True)
@@ -141,11 +159,28 @@ class ApprovalService:
         incoming_message_revision: int | None = None,
         proposed_reply: str,
         reason: str,
+        reply_destination: dict[str, str] | None = None,
         final_reply: str | None = None,
         approvable: bool = True,
         payload_extra: dict[str, Any] | None = None,
         decision_reason: str | None = None,
     ) -> int:
+        if reply_destination is None and approvable:
+            target = self.store.get_message(reply_target_message_id)
+            candidate = (
+                None
+                if target is None
+                else candidate_from_message(
+                    dict(target),
+                    expected_chat_id=task.chat_id,
+                    chat_type=task.chat_type,
+                )
+            )
+            reply_destination = (
+                None if candidate is None else candidate.destination(None)
+            )
+            if reply_destination is None:
+                approvable = False
         reply_text = proposed_reply if final_reply is None else final_reply
         payload_text = reply_text if approvable else ""
         commands = [
@@ -171,6 +206,8 @@ class ApprovalService:
             payload["source_message_id"] = incoming_message_id
         if incoming_message_revision is not None:
             payload["source_revision"] = incoming_message_revision
+        if reply_destination is not None:
+            payload["reply_destination"] = reply_destination
         if payload_extra:
             payload.update(payload_extra)
         notify: dict[str, Any] = {
@@ -187,6 +224,13 @@ class ApprovalService:
             "commands": commands,
             "execution_mode": self.execution_mode,
         }
+        if reply_destination is not None:
+            notify["reply_destination"] = reply_destination
+            notify["reply_target_message_id"] = reply_target_message_id
+        elif not approvable:
+            commands[0] = (
+                f"/send {task.short_id} --location <main|thread> <final reply>"
+            )
         if notification_message_id != reply_target_message_id:
             notify["reply_target_message_id"] = reply_target_message_id
         for key in (
@@ -197,6 +241,8 @@ class ApprovalService:
             "edit_supported",
             "correction_delivery",
             "requires_owner_approval",
+            "allowed_reply_locations",
+            "resource_statuses",
         ):
             if key in payload:
                 notify[key] = payload[key]
@@ -373,7 +419,22 @@ class TaskProcessingService:
         now: str,
         watch_until: str,
         run_id: str,
+        expected_group_activation_id: int | None = None,
     ) -> ProcessingResult | None:
+        access_allowed = self._model_access_guard(
+            message, expected_activation_id=expected_group_activation_id
+        )
+        if message.chat_type == "group" and (
+            not message.chat_id
+            or self.store.get_chat_product_policy(message.chat_id) is None
+        ):
+            return ProcessingResult("watch_only", reason="group_policy_unconfigured")
+        if routing.task is not None and self.store.is_group_policy_held(
+            "task", routing.task.id
+        ):
+            return ProcessingResult(
+                "watch_only", routing.task.id, reason="group_policy_held"
+            )
         route = routing.decision.route
         reason = routing.decision.reason
         self.logger.debug(
@@ -411,6 +472,7 @@ class TaskProcessingService:
                 now=now,
                 watch_until=watch_until,
                 run_id=run_id,
+                access_allowed=access_allowed,
             )
             if isinstance(routed, ProcessingResult):
                 return routed
@@ -427,8 +489,28 @@ class TaskProcessingService:
                 now=now,
                 watch_until=watch_until,
                 run_id=run_id,
+                access_allowed=access_allowed,
             )
         return None
+
+    def _model_access_guard(
+        self, message: NormalizedMessage, *, expected_activation_id: int | None = None
+    ) -> ModelAccessGuard:
+        if message.chat_type != "group":
+            return ModelAccessGuard(
+                self.store, message.chat_type, message.chat_id, None
+            )
+        chat_id = message.chat_id
+        activation_id = expected_activation_id or next(
+            (
+                row["activation_id"]
+                for row in self.store.list_chat_policy_activations()
+                if row["chat_id"] == chat_id
+            ),
+            None,
+        )
+
+        return ModelAccessGuard(self.store, message.chat_type, chat_id, activation_id)
 
     def _call_agent_with_retries(
         self,
@@ -438,6 +520,7 @@ class TaskProcessingService:
         stage: str,
         message_id: str,
         task_id: int | None = None,
+        before_attempt: Callable[[], bool] | None = None,
     ) -> AgentAttemptOutcome:
         return self.agent_invoker.call_with_retries(
             call,
@@ -445,6 +528,7 @@ class TaskProcessingService:
             stage=stage,
             message_id=message_id,
             task_id=task_id,
+            before_attempt=before_attempt,
         )
 
     def _mark_processing_processed(
@@ -604,6 +688,7 @@ class TaskProcessingService:
         now: str,
         watch_until: str,
         run_id: str,
+        access_allowed: ModelAccessGuard,
     ) -> RoutingResult | ProcessingResult | None:
         active_candidates = self.collector.collect(message, now=now)
         historical = []
@@ -642,11 +727,17 @@ class TaskProcessingService:
             ),
         )
         router_prompt_identity = identify_prompt("router", prompt)
+        if message.chat_type == "group" and (
+            not message.chat_id
+            or self.store.get_chat_product_policy(message.chat_id) is None
+        ):
+            return ProcessingResult("watch_only", reason="group_policy_unconfigured")
         outcome = self._call_agent_with_retries(
             lambda: self.agent_backend.task_router(prompt, cwd=self.agent_working_dir),
             run_id=run_id,
             stage="task_router",
             message_id=message.message_id,
+            before_attempt=access_allowed,
         )
         result = outcome.result
         router_response = _json_mapping(None if result is None else result.json_data)
@@ -666,6 +757,16 @@ class TaskProcessingService:
             prompt={"text": prompt} if self.config.debug.save_full_agent_io else None,
             tool_permissions_profile=self.config.tool_permissions,
         )
+        if outcome.blocked or not access_allowed():
+            self._mark_processing_blocked_external(
+                message=message,
+                stage="task_router",
+                task_id=None,
+                attempt_count=outcome.attempt_count,
+                last_error=outcome.last_error,
+                reason="group_policy_changed",
+            )
+            return ProcessingResult("watch_only", reason="group_policy_changed")
         candidates_count = len(active_candidates) + len(historical)
         if result is None or not result.ok or router_response is None:
             last_error = outcome.last_error or (
@@ -796,7 +897,20 @@ class TaskProcessingService:
                 router_called=True,
                 matched_by="task_router",
                 agent_working_dir=str(self.agent_working_dir),
+                expected_group_activation_id=access_allowed.activation_id,
             )
+            if self.store.is_group_policy_held("task", task.id):
+                self._mark_processing_blocked_external(
+                    message=message,
+                    stage="task_session",
+                    task_id=task.id,
+                    attempt_count=0,
+                    last_error="group policy changed while creating task",
+                    reason="group_policy_changed",
+                )
+                return ProcessingResult(
+                    "watch_only", task.id, reason="group_policy_changed"
+                )
             self._mark_processing_processed(
                 message=message,
                 stage="task_router",
@@ -986,6 +1100,11 @@ class TaskProcessingService:
         run_id: str,
     ) -> RoutingResult | ProcessingResult | None:
         """Run the production model-router stage for an existing placeholder."""
+        if message.chat_type == "group" and (
+            not message.chat_id
+            or self.store.get_chat_product_policy(message.chat_id) is None
+        ):
+            return ProcessingResult("watch_only", reason="group_policy_unconfigured")
         return self._run_task_router(
             message=message,
             source=source,
@@ -993,6 +1112,7 @@ class TaskProcessingService:
             now=now,
             watch_until=watch_until,
             run_id=run_id,
+            access_allowed=self._model_access_guard(message),
         )
 
     def _run_task_session(
@@ -1003,7 +1123,13 @@ class TaskProcessingService:
         now: str,
         watch_until: str,
         run_id: str,
+        access_allowed: Callable[[], bool],
     ) -> ProcessingResult:
+        def session_allowed() -> bool:
+            return access_allowed() and not self.store.is_group_policy_held(
+                "task", task.id
+            )
+
         agent_working_dir = self._task_agent_working_dir(task)
         working_dir_error = _agent_working_dir_error(agent_working_dir)
         if working_dir_error is not None:
@@ -1155,6 +1281,15 @@ class TaskProcessingService:
                 "resource_count": len(resources),
             },
         )
+        if message.chat_type == "group" and (
+            not message.chat_id
+            or self.store.get_chat_product_policy(message.chat_id) is None
+        ):
+            return ProcessingResult(
+                "watch_only", task.id, reason="group_policy_unconfigured"
+            )
+        if self.store.is_group_policy_held("task", task.id):
+            return ProcessingResult("watch_only", task.id, reason="group_policy_held")
         session_run = self.task_sessions.run(
             task=task,
             message=message,
@@ -1162,6 +1297,7 @@ class TaskProcessingService:
             resources=resources,
             run_id=run_id,
             cwd=agent_working_dir,
+            before_attempt=session_allowed,
         )
         task_session_prompt_identity = identify_prompt(
             "task_session", session_run.prompt
@@ -1189,6 +1325,24 @@ class TaskProcessingService:
             else None,
             tool_permissions_profile=self.config.tool_permissions,
         )
+        if outcome.blocked or not session_allowed():
+            if result is not None and result.ok and result.session_id:
+                self.store.set_task_agent_session_id(
+                    task.id,
+                    result.session_id,
+                    backend_provider=str(self.agent_backend.provider),
+                )
+            self._mark_processing_blocked_external(
+                message=message,
+                stage="task_session",
+                task_id=task.id,
+                attempt_count=outcome.attempt_count,
+                last_error=outcome.last_error,
+                reason="group_policy_changed",
+            )
+            return ProcessingResult(
+                "watch_only", task.id, reason="group_policy_changed"
+            )
         if result is None or not result.ok or session_response is None:
             last_error = outcome.last_error or (
                 None if result is None else agent_result_error(result)
@@ -1284,7 +1438,11 @@ class TaskProcessingService:
                 },
             )
 
-        if output.answerability == "needs_owner" and p2p_resource_unavailable:
+        if (
+            output.answerability == "needs_owner"
+            and output.proposed_reply.strip()
+            and p2p_resource_unavailable
+        ):
             action_id = self.approvals.escalate_task_to_owner(
                 task=task,
                 message=message,
@@ -1353,6 +1511,14 @@ class TaskProcessingService:
                 },
             )
             fallback_target = self.store.get_message(message.message_id)
+            fallback_candidate = next(
+                (
+                    item
+                    for item in session_plan.reply_candidates
+                    if item.message_id == message.message_id
+                ),
+                None,
+            )
             composed = self.composer.compose(
                 proposed_reply=output.proposed_reply,
                 reply_target=fallback_target,
@@ -1374,7 +1540,12 @@ class TaskProcessingService:
                 proposed_reply=output.proposed_reply,
                 final_reply=composed.text,
                 reason="invalid_reply_target_message_id",
-                approvable=_can_directly_approve(output.proposed_reply, composed),
+                approvable=False,
+                payload_extra={
+                    "allowed_reply_locations": []
+                    if fallback_candidate is None
+                    else list(fallback_candidate.locations)
+                },
                 decision_reason=output.decision_reason,
             )
             self._mark_processing_processed(
@@ -1449,6 +1620,91 @@ class TaskProcessingService:
 
         reply_target_id = output.reply_target_message_id or message.message_id
         reply_target = self.store.get_message(reply_target_id)
+        candidate = next(
+            (
+                item
+                for item in session_plan.reply_candidates
+                if item.message_id == reply_target_id
+            ),
+            None,
+        )
+        destination = (
+            None if candidate is None else candidate.destination(output.reply_location)
+        )
+        if destination is None:
+            self.store.update_task_after_agent(
+                task_id=task.id,
+                task_label=output.task_label
+                if isinstance(output, InitialTaskSessionOutput)
+                else None,
+                status="watching",
+                watch_until=watch_until,
+            )
+            approval_id = self.approvals.request_send_reply(
+                task=task,
+                reply_target_message_id=reply_target_id,
+                incoming_message_id=message.message_id,
+                incoming_message_revision=message.revision,
+                proposed_reply=output.proposed_reply,
+                reason="reply_destination_unavailable_or_invalid",
+                approvable=False,
+                payload_extra={
+                    "allowed_reply_locations": []
+                    if candidate is None
+                    else list(candidate.locations)
+                },
+                decision_reason=output.decision_reason,
+            )
+            self._mark_processing_processed(
+                message=message,
+                stage="task_session",
+                task_id=task.id,
+                attempt_count=outcome.attempt_count,
+            )
+            return ProcessingResult(
+                "approval_created",
+                task.id,
+                approval_id=approval_id,
+                reason="reply_destination_unavailable_or_invalid",
+            )
+        if output.answerability == "needs_owner" and not output.proposed_reply.strip():
+            self.store.update_task_after_agent(
+                task_id=task.id,
+                task_label=output.task_label
+                if isinstance(output, InitialTaskSessionOutput)
+                else None,
+                status="watching",
+                watch_until=watch_until,
+            )
+            payload_extra: dict[str, Any] = {}
+            if previous_sent_reply is not None:
+                payload_extra["previous_reply"] = previous_sent_reply.get("text", "")
+            if p2p_resource_unavailable:
+                payload_extra["resource_statuses"] = resource_status_counts(resources)
+            approval_id = self.approvals.request_send_reply(
+                task=task,
+                reply_target_message_id=reply_target_id,
+                incoming_message_id=message.message_id,
+                incoming_message_revision=message.revision,
+                proposed_reply="",
+                reason="needs_owner_no_draft",
+                reply_destination=destination,
+                approvable=False,
+                payload_extra=payload_extra,
+                decision_reason=output.decision_reason,
+            )
+            self._mark_processing_processed(
+                message=message,
+                stage="task_session",
+                task_id=task.id,
+                attempt_count=outcome.attempt_count,
+            )
+            return ProcessingResult(
+                "approval_created",
+                task.id,
+                approval_id=approval_id,
+                reason="needs_owner_no_draft",
+            )
         postprocess = self._reply_postprocess(
             task=task,
             message=message,
@@ -1456,6 +1712,7 @@ class TaskProcessingService:
             original_reply=output.proposed_reply,
             run_id=run_id,
             cwd=agent_working_dir,
+            before_attempt=session_allowed,
         )
         if postprocess.audit is not None:
             audit_result = postprocess.audit["result"]
@@ -1489,6 +1746,18 @@ class TaskProcessingService:
                 if self.config.debug.save_full_agent_io
                 else None,
                 tool_permissions_profile="read_only",
+            )
+        if not session_allowed():
+            self._mark_processing_blocked_external(
+                message=message,
+                stage="task_session",
+                task_id=task.id,
+                attempt_count=outcome.attempt_count,
+                last_error="group policy changed during reply postprocess",
+                reason="group_policy_changed",
+            )
+            return ProcessingResult(
+                "watch_only", task.id, reason="group_policy_changed"
             )
         if (
             self.config.reply_postprocess.enabled
@@ -1525,6 +1794,7 @@ class TaskProcessingService:
                 proposed_reply=output.proposed_reply,
                 final_reply=composed_original.text,
                 reason=f"reply_postprocess_{postprocess.failure_reason or 'failed'}",
+                reply_destination=destination,
                 approvable=_can_directly_approve(
                     output.proposed_reply, composed_original
                 ),
@@ -1559,6 +1829,17 @@ class TaskProcessingService:
             proposed_reply=postprocess.reply,
         )
         if previous_sent_reply is not None:
+            previous_payload = previous_sent_reply.get("payload")
+            previous_destination = (
+                cast(dict[str, Any], previous_payload).get("reply_destination")
+                if isinstance(previous_payload, dict)
+                else None
+            )
+            previous_destination = (
+                cast(dict[str, str], previous_destination)
+                if isinstance(previous_destination, dict)
+                else None
+            )
             revision_assessment = assess_revision_impact(
                 previous_reply=str(previous_sent_reply.get("text") or ""),
                 current_reply=composed.text,
@@ -1566,6 +1847,8 @@ class TaskProcessingService:
                 decision_reason=output.decision_reason,
                 current_target_message_id=reply_target_id,
                 previous_target_message_id=previous_sent_reply.get("target_message_id"),
+                current_reply_destination=destination,
+                previous_reply_destination=previous_destination,
                 revision_signals=getattr(output, "revision_signals", ()),
             )
             revision_payload = {
@@ -1575,6 +1858,8 @@ class TaskProcessingService:
                 "source_revision": message.revision,
                 "previous_reply": previous_sent_reply.get("text", ""),
                 "previous_action_id": previous_sent_reply.get("action_id"),
+                "previous_reply_destination": previous_destination,
+                "reply_destination": destination,
                 "suggested_reply": composed.text,
                 "impact": revision_assessment.impact,
                 "impact_reasons": list(revision_assessment.reasons),
@@ -1586,6 +1871,10 @@ class TaskProcessingService:
                     f"revision-review:{message.message_id}:{message.revision}"
                 ),
             }
+            if "reply_destination_changed" in revision_assessment.reasons:
+                revision_payload["commands"] = [
+                    f"/send {task.short_id} --location {destination['location']} <final reply>"
+                ]
             if revision_assessment.impact == "none":
                 next_status = "closed" if output.watch_action == "close" else "watching"
                 self.store.update_task_after_agent(
@@ -1644,6 +1933,7 @@ class TaskProcessingService:
                 proposed_reply=output.proposed_reply,
                 final_reply=composed.text,
                 reason="revision_correction_required",
+                reply_destination=destination,
                 approvable=_can_directly_approve(output.proposed_reply, composed),
                 payload_extra=revision_payload,
                 decision_reason=output.decision_reason,
@@ -1699,6 +1989,7 @@ class TaskProcessingService:
                 proposed_reply=postprocess.reply,
                 final_reply=composed.text,
                 reason=gate["reason"],
+                reply_destination=destination,
                 approvable=_can_directly_approve(postprocess.reply, composed),
                 payload_extra={"postprocess": postprocess.metadata}
                 if postprocess.applied
@@ -1726,6 +2017,7 @@ class TaskProcessingService:
             "source": "auto_reply",
             "policy_source": gate["policy_source"],
             "decision_reason": output.decision_reason,
+            "reply_destination": destination,
         }
         if postprocess.applied:
             payload["postprocess"] = postprocess.metadata
@@ -1815,6 +2107,7 @@ class TaskProcessingService:
         original_reply: str,
         run_id: str,
         cwd: str | Path | None,
+        before_attempt: Callable[[], bool] | None = None,
     ) -> ReplyPostprocessResult:
         return self.reply_postprocessor.run(
             task=task,
@@ -1823,6 +2116,7 @@ class TaskProcessingService:
             original_reply=original_reply,
             run_id=run_id,
             cwd=cwd,
+            before_attempt=before_attempt,
         )
 
     def _resource_preflight(

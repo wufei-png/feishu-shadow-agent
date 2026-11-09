@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from feishu_shadow_agent.feishu.lark_cli import LarkCliClient
+from feishu_shadow_agent.feishu.lark_cli import LarkCliClient, LarkCliCommandError
 from feishu_shadow_agent.types import LarkCliResult
 
 
@@ -32,6 +32,22 @@ def test_build_messages_search_for_group_at_me() -> None:
         "--is-at-me",
         "--no-reactions",
     ]
+
+
+def test_p2p_chat_list_requires_complete_pagination_metadata() -> None:
+    seen: list[list[str]] = []
+
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        seen.append(argv)
+        return LarkCliResult(
+            argv, 0, json_data={"data": {"chats": [], "has_more": True}}
+        )
+
+    client = LarkCliClient(runner=runner)
+    with pytest.raises(ValueError, match="incomplete"):
+        client.list_user_p2p_chats()
+    assert seen[0][seen[0].index("--types") + 1] == "p2p"
+    assert seen[0][seen[0].index("--as") + 1] == "user"
 
 
 def test_build_chat_messages_list_uses_order_flag() -> None:
@@ -135,6 +151,21 @@ def test_build_messages_send_defaults_to_dry_run_and_can_send_test() -> None:
     assert "--dry-run" not in send_argv
 
 
+@pytest.mark.parametrize("identity", ["user", "bot"])
+def test_reply_thread_flag_is_explicit_for_both_identities(identity: str) -> None:
+    client = LarkCliClient()
+    assert "--reply-in-thread" not in client.build_messages_reply(
+        as_identity=identity, message_id="om_root", text="hello", idempotency_key="idem"
+    )
+    assert "--reply-in-thread" in client.build_messages_reply(
+        as_identity=identity,
+        message_id="om_root",
+        text="hello",
+        idempotency_key="idem",
+        reply_in_thread=True,
+    )
+
+
 def test_build_messages_send_card_uses_interactive_content() -> None:
     client = LarkCliClient(path="lark-cli")
 
@@ -216,6 +247,107 @@ def test_run_json_returns_structured_error_for_non_json_stdout() -> None:
     assert "not valid JSON" in (result.error or "")
 
 
+def test_run_json_accepts_only_the_known_warning_before_complete_json() -> None:
+    warning = "warning: reactions_partial_failed: 1 message(s) failed (om_1)"
+    stdout = f'{warning}\n{{"ok":true,"data":{{"messages":[]}}}}'
+
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        return LarkCliResult(argv=argv, exit_code=0, stdout=stdout)
+
+    client = LarkCliClient(path="lark-cli", runner=runner)
+    page = client.get_messages(as_identity="user", message_ids=["om_1"])
+    assert page.items == []
+    assert page.warnings == (warning,)
+    result = client.run_json(["lark-cli", "x"])
+    assert result.stdout == stdout
+
+    for invalid in (
+        'warning: something_else\n{"ok":true}',
+        'warning: reactions_partial_failed_extra: unexpected\n{"ok":true}',
+        'warning: reactions_partial_failed\n{"ok":true}\nextra',
+        'warning: reactions_partial_failed\n{"ok":true}{"ok":true}',
+        "",
+    ):
+        stdout = invalid
+        assert not client.run_json(["lark-cli", "x"]).ok
+
+
+def test_message_page_preserves_known_warning_from_stderr() -> None:
+    warning = "warning: reactions_partial_failed: 2 message(s) failed (om_1, om_2)"
+
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        return LarkCliResult(
+            argv=argv,
+            exit_code=0,
+            stdout='{"ok":true,"data":{"messages":[]}}',
+            stderr=f"unrelated diagnostic\n{warning}\n",
+        )
+
+    page = LarkCliClient(runner=runner).get_messages(
+        as_identity="user", message_ids=["om_1"]
+    )
+    assert page.warnings == (warning,)
+
+
+def test_run_json_does_not_treat_error_envelope_as_success() -> None:
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        return LarkCliResult(
+            argv=argv, exit_code=0, stdout='{"ok":false,"error":"failed"}'
+        )
+
+    result = LarkCliClient(runner=runner).run_json(["lark-cli", "x"])
+    assert not result.ok
+    assert result.json_data == {"ok": False, "error": "failed"}
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {},
+        {"ok": False, "data": {"messages": []}},
+        {"code": 10002, "data": {"messages": []}},
+        {"data": {}},
+        {"data": {"messages": None}},
+        {"data": {"messages": [{"message_id": "om_1"}, None]}},
+        {"data": {"messages": [], "has_more": True}},
+        {"data": {"messages": [], "has_more": "unknown"}},
+        {"data": [], "has_more": True},
+        {"data": [], "has_more": "unknown"},
+        {"data": {"messages": [], "page_token": "inner"}, "page_token": "outer"},
+    ],
+)
+def test_invalid_message_page_is_not_an_empty_success(data: object) -> None:
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        return LarkCliResult(argv=argv, exit_code=0, json_data=data)
+
+    with pytest.raises(LarkCliCommandError):
+        LarkCliClient(runner=runner).get_messages(
+            as_identity="user", message_ids=["om_1"]
+        )
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"data": [{"message_id": "om_1"}], "has_more": True, "page_token": "next"},
+        {
+            "data": {"messages": [{"message_id": "om_1"}]},
+            "has_more": True,
+            "page_token": "next",
+        },
+    ],
+)
+def test_message_page_preserves_pagination_from_outer_envelope(data: object) -> None:
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        return LarkCliResult(argv=argv, exit_code=0, json_data=data)
+
+    page = LarkCliClient(runner=runner).get_messages(
+        as_identity="user", message_ids=["om_1"]
+    )
+    assert page.items == [{"message_id": "om_1"}]
+    assert page.has_more and page.next_page_token == "next"
+
+
 def test_run_json_preserves_command_failure() -> None:
     def runner(argv: list[str], timeout: int) -> LarkCliResult:
         return LarkCliResult(argv=argv, exit_code=3, stderr="bad", error="bad")
@@ -285,6 +417,19 @@ def test_search_messages_batches_within_requested_page_limit() -> None:
     assert seen[0][seen[0].index("--page-limit") + 1] == "2"
 
 
+def test_client_can_bound_one_scope_request_without_mutating_original() -> None:
+    timeouts: list[int] = []
+
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        timeouts.append(timeout)
+        return LarkCliResult(argv=argv, exit_code=0, json_data={})
+
+    client = LarkCliClient(timeout_seconds=30, runner=runner)
+    client.with_timeout(4).auth_status()
+    client.auth_status()
+    assert timeouts == [4, 30]
+
+
 def test_search_owner_messages_uses_sender_time_filters_page_all_and_no_reactions() -> (
     None
 ):
@@ -315,6 +460,17 @@ def test_search_owner_messages_uses_sender_time_filters_page_all_and_no_reaction
     assert "--end" in argv
     assert "--page-all" in argv
     assert "--no-reactions" in argv
+    client.search_owner_messages(
+        sender="ou_owner",
+        start=None,
+        end=None,
+        chat_type="group",
+        chat_id="oc_1",
+        page_token="next",
+        page_all=False,
+    )
+    assert "--page-all" not in seen[1]
+    assert seen[1][seen[1].index("--page-token") + 1] == "next"
 
 
 def test_download_resource_uses_bot_identity_and_actual_download() -> None:

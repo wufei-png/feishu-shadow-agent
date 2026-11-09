@@ -66,13 +66,26 @@ class BotMembershipService:
     def refresh(self, *, run_id: str) -> BotMembershipRefreshSummary:
         now = self.clock()
         candidates = self.store.list_bot_membership_candidate_chats()
-        due = [chat_id for chat_id in candidates if self._probe_due(chat_id, now=now)]
+        activations = {
+            str(item["chat_id"]): item["activation_id"]
+            for item in self.store.list_chat_policy_activations()
+        }
+        due = [
+            (chat_id, activations.get(chat_id))
+            for chat_id in candidates
+            if activations.get(chat_id) is not None
+            and self._probe_due(chat_id, now=now)
+        ]
         if not due:
             return BotMembershipRefreshSummary(candidates=len(candidates))
         auth = self.feishu.auth_status(verify=True)
         bot_open_id = _bot_open_id_from_auth(auth.json_data) if auth.ok else None
         summary = BotMembershipRefreshSummary(candidates=len(candidates))
-        for chat_id in due:
+        for chat_id, activation_id in due:
+            if activation_id is None or not self._activation_is_current(
+                chat_id, int(activation_id)
+            ):
+                continue
             if bot_open_id is None:
                 status: MembershipStatus = "unknown"
                 error = auth.error or "bot open_id is missing from auth status"
@@ -97,6 +110,8 @@ class BotMembershipService:
                             else "absent"
                         )
                         error = None
+            if not self._activation_is_current(chat_id, int(activation_id)):
+                continue
             notified = _record_observation(
                 store=self.store,
                 config=self.config,
@@ -118,6 +133,12 @@ class BotMembershipService:
                 notifications=summary.notifications + int(notified),
             )
         return summary
+
+    def _activation_is_current(self, chat_id: str, activation_id: int) -> bool:
+        return any(
+            item["chat_id"] == chat_id and item["activation_id"] == activation_id
+            for item in self.store.list_chat_policy_activations()
+        )
 
     def _probe_due(self, chat_id: str, *, now: str) -> bool:
         fact = self.store.get_bot_membership_fact(chat_id)
@@ -141,7 +162,11 @@ def record_bot_membership_absence(
     absence: BotMembershipAbsence,
     execution_mode: ExecutionMode = "production",
 ) -> None:
-    if not chat_id or chat_type != "group":
+    if (
+        not chat_id
+        or chat_type != "group"
+        or store.get_chat_product_policy(chat_id) is None
+    ):
         return
     _record_observation(
         store=store,

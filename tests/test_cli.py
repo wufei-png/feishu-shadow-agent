@@ -53,6 +53,8 @@ def _insert_task(store: SQLiteStore, short_id: str, root_message_id: str) -> int
             ),
         )
     assert cursor.lastrowid is not None
+    if store.get_message(root_message_id) is None:
+        _insert_message(store, root_message_id)
     return cursor.lastrowid
 
 
@@ -61,7 +63,7 @@ def _insert_message(store: SQLiteStore, message_id: str) -> None:
     with store.connect() as conn:
         conn.execute(
             """
-            INSERT INTO messages(message_id, chat_id, chat_type, sender_id, sent_at, text, raw_json, inserted_at)
+            INSERT OR IGNORE INTO messages(message_id, chat_id, chat_type, sender_id, sent_at, text, raw_json, inserted_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
@@ -254,8 +256,13 @@ def test_daemon_send_owner_notifications_help_describes_dry_run_send(capsys) -> 
     assert "no-op daemon skeleton" not in output
     assert "do not send external replies" in output
     assert "record local state and dispatch previews" in output
-    assert "actually send and consume owner_notification" in output
-    assert "external replies stay pending" in output
+    assert "incompatible with --dry-run" in output
+    assert "local Console" in output
+
+
+def test_daemon_rejects_dry_run_owner_notifications(capsys) -> None:
+    assert main(["daemon", "--dry-run", "--send-owner-notifications"]) == 2
+    assert "cannot send owner notifications" in capsys.readouterr().err
 
 
 def test_config_schema_outputs_json_schema(capsys) -> None:

@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { TFunction } from "i18next";
 import { HeartPulse, RefreshCw, Scissors, Send, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
@@ -13,9 +12,11 @@ import {
   Badge,
   Button,
   CommandResultPanel,
+  ConfirmButton,
   SectionHeader,
   TextareaField
 } from "../components/Primitives";
+import { failedCommandResult } from "../commandResult";
 import { invalidateAfterMaintenanceCommand } from "../queryKeys";
 import type { CommandResult } from "../types";
 
@@ -34,22 +35,22 @@ export function MaintenanceScreen({ token }: { token: string }) {
     mutationFn: (sendTest: boolean) => runDoctor(token, { send_test: sendTest, reason: cleanReason }),
     onSuccess: afterCommand,
     onError: (error, sendTest) =>
-      setCommandResult(errorResult(sendTest ? "maintenance.doctor_send_test" : "maintenance.doctor", error, t))
+      setCommandResult(failedCommandResult(sendTest ? "maintenance.doctor_send_test" : "maintenance.doctor", error, t("common.requestFailed")))
   });
   const config = useMutation({
     mutationFn: () => validateConfig(token, { reason: cleanReason }),
     onSuccess: afterCommand,
-    onError: (error) => setCommandResult(errorResult("maintenance.config_validate", error, t))
+    onError: (error) => setCommandResult(failedCommandResult("maintenance.config_validate", error, t("common.requestFailed")))
   });
   const retention = useMutation({
     mutationFn: (dryRun: boolean) => pruneRetention(token, { dry_run: dryRun, reason: cleanReason }),
     onSuccess: afterCommand,
-    onError: (error) => setCommandResult(errorResult("maintenance.retention_prune", error, t))
+    onError: (error) => setCommandResult(failedCommandResult("maintenance.retention_prune", error, t("common.requestFailed")))
   });
   const replyStyle = useMutation({
     mutationFn: (dryRun: boolean) => refreshReplyStyle(token, { dry_run: dryRun, reason: cleanReason }),
     onSuccess: afterCommand,
-    onError: (error) => setCommandResult(errorResult("maintenance.reply_style_refresh", error, t))
+    onError: (error) => setCommandResult(failedCommandResult("maintenance.reply_style_refresh", error, t("common.requestFailed")))
   });
 
   return (
@@ -75,14 +76,15 @@ export function MaintenanceScreen({ token }: { token: string }) {
               <HeartPulse aria-hidden="true" size={15} />
               {t("maintenance.runDoctor")}
             </Button>
-            <Button
+            <ConfirmButton
+              confirmLabel={t("maintenance.confirmSendTest")}
               disabled={doctor.isPending}
-              onClick={() => confirmThen(t("maintenance.confirmSendTest"), () => doctor.mutate(true))}
+              onConfirm={() => doctor.mutate(true)}
               tone="warning"
             >
               <Send aria-hidden="true" size={15} />
               {t("maintenance.sendTest")}
-            </Button>
+            </ConfirmButton>
             <Button disabled={config.isPending} onClick={() => config.mutate()} tone="neutral">
               <ShieldCheck aria-hidden="true" size={15} />
               {t("maintenance.validateConfig")}
@@ -100,14 +102,15 @@ export function MaintenanceScreen({ token }: { token: string }) {
               <Scissors aria-hidden="true" size={15} />
               {t("maintenance.previewPrune")}
             </Button>
-            <Button
+            <ConfirmButton
+              confirmLabel={t("maintenance.confirmPrune")}
               disabled={retention.isPending}
-              onClick={() => confirmThen(t("maintenance.confirmPrune"), () => retention.mutate(false))}
+              onConfirm={() => retention.mutate(false)}
               tone="danger"
             >
               <Scissors aria-hidden="true" size={15} />
               {t("maintenance.prune")}
-            </Button>
+            </ConfirmButton>
           </div>
         </section>
 
@@ -121,14 +124,15 @@ export function MaintenanceScreen({ token }: { token: string }) {
               <RefreshCw aria-hidden="true" size={15} />
               {t("maintenance.previewRefresh")}
             </Button>
-            <Button
+            <ConfirmButton
+              confirmLabel={t("maintenance.confirmRefresh")}
               disabled={replyStyle.isPending}
-              onClick={() => confirmThen(t("maintenance.confirmRefresh"), () => replyStyle.mutate(false))}
+              onConfirm={() => replyStyle.mutate(false)}
               tone="warning"
             >
               <RefreshCw aria-hidden="true" size={15} />
               {t("maintenance.refreshStyle")}
-            </Button>
+            </ConfirmButton>
           </div>
         </section>
       </div>
@@ -143,24 +147,4 @@ export function MaintenanceScreen({ token }: { token: string }) {
       </aside>
     </section>
   );
-}
-
-function confirmThen(message: string, action: () => void): void {
-  if (window.confirm(message)) {
-    action();
-  }
-}
-
-function errorResult(command: string, error: unknown, t: TFunction): CommandResult {
-  return {
-    status: "failed",
-    command,
-    actor: "local_console",
-    reason: null,
-    target: {},
-    changed: false,
-    result: { error: error instanceof Error ? error.message : t("common.requestFailed") },
-    warnings: [],
-    next_actions: []
-  };
 }

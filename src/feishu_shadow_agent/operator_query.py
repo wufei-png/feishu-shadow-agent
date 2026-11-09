@@ -36,6 +36,7 @@ from .operator_queries.health import (
 )
 from .operator_queries.message_detail import MessageDetailQuery
 from .operator_queries.policy import PolicyQuery
+from .operator_queries.storage import StorageQuery
 from .store.sqlite_store import (
     RUN_HEARTBEAT_STALE_AFTER_SECONDS,
     SQLiteStore,
@@ -77,7 +78,14 @@ class OperatorQueryService:
             validate_policy_store=self._policy_query.validate_policy_store,
         )
         self._feedback_query = FeedbackQuery(connect=self._connect, now=self._now)
+        self._storage_query = StorageQuery(
+            config=policy_import_source, base_dir=base_dir
+        )
         self.policy_resolver = self._policy_query.policy_resolver
+
+    def storage_summary(self) -> dict[str, Any] | None:
+        """Storage footprint read model; None when no runtime config is bound."""
+        return self._storage_query.storage_summary()
 
     def dashboard_snapshot(
         self,
@@ -124,7 +132,7 @@ class OperatorQueryService:
             stale_after_seconds=stale_after_seconds,
             limit=limit,
         )
-        return {
+        snapshot: dict[str, Any] = {
             "daemon_liveness": daemon_liveness(
                 run_runtime_summary(daemon_run) if daemon_run else None,
                 now=now,
@@ -161,6 +169,10 @@ class OperatorQueryService:
             ),
             "recent_failed_actions": failed_or_needs_review,
         }
+        storage = self.storage_summary()
+        if storage is not None:
+            snapshot["storage"] = storage
+        return snapshot
 
     def _attention_work(
         self, *, now: str, stale_after_seconds: int, limit: int
@@ -572,6 +584,7 @@ class OperatorQueryService:
                     SELECT t.id, t.short_id, t.status, t.chat_id, t.chat_type, t.thread_id,
                            t.root_message_id, t.task_label, t.watch_until, t.updated_at,
                            t.agent_working_dir,
+                           EXISTS(SELECT 1 FROM group_policy_holds h WHERE h.kind = 'task' AND h.item_id = t.id) AS policy_held,
                            COUNT(tm.message_id) AS message_count,
                            (
                              SELECT COUNT(*)
@@ -621,7 +634,8 @@ class OperatorQueryService:
                 task = conn.execute(
                     # `_id_lookup` returns fixed SQL fragments and bound values.
                     f"""
-                    SELECT t.*, COUNT(tm.message_id) AS message_count
+                    SELECT t.*, COUNT(tm.message_id) AS message_count,
+                           EXISTS(SELECT 1 FROM group_policy_holds h WHERE h.kind = 'task' AND h.item_id = t.id) AS policy_held
                     FROM tasks t
                     LEFT JOIN task_messages tm ON tm.task_id = t.id
                     WHERE {where_sql}
@@ -665,7 +679,9 @@ class OperatorQueryService:
                            pra.reason AS retry_reason,
                            pra.error AS retry_error,
                            pra.created_at AS retry_created_at,
-                           pra.finished_at AS retry_finished_at
+                           pra.finished_at AS retry_finished_at,
+                           EXISTS(SELECT 1 FROM group_policy_holds h
+                                  WHERE h.kind = 'retry' AND h.item_id = pra.id) AS retry_policy_held
                     FROM message_processing mp
                     LEFT JOIN processing_retry_attempts pra ON pra.id = (
                       SELECT latest.id FROM processing_retry_attempts latest
@@ -720,6 +736,7 @@ class OperatorQueryService:
                 actions,
                 status=task_summary["status"],
                 task_id=task_summary["task_id"],
+                policy_held=task_summary["policy_held"],
             ),
         }
 
@@ -749,7 +766,8 @@ class OperatorQueryService:
                     # `where_sql` is assembled from fixed query fragments; all
                     # caller values remain bound parameters.
                     f"""
-                    SELECT a.*, t.short_id AS task_short_id
+                    SELECT a.*, t.short_id AS task_short_id,
+                           EXISTS(SELECT 1 FROM group_policy_holds h WHERE h.kind = 'action' AND h.item_id = a.id) AS policy_held
                     FROM actions a
                     LEFT JOIN tasks t ON t.id = a.task_id
                     {where_sql}
@@ -767,7 +785,8 @@ class OperatorQueryService:
             with self._connect() as conn:
                 action = conn.execute(
                     """
-                    SELECT a.*, t.short_id AS task_short_id
+                    SELECT a.*, t.short_id AS task_short_id,
+                           EXISTS(SELECT 1 FROM group_policy_holds h WHERE h.kind = 'action' AND h.item_id = a.id) AS policy_held
                     FROM actions a
                     LEFT JOIN tasks t ON t.id = a.task_id
                     WHERE a.id = ?
@@ -896,11 +915,14 @@ def _task_recommended_actions(
     *,
     status: str | None = None,
     task_id: str | None = None,
+    policy_held: bool = False,
 ) -> list[str]:
     recommendations: list[str] = []
     if task_id:
         if status == TaskStatus.WATCHING.value:
             recommendations.append(f"task close --task-id {task_id}")
+            if policy_held:
+                recommendations.append(f"task reopen --task-id {task_id}")
         elif status in {
             TaskStatus.CLOSED.value,
             TaskStatus.CLOSED_BY_OWNER.value,
@@ -931,6 +953,7 @@ def _task_processing_dto(row: sqlite3.Row) -> dict[str, Any]:
             "error": row["retry_error"],
             "created_at": row["retry_created_at"],
             "finished_at": row["retry_finished_at"],
+            "policy_held": bool(row["retry_policy_held"]),
         }
     return {
         "id": int(row["id"]),

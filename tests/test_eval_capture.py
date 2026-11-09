@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from feishu_shadow_agent.config import ConfigService
+from feishu_shadow_agent.config import ChatPolicyConfig, ConfigService
 from feishu_shadow_agent.evals.artifacts import (
     EvalError,
     read_jsonl,
@@ -32,7 +32,7 @@ class FakeLarkClient:
 
     def search_messages(self, *, chat_type: str, **kwargs):
         return MessagePage(
-            [row for row in self.messages if row["chat_type"] == chat_type]
+            [row for row in self.messages if row.get("chat_type") == chat_type]
         )
 
     def version(self):
@@ -50,7 +50,7 @@ def test_capture_writes_flat_runnable_reviews_and_promotes_router(
         Path("tests/fixtures/minimal.config.yaml").read_text(encoding="utf-8"),
         encoding="utf-8",
     )
-    loaded = ConfigService().load(config_path)
+    loaded = _seeded_config(config_path)
     messages = [
         _message("om_1", minute=1, direct=False),
         _message("om_2", minute=2, direct=True),
@@ -115,7 +115,7 @@ def test_task_session_promotion_preserves_expected_skills(tmp_path: Path) -> Non
         Path("tests/fixtures/minimal.config.yaml").read_text(encoding="utf-8"),
         encoding="utf-8",
     )
-    loaded = ConfigService().load(config_path)
+    loaded = _seeded_config(config_path)
     message = _message("om_1", minute=1, direct=True)
     service = EvalService(loaded=loaded, lark_client=FakeLarkClient([message]))
     case = service.capture_case(
@@ -153,7 +153,7 @@ def test_capture_candidates_deduplicates_union(tmp_path: Path) -> None:
         Path("tests/fixtures/minimal.config.yaml").read_text(encoding="utf-8"),
         encoding="utf-8",
     )
-    loaded = ConfigService().load(config_path)
+    loaded = _seeded_config(config_path)
     messages = [
         _message("om_group", minute=1, direct=True),
         {
@@ -167,6 +167,39 @@ def test_capture_candidates_deduplicates_union(tmp_path: Path) -> None:
 
     assert [row["message_id"] for row in rows] == ["om_p2p", "om_group"]
     assert [row["sources"] for row in rows] == [["p2p"], ["group_at_me"]]
+
+
+def test_capture_does_not_query_unconfigured_groups(tmp_path: Path) -> None:
+    loaded = _loaded_config(tmp_path)
+    SQLiteStore(
+        loaded.base_dir / loaded.config.storage.sqlite_path
+    ).delete_chat_product_policy("oc_test", actor="test")
+
+    class RecordingClient(FakeLarkClient):
+        def __init__(self):
+            super().__init__([_message("om_hidden", minute=1, direct=True)])
+            self.scopes: list[tuple[str, str | None]] = []
+
+        def search_messages(self, *, chat_type: str, chat_id=None, **kwargs):
+            self.scopes.append((chat_type, chat_id))
+            return super().search_messages(chat_type=chat_type, **kwargs)
+
+        def get_messages(self, **kwargs):
+            raise AssertionError("unclassified message IDs must not be fetched")
+
+    client = RecordingClient()
+    service = EvalService(loaded=loaded, lark_client=client)
+    assert service.capture_candidates(lookback_days=2, limit=20) == []
+    with pytest.raises(EvalError, match="not found in configured groups"):
+        service.capture_case(
+            message_id="om_hidden",
+            context_before=0,
+            context_after=0,
+            lookback_days=2,
+            label=None,
+            allow_sensitive_config=False,
+        )
+    assert client.scopes == [("p2p", None), ("p2p", None)]
 
 
 def test_capture_candidates_fetches_all_pages_before_global_limit(
@@ -291,9 +324,7 @@ def test_capture_resolves_p2p_source_when_mget_omits_chat_type(
 
     class SourceClient(FakeLarkClient):
         def search_messages(self, *, chat_id=None, chat_type=None, **kwargs):
-            assert chat_id == "oc_test"
-            assert chat_type is None
-            return MessagePage([searched])
+            return MessagePage([searched] if chat_type == "p2p" else [])
 
     service = EvalService(loaded=loaded, lark_client=SourceClient([seed]))
     case = service.capture_case(
@@ -309,6 +340,30 @@ def test_capture_resolves_p2p_source_when_mget_omits_chat_type(
     full_chain = read_yaml(case / "full_chain.review.yaml")
     assert router["scenario"]["target"]["source"] == "p2p"
     assert full_chain["scenario"]["target"]["source"] == "p2p"
+
+
+def test_capture_excludes_linked_policy_held_task_fixture(tmp_path: Path) -> None:
+    loaded = _loaded_config(tmp_path)
+    first = _message("om_1", minute=1, direct=True)
+    target = _message("om_2", minute=2, direct=True)
+    store = SQLiteStore(loaded.base_dir / loaded.config.storage.sqlite_path)
+    message = MessageNormalizer(owner_open_id="ou_owner").normalize(first)
+    store.upsert_message(message)
+    store.create_task_for_message(message, watch_until="2026-07-10T12:00:00+08:00")
+    store.delete_chat_product_policy("oc_test", actor="owner")
+    store.upsert_chat_product_policy(
+        {"chat_id": "oc_test", **ChatPolicyConfig().model_dump()}, actor="owner"
+    )
+    service = EvalService(loaded=loaded, lark_client=FakeLarkClient([first, target]))
+    case = service.capture_case(
+        message_id="om_2",
+        context_before=1,
+        context_after=0,
+        lookback_days=2,
+        label=None,
+        allow_sensitive_config=False,
+    )
+    assert read_yaml(case / "router.review.yaml")["scenario"]["tasks"] == {}
 
 
 def test_capture_reads_minimal_task_fixture_from_production_store(
@@ -422,7 +477,7 @@ def test_promote_rejects_expired_watching_router_fixture(tmp_path: Path) -> None
         .replace("watch_minutes: 120", "watch_minutes: 1"),
         encoding="utf-8",
     )
-    loaded = ConfigService().load(config_path)
+    loaded = _seeded_config(config_path)
     first = _message("om_1", minute=1, direct=True)
     target = _message("om_2", minute=3, direct=True)
     service = EvalService(loaded=loaded, lark_client=FakeLarkClient([first, target]))
@@ -462,7 +517,14 @@ def _loaded_config(tmp_path: Path):
         Path("tests/fixtures/minimal.config.yaml").read_text(encoding="utf-8"),
         encoding="utf-8",
     )
-    return ConfigService().load(config_path)
+    return _seeded_config(config_path)
+
+
+def _seeded_config(config_path: Path):
+    loaded = ConfigService().load(config_path)
+    store = SQLiteStore(loaded.base_dir / loaded.config.storage.sqlite_path)
+    store.import_product_policy_from_config(loaded.config)
+    return loaded
 
 
 def _message(message_id: str, *, minute: int, direct: bool) -> dict:

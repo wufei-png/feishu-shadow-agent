@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -33,6 +34,14 @@ class LarkCliClient:
         self.cwd = None if cwd is None else Path(cwd)
         self._runner = runner
 
+    def with_timeout(self, timeout_seconds: int) -> LarkCliClient:
+        return LarkCliClient(
+            path=self.path,
+            timeout_seconds=min(self.timeout_seconds, timeout_seconds),
+            cwd=self.cwd,
+            runner=self._runner,
+        )
+
     def build_version(self) -> list[str]:
         return [self.path, "--version"]
 
@@ -41,6 +50,51 @@ class LarkCliClient:
         if verify:
             argv.append("--verify")
         return argv
+
+    def build_user_p2p_chat_list(self, *, page_token: str | None = None) -> list[str]:
+        argv = [
+            self.path,
+            "im",
+            "+chat-list",
+            "--as",
+            "user",
+            "--types",
+            "p2p",
+            "--user-id-type",
+            "open_id",
+            "--page-size",
+            "100",
+            "--json",
+        ]
+        _extend_option(argv, "--page-token", page_token)
+        return argv
+
+    def list_user_p2p_chats(self, *, page_token: str | None = None) -> MessagePage:
+        result = self.run_json(self.build_user_p2p_chat_list(page_token=page_token))
+        if not result.ok:
+            raise LarkCliCommandError(result)
+        data: Any = result.json_data
+        if not isinstance(data, dict):
+            raise ValueError("chat list response is not an object")
+        source: Any = cast(dict[str, Any], data).get("data", data)
+        if not isinstance(source, dict):
+            raise ValueError("chat list response is missing data")
+        source = cast(dict[str, Any], source)
+        chats = source.get("chats")
+        has_more = source.get("has_more")
+        token = source.get("page_token")
+        if not isinstance(chats, list) or not isinstance(has_more, bool):
+            raise ValueError("chat list response lacks complete pagination metadata")
+        if any(not isinstance(chat, dict) for chat in cast(list[object], chats)):
+            raise ValueError("chat list contains malformed rows")
+        if has_more and (not isinstance(token, str) or not token):
+            raise ValueError("chat list is incomplete without a next page token")
+        return MessagePage(
+            items=cast(list[dict[str, Any]], chats),
+            next_page_token=token if has_more and isinstance(token, str) else None,
+            has_more=has_more,
+            raw=cast(dict[str, Any], data),
+        )
 
     def build_messages_search(
         self,
@@ -175,6 +229,7 @@ class LarkCliClient:
         message_id: str,
         text: str,
         idempotency_key: str,
+        reply_in_thread: bool = False,
         dry_run: bool = True,
     ) -> list[str]:
         _validate_identity(as_identity)
@@ -198,6 +253,8 @@ class LarkCliClient:
             "--idempotency-key",
             idempotency_key,
         ]
+        if reply_in_thread:
+            argv.append("--reply-in-thread")
         if dry_run:
             argv.append("--dry-run")
         return argv
@@ -389,6 +446,7 @@ class LarkCliClient:
         message_id: str,
         text: str,
         idempotency_key: str,
+        reply_in_thread: bool = False,
         dry_run: bool = True,
     ) -> LarkCliResult:
         return self.run_json(
@@ -397,6 +455,7 @@ class LarkCliClient:
                 message_id=message_id,
                 text=text,
                 idempotency_key=idempotency_key,
+                reply_in_thread=reply_in_thread,
                 dry_run=dry_run,
             )
         )
@@ -459,6 +518,7 @@ class LarkCliClient:
             has_more=page.has_more,
             raw=page.raw,
             page_count=page_count,
+            warnings=page.warnings,
         )
 
     def search_owner_messages(
@@ -467,13 +527,20 @@ class LarkCliClient:
         sender: str,
         start: str | None,
         end: str | None,
+        chat_type: str | None = None,
+        chat_id: str | None = None,
+        page_token: str | None = None,
+        page_all: bool = True,
     ) -> MessagePage:
         result = self.run_json(
             self.build_messages_search(
                 sender=sender,
+                chat_type=chat_type,
+                chat_id=chat_id,
                 start=start,
                 end=end,
-                page_all=True,
+                page_token=page_token,
+                page_all=page_all,
                 query="",
                 no_reactions=True,
             )
@@ -595,13 +662,16 @@ class LarkCliClient:
                             error=f"stdout was not valid JSON: {exc}",
                         )
                 else:
+                    error = result.error
+                    if _cli_reported_error(json_data):
+                        error = error or "lark-cli reported an error"
                     return LarkCliResult(
                         argv=result.argv,
                         exit_code=result.exit_code,
                         stdout=result.stdout,
                         stderr=result.stderr,
                         json_data=json_data,
-                        error=result.error,
+                        error=error,
                         timed_out=result.timed_out,
                     )
             elif result.ok:
@@ -610,8 +680,10 @@ class LarkCliClient:
                     exit_code=result.exit_code,
                     stdout=result.stdout,
                     stderr=result.stderr,
-                    json_data={},
+                    error="stdout was empty instead of JSON",
                 )
+        if parse_json and result.ok and _cli_reported_error(result.json_data):
+            return replace(result, error="lark-cli reported an error")
         return result
 
 
@@ -681,46 +753,100 @@ def _extend_option(argv: list[str], option: str, value: str | None) -> None:
 
 
 def _json_stdout(stdout: str) -> str:
+    return _json_stdout_and_warnings(stdout)[0]
+
+
+def _json_stdout_and_warnings(stdout: str) -> tuple[str, tuple[str, ...]]:
     text = stdout.strip()
     if text.startswith("=== Dry Run ==="):
         text = text.removeprefix("=== Dry Run ===").strip()
-    return text
+    # Only discard the known, nonfatal lark-cli warning. Do not search for a
+    # JSON fragment inside arbitrary output or accept extra trailing content.
+    lines = text.splitlines()
+    warnings: list[str] = []
+    while lines and _is_known_warning(lines[0]):
+        warnings.append(lines[0].strip())
+        lines.pop(0)
+    text = "\n".join(lines).strip()
+    return text, tuple(warnings)
+
+
+def _is_known_warning(line: str) -> bool:
+    warning = "warning: reactions_partial_failed"
+    stripped = line.strip()
+    return stripped == warning or stripped.startswith(f"{warning}:")
+
+
+def _cli_reported_error(data: Any) -> bool:
+    if not isinstance(data, dict):
+        return False
+    envelope = cast(dict[str, Any], data)
+    if envelope.get("ok") is False:
+        return True
+    code = envelope.get("code")
+    return (isinstance(code, int) and not isinstance(code, bool) and code != 0) or (
+        isinstance(code, str) and code.isdecimal() and int(code) != 0
+    )
 
 
 def _message_page_from_result(result: LarkCliResult) -> MessagePage:
     if not result.ok:
         raise LarkCliCommandError(result)
-    return _extract_message_page(result.json_data)
+    try:
+        page = _extract_message_page(result.json_data)
+        _, stdout_warnings = _json_stdout_and_warnings(result.stdout)
+        stderr_warnings = tuple(
+            line.strip()
+            for line in result.stderr.splitlines()
+            if _is_known_warning(line)
+        )
+        return replace(page, warnings=stdout_warnings + stderr_warnings)
+    except ValueError as exc:
+        raise LarkCliCommandError(
+            replace(result, error=f"invalid message page: {exc}")
+        ) from exc
 
 
 def _extract_message_page(data: Any) -> MessagePage:
-    source = data
+    source: Any = data
+    pagination_sources: list[dict[str, Any]] = []
     if isinstance(source, dict):
         source_map = cast(dict[str, Any], source)
+        pagination_sources.append(source_map)
+        if source_map.get("ok") is False:
+            raise ValueError("CLI reported an error")
+        code = source_map.get("code")
+        if code not in (None, 0, "0"):
+            raise ValueError(f"API returned code {code}")
         nested = source_map.get("data")
         if isinstance(nested, dict):
             source = cast(dict[str, Any], nested)
+            pagination_sources.append(source)
     if isinstance(source, list):
-        return MessagePage(
-            items=[
-                cast(dict[str, Any], item)
-                for item in cast(list[object], source)
-                if isinstance(item, dict)
-            ],
-            raw=data,
-        )
+        return MessagePage(items=_message_items(cast(list[object], source)), raw=data)
     if not isinstance(source, dict):
-        return MessagePage(items=[], raw=data)
+        raise ValueError("expected a message list or page object")
 
     source_map = cast(dict[str, Any], source)
     items = _extract_items(source_map)
-    next_page_token = _string_or_none(
-        source_map.get("page_token")
-        or source_map.get("next_page_token")
-        or source_map.get("next_page")
-        or source_map.get("nextPageToken")
-    )
-    has_more = _truthy(source_map.get("has_more")) or bool(next_page_token)
+    tokens: set[str] = set()
+    has_more = False
+    for pagination in pagination_sources:
+        token = _string_or_none(
+            pagination.get("page_token")
+            or pagination.get("next_page_token")
+            or pagination.get("next_page")
+            or pagination.get("nextPageToken")
+        )
+        if token:
+            tokens.add(token)
+        has_more = _page_has_more(pagination.get("has_more")) or has_more
+    if len(tokens) > 1:
+        raise ValueError("conflicting next page tokens")
+    next_page_token = next(iter(tokens), None)
+    has_more = has_more or bool(next_page_token)
+    if has_more and not next_page_token:
+        raise ValueError("has_more is true without a next page token")
     return MessagePage(
         items=items, next_page_token=next_page_token, has_more=has_more, raw=data
     )
@@ -728,21 +854,21 @@ def _extract_message_page(data: Any) -> MessagePage:
 
 def _extract_items(source: dict[str, Any]) -> list[dict[str, Any]]:
     for key in ("items", "messages", "message_list"):
-        value = source.get(key)
-        if isinstance(value, list):
-            return [
-                cast(dict[str, Any], item)
-                for item in cast(list[object], value)
-                if isinstance(item, dict)
-            ]
+        if key in source:
+            value = source[key]
+            if not isinstance(value, list):
+                raise ValueError(f"{key} must be a list")
+            return _message_items(cast(list[object], value))
     data = source.get("data")
     if isinstance(data, list):
-        return [
-            cast(dict[str, Any], item)
-            for item in cast(list[object], data)
-            if isinstance(item, dict)
-        ]
-    return []
+        return _message_items(cast(list[object], data))
+    raise ValueError("message list is missing")
+
+
+def _message_items(items: list[object]) -> list[dict[str, Any]]:
+    if any(not isinstance(item, dict) for item in items):
+        raise ValueError("message list contains a non-object item")
+    return cast(list[dict[str, Any]], items)
 
 
 def _decode_command_output(value: str | bytes | None) -> str:
@@ -760,11 +886,17 @@ def _string_or_none(value: Any) -> str | None:
     return value or None
 
 
-def _truthy(value: Any) -> bool:
+def _page_has_more(value: Any) -> bool:
+    if value is None:
+        return False
     if isinstance(value, bool):
         return value
-    if isinstance(value, (int, float)):
-        return value != 0
+    if isinstance(value, int) and value in (0, 1):
+        return value == 1
     if isinstance(value, str):
-        return value.lower() in {"true", "1", "yes"}
-    return False
+        lowered = value.lower()
+        if lowered in {"true", "1", "yes"}:
+            return True
+        if lowered in {"false", "0", "no"}:
+            return False
+    raise ValueError("has_more is invalid")

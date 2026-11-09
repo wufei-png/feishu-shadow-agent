@@ -37,6 +37,10 @@ def _store_with_approval(
         )
         assert cursor.lastrowid is not None
         task_id = cursor.lastrowid
+        conn.execute(
+            "INSERT INTO messages(message_id, chat_id, chat_type, raw_json, inserted_at) VALUES (?, ?, ?, ?, ?)",
+            ("om_root", "oc_1", "p2p", "{}", "now"),
+        )
     approval_pk = store.create_send_reply_approval(
         task_id=task_id,
         preview=text,
@@ -114,6 +118,51 @@ def test_approval_card_binds_concrete_approval_and_form_fields() -> None:
     assert reply_input["max_length"] == CARD_REPLY_MAX_LENGTH
     assert all(button["value"]["approval_id"] == "a_1" for button in buttons)
     assert all(button["action_type"] == "form_submit" for button in buttons)
+
+
+def test_approval_card_displays_destination_and_available_location() -> None:
+    base = {
+        "approval_id": "a_1",
+        "task_id": "t_1",
+        "suggested_reply": "hello",
+        "reply_target_message_id": "om_root",
+    }
+    card = build_approval_card(
+        base
+        | {
+            "reply_destination": {
+                "chat_id": "oc_1",
+                "location": "thread",
+                "thread_id": "omt_1",
+            }
+        }
+    )
+    details = card["body"]["elements"][0]["text"]["content"]
+    assert "回复目标：om_root" in details
+    assert "回复位置：话题" in details
+
+    unresolved = build_approval_card(
+        base | {"approvable": False, "allowed_reply_locations": ["thread"]}
+    )
+    details = unresolved["body"]["elements"][0]["text"]["content"]
+    assert "--location <thread>" in details
+
+
+def test_unapprovable_card_shows_preview_without_enabling_send() -> None:
+    card = build_approval_card(
+        {
+            "approval_id": "a_1",
+            "task_id": "t_1",
+            "suggested_reply": "",
+            "preview": "候选回复",
+            "approvable": False,
+            "allowed_reply_locations": ["main", "thread"],
+        }
+    )
+    details = card["body"]["elements"][0]["text"]["content"]
+    assert "建议回复：候选回复" in details
+    buttons = card["body"]["elements"][2]["elements"][-1]["columns"]
+    assert all(column["elements"][0]["value"]["action"] != "send" for column in buttons)
 
 
 def test_approval_card_keeps_long_suggestion_in_details_but_caps_form_default() -> None:

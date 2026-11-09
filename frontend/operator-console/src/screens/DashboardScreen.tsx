@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, ArrowUpRight, Bell, CheckCircle2, ClipboardList, RefreshCw, Send, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -5,6 +6,7 @@ import { expireApprovals, getDashboard } from "../api";
 import {
   Badge,
   Button,
+  ConfirmButton,
   CommandResultPanel,
   EmptyState,
   ErrorState,
@@ -16,6 +18,7 @@ import {
   statusTone,
   TechnicalDetails
 } from "../components/Primitives";
+import { failedCommandResult } from "../commandResult";
 import { invalidateAfterMaintenanceCommand, queryKeys } from "../queryKeys";
 import { enumLabel } from "../presentation";
 import type { ApprovalSummary, AttentionTask, BotMembershipStatus, CommandResult, DispatchActionSummary, IngestionStatus, RouteKey } from "../types";
@@ -23,6 +26,7 @@ import type { ApprovalSummary, AttentionTask, BotMembershipStatus, CommandResult
 export function DashboardScreen({ token, navigate }: { token: string; navigate: (route: RouteKey, selectedId?: string, view?: "attention" | "all") => void }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const [expireResult, setExpireResult] = useState<CommandResult | null>(null);
   const dashboard = useQuery({
     queryKey: queryKeys.dashboard(),
     queryFn: () => getDashboard(token),
@@ -31,7 +35,13 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
   });
   const expire = useMutation({
     mutationFn: () => expireApprovals(token, { reason: "operator console maintenance" }),
-    onSuccess: async () => invalidateAfterMaintenanceCommand(queryClient)
+    onSuccess: async (result) => {
+      setExpireResult(result);
+      await invalidateAfterMaintenanceCommand(queryClient);
+    },
+    // A failed expiry used to leave the panel empty, which reads as "nothing
+    // happened" rather than "this failed".
+    onError: (error) => setExpireResult(failedCommandResult("maintenance.expire_approvals", error, t("common.requestFailed")))
   });
 
   if (dashboard.isLoading) {
@@ -94,10 +104,13 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
         />
       </div>
 
+      {/*
+        Three tiers, not five peers. The rail answers "is the machine configured
+        correctly", then "what is its condition", then "what changed recently";
+        the housekeeping command sits below all of it at a smaller size, because
+        an action is not a status readout.
+      */}
       <aside className="work-detail">
-        <IngestionPanel status={snapshot?.ingestion_status} />
-        <MembershipPanel status={snapshot?.bot_membership_status} />
-
         <div className="detail-panel">
           <p className="eyebrow">{t("dashboard.runtimeBoundary")}</p>
           <h2>{t("dashboard.runtimePolicy")}</h2>
@@ -120,11 +133,10 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
         </div>
 
         <div className="detail-panel">
-          <p className="eyebrow">{t("dashboard.maintenance")}</p>
-          <h2>{t("dashboard.expireTitle")}</h2>
-          <p className="detail-note">{t("dashboard.expireDetail")}</p>
-          <Button disabled={expire.isPending} onClick={() => expire.mutate()} tone="warning">{t("dashboard.expire")}</Button>
-          <CommandResultPanel result={(expire.data as CommandResult | undefined) ?? null} />
+          <p className="eyebrow">{t("dashboard.signalsEyebrow")}</p>
+          <h2>{t("dashboard.signalsTitle")}</h2>
+          <IngestionSignal status={snapshot?.ingestion_status} />
+          <MembershipSignal status={snapshot?.bot_membership_status} />
         </div>
 
         <div className="detail-panel">
@@ -133,25 +145,41 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
           {recentErrors.length ? (
             <ul className="timeline-list">
               {recentErrors.slice(0, 5).map((item, index) => (
-                <li key={`${String(item.type)}-${index}`}><AlertTriangle aria-hidden="true" size={14} /><span>{String(item.message ?? item.type ?? "recent issue")}</span><small title={String(item.status ?? "")}>{item.status ? enumLabel(t, "status", String(item.status)) : ""}</small></li>
+                <li key={`${String(item.type)}-${index}`}><AlertTriangle aria-hidden="true" size={14} /><span>{String(item.message ?? item.type ?? t("dashboard.recentIssue"))}</span><small title={String(item.status ?? "")}>{item.status ? enumLabel(t, "status", String(item.status)) : ""}</small></li>
               ))}
             </ul>
           ) : <div className="quiet-empty"><CheckCircle2 aria-hidden="true" size={18} /><span>{t("dashboard.noRecentErrors")}</span></div>}
           <p className="detail-note">{t("dashboard.healthIssues", { count: healthIssueCount })}</p>
         </div>
+
+        <div className="rail-action">
+          <div>
+            <h3>{t("dashboard.expireTitle")}</h3>
+            <p>{t("dashboard.expireDetail")}</p>
+          </div>
+          <ConfirmButton
+            confirmLabel={t("dashboard.confirmExpire")}
+            disabled={expire.isPending}
+            onConfirm={() => expire.mutate()}
+            tone="warning"
+          >
+            {t("dashboard.expire")}
+          </ConfirmButton>
+          <CommandResultPanel result={expireResult} />
+        </div>
+
       </aside>
     </section>
   );
 }
 
-function MembershipPanel({ status }: { status: BotMembershipStatus | undefined }) {
+function MembershipSignal({ status }: { status: BotMembershipStatus | undefined }) {
   const { t } = useTranslation();
   const attention = status?.facts.filter((fact) => fact.status !== "present") ?? [];
   return (
-    <div className="detail-panel">
-      <p className="eyebrow">{t("dashboard.membershipEyebrow")}</p>
+    <section className="signal-section">
       <div className="detail-title-row">
-        <h2>{t("dashboard.membershipTitle")}</h2>
+        <h3>{t("dashboard.membershipTitle")}</h3>
         <Badge tone={status?.summary.absent ? "danger" : status?.summary.unknown || status?.summary.unobserved ? "warning" : "success"}>
           {t("dashboard.membershipSummary", { absent: status?.summary.absent ?? 0, unknown: status?.summary.unknown ?? 0, unobserved: status?.summary.unobserved ?? 0 })}
         </Badge>
@@ -167,19 +195,18 @@ function MembershipPanel({ status }: { status: BotMembershipStatus | undefined }
           ))}
         </ul>
       ) : <div className="quiet-empty"><CheckCircle2 aria-hidden="true" size={18} /><span>{t("dashboard.membershipClear")}</span></div>}
-    </div>
+    </section>
   );
 }
 
-function IngestionPanel({ status }: { status: IngestionStatus | undefined }) {
+function IngestionSignal({ status }: { status: IngestionStatus | undefined }) {
   const { t } = useTranslation();
   const summary = status?.summary;
   const backlogs = status?.sources.filter((source) => !source.drain_complete) ?? [];
   return (
-    <div className="detail-panel">
-      <p className="eyebrow">{t("dashboard.ingestionEyebrow")}</p>
+    <section className="signal-section">
       <div className="detail-title-row">
-        <h2>{t("dashboard.ingestionTitle")}</h2>
+        <h3>{t("dashboard.ingestionTitle")}</h3>
         <Badge tone={summary?.backlog_count ? "warning" : "success"}>{t("dashboard.sourceCount", { count: summary?.backlog_count ?? 0 })}</Badge>
       </div>
       <dl className="fact-list">
@@ -197,7 +224,7 @@ function IngestionPanel({ status }: { status: IngestionStatus | undefined }) {
           ))}
         </ul>
       ) : <div className="quiet-empty"><CheckCircle2 aria-hidden="true" size={18} /><span>{t("dashboard.noBacklog")}</span></div>}
-    </div>
+    </section>
   );
 }
 

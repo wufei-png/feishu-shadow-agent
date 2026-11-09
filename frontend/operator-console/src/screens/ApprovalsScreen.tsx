@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, ClipboardList, Send } from "lucide-react";
+import { m } from "motion/react";
+import { failedCommandResult } from "../commandResult";
 import { useTranslation } from "react-i18next";
 import { approveApproval, expireApprovals, getApproval, getTask, listApprovals, rejectApproval, sendApproval } from "../api";
 import {
+  Fact,
   Badge,
   Button,
   CommandResultPanel,
@@ -25,12 +27,14 @@ import {
   TextareaField
 } from "../components/Primitives";
 import { invalidateAfterApprovalCommand, invalidateAfterMaintenanceCommand, queryKeys, type ApprovalFilter } from "../queryKeys";
+import { panelTransition, panelVariants } from "../motionTokens";
 import { enumLabel } from "../presentation";
 import type { ApprovalDetail, ApprovalStatus, ApprovalSummary, CommandResult } from "../types";
 
 type ApprovalDraft = {
   reason: string;
   finalReply: string;
+  replyLocation: "" | "main" | "thread";
 };
 
 type ApprovalCommandInput = {
@@ -38,10 +42,11 @@ type ApprovalCommandInput = {
   approval: ApprovalDetail;
   reason?: string;
   finalReply?: string;
+  replyLocation?: "main" | "thread";
   commandId: string;
 };
 
-const emptyDraft: ApprovalDraft = { reason: "", finalReply: "" };
+const emptyDraft: ApprovalDraft = { reason: "", finalReply: "", replyLocation: "" };
 const pageSize = 50;
 
 export function ApprovalsScreen({ token, selectedId }: { token: string; selectedId: string | null }) {
@@ -110,7 +115,11 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
       if (input.kind === "reject") {
         return rejectApproval(token, input.approval.approval_id, body);
       }
-      return sendApproval(token, input.approval.approval_id, { ...body, final_reply: input.finalReply });
+      return sendApproval(token, input.approval.approval_id, {
+        ...body,
+        final_reply: input.finalReply,
+        reply_location: input.replyLocation
+      });
     },
     onSuccess: async (result, input) => {
       setCommandResults((current) => ({ ...current, [input.approval.approval_id]: result }));
@@ -119,7 +128,7 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
     onError: (error, input) => {
       setCommandResults((current) => ({
         ...current,
-        [input.approval.approval_id]: errorResult(`approval.${input.kind}`, error)
+        [input.approval.approval_id]: failedCommandResult(`approval.${input.kind}`, error, t("common.requestFailed"))
       }));
     },
     onSettled: (_result, _error, input) => {
@@ -139,7 +148,7 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
       if (input.approvalId) {
         setCommandResults((current) => ({
           ...current,
-          [input.approvalId as string]: errorResult("maintenance.expire_approvals", error)
+          [input.approvalId as string]: failedCommandResult("maintenance.expire_approvals", error, t("common.requestFailed"))
         }));
       }
     }
@@ -150,6 +159,8 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
   const canApprove = detail.data?.available_commands.includes(`approve ${detail.data.approval_id}`) ?? false;
   const canReject = detail.data?.available_commands.includes(`reject ${detail.data.approval_id}`) ?? false;
   const canSend = detail.data?.available_commands.some((command) => command.startsWith("send ")) ?? false;
+  const existingLocation = replyLocation(detail.data?.payload);
+  const locationChoices = allowedLocations(detail.data?.payload);
   const approvalFilters: Array<{ value: ApprovalFilter; label: string }> = [
     { value: "pending", label: t("approvals.filters.pending") },
     { value: "expired", label: t("approvals.filters.expired") },
@@ -179,6 +190,7 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
       approval,
       reason: clean(selectedDraft.reason),
       finalReply: selectedDraft.finalReply,
+      replyLocation: selectedDraft.replyLocation || undefined,
       commandId: newCommandId()
     });
   }
@@ -246,7 +258,18 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
         </div>
       </div>
 
-      <aside className="work-detail">
+      {/*
+        Keyed on the selection so switching rows reads as the detail being
+        replaced rather than as every field changing at once.
+      */}
+      <m.aside
+        animate="visible"
+        className="work-detail"
+        key={selectedApprovalId ?? "none"}
+        initial="hidden"
+        transition={panelTransition}
+        variants={panelVariants}
+      >
         {selectedApprovalId && detail.isLoading ? <LoadingState title={t("approvals.detailLoading")} /> : null}
         {detail.error ? <ErrorState title={t("approvals.detailUnavailable")} error={detail.error} /> : null}
         {detail.data ? (
@@ -261,20 +284,22 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
               </div>
               <p className="preview-copy">{shortText(detail.data.preview, t("approvals.noApprovalPreview"))}</p>
               <FieldList>
-                <FactRow label={t("approvals.linkedTask")} value={detail.data.task_short_id ?? t("common.notLinked")} />
-                <FactRow label={t("approvals.createdAt")} value={formatDate(detail.data.created_at)} />
-                <FactRow label={t("approvals.expiresAt")} value={formatDate(detail.data.expires_at)} />
-                <FactRow label={t("approvals.recommendedAction")} value={enumLabel(t, "action", detail.data.recommended_action)} />
+                <Fact label={t("approvals.linkedTask")} value={detail.data.task_short_id ?? t("common.notLinked")} />
+                <Fact label={t("approvals.createdAt")} value={formatDate(detail.data.created_at)} />
+                <Fact label={t("approvals.expiresAt")} value={formatDate(detail.data.expires_at)} />
+                <Fact label={t("approvals.recommendedAction")} value={enumLabel(t, "action", detail.data.recommended_action)} />
+                <Fact label={t("approvals.replyTarget")} value={replyTarget(detail.data.payload) ?? t("common.notRecorded")} />
+                <Fact label={t("approvals.replyLocation")} value={existingLocation ? t(existingLocation === "thread" ? "approvals.locationThread" : "approvals.locationMain") : t("approvals.locationUnconfirmed")} />
               </FieldList>
               {postprocessInfo(detail.data.payload) ? (
                 <div className="subsection">
                   <p className="eyebrow">{t("approvals.postprocess")}</p>
                   <FieldList>
-                    <FactRow label={t("approvals.status")} value={enumLabel(t, "status", String(postprocessInfo(detail.data.payload)?.status ?? ""), t("common.unknown"))} />
-                    <FactRow label={t("approvals.guidance")} value={postprocessInfo(detail.data.payload)?.guidance || t("common.none")} />
-                    <FactRow label={t("approvals.failure")} value={postprocessInfo(detail.data.payload)?.failure || t("common.none")} />
-                    <FactRow label={t("approvals.approveBehavior")} value={enumLabel(t, "postprocess", postprocessInfo(detail.data.payload)?.approveBehavior, t("approvals.originalReply"))} />
-                    <FactRow label={t("approvals.rejectBehavior")} value={enumLabel(t, "postprocess", postprocessInfo(detail.data.payload)?.rejectBehavior, t("common.unknown"))} />
+                    <Fact label={t("approvals.status")} value={enumLabel(t, "status", String(postprocessInfo(detail.data.payload)?.status ?? ""), t("common.unknown"))} />
+                    <Fact label={t("approvals.guidance")} value={postprocessInfo(detail.data.payload)?.guidance || t("common.none")} />
+                    <Fact label={t("approvals.failure")} value={postprocessInfo(detail.data.payload)?.failure || t("common.none")} />
+                    <Fact label={t("approvals.approveBehavior")} value={enumLabel(t, "postprocess", postprocessInfo(detail.data.payload)?.approveBehavior, t("approvals.originalReply"))} />
+                    <Fact label={t("approvals.rejectBehavior")} value={enumLabel(t, "postprocess", postprocessInfo(detail.data.payload)?.rejectBehavior, t("common.unknown"))} />
                   </FieldList>
                 </div>
               ) : null}
@@ -323,8 +348,20 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
                 rows={4}
                 value={selectedDraft.finalReply}
               />
+              {!existingLocation && locationChoices.length ? (
+                <SegmentedControl
+                  label={t("approvals.replyLocation")}
+                  value={selectedDraft.replyLocation}
+                  options={locationChoices.map((location) => ({
+                    value: location,
+                    label: t(location === "thread" ? "approvals.locationThread" : "approvals.locationMain")
+                  }))}
+                  onChange={(replyLocation) => updateDraft({ replyLocation })}
+                />
+              ) : null}
+              {!existingLocation && !locationChoices.length ? <p className="detail-note">{t("approvals.locationUnavailable")}</p> : null}
               <Button
-                disabled={!canSend || !taskId || !selectedDraft.finalReply.trim() || selectedApprovalBusy || expire.isPending}
+                disabled={!canSend || !taskId || !selectedDraft.finalReply.trim() || (!existingLocation && !selectedDraft.replyLocation) || selectedApprovalBusy || expire.isPending}
                 onClick={() => runApprovalCommand("send")}
                 tone="info"
               >
@@ -343,10 +380,10 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
               {task.data ? (
                 <>
                   <FieldList>
-                    <FactRow label={t("approvals.taskStatus")} value={enumLabel(t, "status", task.data.status)} />
-                    <FactRow label={t("approvals.chat")} value={task.data.chat_id ?? t("common.notRecorded")} />
-                    <FactRow label={t("approvals.messageCount")} value={task.data.message_count} />
-                    <FactRow label={t("approvals.policySource")} value={enumLabel(t, "source", task.data.effective_policy.policy_source)} />
+                    <Fact label={t("approvals.taskStatus")} value={enumLabel(t, "status", task.data.status)} />
+                    <Fact label={t("approvals.chat")} value={task.data.chat_id ?? t("common.notRecorded")} />
+                    <Fact label={t("approvals.messageCount")} value={task.data.message_count} />
+                    <Fact label={t("approvals.policySource")} value={enumLabel(t, "source", task.data.effective_policy.policy_source)} />
                   </FieldList>
                   <ul className="timeline-list">
                     {task.data.recent_messages.slice(-4).map((message) => (
@@ -364,18 +401,26 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
         ) : selectedApproval ? null : (
           <EmptyState title={t("approvals.selectTitle")} detail={t("approvals.selectDetail")} />
         )}
-      </aside>
+      </m.aside>
     </section>
   );
 }
 
-function FactRow({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div>
-      <dt>{label}</dt>
-      <dd>{value}</dd>
-    </div>
-  );
+
+function replyLocation(payload: Record<string, unknown> | undefined): "main" | "thread" | null {
+  const destination = payload?.reply_destination;
+  if (!destination || typeof destination !== "object") return null;
+  const location = (destination as Record<string, unknown>).location;
+  return location === "main" || location === "thread" ? location : null;
+}
+
+function replyTarget(payload: Record<string, unknown> | undefined): string | null {
+  return typeof payload?.reply_target_message_id === "string" ? payload.reply_target_message_id : null;
+}
+
+function allowedLocations(payload: Record<string, unknown> | undefined): Array<"main" | "thread"> {
+  const value = payload?.allowed_reply_locations;
+  return Array.isArray(value) ? value.filter((item): item is "main" | "thread" => item === "main" || item === "thread") : [];
 }
 
 function clean(value: string): string | undefined {
@@ -438,19 +483,6 @@ function selectApproval(approvalId: string, setSelectedApprovalId: (approvalId: 
   window.location.hash = `approvals/${encodeURIComponent(approvalId)}`;
 }
 
-function errorResult(command: string, error: unknown): CommandResult {
-  return {
-    status: "failed",
-    command,
-    actor: "local_console",
-    reason: null,
-    target: {},
-    changed: false,
-    result: { error: error instanceof Error ? error.message : "Request failed." },
-    warnings: [],
-    next_actions: []
-  };
-}
 
 function newCommandId(): string {
   return `console_${crypto.randomUUID()}`;

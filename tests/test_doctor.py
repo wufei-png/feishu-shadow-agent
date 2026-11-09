@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 from feishu_shadow_agent.config import ConfigService, LoadedConfig
@@ -66,6 +67,12 @@ def ok_hermes(loaded: LoadedConfig) -> HealthCheckResult:
 
 def failed_hermes(loaded: LoadedConfig) -> HealthCheckResult:
     return HealthCheckResult("hermes_reachable", "critical", "failed", "down")
+
+
+def roomy_disk_usage(path: Path) -> tuple[int, int, int]:
+    """Host-independent volume so storage checks never decide these tests."""
+    gib = 1024**3
+    return (1_000 * gib, 500 * gib, 500 * gib)
 
 
 def _initialized_store(tmp_path: Path, loaded: LoadedConfig) -> SQLiteStore:
@@ -196,6 +203,7 @@ def test_doctor_all_green_and_default_owner_notification_is_dry_run(
         feishu_client=client,
         hermes_checker=ok_hermes,
         run_id="doctor_1",
+        disk_usage=roomy_disk_usage,
     )
 
     results = suite.run(send_test=False)
@@ -261,6 +269,139 @@ def test_doctor_rejects_wrong_storage_type_and_read_only_directory(
     errors = {item["name"]: item for item in result.details["errors"]}
     assert errors["resources"]["reason"] == "expected_directory"
     assert errors["jsonl_log"]["reason"] == "parent_directory_not_writable"
+
+
+def _storage_capacity_suite(
+    tmp_path: Path,
+    *,
+    total_bytes: int = 0,
+    free_bytes: int = 0,
+    probe: Callable[[Path], tuple[int, int, int]] | None = None,
+) -> HealthSuite:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+    loaded = ConfigService().load(config_path)
+    return HealthSuite(
+        loaded_config=loaded,
+        store=_initialized_store(tmp_path, loaded),
+        feishu_client=FakeFeishuClient(),
+        hermes_checker=ok_hermes,
+        disk_usage=probe
+        or (lambda path: (total_bytes, total_bytes - free_bytes, free_bytes)),
+    )
+
+
+def test_runtime_storage_capacity_measurement_failure_does_not_block(
+    tmp_path: Path,
+) -> None:
+    def broken(path: Path) -> tuple[int, int, int]:
+        raise OSError("statvfs failed")
+
+    result = _storage_capacity_suite(
+        tmp_path, probe=broken
+    )._check_runtime_storage_capacity()
+
+    assert result.status == "failed"
+    assert result.severity == "warning"
+    assert result.is_critical_failure is False
+
+
+def test_runtime_storage_capacity_ignores_implausible_measurements(
+    tmp_path: Path,
+) -> None:
+    gib = 1024**3
+    empty = _storage_capacity_suite(
+        tmp_path, total_bytes=0, free_bytes=0
+    )._check_runtime_storage_capacity()
+    negative = _storage_capacity_suite(
+        tmp_path, total_bytes=100 * gib, free_bytes=-1
+    )._check_runtime_storage_capacity()
+
+    assert empty.details["reason"] == "implausible_filesystem_size"
+    assert negative.details["reason"] == "implausible_filesystem_size"
+    assert empty.is_critical_failure is False
+    assert negative.is_critical_failure is False
+
+
+def test_runtime_storage_capacity_is_ok_on_a_roomy_volume(tmp_path: Path) -> None:
+    gib = 1024**3
+    suite = _storage_capacity_suite(
+        tmp_path, total_bytes=1_000 * gib, free_bytes=500 * gib
+    )
+
+    result = suite._check_runtime_storage_capacity()
+
+    assert result.status == "ok"
+    assert result.is_critical_failure is False
+    assert result.details["filesystem_free_bytes"] == 500 * gib
+    assert result.details["warning_floor_bytes"] == 100 * gib
+
+
+def test_runtime_storage_capacity_warns_below_the_warning_floor(
+    tmp_path: Path,
+) -> None:
+    gib = 1024**3
+    suite = _storage_capacity_suite(tmp_path, total_bytes=100 * gib, free_bytes=5 * gib)
+
+    result = suite._check_runtime_storage_capacity()
+
+    assert result.severity == "warning"
+    assert result.status == "failed"
+    assert result.is_critical_failure is False
+
+
+def test_runtime_storage_capacity_is_critical_below_the_critical_floor(
+    tmp_path: Path,
+) -> None:
+    mib = 1024**2
+    suite = _storage_capacity_suite(
+        tmp_path, total_bytes=1_000 * mib, free_bytes=100 * mib
+    )
+
+    result = suite._check_runtime_storage_capacity()
+
+    assert result.severity == "critical"
+    assert result.status == "failed"
+    assert result.is_critical_failure is True
+
+
+def test_runtime_storage_capacity_scales_with_large_volumes(tmp_path: Path) -> None:
+    tib = 1024**4
+    suite = _storage_capacity_suite(tmp_path, total_bytes=100 * tib, free_bytes=9 * tib)
+
+    result = suite._check_runtime_storage_capacity()
+
+    assert result.details["warning_floor_bytes"] == 10 * tib
+    assert result.is_critical_failure is False
+    assert result.status == "failed"
+
+
+def test_storage_capacity_caps_the_critical_floor_on_huge_volumes(
+    tmp_path: Path,
+) -> None:
+    tib = 1024**4
+    gib = 1024**3
+    suite = _storage_capacity_suite(tmp_path, total_bytes=100 * tib, free_bytes=2 * gib)
+
+    result = suite._check_runtime_storage_capacity()
+
+    assert result.details["critical_floor_bytes"] == gib
+    assert result.is_critical_failure is False
+    assert result.status == "failed"
+
+
+def test_runtime_critical_checks_include_storage_capacity(tmp_path: Path) -> None:
+    gib = 1024**3
+    suite = _storage_capacity_suite(
+        tmp_path, total_bytes=1_000 * gib, free_bytes=500 * gib
+    )
+
+    names = {result.name for result in suite.run_runtime_critical()}
+
+    assert "runtime_storage_capacity" in names
+    assert "runtime_storage_capacity" in {
+        result.name for result in suite.run(send_test=False)
+    }
 
 
 def test_doctor_fails_when_product_policy_store_is_not_initialized(
@@ -349,6 +490,7 @@ reply_postprocess:
         feishu_client=FakeFeishuClient(),
         hermes_checker=ok_hermes,
         run_id="doctor_1",
+        disk_usage=roomy_disk_usage,
     )
 
     results = suite.run(send_test=False)
@@ -387,6 +529,7 @@ reply_postprocess:
         feishu_client=FakeFeishuClient(),
         hermes_checker=ok_hermes,
         run_id="doctor_1",
+        disk_usage=roomy_disk_usage,
     )
 
     results = suite.run(send_test=False)
@@ -418,6 +561,25 @@ def test_missing_scope_is_critical_failure(tmp_path: Path) -> None:
     failed = {result.name: result for result in results if result.is_critical_failure}
     assert "required_user_scopes" in failed
     assert failed["required_user_scopes"].details["missing"] == ["search:message"]
+    assert "search:message" in failed["required_user_scopes"].message
+    assert "auth login --scope" in failed["required_user_scopes"].message
+
+
+def test_dry_run_doctor_policy_hint_targets_dry_run_store(tmp_path: Path) -> None:
+    loaded = ConfigService().load(FIXTURE)
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=SQLiteStore(tmp_path / "dry.sqlite3"),
+        feishu_client=FakeFeishuClient(),
+        hermes_checker=ok_hermes,
+        dry_run_mode=True,
+    )
+
+    results = suite.run(send_test=False)
+
+    policy = next(item for item in results if item.name == "product_policy_initialized")
+    assert policy.is_critical_failure
+    assert "policy import-config --mode dry-run" in policy.message
 
 
 def test_hermes_unreachable_is_critical_failure(tmp_path: Path) -> None:

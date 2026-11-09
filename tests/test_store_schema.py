@@ -112,6 +112,54 @@ def test_schema_migrates_v6_task_background_table(tmp_path: Path) -> None:
     assert version == SQLITE_SCHEMA_VERSION
 
 
+def test_schema_migrates_v7_query_indexes(tmp_path: Path) -> None:
+    path = tmp_path / "agent.sqlite3"
+    initial = SQLiteStore(path)
+    initial.initialize()
+    with initial.connect() as conn:
+        for name in (
+            "idx_health_checks_name_checked",
+            "idx_actions_status_updated",
+            "idx_approvals_status_expires",
+        ):
+            conn.execute(f"DROP INDEX {name}")
+        conn.execute("PRAGMA user_version = 7")
+
+    SQLiteStore(path).initialize()
+
+    with initial.connect() as conn:
+        indexes = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            )
+        }
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert {
+        "idx_health_checks_name_checked",
+        "idx_actions_status_updated",
+        "idx_approvals_status_expires",
+    } <= indexes
+    assert version == SQLITE_SCHEMA_VERSION
+
+
+def test_schema_migrates_v8_group_policy_holds(tmp_path: Path) -> None:
+    path = tmp_path / "agent.sqlite3"
+    initial = SQLiteStore(path)
+    initial.initialize()
+    with initial.connect() as conn:
+        conn.execute("DROP TABLE group_policy_holds")
+        conn.execute("PRAGMA user_version = 8")
+    SQLiteStore(path).initialize()
+    with initial.connect() as conn:
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'group_policy_holds'"
+        ).fetchone()
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert table is not None
+    assert version == SQLITE_SCHEMA_VERSION
+
+
 def test_schema_initialize_rejects_unmarked_existing_database(tmp_path: Path) -> None:
     path = tmp_path / "agent.sqlite3"
     schema_path = Path(__file__).parents[1] / "src/feishu_shadow_agent/store/schema.sql"

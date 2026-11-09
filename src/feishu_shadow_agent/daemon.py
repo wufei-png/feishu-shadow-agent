@@ -50,6 +50,10 @@ class Daemon:
         self.health_suite = health_suite
         self.tick_interval_seconds = tick_interval_seconds
         self.dry_run = dry_run
+        if dry_run and send_owner_notifications:
+            raise ValueError(
+                "dry-run approvals are local; owner notifications cannot be sent"
+            )
         self.app_config = app_config
         self.feishu_client = feishu_client
         self.task_processor = task_processor
@@ -66,7 +70,7 @@ class Daemon:
         self._lifecycle_condition = threading.Condition()
         self._wakeup_generation = 0
         self._stop_requested = False
-        self.card_action_connection = card_action_connection
+        self.card_action_connection = None if dry_run else card_action_connection
 
     def wake(self) -> None:
         """Wake the daemon loop so queued operator actions dispatch promptly."""
@@ -148,6 +152,7 @@ class Daemon:
                 task_processor=self.task_processor,
                 config_base_dir=self.config_base_dir,
                 monotonic=self.ingestion_monotonic,
+                dry_run=self.dry_run,
             )
             membership = BotMembershipService(
                 store=self.store,
@@ -164,7 +169,9 @@ class Daemon:
             stages = [
                 run_bot_membership,
                 service.run_processing_retries,
-                service.run_approval_inbox,
+                service.run_approval_inbox_placeholder
+                if self.dry_run
+                else service.run_approval_inbox,
                 *service.ordered_ingestion_stages(),
             ]
             for stage in stages:
@@ -254,8 +261,8 @@ class Daemon:
             dispatch = dispatcher.dispatch(
                 run_id=run_id,
                 allow_send_reply_actual=not self.dry_run and not approval_failed,
-                allow_owner_notification_actual=not self.dry_run
-                or self.send_owner_notifications,
+                allow_owner_notification_actual=not self.dry_run,
+                include_owner_notifications=not self.dry_run,
                 blocked_send_reply_reason="approval_inbox_failed"
                 if approval_failed and not self.dry_run
                 else None,
@@ -499,7 +506,12 @@ class Daemon:
                 "product_policy_initialized",
                 "critical",
                 "failed",
-                "Product Policy Store global policy is not initialized; run `policy import-config`.",
+                "Product Policy Store global policy is not initialized; run "
+                + (
+                    "`policy import-config --mode dry-run`."
+                    if self.dry_run
+                    else "`policy import-config`."
+                ),
                 {"missing": probe["missing"], "path": str(self.store.path)},
             )
         self.store.record_health_results(run_id=run_id, results=[result])

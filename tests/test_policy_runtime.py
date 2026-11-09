@@ -143,6 +143,95 @@ def _reply_decision(
     }
 
 
+class CountingPolicyRepository:
+    """Count repository reads so one resolution cannot re-read global policy."""
+
+    def __init__(self, store: SQLiteStore):
+        self.store = store
+        self.global_reads = 0
+        self.chat_reads = 0
+        self.membership_reads = 0
+
+    def get_product_policy(self) -> dict[str, Any] | None:
+        self.global_reads += 1
+        return self.store.get_product_policy()
+
+    def get_chat_product_policy(self, chat_id: str) -> dict[str, Any] | None:
+        self.chat_reads += 1
+        return self.store.get_chat_product_policy(chat_id)
+
+    def get_bot_membership_fact(self, chat_id: str) -> dict[str, Any] | None:
+        self.membership_reads += 1
+        return self.store.get_bot_membership_fact(chat_id)
+
+
+def test_reply_policy_resolution_reads_global_policy_once(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.import_product_policy_from_config(
+        _config(
+            reply_policy=ReplyPolicyConfig(
+                p2p_auto_reply=False, unknown_group_auto_reply=True
+            )
+        )
+    )
+    repository = CountingPolicyRepository(store)
+    resolver = PolicyResolver(repository)
+
+    p2p = _reply_decision(resolver, chat_id="ou_chat", chat_type="p2p")
+    group = _reply_decision(resolver, chat_id="oc_unknown")
+
+    assert p2p["reason"] == "p2p_auto_reply_disabled"
+    assert group["reason"] == "ok"
+    # One resolution per case: the P2P gate reuses the already-read global policy
+    # instead of loading it a second time.
+    assert repository.global_reads == 2
+    assert repository.chat_reads == 2
+    assert repository.membership_reads == 1
+
+
+def test_p2p_gate_uses_global_auto_reply_not_the_chat_policy(tmp_path: Path) -> None:
+    """The P2P gate is a global switch even when a chat row overrides auto_reply.
+
+    This is the invariant the single-snapshot refactor could most easily break:
+    reading ``policy.auto_reply`` instead of the global ``p2p_auto_reply`` would
+    keep every other test green.
+    """
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.import_product_policy_from_config(
+        _config(
+            reply_policy=ReplyPolicyConfig(
+                p2p_auto_reply=True, unknown_group_auto_reply=False
+            ),
+            chats={"ou_chat": ChatPolicyConfig(auto_reply=False, bot_joined=True)},
+        )
+    )
+    allowed = _reply_decision(PolicyResolver(store), chat_id="ou_chat", chat_type="p2p")
+
+    assert allowed == {
+        "allow": True,
+        "reason": "ok",
+        "identity": "user",
+        "policy_source": "explicit_chat",
+    }
+
+    blocked_store = SQLiteStore(tmp_path / "blocked.sqlite3")
+    blocked_store.import_product_policy_from_config(
+        _config(
+            reply_policy=ReplyPolicyConfig(
+                p2p_auto_reply=False, unknown_group_auto_reply=False
+            ),
+            chats={"ou_chat": ChatPolicyConfig(auto_reply=True, bot_joined=True)},
+        )
+    )
+    blocked = _reply_decision(
+        PolicyResolver(blocked_store), chat_id="ou_chat", chat_type="p2p"
+    )
+
+    assert blocked["allow"] is False
+    assert blocked["reason"] == "p2p_auto_reply_disabled"
+    assert blocked["policy_source"] == "explicit_chat"
+
+
 def test_policy_resolver_requires_initialized_product_policy(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     resolver = PolicyResolver(store)
@@ -303,6 +392,99 @@ def test_runtime_membership_absence_dedupes_notification_and_recovers(
         ).fetchone()["c"]
     assert notifications == 2
     assert policy_audits_after == policy_audits_before
+
+
+def test_group_removal_holds_related_owner_notifications(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    config = _config(chats={"oc_1": ChatPolicyConfig()})
+    store.import_product_policy_from_config(config)
+    message = _message(chat_id="oc_1")
+    store.upsert_message(message)
+    task = store.create_task_for_message(
+        message, watch_until="2999-01-01T00:00:00+00:00"
+    )
+    task_action = store.create_owner_notification_action(
+        task_id=task.id, payload={"type": "approval", "dedupe_key": "task"}
+    )
+    source_action = store.create_owner_notification_action(
+        task_id=None,
+        payload={"source_message_id": message.message_id, "dedupe_key": "source"},
+    )
+    membership_action = store.create_owner_notification_action(
+        task_id=None,
+        payload={
+            "type": "bot_membership_absent",
+            "chat_id": "oc_1",
+            "dedupe_key": "membership",
+        },
+    )
+    unrelated = store.create_owner_notification_action(
+        task_id=None, payload={"type": "other", "dedupe_key": "unrelated"}
+    )
+    store.delete_chat_product_policy("oc_1", actor="owner")
+    late_action = store.create_owner_notification_action(
+        task_id=task.id, payload={"type": "approval", "dedupe_key": "late"}
+    )
+
+    for action_id in (task_action, source_action, membership_action, late_action):
+        assert store.is_group_policy_held("action", action_id)
+        assert not store.group_send_allowed(action_id)
+        assert store.claim_action_for_dispatch(action_id) is None
+    assert [action.id for action in store.list_dispatchable_actions()] == [unrelated]
+    with pytest.raises(ValueError, match="group chat policy"):
+        store.retry_dispatch_action(source_action)
+    store.upsert_chat_product_policy(
+        {"chat_id": "oc_1", **ChatPolicyConfig().model_dump()}, actor="owner"
+    )
+    assert not store.group_send_allowed(source_action)
+    store.retry_dispatch_action(source_action)
+    assert store.group_send_allowed(source_action)
+    assert store.is_group_policy_held("action", task_action)
+
+
+def test_membership_only_probes_current_group_activations(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    config = _config(
+        chats={name: ChatPolicyConfig() for name in ("oc_old", "oc_a", "oc_b")}
+    )
+    store.import_product_policy_from_config(config)
+    old_message = _message(chat_id="oc_old")
+    store.upsert_message(old_message)
+    store.create_task_for_message(old_message, watch_until="2999-01-01T00:00:00+00:00")
+    store.delete_chat_product_policy("oc_old", actor="owner")
+
+    class RevokingClient(FakeMembershipClient):
+        def auth_status(self, *, verify: bool = True) -> LarkCliResult:
+            store.delete_chat_product_policy("oc_b", actor="owner")
+            return super().auth_status(verify=verify)
+
+        def list_chat_bots(
+            self, *, chat_id: str, as_identity: str = "user"
+        ) -> LarkCliResult:
+            result = super().list_chat_bots(chat_id=chat_id, as_identity=as_identity)
+            store.delete_chat_product_policy("oc_a", actor="owner")
+            store.upsert_chat_product_policy(
+                {"chat_id": "oc_a", **ChatPolicyConfig().model_dump()}, actor="owner"
+            )
+            return result
+
+    client = RevokingClient(
+        [LarkCliResult(["probe"], 0, json_data={"data": {"items": []}})]
+    )
+    service = BotMembershipService(
+        store=store,
+        feishu_client=client,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+    )
+    summary = service.refresh(run_id="run")
+
+    assert client.probes == ["oc_a"]
+    assert summary.probed == 0
+    assert store.get_bot_membership_fact("oc_a") is None
+    assert store.get_bot_membership_fact("oc_old") is None
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM actions").fetchone()[0] == 0
 
 
 def test_unknown_membership_uses_short_retry_without_becoming_absent(

@@ -1,53 +1,127 @@
+/*
+ * Token system.
+ *
+ * Neutral graphite base, one teal accent. The neutral ramp carries no hue of its
+ * own so the accent stays the only thing on screen that means something, and so
+ * the glass materials have a clean substrate to transmit.
+ *
+ * Material rule: glass marks where the machine reports on itself. Anything the
+ * operator must read verbatim (evidence, messages, policy text) stays opaque.
+ */
 :root {
   color-scheme: light;
   font-family: "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", sans-serif;
   -webkit-font-smoothing: antialiased;
   --font-display: "Bahnschrift", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
   --font-data: "JetBrains Mono", Consolas, monospace;
-  --surface-canvas: #f5f8f8;
+
+  /* Neutral graphite ramp: lightness only, no hue. */
+  --surface-canvas: #f2f2f4;
   --surface-panel: #ffffff;
-  --surface-raised: #f0f5f5;
-  --surface-hover: #e8f1f0;
-  --surface-inset: #eaf0f0;
-  --text-primary: #17272b;
-  --text-secondary: #40585e;
-  --text-muted: #536b70;
-  --border-subtle: rgba(23, 39, 43, 0.11);
-  --border-strong: rgba(23, 39, 43, 0.24);
+  --surface-raised: #f7f7f9;
+  --surface-hover: #ededf0;
+  --surface-inset: #e8e8ec;
+  --text-primary: #17171a;
+  --text-secondary: #4c4c55;
+  --text-muted: #6f6f7a;
+  --border-subtle: rgba(20, 20, 26, 0.1);
+  --border-strong: rgba(20, 20, 26, 0.22);
+
+  /* Nav rail states. Explicit per theme: the rail sits on the canvas tone, so
+   * hover and active cannot be derived from the surface ramp without inverting
+   * their order in one of the two themes. */
+  --surface-nav-hover: rgba(20, 20, 26, 0.055);
+  --surface-nav-active: #ffffff;
+
+  /* One accent. Used for selection, focus, and success only. */
   --accent-primary: #137b70;
   --accent-wash: rgba(19, 123, 112, 0.1);
   --accent-outline: rgba(19, 123, 112, 0.35);
   --status-success: #137b70;
-  --status-warning: #925d10;
-  --status-danger: #ac404b;
-  --status-info: #315e9e;
-  --warning-wash: rgba(146, 93, 16, 0.09);
-  --danger-wash: rgba(172, 64, 75, 0.09);
-  --radius-small: 6px;
-  --radius-panel: 10px;
+  --status-warning: #8a5a12;
+  --status-danger: #a83c47;
+  --status-info: #33598f;
+  --warning-wash: rgba(138, 90, 18, 0.09);
+  --danger-wash: rgba(168, 60, 71, 0.09);
+
+  /*
+   * Materials. `--material-glass*` pair with backdrop-filter and are only used
+   * where content genuinely passes underneath. `--material-chrome` is a tonal
+   * step for surfaces with nothing behind them, where blur would cost frames
+   * and change nothing.
+   *
+   * Glass alpha sits high enough that blurred content reads as shape and tone
+   * rather than as text competing with the strip's own labels.
+   */
+  --material-glass: rgba(255, 255, 255, 0.8);
+  --material-glass-strong: rgba(255, 255, 255, 0.9);
+  --material-chrome: #f7f7f9;
+  --material-blur: 28px;
+  --material-saturate: 180%;
+
+  /* Elevation. Ring first; depth only where a surface truly floats. */
+  --elevation-1: 0 0 0 1px rgba(20, 20, 26, 0.06), 0 1px 2px -1px rgba(20, 20, 26, 0.08), 0 2px 6px rgba(20, 20, 26, 0.05);
+  --elevation-2: 0 0 0 1px rgba(20, 20, 26, 0.07), 0 2px 4px -2px rgba(20, 20, 26, 0.1), 0 8px 20px rgba(20, 20, 26, 0.1);
+  --elevation-3: 0 0 0 1px rgba(20, 20, 26, 0.08), 0 4px 8px -4px rgba(20, 20, 26, 0.12), 0 16px 40px rgba(20, 20, 26, 0.16);
+
+  /* Concentric radii: a nested radius is its parent's minus the gap between them. */
+  --radius-small: 7px;
+  --radius-inset: 8px;
+  --radius-panel: 12px;
+  --radius-glass: 14px;
+
+  /* Type scale, 1.25 ratio from a 14px body. */
+  --text-caption: 11px;
+  --text-label: 12px;
+  --text-body: 13px;
+  --text-body-lg: 14px;
+  --text-h4: 16px;
+  --text-h3: 18px;
+  --text-h1: 28px;
+  --text-display: 34px;
+
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --duration-press: 120ms;
+  --duration-quick: 150ms;
+  --duration-route: 140ms;
+  --duration-panel: 200ms;
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --surface-canvas: #10171a;
-  --surface-panel: #192226;
-  --surface-raised: #202d31;
-  --surface-hover: #29383b;
-  --surface-inset: #0c1417;
-  --text-primary: #ebf2f1;
-  --text-secondary: #b9c7c6;
-  --text-muted: #91a3a4;
-  --border-subtle: rgba(235, 242, 241, 0.09);
-  --border-strong: rgba(235, 242, 241, 0.22);
+  --surface-canvas: #0d0d0f;
+  --surface-panel: #17171a;
+  --surface-raised: #1f1f23;
+  --surface-hover: #27272c;
+  --surface-inset: #09090b;
+  --text-primary: #f0f0f2;
+  --text-secondary: #b6b6bf;
+  --text-muted: #8b8b95;
+  --border-subtle: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.22);
+  --surface-nav-hover: rgba(255, 255, 255, 0.06);
+  --surface-nav-active: #1f1f23;
   --accent-primary: #75d5be;
   --accent-wash: rgba(117, 213, 190, 0.12);
   --accent-outline: rgba(117, 213, 190, 0.38);
   --status-success: #75d5be;
-  --status-warning: #e8be70;
-  --status-danger: #f18a91;
+  --status-warning: #e0b978;
+  --status-danger: #ee8b92;
   --status-info: #91b8ed;
-  --warning-wash: rgba(232, 190, 112, 0.1);
-  --danger-wash: rgba(241, 138, 145, 0.1);
+  --warning-wash: rgba(224, 185, 120, 0.1);
+  --danger-wash: rgba(238, 139, 146, 0.1);
+
+  --material-glass: rgba(23, 23, 26, 0.78);
+  --material-glass-strong: rgba(28, 28, 32, 0.92);
+  --material-chrome: #131316;
+  --material-blur: 28px;
+  --material-saturate: 140%;
+
+  /* On dark, depth shadows do not read; the ring carries the layering. */
+  --elevation-1: 0 0 0 1px rgba(255, 255, 255, 0.07);
+  --elevation-2: 0 0 0 1px rgba(255, 255, 255, 0.1), 0 8px 24px rgba(0, 0, 0, 0.5);
+  --elevation-3: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 16px 48px rgba(0, 0, 0, 0.62);
 }
 
 * {
@@ -65,6 +139,59 @@ body {
 ::selection {
   background: var(--accent-wash);
   color: var(--text-primary);
+}
+
+/*
+ * Materials.
+ *
+ * `.material-glass` is real glass: it blurs what is behind it, so it is only
+ * ever applied where content scrolls underneath. `.material-chrome` is a tonal
+ * step for surfaces with a flat canvas behind them, where a blur would cost a
+ * compositor layer and be indistinguishable from the tint.
+ */
+.material-glass {
+  background: var(--material-glass);
+  -webkit-backdrop-filter: blur(var(--material-blur)) saturate(var(--material-saturate));
+  backdrop-filter: blur(var(--material-blur)) saturate(var(--material-saturate));
+}
+
+.material-glass-strong {
+  background: var(--material-glass-strong);
+  -webkit-backdrop-filter: blur(var(--material-blur)) saturate(var(--material-saturate));
+  backdrop-filter: blur(var(--material-blur)) saturate(var(--material-saturate));
+}
+
+.material-chrome {
+  background: var(--material-chrome);
+}
+
+/*
+ * Degradation. Without backdrop-filter support, and when the operator has asked
+ * the system to reduce transparency, glass becomes an opaque surface rather than
+ * text over an unreadable smear. Hierarchy is carried by the ring either way.
+ */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .material-glass {
+    background: var(--surface-panel);
+  }
+
+  .material-glass-strong {
+    background: var(--surface-panel);
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .material-glass {
+    background: var(--surface-panel);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  .material-glass-strong {
+    background: var(--surface-panel);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
 }
 
 button,
@@ -85,11 +212,20 @@ button {
   min-height: 100vh;
 }
 
+/*
+ * The rail keeps the canvas tone instead of inventing a second background: a
+ * tinted sidebar splits the window into "nav world" and "content world". The
+ * hairline and the active pill carry the structure instead.
+ */
 .side-nav {
+  position: sticky;
+  top: 0;
   display: flex;
   flex-direction: column;
-  gap: 24px;
-  padding: 20px 12px;
+  gap: 20px;
+  height: 100vh;
+  padding: 18px 12px;
+  overflow-y: auto;
   border-right: 1px solid var(--border-subtle);
   background: var(--surface-canvas);
 }
@@ -121,16 +257,36 @@ button {
 
 .brand-subtitle {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-label);
   font-weight: 500;
 }
 
+/*
+ * Three sections, not nine peers. The grouping states what each destination is
+ * for: work you act on, configuration you own, and the machine's own condition.
+ */
 .nav-list {
+  display: grid;
+  gap: 18px;
+}
+
+.nav-section {
   display: grid;
   gap: 2px;
 }
 
+.nav-section-label {
+  margin: 0 0 4px;
+  padding: 0 10px;
+  color: var(--text-muted);
+  font-size: var(--text-caption);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
 .nav-item {
+  position: relative;
   display: flex;
   align-items: center;
   min-height: 42px;
@@ -138,44 +294,157 @@ button {
   padding: 0 10px;
   border-radius: var(--radius-small);
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--text-body);
   font-weight: 600;
   text-decoration: none;
   transition:
-    background-color 150ms cubic-bezier(0.23, 1, 0.32, 1),
-    color 150ms cubic-bezier(0.23, 1, 0.32, 1);
+    background-color var(--duration-quick) var(--ease-out),
+    color var(--duration-quick) var(--ease-out);
+}
+
+/*
+ * The selected pill is a single shared element that travels between items, so
+ * the surface carries the selection instead of each item owning its own
+ * background. Icon and label are positioned so they paint above it.
+ */
+.nav-active-pill {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-small);
+  background: var(--surface-nav-active);
+  box-shadow: var(--elevation-1), inset 3px 0 0 var(--accent-primary);
+}
+
+.nav-item > svg,
+.nav-item > span {
+  position: relative;
 }
 
 .nav-item:hover,
 .nav-item:focus-visible {
   color: var(--text-primary);
-  background: var(--surface-panel);
+  background: var(--surface-nav-hover);
 }
 
 .nav-item[aria-current="page"] {
   color: var(--text-primary);
-  background: var(--surface-raised);
-  box-shadow: inset 3px 0 0 var(--accent-primary);
 }
 
 .workspace {
   min-width: 0;
 }
 
+/*
+ * The runtime strip is the one surface content genuinely scrolls underneath, so
+ * it is the one surface that earns a real blur. Its readings are tell-tale lamps
+ * rather than badges: a row of status pills competes with the work below it, a
+ * row of dim indicators does not.
+ */
 .runtime-strip {
+  position: sticky;
+  top: 0;
+  z-index: 3;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 16px;
-  min-height: 64px;
-  padding: 10px 24px;
+  min-height: 56px;
+  padding: 8px 24px;
   border-bottom: 1px solid var(--border-subtle);
-  background: var(--surface-panel);
 }
 
 .runtime-heading,
 .runtime-items,
-.runtime-item,
+.runtime-item {
+  display: flex;
+  align-items: center;
+}
+
+.runtime-heading {
+  gap: 8px;
+  padding-right: 16px;
+  border-right: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  font-size: var(--text-label);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.runtime-heading svg {
+  color: var(--text-muted);
+}
+
+.runtime-items {
+  flex-wrap: wrap;
+  gap: 18px;
+  min-width: 0;
+}
+
+.runtime-item {
+  gap: 7px;
+  min-width: 0;
+}
+
+.runtime-label {
+  color: var(--text-muted);
+  font-size: var(--text-label);
+  font-weight: 550;
+  white-space: nowrap;
+}
+
+.runtime-value {
+  color: var(--text-secondary);
+  font-size: var(--text-label);
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+/*
+ * Tell-tale. `color` carries the tone and the lamp inherits it, so a tone is one
+ * declaration and the halo can never drift out of sync with the lamp.
+ */
+.tell-tale {
+  position: relative;
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: currentColor;
+  color: var(--text-muted);
+}
+
+.tell-tale::after {
+  position: absolute;
+  inset: -3px;
+  border-radius: inherit;
+  background: color-mix(in srgb, currentColor 20%, transparent);
+  content: "";
+}
+
+.tell-tale.success {
+  color: var(--status-success);
+}
+
+.tell-tale.warning {
+  color: var(--status-warning);
+}
+
+.tell-tale.danger {
+  color: var(--status-danger);
+}
+
+.tell-tale.info {
+  color: var(--status-info);
+}
+
+.tell-tale.neutral {
+  color: var(--text-secondary);
+}
+
+.tell-tale.muted {
+  color: var(--text-muted);
+}
+
 .subsection-title,
 .detail-title-row,
 .command-buttons,
@@ -184,58 +453,66 @@ button {
   align-items: center;
 }
 
-.runtime-heading {
-  gap: 8px;
-  color: var(--text-primary);
-  font-size: 12px;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.runtime-items {
-  flex-wrap: wrap;
-  justify-content: center;
+/*
+ * Readouts nested inside one panel. They keep the panel's own frame and drop to
+ * an h3, so the rail reads as three tiers instead of five identical boxes.
+ */
+.signal-section {
+  display: grid;
   gap: 10px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-subtle);
 }
 
-.runtime-item {
-  gap: 7px;
-  min-height: 28px;
+.signal-section:first-of-type {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
 }
 
-.runtime-label {
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 550;
-}
-
-.theme-control {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: auto;
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 650;
-  white-space: nowrap;
-}
-
-.theme-control svg {
-  color: var(--accent-primary);
-}
-
-.theme-control select {
-  min-height: 40px;
-  padding: 0 8px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-small);
-  background: var(--surface-inset);
+.signal-section h3 {
+  margin: 0;
   color: var(--text-primary);
-  cursor: pointer;
+  font-size: var(--text-h4);
+  font-weight: 650;
+}
+
+/*
+ * A housekeeping command is not a status readout, so it does not get a panel.
+ * Sitting below the panels at a smaller size is the hierarchy that says "read
+ * the panels first, then decide whether to press this".
+ */
+.rail-action {
+  display: grid;
+  gap: 10px;
+  padding: 14px 2px 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* Grid items stretch by default; a control must keep its own width. */
+.rail-action > .button,
+.rail-action > .confirm-group {
+  justify-self: start;
+}
+
+.rail-action h3 {
+  margin: 0 0 3px;
+  color: var(--text-secondary);
+  font-size: var(--text-body-lg);
+  font-weight: 650;
+}
+
+.rail-action p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-label);
+  line-height: 1.45;
+  text-wrap: pretty;
 }
 
 .main-surface {
-  min-height: calc(100vh - 64px);
+  min-height: calc(100vh - 56px);
   padding: 24px;
 }
 
@@ -554,9 +831,10 @@ h2 {
   color: var(--status-danger);
 }
 
-.empty-state h1 {
+.empty-state h2 {
   margin-bottom: 4px;
-  font-size: 18px;
+  font-size: var(--text-h3);
+  font-weight: 650;
 }
 
 .empty-state p {
@@ -656,6 +934,10 @@ h2 {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+  /* Sized to its options: a track stretched across a grid column reads as an
+   * empty trough next to the buttons it is supposed to contain. */
+  width: fit-content;
+  max-width: 100%;
   margin-bottom: 14px;
   padding: 4px;
   border: 1px solid var(--border-subtle);
@@ -664,15 +946,37 @@ h2 {
 }
 
 .segmented-control button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
   min-height: 40px;
   padding: 0 10px;
   border: 0;
-  border-radius: var(--radius-small);
+  /* Concentric with the 12px track: 12px outer minus the 4px track padding. */
+  border-radius: var(--radius-inset);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--text-label);
   font-weight: 650;
+  transition: color var(--duration-quick) var(--ease-out);
+}
+
+/*
+ * The selected thumb is one shared element that travels between options, so the
+ * track reads as a control with a moving selection rather than as buttons
+ * toggling their own backgrounds.
+ */
+.segmented-indicator {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-inset);
+  background: var(--surface-raised);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.segmented-option {
+  position: relative;
 }
 
 .segmented-control button:hover,
@@ -681,9 +985,7 @@ h2 {
 }
 
 .segmented-control button[aria-pressed="true"] {
-  background: var(--surface-raised);
   color: var(--text-primary);
-  box-shadow: inset 0 0 0 1px var(--border-subtle);
 }
 
 .fact-list,
@@ -941,19 +1243,20 @@ dd {
   z-index: 50;
   max-width: min(320px, calc(100vw - 24px));
   padding: 9px 11px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-small);
-  box-shadow: var(--shadow-medium);
-  background: var(--surface-raised);
+  border-radius: var(--radius-inset);
+  box-shadow: var(--elevation-2);
+  background: var(--material-glass-strong);
+  -webkit-backdrop-filter: blur(var(--material-blur)) saturate(var(--material-saturate));
+  backdrop-filter: blur(var(--material-blur)) saturate(var(--material-saturate));
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--text-label);
   line-height: 1.5;
   overflow-wrap: anywhere;
-  animation: tooltip-in 120ms ease-out;
+  animation: tooltip-in var(--duration-press) var(--ease-out);
 }
 
 .tooltip-arrow {
-  fill: var(--surface-raised);
+  fill: var(--material-glass-strong);
 }
 
 @keyframes tooltip-in {
@@ -1091,6 +1394,64 @@ dd {
   gap: 16px;
 }
 
+/*
+ * Preference rows. Label and explanation on the left, control on the right,
+ * divided by space and a hairline rather than a card each: two preferences do
+ * not need two boxes.
+ */
+.settings-preferences {
+  display: grid;
+  gap: 2px;
+}
+
+.preference-list {
+  display: grid;
+}
+
+.preference-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  min-height: 62px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.preference-row:first-child {
+  padding-top: 2px;
+}
+
+.preference-row:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.preference-row .segmented-control {
+  margin-bottom: 0;
+}
+
+.preference-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.preference-copy h3 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: var(--text-h4);
+  font-weight: 650;
+}
+
+.preference-copy p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-body);
+  line-height: 1.45;
+  text-wrap: pretty;
+}
+
 .settings-groups {
   grid-template-columns: minmax(0, 1fr);
 }
@@ -1162,6 +1523,37 @@ dd {
   color: var(--text-primary);
   font-size: 14px;
   font-weight: 650;
+}
+
+/*
+ * The route to the screen that owns a field's write path. Styled as a quiet
+ * action rather than a status badge, because it is the one thing on the card the
+ * operator can actually do.
+ */
+.settings-field-link {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 3px;
+  min-height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--accent-outline);
+  border-radius: 999px;
+  background: var(--accent-wash);
+  color: var(--accent-primary);
+  font-size: var(--text-label);
+  font-weight: 650;
+  text-decoration: none;
+  white-space: nowrap;
+  transition:
+    background-color var(--duration-quick) var(--ease-out),
+    border-color var(--duration-quick) var(--ease-out);
+}
+
+.settings-field-link:hover,
+.settings-field-link:focus-visible {
+  border-color: var(--accent-primary);
+  background: var(--surface-hover);
 }
 
 .settings-current-value {
@@ -1265,6 +1657,30 @@ dd {
   flex-wrap: wrap;
   gap: 8px;
   margin: 12px 0;
+}
+
+/*
+ * Armed confirmation. It reads as one control that grew a question rather than
+ * as a dialog that interrupted: the prompt sits inline, and the group inherits
+ * the parent's flow so nothing shifts position when it opens.
+ */
+.confirm-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-panel);
+  background: var(--surface-inset);
+}
+
+.confirm-prompt {
+  color: var(--text-secondary);
+  font-size: var(--text-label);
+  font-weight: 600;
+  line-height: 1.35;
+  text-wrap: pretty;
 }
 
 .command-result {
@@ -1559,42 +1975,79 @@ dd {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  /*
+   * Below 900px the rail moves to the top and becomes the thing content scrolls
+   * under, so it takes over the glass from the runtime strip.
+   */
   .side-nav {
     position: sticky;
     top: 0;
-    z-index: 2;
-    gap: 12px;
+    z-index: 3;
+    height: auto;
+    gap: 10px;
     min-width: 0;
     overflow-x: clip;
+    overflow-y: visible;
     border-right: 0;
     border-bottom: 1px solid var(--border-subtle);
+    background: var(--material-glass);
+    -webkit-backdrop-filter: blur(var(--material-blur)) saturate(var(--material-saturate));
+    backdrop-filter: blur(var(--material-blur)) saturate(var(--material-saturate));
   }
 
+  /* The grouping survives in compressed form: labels drop, hairline dividers stay. */
   .nav-list {
     display: flex;
-    gap: 4px;
+    gap: 0;
     min-width: 0;
     overflow-x: auto;
     padding-bottom: 2px;
+  }
+
+  .nav-section {
+    display: flex;
+    gap: 4px;
+  }
+
+  .nav-section + .nav-section {
+    margin-left: 6px;
+    padding-left: 6px;
+    border-left: 1px solid var(--border-subtle);
+  }
+
+  .nav-section-label {
+    display: none;
   }
 
   .nav-item {
     flex: 0 0 auto;
   }
 
+  /*
+   * The strip no longer has content passing beneath it, so it gives the blur back
+   * rather than paying for a compositor layer that changes nothing.
+   */
   .runtime-strip {
-    align-items: flex-start;
-    flex-wrap: wrap;
-    padding: 12px 16px;
+    gap: 12px;
+    padding: 8px 16px;
+    overflow-x: auto;
+    background: var(--surface-panel);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
   }
 
   .runtime-items {
-    justify-content: flex-start;
-    order: 3;
-    width: 100%;
+    flex-wrap: nowrap;
+    gap: 14px;
+    width: auto;
+  }
+
+  .runtime-item {
+    flex: 0 0 auto;
   }
 
   .main-surface {
+    min-height: 0;
     padding: 16px;
   }
 
@@ -1615,6 +2068,12 @@ dd {
 
   .settings-toolbar {
     grid-template-columns: 1fr;
+  }
+
+  .preference-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
   }
 }
 
@@ -1654,27 +2113,11 @@ dd {
   }
 
   .runtime-heading {
-    margin-right: auto;
-  }
-
-  .theme-control {
-    gap: 4px;
-    margin-left: 0;
-  }
-
-  .theme-control select {
-    min-height: 36px;
+    padding-right: 8px;
   }
 
   .runtime-items {
-    flex-wrap: nowrap;
     gap: 12px;
-    overflow-x: auto;
-    padding-bottom: 2px;
-  }
-
-  .runtime-item {
-    flex: 0 0 auto;
   }
 
   .section-header,

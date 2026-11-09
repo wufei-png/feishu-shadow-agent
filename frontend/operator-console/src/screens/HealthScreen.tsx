@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
 import { AlertTriangle, CheckCircle2, ExternalLink, HeartPulse, Send } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { getHealthIssues } from "../api";
 import {
+  QueueControls,
+  Fact,
   Badge,
   EmptyState,
   ErrorState,
@@ -56,6 +57,16 @@ export function HealthScreen({ token }: { token: string }) {
     <section className="work-grid health-layout" aria-label={t("health.aria")}>
       <div className="work-main">
         <HealthSummaryPanel data={health.data} refreshing={health.isFetching && !health.isLoading} />
+        <QueueControls
+          error={health.error}
+          hasNext={false}
+          isFetching={health.isFetching}
+          onNext={() => undefined}
+          onPrevious={() => undefined}
+          onRefresh={() => void health.refetch()}
+          page={0}
+          updatedAt={health.dataUpdatedAt}
+        />
         <div className="queue-panel">
           <SectionHeader
             eyebrow={t("health.currentIssues")}
@@ -130,8 +141,8 @@ function IssueDetailPanel({ issue }: { issue: HealthIssue | null }) {
         <Badge tone={issueTone(issue.severity)}>{enumLabel(t, "severity", issue.severity)}</Badge>
       </div>
       <FieldList>
-        <FactRow label={t("health.category")} value={enumLabel(t, "category", issue.category)} />
-        <FactRow label={t("health.detectedAt")} value={formatDate(issue.detected_at)} />
+        <Fact label={t("health.category")} value={enumLabel(t, "category", issue.category)} />
+        <Fact label={t("health.detectedAt")} value={formatDate(issue.detected_at)} />
       </FieldList>
       <p className="detail-note">{copy.detail}</p>
       {copy.localized ? (
@@ -195,11 +206,11 @@ function RuntimePanel({ data }: { data: HealthIssuesResponse }) {
       <p className="eyebrow">{t("health.liveness")}</p>
       <h2>{t("health.daemonAndStore")}</h2>
       <FieldList>
-        <FactRow label={t("health.daemonStatus")} value={enumLabel(t, "status", String(liveness.status ?? "unknown"))} />
-        <FactRow label={t("health.lastHeartbeat")} value={formatSeconds(t, liveness.heartbeat_age_seconds)} />
-        <FactRow label={t("health.runStatus")} value={enumLabel(t, "status", String(liveness.run_status ?? lastRun.status ?? "unknown"))} />
-        <FactRow label={t("health.lastTick")} value={formatDate(String(lastRun.last_tick_finished_at ?? ""))} />
-        <FactRow label={t("health.storeAvailable")} value={data.runtime.store?.available ? t("common.yes") : t("common.no")} />
+        <Fact label={t("health.daemonStatus")} value={enumLabel(t, "status", String(liveness.status ?? "unknown"))} />
+        <Fact label={t("health.lastHeartbeat")} value={formatSeconds(t, liveness.heartbeat_age_seconds)} />
+        <Fact label={t("health.runStatus")} value={enumLabel(t, "status", String(liveness.run_status ?? lastRun.status ?? "unknown"))} />
+        <Fact label={t("health.lastTick")} value={formatDate(String(lastRun.last_tick_finished_at ?? ""))} />
+        <Fact label={t("health.storeAvailable")} value={data.runtime.store?.available ? t("common.yes") : t("common.no")} />
       </FieldList>
     </div>
   );
@@ -290,14 +301,6 @@ function Metric({ label, value, tone }: { label: string; value: string; tone: To
   );
 }
 
-function FactRow({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div>
-      <dt>{label}</dt>
-      <dd>{value}</dd>
-    </div>
-  );
-}
 
 function linkTarget(t: TFunction, link: HealthIssueLink): { label: string; href: string | null } {
   if (link.type === "dispatch_action") {

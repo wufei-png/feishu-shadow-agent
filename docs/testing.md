@@ -210,7 +210,7 @@ python -m feishu_shadow_agent doctor --config config.yaml --send-test
 先用 dry-run 跑完整链路：
 
 ```bash
-python -m feishu_shadow_agent daemon --config config.yaml --dry-run --send-owner-notifications
+python -m feishu_shadow_agent daemon --config config.yaml --dry-run
 ```
 
 验证步骤：
@@ -220,21 +220,24 @@ python -m feishu_shadow_agent daemon --config config.yaml --dry-run --send-owner
 3. 查看状态：
 
 ```bash
-python -m feishu_shadow_agent status --config config.yaml
+python -m feishu_shadow_agent status --config config.yaml --mode dry-run
+python -m feishu_shadow_agent console --config config.yaml --mode dry-run
 ```
 
 4. 如知道 `message_id`，查看该消息的本地路由和 dispatch preview：
 
 ```bash
-python -m feishu_shadow_agent replay --config config.yaml --message-id <message_id> --dry-run
+python -m feishu_shadow_agent replay --config config.yaml --mode dry-run --message-id <message_id> --dry-run
 ```
 
 预期结果：
 
-- `data/agent.sqlite3` 中出现消息、任务、routing audit、Agent audit 或 approval/action 记录。
-- `logs/agent.jsonl` 中出现 `message_ingested`、`task_processing_completed`、`dispatch_action_previewed` 等事件。
-- dry-run 模式不会真实对外回复；只有 owner notification 在显式加 `--send-owner-notifications` 时会真实发送。
+- 默认预演库 `data/agent.sqlite3.dry-run` 中出现消息、任务、routing audit、Agent audit 或 approval/action 记录；生产库不复制这些记录。
+- 默认预演日志 `logs/agent.jsonl.dry-run` 中出现 `message_ingested`、`task_processing_completed`、`dispatch_action_previewed` 等事件；资源使用 `data/resources.dry-run`。
+- dry-run 模式不会真实对外回复或发送 owner 通知；审批只通过本地 Console 处理。私聊仅在完整枚举并排除机器人会话后按 chat ID 查询，无法确认时暂停私聊采集。
 - dry-run 产生的 approval/action 带 dry-run provenance，切换到生产模式后不能复用；生产发送必须由生产运行重新生成 approval。
+- 首次创建预演状态时，若生产策略已初始化则复制其当前策略，此后两套策略独立；需要时用 `policy sync-production --config config.yaml --mode dry-run` 显式同步。生产策略未初始化时，可运行 `policy import-config --config config.yaml --mode dry-run`。
+- `full_access` Agent 可自行调用 shell 或飞书 CLI 并产生外部写入，项目的 dry-run 发送开关不限制这些工具。
 
 ## 5. 真实发送端到端
 
@@ -255,8 +258,15 @@ python -m feishu_shadow_agent daemon --config config.yaml
 ```text
 /approve <a_or_t_id>
 /send <task_id> <最终回复>
+/send <a_or_t_id> --location <main|thread> <最终回复>
 /reject <a_or_t_id>
 ```
+
+Agent 为回复目标选择的主楼或已有话题会显示在审批中，编辑回复默认保留该位置。缺少明确位置时，owner 可用上面的 `--location` 选择；代码仍会检查位置是否与目标消息和当前会话匹配。对于本地 CLI，选项放在 task ID 之前：`python -m feishu_shadow_agent send --config config.yaml --location thread <task_id> <最终回复>`。位置元数据不足或不一致时不能发送，也不会根据 `thread_id` 单独推断主楼与话题。新版不迁移缺少位置的旧待发记录。
+
+验证话题回复时，应分别覆盖已有话题的主楼根消息选择主楼、选择话题，以及话题内回复。先检查 dry-run 参数，再由测试会话的实际读回核对 chat、回复目标和消息所处位置；dry-run 成功本身不证明服务端投递落点。
+
+主楼根消息已有话题时，active watch 同时扫描主楼和该话题。位置快照发生冲突时会重新读取当前消息；重查失败或仍缺少有效证据时继续阻止发送，等待后续核实。
 
 启用且连接健康时，还应验证审批交互的四条路径：不修改“实际回复”直接发送、修改后发送、不发送并继续关注、不发送并结束任务。重复提交同一个 callback event 不得产生第二条 command 或 feedback；非 owner 操作必须被拒绝。处理后原消息应更新为结果态，Feedback 页面确认 outcome、decision reason 和原始/最终回复差异。文本命令在交互入口关闭、断连或 SDK 不可用时仍应可用。
 
@@ -318,7 +328,7 @@ python -m feishu_shadow_agent replay --config config.yaml --message-id <message_
 
 - action 状态从 `pending` 变为 `sent`、明确 `failed`，或不确定时变为 `failed_needs_review`。
 - 发送 action 先有 dry-run 结果，再有真实发送结果，并在 `dispatch_attempts` 中记录本次 claim。
-- 读回验证记录了 `sent_message_id`、`reply_to_message_id` 和 mentions。
+- 读回验证记录了 `sent_message_id`、`reply_to_message_id`、chat、位置、thread 和 mentions。已取得发送消息 ID 但位置读回不匹配或不可用时，action 保持 `sent`，attempt 记录未完成验证，并通知 owner 检查；不会自动重发。
 - owner 直接在原 chat/thread 接管任务后，未发送的 `send_reply` action 会被取消，pending approval 会过期。
 
 如果 action 进入 `failed_needs_review`，先本地查看证据：

@@ -133,6 +133,7 @@ def _task_summary_dto(row: sqlite3.Row) -> dict[str, Any]:
             data.get("failed_needs_review_action_count") or 0
         ),
         failed_action_count=int(data.get("failed_action_count") or 0),
+        policy_held=bool(data.get("policy_held")),
     )
     return {
         "id": data["id"],
@@ -140,6 +141,7 @@ def _task_summary_dto(row: sqlite3.Row) -> dict[str, Any]:
         "task_short_id": short_id,
         "short_id": short_id,
         "status": data["status"],
+        "policy_held": bool(data.get("policy_held")),
         "chat_id": data["chat_id"],
         "chat_type": data["chat_type"],
         "thread_id": data.get("thread_id"),
@@ -213,6 +215,7 @@ def _action_dto(row: sqlite3.Row, *, include_payload: bool) -> dict[str, Any]:
         "action_id": data["id"],
         "kind": data["kind"],
         "status": data["status"],
+        "policy_held": bool(data.get("policy_held")),
         "task_id": data["task_id"],
         "task_short_id": data.get("task_short_id"),
         "approval_id": data.get("approval_id"),
@@ -258,7 +261,11 @@ def _readback_summary(attempts: list[dict[str, Any]]) -> dict[str, Any]:
         "latest_status": None if latest is None else latest["status"],
         "sent_message_id": None if latest is None else latest["sent_message_id"],
         "error_stage": None if latest is None else latest["error_stage"],
-        "readback_ok": readback_data.get("ok") is True,
+        "readback_ok": bool(
+            latest
+            and latest["status"] == "readback_ok"
+            and readback_data.get("ok") is True
+        ),
         "readback_message_id": readback_data.get("message_id"),
     }
 
@@ -271,10 +278,13 @@ def _summary_recommended_actions(
     overdue_approval_count: int,
     failed_needs_review_action_count: int,
     failed_action_count: int,
+    policy_held: bool,
 ) -> list[str]:
     recommendations: list[str] = []
     if status == TaskStatus.WATCHING.value:
         recommendations.append(f"task close --task-id {task_id}")
+        if policy_held:
+            recommendations.append(f"task reopen --task-id {task_id}")
     elif status in {
         TaskStatus.CLOSED.value,
         TaskStatus.CLOSED_BY_OWNER.value,
@@ -294,6 +304,11 @@ def _summary_recommended_actions(
 
 def _dispatch_recommended_actions(action: dict[str, Any]) -> list[str]:
     action_id = action["action_id"]
+    if action["status"] == ActionStatus.PENDING.value and action.get("policy_held"):
+        return [
+            f"dispatch retry --action-id {action_id}",
+            f"dispatch cancel --action-id {action_id}",
+        ]
     if action["status"] == ActionStatus.FAILED_NEEDS_REVIEW.value:
         return [
             f"dispatch inspect --action-id {action_id}",

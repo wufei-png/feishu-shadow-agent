@@ -1,34 +1,49 @@
 import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
-import { Database, LockKeyhole, Search, Settings2, SlidersHorizontal } from "lucide-react";
+import { ArrowUpRight, Database, LockKeyhole, Search, Settings2, ShieldCheck, SlidersHorizontal, SunMoon } from "lucide-react";
+import { AnimatePresence, m } from "motion/react";
 import { useTranslation } from "react-i18next";
 import { getSettingsCatalog, getSettingsRuntime } from "../api";
 import {
   Badge,
   EmptyState,
   ErrorState,
+  Fact,
   FieldList,
   HelpTooltip,
   LoadingState,
   SectionHeader,
-  SegmentedControl,
-  statusTone
+  SegmentedControl
 } from "../components/Primitives";
-import { catalogText } from "../catalogPresentation";
+import { catalogText, formatSettingValue } from "../catalogPresentation";
+import type { ConsoleLanguage } from "../i18n";
+import { groupTransition, groupVariants } from "../motionTokens";
+import { usePreferences } from "../preferences";
 import { enumLabel } from "../presentation";
 import { queryKeys } from "../queryKeys";
-import type { SettingsCatalogEntry, SettingsRuntime, Tone } from "../types";
+import type { ThemePreference } from "../theme";
+import type { SettingsCatalogEntry, SettingsRuntime } from "../types";
 
-type SettingsGroup = "normal" | "advanced" | "diagnostics";
+type SettingsGroup = "normal" | "advanced" | "policy" | "diagnostics";
 
 const groupLabels: Record<SettingsGroup, { eyebrowKey: string; titleKey: string; labelKey: string; icon: typeof Settings2 }> = {
   normal: { eyebrowKey: "settings.group.normal.eyebrow", titleKey: "settings.group.normal.title", labelKey: "settings.group.normal", icon: Settings2 },
   advanced: { eyebrowKey: "settings.group.advanced.eyebrow", titleKey: "settings.group.advanced.title", labelKey: "settings.group.advanced", icon: SlidersHorizontal },
+  policy: { eyebrowKey: "settings.group.policy.eyebrow", titleKey: "settings.group.policy.title", labelKey: "settings.group.policy", icon: ShieldCheck },
   diagnostics: { eyebrowKey: "settings.group.diagnostics.eyebrow", titleKey: "settings.group.diagnostics.title", labelKey: "settings.group.diagnostics", icon: Database }
 };
 
-const settingsGroups: SettingsGroup[] = ["normal", "advanced", "diagnostics"];
+const settingsGroups: SettingsGroup[] = ["normal", "advanced", "policy", "diagnostics"];
+
+/**
+ * Scopes whose write path belongs to the Policy screen. They are collected into
+ * their own group because grouping by visibility alone left the default group
+ * 69% policy-owned: the operator landed on a screen of cards they could not act
+ * on, most of which only said "edit this elsewhere".
+ */
+const policyScopes = new Set(["global_policy", "chat_policy", "policy_status", "policy_audit", "policy_import"]);
 
 export function SettingsScreen({ token }: { token: string }) {
   const { t } = useTranslation();
@@ -96,12 +111,9 @@ export function SettingsScreen({ token }: { token: string }) {
             {t("settings.intro")}
           </p>
         </SectionHeader>
-        <div className="policy-diff-grid">
-          <FactTile label={t("settings.policy")} value={runtime.data.policy_status.initialized ? t("policy.initialized") : t("policy.missing")} tone={runtime.data.policy_status.initialized ? "success" : "warning"} />
-          <FactTile label={t("settings.importDiff")} value={enumLabel(t, "status", runtime.data.policy_status.policy_import_diff?.status)} tone={statusTone(runtime.data.policy_status.policy_import_diff?.status)} />
-          <FactTile label={t("settings.chatPolicyCount")} value={String(runtime.data.chat_policies.length)} tone="info" />
-        </div>
       </div>
+
+      <SettingsPreferences />
 
       <div className="settings-toolbar queue-panel">
         <SegmentedControl
@@ -120,9 +132,78 @@ export function SettingsScreen({ token }: { token: string }) {
       </div>
 
       <div className="settings-groups">
-        <SettingsCatalogSection entries={grouped[activeGroup]} group={activeGroup} runtime={runtime.data} />
+        {/*
+          Cross-fade between groups: the outgoing group clears first so the two
+          field grids never overlap and reflow against each other.
+        */}
+        <AnimatePresence initial={false} mode="wait">
+          <m.div
+            animate="visible"
+            exit="exit"
+            initial="hidden"
+            key={activeGroup}
+            transition={groupTransition}
+            variants={groupVariants}
+          >
+            <SettingsCatalogSection entries={grouped[activeGroup]} group={activeGroup} runtime={runtime.data} />
+          </m.div>
+        </AnimatePresence>
       </div>
     </section>
+  );
+}
+
+/**
+ * The operator's own preferences, and the only editable controls in the console.
+ *
+ * They sit above the catalog rather than inside it: a preference is not a
+ * product field, it is never searched or filtered, and it must stay reachable
+ * while the catalog is filtered down to nothing.
+ */
+function SettingsPreferences() {
+  const { t } = useTranslation();
+  const { theme, setTheme, language, setLanguage } = usePreferences();
+
+  const themeOptions: Array<{ value: ThemePreference; label: string }> = [
+    { value: "system", label: t("app.themeSystem") },
+    { value: "light", label: t("app.themeLight") },
+    { value: "dark", label: t("app.themeDark") }
+  ];
+  const languageOptions: Array<{ value: ConsoleLanguage; label: string }> = [
+    { value: "zh-CN", label: t("language.chinese") },
+    { value: "en-US", label: t("language.english") }
+  ];
+
+  return (
+    <section className="queue-panel settings-preferences" aria-label={t("settings.appearance.title")}>
+      <div className="subsection-title">
+        <SunMoon aria-hidden="true" size={16} />
+        <div>
+          <p className="eyebrow">{t("settings.appearance.eyebrow")}</p>
+          <h2>{t("settings.appearance.title")}</h2>
+        </div>
+      </div>
+      <div className="preference-list">
+        <PreferenceRow description={t("settings.appearance.themeDetail")} label={t("app.appearanceLabel")}>
+          <SegmentedControl label={t("app.appearanceLabel")} onChange={setTheme} options={themeOptions} value={theme} />
+        </PreferenceRow>
+        <PreferenceRow description={t("settings.appearance.languageDetail")} label={t("language.label")}>
+          <SegmentedControl label={t("language.label")} onChange={setLanguage} options={languageOptions} value={language} />
+        </PreferenceRow>
+      </div>
+    </section>
+  );
+}
+
+function PreferenceRow({ label, description, children }: { label: string; description: string; children: ReactNode }) {
+  return (
+    <div className="preference-row">
+      <div className="preference-copy">
+        <h3>{label}</h3>
+        <p>{description}</p>
+      </div>
+      {children}
+    </div>
   );
 }
 
@@ -177,7 +258,16 @@ function SettingsField({ entry, runtime }: { entry: SettingsCatalogEntry; runtim
             {help ? <><br />{help}</> : null}
           </HelpTooltip>
         </span>
-        <Badge tone={entry.editable_v1 ? "info" : "muted"}>{editableLabel(t, entry)}</Badge>
+        {isPolicyOwned(entry) ? (
+          // A card whose only content is "edit this elsewhere" is a dead end, so
+          // the badge becomes the route to the screen that owns the write path.
+          <a className="settings-field-link" href="#policy">
+            {t("settings.editPolicy")}
+            <ArrowUpRight aria-hidden="true" size={13} />
+          </a>
+        ) : (
+          <Badge tone={entry.editable_v1 ? "info" : "muted"}>{editableLabel(t, entry)}</Badge>
+        )}
       </div>
       <div className="settings-current-value">
         <span>{t("settings.currentValue")}</span>
@@ -186,12 +276,12 @@ function SettingsField({ entry, runtime }: { entry: SettingsCatalogEntry; runtim
       <details className="settings-technical-details">
         <summary>{t("settings.technicalDetails")}</summary>
         <FieldList>
-          <FactRow label={t("settings.settingKey")} value={entry.key} />
-          <FactRow label={t("settings.source")} value={enumLabel(t, "source", entry.source)} />
-          <FactRow label={t("settings.scope")} value={entry.scope} />
-          <FactRow label={t("settings.requiresRestart")} value={entry.requires_restart ? t("common.yes") : t("common.no")} />
-          <FactRow label={t("settings.writeBoundary")} value={entry.write_boundary ?? t("common.none")} />
-          <FactRow label={t("settings.auditBehavior")} value={entry.audit_behavior} />
+          <Fact label={t("settings.settingKey")} value={entry.key} />
+          <Fact label={t("settings.source")} value={enumLabel(t, "source", entry.source)} />
+          <Fact label={t("settings.scope")} value={entry.scope} />
+          <Fact label={t("settings.requiresRestart")} value={entry.requires_restart ? t("common.yes") : t("common.no")} />
+          <Fact label={t("settings.writeBoundary")} value={entry.write_boundary ?? t("common.none")} />
+          <Fact label={t("settings.auditBehavior")} value={entry.audit_behavior} />
         </FieldList>
         {readonlyReason ? (
           <div className="readonly-note">
@@ -210,11 +300,14 @@ function groupSettings(entries: SettingsCatalogEntry[]): Record<SettingsGroup, S
       groups[groupForEntry(entry)].push(entry);
       return groups;
     },
-    { normal: [], advanced: [], diagnostics: [] }
+    { normal: [], advanced: [], policy: [], diagnostics: [] }
   );
 }
 
 function groupForEntry(entry: SettingsCatalogEntry): SettingsGroup {
+  if (policyScopes.has(entry.scope)) {
+    return "policy";
+  }
   if (entry.visibility === "advanced") {
     return "advanced";
   }
@@ -225,9 +318,15 @@ function groupForEntry(entry: SettingsCatalogEntry): SettingsGroup {
 }
 
 function settingValue(t: TFunction, entry: SettingsCatalogEntry, runtime: SettingsRuntime): unknown {
-  if (entry.key in runtime.values) {
-    return runtime.values[entry.key];
+  const stored = runtime.values[entry.key];
+  // Presence is not enough: the API lists derived fields with a null value, so
+  // checking only for the key made the audit card claim "not set" while records
+  // existed.
+  if (stored !== undefined && stored !== null) {
+    return stored;
   }
+  // Per-chat fields have no single current value, so the copy says where the
+  // value lives rather than presenting a chat count as if it were the value.
   if (entry.scope === "chat_policy") {
     return runtime.chat_policies.length ? t("settings.chatPolicyValue", { count: runtime.chat_policies.length }) : t("settings.noChatPolicyValue");
   }
@@ -235,6 +334,11 @@ function settingValue(t: TFunction, entry: SettingsCatalogEntry, runtime: Settin
     return t("settings.auditValue", { count: runtime.policy_audit_history.length });
   }
   return null;
+}
+
+/** True when the Policy screen owns this field's write path. */
+function isPolicyOwned(entry: SettingsCatalogEntry): boolean {
+  return entry.source === "product_policy_store" && entry.editable_v1 === true;
 }
 
 function editableLabel(t: TFunction, entry: SettingsCatalogEntry): string {
@@ -261,41 +365,4 @@ function readonlyNote(t: TFunction, entry: SettingsCatalogEntry): string | null 
     return t("settings.noteRuntime");
   }
   return null;
-}
-
-function FactTile({ label, value, tone }: { label: string; value: string; tone: Tone }) {
-  return (
-    <div className={`metric-card ${tone} compact`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
-
-function FactRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <dt>{label}</dt>
-      <dd>{value}</dd>
-    </div>
-  );
-}
-
-function formatSettingValue(t: TFunction, value: unknown): string {
-  if (value === true) {
-    return t("common.yes");
-  }
-  if (value === false) {
-    return t("common.no");
-  }
-  if (value === null || value === undefined || value === "") {
-    return t("settings.notSet");
-  }
-  if (Array.isArray(value)) {
-    return value.length ? value.join(", ") : t("common.none");
-  }
-  if (typeof value === "object") {
-    return JSON.stringify(value);
-  }
-  return String(value);
 }

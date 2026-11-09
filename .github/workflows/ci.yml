@@ -75,12 +75,8 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/operator-console/package-lock.json
       - name: Install frontend dependencies
+        id: install
         run: npm --prefix frontend/operator-console ci
-      - name: Audit frontend dependencies
-        run: >-
-          npm --prefix frontend/operator-console audit
-          --audit-level=high
-          --registry=https://registry.npmjs.org
       - name: Lint Operator Console
         run: npm --prefix frontend/operator-console run lint
       - name: Test Operator Console
@@ -89,6 +85,12 @@ jobs:
         run: npm --prefix frontend/operator-console run build
       - name: Verify bundled assets are current
         run: git diff --exit-code -- src/feishu_shadow_agent/console_static
+      - name: Audit frontend dependencies
+        if: ${{ !cancelled() && steps.install.conclusion == 'success' }}
+        run: >-
+          npm --prefix frontend/operator-console audit
+          --audit-level=high
+          --registry=https://registry.npmjs.org
 
   package:
     name: Build and inspect package
