@@ -19,6 +19,7 @@ from feishu_shadow_agent.operator_commands import (
     OperatorCommandService,
     command_exit_code,
 )
+from feishu_shadow_agent.operator_query import OperatorQueryService
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import (
     LarkCliResult,
@@ -427,6 +428,7 @@ def test_processing_retry_dedupes_active_request_and_fences_claim_token(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
+    store.import_product_policy_from_config(_config(chats={"oc_1": ChatPolicyConfig()}))
     message = _processing_message()
     store.upsert_message(message)
     task, _ = store.create_task_for_message_and_audit(
@@ -513,6 +515,7 @@ def test_processing_retry_preserves_terminal_safety_gates(
     error_fragment: str,
 ) -> None:
     store = _store(tmp_path)
+    store.import_product_policy_from_config(_config(chats={"oc_1": ChatPolicyConfig()}))
     message = _processing_message()
     store.upsert_message(message)
     task, _ = store.create_task_for_message_and_audit(
@@ -557,6 +560,7 @@ def test_processing_retry_worker_replays_bound_stage_and_finishes_attempt(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
+    store.import_product_policy_from_config(_config(chats={"oc_1": ChatPolicyConfig()}))
     message = _processing_message()
     store.upsert_message(message)
     task, _ = store.create_task_for_message_and_audit(
@@ -625,10 +629,121 @@ def test_processing_retry_worker_replays_bound_stage_and_finishes_attempt(
     assert notification is not None and notification.status == "cancelled"
 
 
+@pytest.mark.parametrize("scope_fails", [False, True])
+def test_dry_run_excluded_p2p_retry_does_not_starve_group_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope_fails: bool
+) -> None:
+    store = _store(tmp_path)
+    store.import_product_policy_from_config(_config(chats={"oc_1": ChatPolicyConfig()}))
+    group = _processing_message("om_group")
+    p2p_base = _processing_message("om_p2p")
+    p2p = replace(
+        p2p_base,
+        chat_id="oc_bot",
+        chat_type="p2p",
+        raw=p2p_base.raw | {"chat_id": "oc_bot", "chat_type": "p2p"},
+    )
+    for message in (p2p, group):
+        store.upsert_message(message)
+        task, _ = store.create_task_for_message_and_audit(
+            message, watch_until="2999-06-22T12:00:00+00:00"
+        )
+        store.record_message_processing(
+            message_id=message.message_id,
+            task_id=task.id,
+            stage="task_session",
+            status="processing_failed_terminal",
+        )
+        store.request_processing_retry(
+            message_id=message.message_id, stage="task_session", actor="owner"
+        )
+
+    class FakeProcessor:
+        approvals = None
+
+        def set_resource_retry_func(self, func: Any) -> None:
+            pass
+
+        def process(self, **kwargs: Any) -> None:
+            current = cast(NormalizedMessage, kwargs["message"])
+            assert current.message_id == group.message_id
+            store.record_message_processing(
+                message_id=current.message_id,
+                revision=current.revision,
+                stage="task_session",
+                status="processed",
+            )
+
+    service = IngestionService(
+        store=store,
+        feishu_client=cast(Any, object()),
+        config=_config(),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        task_processor=cast(Any, FakeProcessor()),
+        dry_run=True,
+    )
+
+    def scope() -> set[str]:
+        if scope_fails:
+            raise RuntimeError("enumeration failed")
+        return {"oc_human"}
+
+    monkeypatch.setattr(service, "_dry_run_p2p_scope", scope)
+    summary = service.run_processing_retries(run_id="run", limit=20)
+    assert summary.processed == 1
+    assert summary.ok is not scope_fails
+    with store.connect() as conn:
+        statuses = dict(
+            conn.execute("SELECT message_id, status FROM processing_retry_attempts")
+        )
+    assert statuses == {"om_p2p": "queued", "om_group": "succeeded"}
+
+
+def test_policy_held_retry_is_visible_and_can_be_resumed_from_console(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.import_product_policy_from_config(_config(chats={"oc_1": ChatPolicyConfig()}))
+    message = _processing_message()
+    store.upsert_message(message)
+    task, _ = store.create_task_for_message_and_audit(
+        message, watch_until="2999-06-22T12:00:00+00:00"
+    )
+    store.record_message_processing(
+        message_id=message.message_id,
+        task_id=task.id,
+        stage="task_session",
+        status="processing_failed_terminal",
+    )
+    store.request_processing_retry(
+        message_id=message.message_id, stage="task_session", actor="owner"
+    )
+    store.delete_chat_product_policy("oc_1", actor="owner")
+    store.upsert_chat_product_policy(
+        {"chat_id": "oc_1", **ChatPolicyConfig().model_dump()}, actor="owner"
+    )
+    store.reopen_task_by_operator(task.id, watch_until="2999-06-23T12:00:00+00:00")
+    query = OperatorQueryService(store)
+    detail = query.task_detail(task.short_id)
+    message_detail = query.message_detail(message.message_id)
+    assert detail is not None and message_detail is not None
+    assert detail["processing"][0]["latest_retry"]["policy_held"] is True
+    assert message_detail["processing"][0]["latest_retry"]["policy_held"] is True
+
+    result = OperatorCommandService(store).retry_processing(
+        message.message_id, stage="task_session", actor="local_console"
+    )
+    assert result.status == "applied" and result.changed is True
+    updated = query.task_detail(task.short_id)
+    assert updated is not None
+    assert updated["processing"][0]["latest_retry"]["policy_held"] is False
+
+
 def test_processing_retry_worker_replays_task_router_from_original_placeholder(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
+    store.import_product_policy_from_config(_config(chats={"oc_1": ChatPolicyConfig()}))
     message = _processing_message("om_router_retry")
     store.upsert_message(message)
     store.record_routing_audit(

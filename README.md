@@ -19,6 +19,8 @@ Feishu Shadow Agent 是一个本机运行的飞书个人办公影子助手。它
 
 ## 快速启动
 
+从零准备飞书应用、权限、账号和测试群，请按 [首次准备与预演](docs/getting-started.md) 操作。
+
 要求 Python 3.11+、uv 0.12.4，并确保本机已经可以使用 `lark-cli`，以及配置所选择的 Hermes、Codex 或 Claude Code CLI。
 
 ```bash
@@ -55,11 +57,22 @@ python -m feishu_shadow_agent policy import-config --config config.yaml
 python -m feishu_shadow_agent doctor --config config.yaml
 ```
 
-推荐先用 dry-run 跑 daemon。这个模式会执行拉取、路由、Agent、审批和 dispatch preview，但不会真实对外回复；加上 `--send-owner-notifications` 后，owner 通知仍会真实发送，方便验证审批闭环。dry-run 中产生的审批和动作不会被提升为生产发送；生产模式必须重新生成审批。
+推荐先用 dry-run 跑 daemon。这个模式会执行拉取、路由、Agent 和 dispatch preview，但不会真实发送回复或 owner 通知；审批使用本地 Operator Console。dry-run 中产生的审批和动作不会被提升为生产发送；生产模式必须重新生成审批。
 
 ```bash
-python -m feishu_shadow_agent daemon --config config.yaml --dry-run --send-owner-notifications
+python -m feishu_shadow_agent daemon --config config.yaml --dry-run
 ```
+
+另开终端启动同一预演状态的 Console：
+
+```bash
+python -m feishu_shadow_agent console --config config.yaml --mode dry-run
+python -m feishu_shadow_agent status --config config.yaml --mode dry-run
+```
+
+预演首次创建时只从已初始化的生产库复制当前策略，数据库、资源和日志分别使用独立的 `.dry-run` 路径。之后两套策略独立修改；如需再次从生产库同步，运行 `python -m feishu_shadow_agent policy sync-production --config config.yaml --mode dry-run`。若生产策略尚未初始化，可用 `policy import-config --config config.yaml --mode dry-run` 直接初始化预演策略。
+
+项目自身不会在 dry-run 中发送消息，但 `tool_permissions: full_access` 的 Agent 可以独立调用 shell 或飞书 CLI 并产生外部写入；dry-run 不会限制这些 Agent 工具。首次验证建议使用 `read_only` 或外部沙箱。
 
 确认行为符合预期后，再去掉 `--dry-run` 进入真实发送模式：
 

@@ -700,7 +700,7 @@
         },
         "unknown_group_auto_reply": {
           "default": false,
-          "description": "Whether groups without an explicit chats entry may auto-reply when all gates pass.",
+          "description": "Compatibility field; unconfigured groups are not ingested or sent to the agent.",
           "title": "Unknown Group Auto Reply",
           "type": "boolean"
         }

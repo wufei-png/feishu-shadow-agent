@@ -70,7 +70,9 @@ class MessageDetailQuery:
                        pra.reason AS retry_reason,
                        pra.error AS retry_error,
                        pra.created_at AS retry_created_at,
-                       pra.finished_at AS retry_finished_at
+                       pra.finished_at AS retry_finished_at,
+                       EXISTS(SELECT 1 FROM group_policy_holds h
+                              WHERE h.kind = 'retry' AND h.item_id = pra.id) AS retry_policy_held
                 FROM message_processing mp
                 LEFT JOIN processing_retry_attempts pra ON pra.id = (
                   SELECT latest.id FROM processing_retry_attempts latest
@@ -294,6 +296,7 @@ def _message_processing_dto(row: sqlite3.Row) -> dict[str, Any]:
             "error": data.get("retry_error"),
             "created_at": data.get("retry_created_at"),
             "finished_at": data.get("retry_finished_at"),
+            "policy_held": bool(data.get("retry_policy_held")),
         }
     return {
         "id": data["id"],

@@ -24,10 +24,12 @@ class MaintenanceCommandService:
         loaded_config: LoadedConfig,
         store: SQLiteStore,
         logger: JSONLLogger,
+        dry_run_mode: bool = False,
     ):
         self.loaded_config = loaded_config
         self.store = store
         self.logger = logger
+        self.dry_run_mode = dry_run_mode
 
     def doctor(
         self,
@@ -43,6 +45,7 @@ class MaintenanceCommandService:
             store=self.store,
             feishu_client=self._feishu_client(),
             run_id=run_id,
+            dry_run_mode=self.dry_run_mode,
         )
         results = suite.run(send_test=send_test)
         summary = summarize_results(results)
@@ -147,6 +150,7 @@ class MaintenanceCommandService:
         run_id = new_run_id("reply_style")
         result = ReplyStyleRefresher(
             config=self.loaded_config.config,
+            store=self.store,
             base_dir=self.loaded_config.base_dir,
             feishu_client=self._feishu_client(),
             agent_backend=self._agent_backend(),

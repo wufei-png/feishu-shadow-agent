@@ -5,6 +5,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
+import { getDashboard } from "./api";
 import { setConsoleLanguage } from "./i18n";
 
 vi.mock("./api", () => ({ getDashboard: vi.fn().mockResolvedValue({}) }));
@@ -42,6 +43,14 @@ afterEach(() => {
 });
 
 describe("dashboard attention navigation", () => {
+  it("identifies the isolated dry-run console", async () => {
+    vi.mocked(getDashboard).mockResolvedValueOnce({ runtime_mode: "dry_run" });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><App /></QueryClientProvider>);
+
+    expect(await screen.findByText("本地预演")).toBeTruthy();
+  });
+
   it("preserves the requested list view in the URL and destination", async () => {
     const user = userEvent.setup();
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });

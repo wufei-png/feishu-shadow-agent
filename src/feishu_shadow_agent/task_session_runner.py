@@ -262,6 +262,7 @@ class TaskSessionRunner:
         resources: list[Any],
         run_id: str,
         cwd: str | Path | None = None,
+        before_attempt: Callable[[], bool] | None = None,
     ) -> TaskSessionRunResult:
         prompt = build_task_session_prompt(
             task=task,
@@ -290,6 +291,7 @@ class TaskSessionRunner:
             stage="task_session",
             message_id=message.message_id,
             task_id=task.id,
+            before_attempt=before_attempt,
         )
         result = outcome.result
         if result is None or not result.ok or not isinstance(result.json_data, dict):

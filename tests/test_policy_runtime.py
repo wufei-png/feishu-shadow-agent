@@ -394,6 +394,99 @@ def test_runtime_membership_absence_dedupes_notification_and_recovers(
     assert policy_audits_after == policy_audits_before
 
 
+def test_group_removal_holds_related_owner_notifications(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    config = _config(chats={"oc_1": ChatPolicyConfig()})
+    store.import_product_policy_from_config(config)
+    message = _message(chat_id="oc_1")
+    store.upsert_message(message)
+    task = store.create_task_for_message(
+        message, watch_until="2999-01-01T00:00:00+00:00"
+    )
+    task_action = store.create_owner_notification_action(
+        task_id=task.id, payload={"type": "approval", "dedupe_key": "task"}
+    )
+    source_action = store.create_owner_notification_action(
+        task_id=None,
+        payload={"source_message_id": message.message_id, "dedupe_key": "source"},
+    )
+    membership_action = store.create_owner_notification_action(
+        task_id=None,
+        payload={
+            "type": "bot_membership_absent",
+            "chat_id": "oc_1",
+            "dedupe_key": "membership",
+        },
+    )
+    unrelated = store.create_owner_notification_action(
+        task_id=None, payload={"type": "other", "dedupe_key": "unrelated"}
+    )
+    store.delete_chat_product_policy("oc_1", actor="owner")
+    late_action = store.create_owner_notification_action(
+        task_id=task.id, payload={"type": "approval", "dedupe_key": "late"}
+    )
+
+    for action_id in (task_action, source_action, membership_action, late_action):
+        assert store.is_group_policy_held("action", action_id)
+        assert not store.group_send_allowed(action_id)
+        assert store.claim_action_for_dispatch(action_id) is None
+    assert [action.id for action in store.list_dispatchable_actions()] == [unrelated]
+    with pytest.raises(ValueError, match="group chat policy"):
+        store.retry_dispatch_action(source_action)
+    store.upsert_chat_product_policy(
+        {"chat_id": "oc_1", **ChatPolicyConfig().model_dump()}, actor="owner"
+    )
+    assert not store.group_send_allowed(source_action)
+    store.retry_dispatch_action(source_action)
+    assert store.group_send_allowed(source_action)
+    assert store.is_group_policy_held("action", task_action)
+
+
+def test_membership_only_probes_current_group_activations(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    config = _config(
+        chats={name: ChatPolicyConfig() for name in ("oc_old", "oc_a", "oc_b")}
+    )
+    store.import_product_policy_from_config(config)
+    old_message = _message(chat_id="oc_old")
+    store.upsert_message(old_message)
+    store.create_task_for_message(old_message, watch_until="2999-01-01T00:00:00+00:00")
+    store.delete_chat_product_policy("oc_old", actor="owner")
+
+    class RevokingClient(FakeMembershipClient):
+        def auth_status(self, *, verify: bool = True) -> LarkCliResult:
+            store.delete_chat_product_policy("oc_b", actor="owner")
+            return super().auth_status(verify=verify)
+
+        def list_chat_bots(
+            self, *, chat_id: str, as_identity: str = "user"
+        ) -> LarkCliResult:
+            result = super().list_chat_bots(chat_id=chat_id, as_identity=as_identity)
+            store.delete_chat_product_policy("oc_a", actor="owner")
+            store.upsert_chat_product_policy(
+                {"chat_id": "oc_a", **ChatPolicyConfig().model_dump()}, actor="owner"
+            )
+            return result
+
+    client = RevokingClient(
+        [LarkCliResult(["probe"], 0, json_data={"data": {"items": []}})]
+    )
+    service = BotMembershipService(
+        store=store,
+        feishu_client=client,
+        config=config,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+    )
+    summary = service.refresh(run_id="run")
+
+    assert client.probes == ["oc_a"]
+    assert summary.probed == 0
+    assert store.get_bot_membership_fact("oc_a") is None
+    assert store.get_bot_membership_fact("oc_old") is None
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM actions").fetchone()[0] == 0
+
+
 def test_unknown_membership_uses_short_retry_without_becoming_absent(
     tmp_path: Path,
 ) -> None:

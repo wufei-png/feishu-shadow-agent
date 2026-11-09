@@ -813,6 +813,7 @@ def test_task_detail_returns_related_read_models_and_effective_policy(
                 "error": None,
                 "created_at": detail["processing"][0]["latest_retry"]["created_at"],
                 "finished_at": None,
+                "policy_held": False,
             },
         }
     ]
@@ -886,6 +887,7 @@ def test_dispatch_action_detail_reads_attempts_without_recovering_stale_sends(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
+    store.import_product_policy_from_config(_config(chats={"oc_1": ChatPolicyConfig()}))
     task_id = _insert_task(store)
     action_id = store.create_send_reply_action(
         task_id=task_id,
@@ -925,6 +927,7 @@ def test_message_detail_returns_processing_context_without_preview_side_effects(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
+    store.import_product_policy_from_config(_config(chats={"oc_1": ChatPolicyConfig()}))
     task_id = _insert_task(store)
     _insert_message(store, task_id=task_id)
     _insert_approval(store, task_id=task_id, short_id="a_msg_detail")

@@ -31,15 +31,16 @@ import type {
 type WindowDays = 7 | 30;
 type OutcomeFilter = "all" | FeedbackRecord["outcome"];
 
-export function FeedbackScreen({ token }: { token: string }) {
+export function FeedbackScreen({ token, runtimeMode = "production" }: { token: string; runtimeMode?: "production" | "dry_run" }) {
   const { t } = useTranslation();
   const [executionMode, setExecutionMode] = useState<FeedbackExecutionMode>("production");
+  const effectiveMode = runtimeMode === "dry_run" ? "dry_run" : executionMode;
   const [windowDays, setWindowDays] = useState<WindowDays>(30);
   const [outcomeFilter, setOutcomeFilter] = useState<OutcomeFilter>("all");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const overview = useQuery({
-    queryKey: queryKeys.feedbackOverview(executionMode),
-    queryFn: () => getFeedbackOverview(token, executionMode),
+    queryKey: queryKeys.feedbackOverview(effectiveMode),
+    queryFn: () => getFeedbackOverview(token, effectiveMode),
     enabled: Boolean(token),
     refetchInterval: 30_000
   });
@@ -80,14 +81,14 @@ export function FeedbackScreen({ token }: { token: string }) {
           <SectionHeader
             eyebrow={t("feedback.eyebrow")}
             title={t("feedback.title")}
-            badge={<Badge tone={executionMode === "production" ? "success" : "info"}>{executionMode === "production" ? t("feedback.production") : executionMode === "dry_run" ? t("feedback.dryRun") : t("feedback.all")}</Badge>}
+            badge={<Badge tone={effectiveMode === "production" ? "success" : "info"}>{effectiveMode === "production" ? t("feedback.production") : effectiveMode === "dry_run" ? t("feedback.dryRun") : t("feedback.all")}</Badge>}
           >
             <p className="section-note">
               {t("feedback.intro")}
             </p>
           </SectionHeader>
           <div className="feedback-controls">
-            <SegmentedControl
+            {runtimeMode !== "dry_run" ? <SegmentedControl
               label={t("feedback.executionMode")}
               value={executionMode}
               onChange={setExecutionMode}
@@ -96,7 +97,7 @@ export function FeedbackScreen({ token }: { token: string }) {
                 { value: "dry_run", label: t("feedback.dryRun") },
                 { value: "all", label: t("feedback.all") }
               ]}
-            />
+            /> : null}
             <SegmentedControl
               label={t("feedback.period")}
               value={String(windowDays)}

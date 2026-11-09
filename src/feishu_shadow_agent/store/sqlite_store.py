@@ -13,7 +13,13 @@ from uuid import uuid4
 from ..config import AppConfig, ChatPolicyConfig, ReplyPolicyConfig
 from ..reply_destination import POSITION_FIELDS, candidate_from_message, position_value
 from ..revision import message_semantic_hash
-from ..time_utils import normalize_instant, parse_instant_or_none, shift_instant
+from ..time_utils import (
+    format_instant,
+    normalize_instant,
+    parse_instant_or_none,
+    shift_instant,
+    utc_now,
+)
 from ..types import (
     ActionKind,
     ActionRecord,
@@ -39,13 +45,12 @@ from ..types import (
     TaskRecord,
     TaskStatus,
     new_run_id,
-    utc_now_iso,
 )
 from .migrate import migrate_schema
 
 SQLITE_BUSY_TIMEOUT_MS = 5000
 SQLITE_APPLICATION_ID = 1179861319
-SQLITE_SCHEMA_VERSION = 8
+SQLITE_SCHEMA_VERSION = 9
 RUN_HEARTBEAT_STALE_AFTER_SECONDS = 300
 PRODUCT_POLICY_KEY = "reply_policy"
 LATEST_NON_OK_HEALTH_CHECKS_SQL = """
@@ -90,8 +95,12 @@ WHERE status = 'pending'
 """
 
 
+def _store_now_iso() -> str:
+    return format_instant(utc_now())
+
+
 class SQLiteStore:
-    def __init__(self, path: str | Path, *, clock: Callable[[], str] = utc_now_iso):
+    def __init__(self, path: str | Path, *, clock: Callable[[], str] = _store_now_iso):
         self.path = Path(path)
         self.clock = lambda: normalize_instant(clock())
         self._initialize_lock = threading.Lock()
@@ -174,6 +183,36 @@ class SQLiteStore:
             ).fetchone()
         return None if row is None else _chat_policy_from_row(row)
 
+    def list_chat_policy_activations(self) -> list[dict[str, Any]]:
+        """Return current chat policies with their latest auditable activation."""
+        self.initialize()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT cp.chat_id, pa.id AS activation_id, pa.created_at AS activated_at
+                FROM chat_policies cp
+                LEFT JOIN policy_audits pa ON pa.id = (
+                  SELECT id FROM policy_audits
+                  WHERE scope = 'chat' AND policy_key = 'chat:' || cp.chat_id
+                    AND old_json IS NULL AND new_json IS NOT NULL
+                  ORDER BY id DESC LIMIT 1
+                )
+                ORDER BY cp.chat_id
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def is_group_policy_held(self, kind: str, item_id: int) -> bool:
+        self.initialize()
+        with self.connect() as conn:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM group_policy_holds WHERE kind = ? AND item_id = ?",
+                    (kind, item_id),
+                ).fetchone()
+                is not None
+            )
+
     def product_policy_initialization_probe(self) -> dict[str, Any]:
         self.initialize()
         with self.connect() as conn:
@@ -211,7 +250,6 @@ class SQLiteStore:
         reason: str | None = None,
     ) -> dict[str, Any]:
         self.initialize()
-        now = self.clock()
         audit_reason = reason or (
             "policy import-config --replace" if replace else "policy import-config"
         )
@@ -226,6 +264,8 @@ class SQLiteStore:
         }
         global_policy = _global_product_policy_from_config(config)
         with self.connect() as conn:
+            conn.execute("BEGIN EXCLUSIVE")
+            now = self.clock()
             existing_global = conn.execute(
                 "SELECT policy_json FROM product_policies WHERE key = ?",
                 (PRODUCT_POLICY_KEY,),
@@ -391,10 +431,11 @@ class SQLiteStore:
         reason: str | None = None,
     ) -> dict[str, Any]:
         self.initialize()
-        now = self.clock()
         new_policy = _normalize_chat_product_policy(policy)
         chat_id = str(new_policy["chat_id"])
         with self.connect() as conn:
+            conn.execute("BEGIN EXCLUSIVE")
+            now = self.clock()
             existing = conn.execute(
                 """
                 SELECT chat_id, name, auto_reply, bot_joined, reply_identity,
@@ -467,6 +508,7 @@ class SQLiteStore:
                     "new_policy": None,
                     "audit_id": None,
                 }
+            _hold_group_policy_items_locked(conn, normalized_chat_id, now=now)
             conn.execute(
                 "DELETE FROM chat_policies WHERE chat_id = ?",
                 (normalized_chat_id,),
@@ -489,6 +531,83 @@ class SQLiteStore:
             "new_policy": None,
             "audit_id": audit_id,
         }
+
+    def replace_product_policy_snapshot(
+        self, global_policy: dict[str, Any], chats: list[dict[str, Any]], *, source: str
+    ) -> None:
+        """Atomically replace policy only, retaining and holding other local state."""
+        normalized_global = _normalize_global_product_policy(global_policy)
+        normalized_chats = [_normalize_chat_product_policy(chat) for chat in chats]
+        incoming = {str(chat["chat_id"]): chat for chat in normalized_chats}
+        self.initialize()
+        actor = "dry_run_policy_sync"
+        reason = "production policy snapshot"
+        with self.connect() as conn:
+            conn.execute("BEGIN EXCLUSIVE")
+            now = self.clock()
+            global_row = conn.execute(
+                "SELECT policy_json FROM product_policies WHERE key = ?",
+                (PRODUCT_POLICY_KEY,),
+            ).fetchone()
+            old_global = (
+                None if global_row is None else json.loads(global_row["policy_json"])
+            )
+            if old_global != normalized_global:
+                conn.execute(
+                    "INSERT INTO product_policies(key, policy_json, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET policy_json = excluded.policy_json, updated_at = excluded.updated_at",
+                    (PRODUCT_POLICY_KEY, _policy_json(normalized_global), now),
+                )
+                self._record_policy_audit_locked(
+                    conn,
+                    scope="global",
+                    policy_key=PRODUCT_POLICY_KEY,
+                    old_policy=old_global,
+                    new_policy=normalized_global,
+                    actor=actor,
+                    reason=reason,
+                    now=now,
+                )
+            rows = conn.execute(
+                "SELECT chat_id, name, auto_reply, bot_joined, reply_identity, allow_user_fallback, resource_download FROM chat_policies"
+            ).fetchall()
+            existing = {str(row["chat_id"]): _chat_policy_from_row(row) for row in rows}
+            for chat_id in sorted(existing.keys() - incoming.keys()):
+                _hold_group_policy_items_locked(conn, chat_id, now=now)
+                conn.execute("DELETE FROM chat_policies WHERE chat_id = ?", (chat_id,))
+                self._record_policy_audit_locked(
+                    conn,
+                    scope="chat",
+                    policy_key=f"chat:{chat_id}",
+                    old_policy=existing[chat_id],
+                    new_policy=None,
+                    actor=actor,
+                    reason=reason,
+                    now=now,
+                )
+            for chat_id, policy in sorted(incoming.items()):
+                old_policy = existing.get(chat_id)
+                if old_policy == policy:
+                    continue
+                if old_policy is None:
+                    self._insert_chat_policy_locked(conn, policy, now=now)
+                else:
+                    self._update_chat_policy_locked(conn, policy, now=now)
+                self._record_policy_audit_locked(
+                    conn,
+                    scope="chat",
+                    policy_key=f"chat:{chat_id}",
+                    old_policy=old_policy,
+                    new_policy=policy,
+                    actor=actor,
+                    reason=reason,
+                    now=now,
+                )
+            conn.execute(
+                "INSERT INTO checkpoints(key, value_json, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+                ("dry_run.policy_initialized", _policy_json({"source": source}), now),
+            )
 
     def record_run_start(
         self,
@@ -710,9 +829,6 @@ class SQLiteStore:
             rows = conn.execute(
                 """
                 SELECT chat_id FROM chat_policies
-                UNION
-                SELECT chat_id FROM tasks
-                WHERE chat_type = 'group' AND chat_id IS NOT NULL
                 ORDER BY chat_id
                 """
             ).fetchall()
@@ -934,6 +1050,7 @@ class SQLiteStore:
             processing = conn.execute(
                 """
                 SELECT mp.*, m.revision AS current_revision, m.is_deleted,
+                       m.chat_id, m.chat_type,
                        t.status AS task_status
                 FROM message_processing mp
                 JOIN messages m ON m.message_id = mp.message_id
@@ -946,6 +1063,17 @@ class SQLiteStore:
             ).fetchone()
             if processing is None:
                 raise ValueError(f"processing stage not found: {message_id} {stage}")
+            _require_group_policy_locked(
+                conn, processing["chat_id"], processing["chat_type"]
+            )
+            if (
+                processing["task_id"] is not None
+                and conn.execute(
+                    "SELECT 1 FROM group_policy_holds WHERE kind = 'task' AND item_id = ?",
+                    (processing["task_id"],),
+                ).fetchone()
+            ):
+                raise ValueError("task is policy-held; reopen it before retrying")
             if processing["status"] not in {
                 "processing_failed_terminal",
                 "blocked_waiting_external",
@@ -991,6 +1119,12 @@ class SQLiteStore:
             if active is not None:
                 if active["status"] == "claimed":
                     raise ValueError("processing retry is already in flight")
+                released = conn.execute(
+                    "DELETE FROM group_policy_holds WHERE kind = 'retry' AND item_id = ?",
+                    (active["id"],),
+                ).rowcount
+                if released:
+                    return {"changed": True, "attempt": _row_dict(active)}
                 return {"changed": False, "attempt": _row_dict(active)}
             cursor = conn.execute(
                 """
@@ -1018,18 +1152,35 @@ class SQLiteStore:
             raise ValueError("processing retry queue write failed")
         return {"changed": True, "attempt": _row_dict(attempt)}
 
-    def claim_next_processing_retry(self, *, run_id: str) -> dict[str, Any] | None:
+    def claim_next_processing_retry(
+        self, *, run_id: str, allowed_p2p_chat_ids: set[str] | None = None
+    ) -> dict[str, Any] | None:
         self.initialize()
         now = self.clock()
         claim_token = f"processing-retry-{uuid4()}"
+        allowed_p2p_json = (
+            None
+            if allowed_p2p_chat_ids is None
+            else json.dumps(sorted(allowed_p2p_chat_ids))
+        )
         with self.connect() as conn:
             candidate = conn.execute(
                 """
-                SELECT id FROM processing_retry_attempts
-                WHERE status = 'queued'
-                ORDER BY created_at, id
+                SELECT r.id FROM processing_retry_attempts r
+                JOIN messages m ON m.message_id = r.message_id
+                WHERE r.status = 'queued'
+                  AND NOT EXISTS (SELECT 1 FROM group_policy_holds h WHERE h.kind = 'retry' AND h.item_id = r.id)
+                  AND NOT EXISTS (SELECT 1 FROM group_policy_holds h WHERE h.kind = 'task' AND h.item_id = r.task_id)
+                  AND (m.chat_type != 'group' OR EXISTS (
+                    SELECT 1 FROM chat_policies cp WHERE cp.chat_id = m.chat_id
+                  ))
+                  AND (? IS NULL OR m.chat_type != 'p2p' OR m.chat_id IN (
+                    SELECT value FROM json_each(?)
+                  ))
+                ORDER BY r.created_at, r.id
                 LIMIT 1
-                """
+                """,
+                (allowed_p2p_json, allowed_p2p_json),
             ).fetchone()
             if candidate is None:
                 return None
@@ -1099,6 +1250,19 @@ class SQLiteStore:
                         attempt["stage"],
                     ),
                 )
+        return cursor.rowcount == 1
+
+    def requeue_policy_held_retry(self, attempt_id: int, *, claim_token: str) -> bool:
+        self.initialize()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE processing_retry_attempts
+                SET status = 'queued', claim_token = NULL, run_id = NULL, claimed_at = NULL
+                WHERE id = ? AND status = 'claimed' AND claim_token = ?
+                """,
+                (attempt_id, claim_token),
+            )
         return cursor.rowcount == 1
 
     def upsert_resource(
@@ -1553,6 +1717,7 @@ class SQLiteStore:
         router_called: bool = False,
         matched_by: str = "new_trigger",
         agent_working_dir: str | None = None,
+        expected_group_activation_id: int | None = None,
     ) -> tuple[TaskRecord, RouteDecision]:
         self.initialize()
         now = self.clock()
@@ -1565,6 +1730,31 @@ class SQLiteStore:
                 agent_working_dir=agent_working_dir,
                 now=now,
             )
+            if (
+                message.chat_type == "group"
+                and expected_group_activation_id is not None
+            ):
+                activation = conn.execute(
+                    """
+                    SELECT pa.id FROM chat_policies cp
+                    JOIN policy_audits pa ON pa.id = (
+                      SELECT id FROM policy_audits
+                      WHERE scope = 'chat' AND policy_key = 'chat:' || cp.chat_id
+                        AND old_json IS NULL AND new_json IS NOT NULL
+                      ORDER BY id DESC LIMIT 1
+                    )
+                    WHERE cp.chat_id = ?
+                    """,
+                    (message.chat_id,),
+                ).fetchone()
+                if (
+                    activation is None
+                    or activation["id"] != expected_group_activation_id
+                ):
+                    conn.execute(
+                        "INSERT OR IGNORE INTO group_policy_holds(kind, item_id, chat_id, created_at) VALUES ('task', ?, ?, ?)",
+                        (task_id, message.chat_id or "", now),
+                    )
             task = self._get_task_by_id(conn, task_id)
             decision = RouteDecision(
                 RouteName.NEW_TASK,
@@ -1745,12 +1935,36 @@ class SQLiteStore:
             task = self._get_task_by_lookup(conn, task_id)
             if task is None:
                 raise KeyError(f"task not found: {task_id}")
+            _require_group_policy_locked(conn, task.chat_id, task.chat_type)
             if task.status == TaskStatus.WATCHING.value:
+                if conn.execute(
+                    "SELECT 1 FROM group_policy_holds WHERE kind = 'task' AND item_id = ?",
+                    (task.id,),
+                ).fetchone():
+                    conn.execute(
+                        "DELETE FROM group_policy_holds WHERE kind = 'task' AND item_id = ?",
+                        (task.id,),
+                    )
+                    conn.execute(
+                        "UPDATE tasks SET watch_until = ?, updated_at = ? WHERE id = ?",
+                        (watch_until, now, task.id),
+                    )
+                    return {
+                        "changed": True,
+                        "task": _task_command_summary(
+                            self._get_task_by_id(conn, task.id)
+                        ),
+                        "previous_status": task.status,
+                    }
                 return {
                     "changed": False,
                     "task": _task_command_summary(task),
                     "previous_status": task.status,
                 }
+            conn.execute(
+                "DELETE FROM group_policy_holds WHERE kind = 'task' AND item_id = ?",
+                (task.id,),
+            )
             conn.execute(
                 """
                 UPDATE tasks
@@ -1901,6 +2115,7 @@ class SQLiteStore:
                 SELECT * FROM tasks
                 WHERE chat_id = ?
                   AND status = 'watching'
+                  AND NOT EXISTS (SELECT 1 FROM group_policy_holds h WHERE h.kind = 'task' AND h.item_id = tasks.id)
                   AND (watch_until IS NULL OR julianday(watch_until) > julianday(?))
                 ORDER BY updated_at DESC, id DESC
                 """,
@@ -1925,6 +2140,7 @@ class SQLiteStore:
                 WHERE t.chat_id = ?
                   AND wk.key = ?
                   AND t.status = 'watching'
+                  AND NOT EXISTS (SELECT 1 FROM group_policy_holds h WHERE h.kind = 'task' AND h.item_id = t.id)
                   AND (t.watch_until IS NULL OR julianday(t.watch_until) > julianday(?))
                 ORDER BY t.updated_at DESC, t.id DESC
                 """,
@@ -2158,6 +2374,7 @@ class SQLiteStore:
                 FROM tasks t
                 JOIN task_watch_keys wk ON wk.task_id = t.id
                 WHERE t.status = 'watching'
+                  AND NOT EXISTS (SELECT 1 FROM group_policy_holds h WHERE h.kind = 'task' AND h.item_id = t.id)
                   AND (t.watch_until IS NULL OR julianday(t.watch_until) > julianday(?))
                   AND t.chat_id IS NOT NULL
                   AND wk.key LIKE 'thread:%'
@@ -2169,6 +2386,7 @@ class SQLiteStore:
                   NULL AS thread_id
                 FROM tasks t
                 WHERE t.status = 'watching'
+                  AND NOT EXISTS (SELECT 1 FROM group_policy_holds h WHERE h.kind = 'task' AND h.item_id = t.id)
                   AND (t.watch_until IS NULL OR julianday(t.watch_until) > julianday(?))
                   AND t.chat_id IS NOT NULL
                   AND NOT EXISTS (
@@ -2188,6 +2406,7 @@ class SQLiteStore:
                 FROM tasks t
                 JOIN messages m ON m.message_id = t.root_message_id
                 WHERE t.status = 'watching'
+                  AND NOT EXISTS (SELECT 1 FROM group_policy_holds h WHERE h.kind = 'task' AND h.item_id = t.id)
                   AND (t.watch_until IS NULL OR julianday(t.watch_until) > julianday(?))
                   AND t.chat_type = 'group'
                   AND EXISTS (
@@ -2212,6 +2431,21 @@ class SQLiteStore:
                 targets, key=lambda target: (target[0] or "", target[2] or "")
             )
         ]
+
+    def conversation_thread_is_known(
+        self, *, chat_id: str, chat_type: str, thread_id: str
+    ) -> bool:
+        """Check thread ownership before using a thread-only API."""
+        self.initialize()
+        with self.connect() as conn:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM messages WHERE chat_id = ? AND chat_type = ? "
+                    "AND thread_id = ? LIMIT 1",
+                    (chat_id, chat_type, thread_id),
+                ).fetchone()
+                is not None
+            )
 
     def record_routing_audit(
         self,
@@ -2294,10 +2528,15 @@ class SQLiteStore:
             if kind is None:
                 rows = conn.execute(
                     """
-                    SELECT *
-                    FROM actions
-                    WHERE status = 'pending'
-                      AND kind IN ('send_reply', 'owner_notification')
+                    SELECT a.*
+                    FROM actions a
+                    WHERE a.status = 'pending'
+                      AND a.kind IN ('send_reply', 'owner_notification')
+                      AND NOT EXISTS (SELECT 1 FROM group_policy_holds h WHERE h.kind = 'action' AND h.item_id = a.id)
+                      AND (a.kind != 'send_reply' OR NOT EXISTS (
+                        SELECT 1 FROM tasks t WHERE t.id = a.task_id AND t.chat_type = 'group'
+                          AND NOT EXISTS (SELECT 1 FROM chat_policies cp WHERE cp.chat_id = t.chat_id)
+                      ))
                     ORDER BY CASE WHEN execution_mode = 'production' THEN 0 ELSE 1 END,
                              created_at, id
                     LIMIT ?
@@ -2307,10 +2546,15 @@ class SQLiteStore:
             else:
                 rows = conn.execute(
                     """
-                    SELECT *
-                    FROM actions
-                    WHERE status = 'pending'
-                      AND kind = ?
+                    SELECT a.*
+                    FROM actions a
+                    WHERE a.status = 'pending'
+                      AND a.kind = ?
+                      AND NOT EXISTS (SELECT 1 FROM group_policy_holds h WHERE h.kind = 'action' AND h.item_id = a.id)
+                      AND (a.kind != 'send_reply' OR NOT EXISTS (
+                        SELECT 1 FROM tasks t WHERE t.id = a.task_id AND t.chat_type = 'group'
+                          AND NOT EXISTS (SELECT 1 FROM chat_policies cp WHERE cp.chat_id = t.chat_id)
+                      ))
                     ORDER BY CASE WHEN execution_mode = 'production' THEN 0 ELSE 1 END,
                              created_at, id
                     LIMIT ?
@@ -2326,6 +2570,31 @@ class SQLiteStore:
                 "SELECT * FROM actions WHERE id = ?", (action_id,)
             ).fetchone()
         return None if row is None else _action_from_row(row)
+
+    def group_send_allowed(self, action_id: int, *, allow_held: bool = False) -> bool:
+        """Recheck a group's policy and hold immediately before adapter calls."""
+        self.initialize()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT a.kind, t.chat_id, t.chat_type,
+                       EXISTS(SELECT 1 FROM group_policy_holds h
+                              WHERE h.kind = 'action' AND h.item_id = a.id) AS held
+                FROM actions a LEFT JOIN tasks t ON t.id = a.task_id
+                WHERE a.id = ?
+                """,
+                (action_id,),
+            ).fetchone()
+            if row is None or (row["held"] and not allow_held):
+                return False
+            group_chat_id = _action_group_chat_id_locked(conn, action_id)
+            if group_chat_id is None:
+                return True
+            try:
+                _require_group_policy_locked(conn, group_chat_id, "group")
+            except ValueError:
+                return False
+            return True
 
     def action_revision_is_current(self, action: ActionRecord) -> bool:
         """Return whether a revision-bound action may still cross the send boundary."""
@@ -2404,6 +2673,11 @@ class SQLiteStore:
                 UPDATE actions
                 SET status = ?, updated_at = ?
                 WHERE id = ? AND status = ?
+                  AND NOT EXISTS (SELECT 1 FROM group_policy_holds h WHERE h.kind = 'action' AND h.item_id = actions.id)
+                  AND (kind != 'send_reply' OR NOT EXISTS (
+                    SELECT 1 FROM tasks t WHERE t.id = actions.task_id AND t.chat_type = 'group'
+                      AND NOT EXISTS (SELECT 1 FROM chat_policies cp WHERE cp.chat_id = t.chat_id)
+                  ))
                 """,
                 ("sending", now, action_id, "pending"),
             )
@@ -2642,12 +2916,24 @@ class SQLiteStore:
             ).fetchone()
             if row is None:
                 raise ValueError(f"action not found: {action_id}")
+            task = conn.execute(
+                "SELECT chat_id, chat_type FROM tasks WHERE id = ?", (row["task_id"],)
+            ).fetchone()
+            if row["kind"] == "send_reply" and task is not None:
+                _require_group_policy_locked(conn, task["chat_id"], task["chat_type"])
+            held_row = conn.execute(
+                "SELECT chat_id FROM group_policy_holds WHERE kind = 'action' AND item_id = ?",
+                (action_id,),
+            ).fetchone()
+            held = held_row is not None
+            if held_row is not None:
+                _require_group_policy_locked(conn, held_row["chat_id"], "group")
             if row["status"] not in {
                 ActionStatus.FAILED.value,
                 ActionStatus.FAILED_NEEDS_REVIEW.value,
-            }:
+            } and not (row["status"] == ActionStatus.PENDING.value and held):
                 raise ValueError(
-                    "dispatch retry only accepts failed or failed_needs_review actions"
+                    "dispatch retry only accepts failed or failed_needs_review actions, or policy-held pending actions"
                 )
             if (
                 row["source_message_id"] is not None
@@ -2684,6 +2970,10 @@ class SQLiteStore:
                 WHERE id = ?
                 """,
                 (ActionStatus.PENDING.value, 1, now, action_id),
+            )
+            conn.execute(
+                "DELETE FROM group_policy_holds WHERE kind = 'action' AND item_id = ?",
+                (action_id,),
             )
             updated = conn.execute(
                 "SELECT * FROM actions WHERE id = ?", (action_id,)
@@ -3761,6 +4051,10 @@ class SQLiteStore:
             if verb == "approve" and not _task_is_watching(task):
                 raise ValueError("approval task is not watching")
             if verb == "approve":
+                if task is not None:
+                    _require_group_policy_locked(
+                        conn, task["chat_id"], task["chat_type"]
+                    )
                 approval_target = payload.get("reply_target_message_id") or payload.get(
                     "target_message_id"
                 )
@@ -3943,6 +4237,7 @@ class SQLiteStore:
                 raise ValueError("/send requires a task or approval id")
             if task is None:
                 raise ValueError(f"task not found: {target_id}")
+            _require_group_policy_locked(conn, task["chat_id"], task["chat_type"])
             if not _task_is_watching(task):
                 raise ValueError(f"task is not watching: {target_id}")
             reply_text = final_reply or ""
@@ -4507,6 +4802,7 @@ class SQLiteStore:
                 execution_mode=execution_mode,
                 now=now,
             )
+            _hold_group_action_if_needed_locked(conn, int(failed["id"]), task_id, now)
             return int(failed["id"])
 
         if _has_active_send_reply_action(
@@ -4579,8 +4875,11 @@ class SQLiteStore:
                 execution_mode=execution_mode,
                 now=now,
             )
+            _hold_group_action_if_needed_locked(conn, int(row["id"]), task_id, now)
             return int(row["id"])
-        return _cursor_lastrowid(cursor)
+        action_id = _cursor_lastrowid(cursor)
+        _hold_group_action_if_needed_locked(conn, action_id, task_id, now)
+        return action_id
 
     def _create_owner_notification_action_locked(
         self,
@@ -4635,7 +4934,9 @@ class SQLiteStore:
             ),
         )
         if cursor.rowcount == 1:
-            return _cursor_lastrowid(cursor)
+            action_id = _cursor_lastrowid(cursor)
+            _hold_group_action_if_needed_locked(conn, action_id, task_id, now)
+            return action_id
         row = conn.execute(
             "SELECT id, status FROM actions WHERE idempotency_key = ? AND kind = 'owner_notification'",
             (idempotency_key,),
@@ -4671,7 +4972,9 @@ class SQLiteStore:
                     row["id"],
                 ),
             )
-        return int(row["id"])
+        action_id = int(row["id"])
+        _hold_group_action_if_needed_locked(conn, action_id, task_id, now)
+        return action_id
 
     def insert_action_for_test(
         self,
@@ -5793,6 +6096,105 @@ def _truncate(text: str, limit: int = 100) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return f"{cleaned[: limit - 3]}..."
+
+
+def _action_group_chat_id_locked(
+    conn: sqlite3.Connection, action_id: int
+) -> str | None:
+    row = conn.execute(
+        """
+        SELECT t.chat_id AS task_chat_id, t.chat_type AS task_chat_type,
+               m.chat_id AS source_chat_id, m.chat_type AS source_chat_type,
+               a.payload_json
+        FROM actions a
+        LEFT JOIN tasks t ON t.id = a.task_id
+        LEFT JOIN messages m ON m.message_id = a.source_message_id
+        WHERE a.id = ?
+        """,
+        (action_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    if row["task_chat_type"] == "group":
+        return cast(str | None, row["task_chat_id"])
+    if row["source_chat_type"] == "group":
+        return cast(str | None, row["source_chat_id"])
+    payload = _loads_json_object(row["payload_json"])
+    if payload.get("type") in {"bot_membership_absent", "bot_membership_recovered"}:
+        chat_id = payload.get("chat_id")
+        return chat_id if isinstance(chat_id, str) else None
+    return None
+
+
+def _hold_group_action_if_needed_locked(
+    conn: sqlite3.Connection, action_id: int, task_id: int | None, now: str
+) -> None:
+    chat_id = _action_group_chat_id_locked(conn, action_id)
+    if not chat_id:
+        return
+    policy = conn.execute(
+        "SELECT 1 FROM chat_policies WHERE chat_id = ?", (chat_id,)
+    ).fetchone()
+    held_task = conn.execute(
+        "SELECT 1 FROM group_policy_holds WHERE kind = 'task' AND item_id = ?",
+        (task_id,),
+    ).fetchone()
+    if policy is None or held_task is not None:
+        conn.execute(
+            "INSERT OR IGNORE INTO group_policy_holds(kind, item_id, chat_id, created_at) VALUES ('action', ?, ?, ?)",
+            (action_id, chat_id, now),
+        )
+
+
+def _hold_group_policy_items_locked(
+    conn: sqlite3.Connection, chat_id: str, *, now: str
+) -> None:
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO group_policy_holds(kind, item_id, chat_id, created_at)
+        SELECT 'task', id, chat_id, ? FROM tasks
+        WHERE chat_id = ? AND chat_type = 'group' AND status = 'watching'
+        """,
+        (now, chat_id),
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO group_policy_holds(kind, item_id, chat_id, created_at)
+        SELECT 'action', a.id, ?, ? FROM actions a
+        LEFT JOIN tasks t ON t.id = a.task_id
+        LEFT JOIN messages m ON m.message_id = a.source_message_id
+        WHERE a.status IN ('pending', 'sending') AND (
+          (t.chat_type = 'group' AND t.chat_id = ?)
+          OR (m.chat_type = 'group' AND m.chat_id = ?)
+          OR (json_extract(a.payload_json, '$.type') IN ('bot_membership_absent', 'bot_membership_recovered')
+              AND json_extract(a.payload_json, '$.chat_id') = ?)
+        )
+        """,
+        (chat_id, now, chat_id, chat_id, chat_id),
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO group_policy_holds(kind, item_id, chat_id, created_at)
+        SELECT 'retry', r.id, m.chat_id, ? FROM processing_retry_attempts r
+        JOIN messages m ON m.message_id = r.message_id
+        WHERE m.chat_id = ? AND m.chat_type = 'group'
+          AND r.status IN ('queued', 'claimed')
+        """,
+        (now, chat_id),
+    )
+
+
+def _require_group_policy_locked(
+    conn: sqlite3.Connection, chat_id: str | None, chat_type: str | None
+) -> None:
+    if chat_type == "group" and (
+        not chat_id
+        or conn.execute(
+            "SELECT 1 FROM chat_policies WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+        is None
+    ):
+        raise ValueError("group chat policy is not configured")
 
 
 def _task_is_watching(row: sqlite3.Row | None) -> bool:

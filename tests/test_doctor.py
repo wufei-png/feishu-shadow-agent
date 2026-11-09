@@ -561,6 +561,25 @@ def test_missing_scope_is_critical_failure(tmp_path: Path) -> None:
     failed = {result.name: result for result in results if result.is_critical_failure}
     assert "required_user_scopes" in failed
     assert failed["required_user_scopes"].details["missing"] == ["search:message"]
+    assert "search:message" in failed["required_user_scopes"].message
+    assert "auth login --scope" in failed["required_user_scopes"].message
+
+
+def test_dry_run_doctor_policy_hint_targets_dry_run_store(tmp_path: Path) -> None:
+    loaded = ConfigService().load(FIXTURE)
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=SQLiteStore(tmp_path / "dry.sqlite3"),
+        feishu_client=FakeFeishuClient(),
+        hermes_checker=ok_hermes,
+        dry_run_mode=True,
+    )
+
+    results = suite.run(send_test=False)
+
+    policy = next(item for item in results if item.name == "product_policy_initialized")
+    assert policy.is_critical_failure
+    assert "policy import-config --mode dry-run" in policy.message
 
 
 def test_hermes_unreachable_is_critical_failure(tmp_path: Path) -> None:

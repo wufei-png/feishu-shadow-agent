@@ -12,7 +12,7 @@ export type CatalogTranslation = { label: string; description: string; help?: st
 
 const zhCatalog: Record<string, CatalogTranslation> = {
   "policy.global.p2p_auto_reply": { label: "私聊自动回复", description: "回复条件满足时，允许在一对一会话中自动回复。" },
-  "policy.global.unknown_group_auto_reply": { label: "未配置群聊自动回复", description: "回复条件满足时，允许未单独配置策略的群聊自动回复。", help: "仅适用于产品策略中没有独立会话策略的群聊。" },
+  "policy.global.unknown_group_auto_reply": { label: "兼容字段：未配置群聊", description: "保留供旧配置兼容；未配置群不会被采集。", help: "要启用群消息采集，请添加该群的会话策略。" },
   "policy.global.default_bot_joined": { label: "默认机器人可用状态", description: "未单独配置策略的会话默认是否可使用机器人。" },
   "policy.global.default_reply_identity": { label: "默认回复身份", description: "未单独配置策略的会话默认采用的回复身份。", help: "“优先机器人”会先使用机器人；允许降级时，可改用你的用户身份。" },
   "policy.global.default_allow_user_fallback": { label: "默认允许用户身份降级", description: "优先使用机器人回复失败时，默认是否允许改用用户身份。", help: "仅在回复身份为“优先机器人”时生效。" },

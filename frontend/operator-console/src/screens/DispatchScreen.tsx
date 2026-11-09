@@ -301,6 +301,7 @@ export function DispatchScreen({ token, selectedId, initialFilter }: { token: st
             <div className="detail-panel">
               <p className="eyebrow">{t("dispatch.recovery")}</p>
               <h2>{t("dispatch.handle")}</h2>
+              {detail.data.action.policy_held ? <p className="detail-note">{t("dispatch.policyHeld")}</p> : null}
               <TextareaField
                 label={t("common.reason")}
                 onChange={(reason) => updateDraft({ reason })}

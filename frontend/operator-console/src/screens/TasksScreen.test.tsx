@@ -107,6 +107,32 @@ describe("TasksScreen processing recovery", () => {
       reason: undefined
     });
   });
+
+  it("allows a policy-held queued retry to be explicitly resumed", async () => {
+    const detail = taskDetail();
+    const retry = detail.processing?.[1].latest_retry;
+    if (!retry) throw new Error("missing queued retry fixture");
+    retry.policy_held = true;
+    vi.mocked(api.listTasks).mockResolvedValue([detail]);
+    vi.mocked(api.getTask).mockResolvedValue(detail);
+    vi.mocked(api.retryMessageProcessing).mockResolvedValue({
+      status: "applied", command: "processing.retry", actor: "local_console",
+      reason: null, target: {}, changed: true, result: {}, warnings: [], next_actions: []
+    });
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <TasksScreen selectedId="t_retry" token="token" />
+      </QueryClientProvider>
+    );
+    const resume = await screen.findByRole("button", { name: "恢复重试" });
+    expect(resume.hasAttribute("disabled")).toBe(false);
+    await user.click(resume);
+    expect(api.retryMessageProcessing).toHaveBeenCalledWith(
+      "token", "om_blocked", "resource_download", { reason: undefined }
+    );
+  });
 });
 
 function taskDetail(): TaskDetail {

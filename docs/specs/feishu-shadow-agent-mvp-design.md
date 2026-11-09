@@ -275,7 +275,7 @@ reply_policy:
 
 - 不确定、涉及承诺/隐私/写操作/权限扩大/多人责任不清：bot 私聊 owner。
 - P2P：证据完整、`answerability=auto_reply` 且回复 gate 通过时允许自动回复；single-active-task 只作为语义候选，不作为确定性 attach。
-- 群聊：显式 per-chat policy 开启，或未知群 `unknown_group_auto_reply` 开启时，直接 `@我`、证据完整、全部确定性 gate 通过才自动回复。
+- 群聊：必须先有显式 per-chat policy 才会采集；开启自动回复后，直接 `@我`、证据完整、全部确定性 gate 通过才自动回复。`unknown_group_auto_reply` 为兼容字段，不能启用未配置群的采集。
 
 身份规则：
 
@@ -1070,22 +1070,17 @@ python -m feishu_shadow_agent doctor --send-test
 ```bash
 python -m feishu_shadow_agent daemon
 python -m feishu_shadow_agent daemon --dry-run
-python -m feishu_shadow_agent daemon --dry-run --send-owner-notifications
 ```
 
 `--dry-run`：
 
 - 拉消息、建任务、调用 Hermes 正常。
 - 不真实对外发送。
-- 不真实执行写操作。
+- 项目自身的回复发送保持 preview；Agent 工具仍遵循所配置的权限，`full_access` 可能产生外部写入。
 - 不发送 owner 通知。
 - 记录 would-do。
 
-`--dry-run --send-owner-notifications`：
-
-- 允许只发给 owner 的通知。
-- 不对外回复。
-- 不执行写操作。
+dry-run 审批只通过本地 Console 处理，不读取机器人审批私聊，也不发送 owner 通知或接收卡片回调。`--send-owner-notifications` 与 `--dry-run` 不兼容。
 
 ### replay
 

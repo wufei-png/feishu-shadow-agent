@@ -7,6 +7,7 @@ from typing import Any, cast
 from ..agent_backend import AgentBackend
 from ..config import ConfigService, LoadedConfig
 from ..time_utils import parse_instant
+from .access import validate_model_messages
 from .artifacts import (
     EvalError,
     copy_config_or_raise,
@@ -211,6 +212,19 @@ class ModelEvalService:
             case_type=eval_type,
             run_config=self.loaded,
         )
+        group_ids: set[str] = (
+            validate_model_messages(
+                self.loaded, list(case.raw_messages.values()), directory=case.directory
+            )
+            if not dry_run_backend
+            else {
+                str(chat_id)
+                for raw in case.raw_messages.values()
+                if (raw.get("chat_type") or raw.get("chatType")) == "group"
+                and isinstance(chat_id := raw.get("chat_id") or raw.get("chatId"), str)
+                and chat_id
+            }
+        )
         run_config_hash = file_sha256(self.loaded.path)
         case_backend = model_metadata(
             ConfigService().load(case.directory / "config.yaml")
@@ -230,12 +244,29 @@ class ModelEvalService:
                     slot_key=text_sha256(str(case.directory))[:24],
                     log_level=self.loaded.config.logging.level,
                 )
+                for chat_id in group_ids:
+                    if runtime.store.get_chat_product_policy(chat_id) is None:
+                        runtime.store.upsert_chat_product_policy(
+                            {"chat_id": chat_id},
+                            actor="evaluation",
+                            reason="validated fixture",
+                        )
                 backend = (
                     DryRunBackend()
                     if dry_run_backend
                     else self.backend_factory(self.loaded)
                 )
-                traced_backend = TracedAgentBackend(backend)
+
+                def verify_case_access() -> None:
+                    validate_model_messages(
+                        self.loaded,
+                        list(case.raw_messages.values()),
+                        directory=case.directory,
+                    )
+
+                traced_backend = TracedAgentBackend(
+                    backend, before_call=None if dry_run_backend else verify_case_access
+                )
                 trial = _run_trial(
                     eval_type=eval_type,
                     case=case,

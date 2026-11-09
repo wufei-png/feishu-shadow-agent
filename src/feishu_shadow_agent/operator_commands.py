@@ -560,6 +560,15 @@ class TaskCommandService:
                 target=_task_target(task_id),
                 error=str(exc),
             )
+        except ValueError as exc:
+            return _error_result(
+                status="validation_failed",
+                command="task.reopen",
+                actor=actor,
+                reason=reason,
+                target=_task_target(task_id),
+                error=str(exc),
+            )
         changed = bool(raw.get("changed"))
         return CommandResult(
             status="applied" if changed else "no_change",

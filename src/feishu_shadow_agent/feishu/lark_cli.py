@@ -34,6 +34,14 @@ class LarkCliClient:
         self.cwd = None if cwd is None else Path(cwd)
         self._runner = runner
 
+    def with_timeout(self, timeout_seconds: int) -> LarkCliClient:
+        return LarkCliClient(
+            path=self.path,
+            timeout_seconds=min(self.timeout_seconds, timeout_seconds),
+            cwd=self.cwd,
+            runner=self._runner,
+        )
+
     def build_version(self) -> list[str]:
         return [self.path, "--version"]
 
@@ -42,6 +50,51 @@ class LarkCliClient:
         if verify:
             argv.append("--verify")
         return argv
+
+    def build_user_p2p_chat_list(self, *, page_token: str | None = None) -> list[str]:
+        argv = [
+            self.path,
+            "im",
+            "+chat-list",
+            "--as",
+            "user",
+            "--types",
+            "p2p",
+            "--user-id-type",
+            "open_id",
+            "--page-size",
+            "100",
+            "--json",
+        ]
+        _extend_option(argv, "--page-token", page_token)
+        return argv
+
+    def list_user_p2p_chats(self, *, page_token: str | None = None) -> MessagePage:
+        result = self.run_json(self.build_user_p2p_chat_list(page_token=page_token))
+        if not result.ok:
+            raise LarkCliCommandError(result)
+        data: Any = result.json_data
+        if not isinstance(data, dict):
+            raise ValueError("chat list response is not an object")
+        source: Any = cast(dict[str, Any], data).get("data", data)
+        if not isinstance(source, dict):
+            raise ValueError("chat list response is missing data")
+        source = cast(dict[str, Any], source)
+        chats = source.get("chats")
+        has_more = source.get("has_more")
+        token = source.get("page_token")
+        if not isinstance(chats, list) or not isinstance(has_more, bool):
+            raise ValueError("chat list response lacks complete pagination metadata")
+        if any(not isinstance(chat, dict) for chat in cast(list[object], chats)):
+            raise ValueError("chat list contains malformed rows")
+        if has_more and (not isinstance(token, str) or not token):
+            raise ValueError("chat list is incomplete without a next page token")
+        return MessagePage(
+            items=cast(list[dict[str, Any]], chats),
+            next_page_token=token if has_more and isinstance(token, str) else None,
+            has_more=has_more,
+            raw=cast(dict[str, Any], data),
+        )
 
     def build_messages_search(
         self,
@@ -474,13 +527,20 @@ class LarkCliClient:
         sender: str,
         start: str | None,
         end: str | None,
+        chat_type: str | None = None,
+        chat_id: str | None = None,
+        page_token: str | None = None,
+        page_all: bool = True,
     ) -> MessagePage:
         result = self.run_json(
             self.build_messages_search(
                 sender=sender,
+                chat_type=chat_type,
+                chat_id=chat_id,
                 start=start,
                 end=end,
-                page_all=True,
+                page_token=page_token,
+                page_all=page_all,
                 query="",
                 no_reactions=True,
             )

@@ -322,6 +322,7 @@ class HealthSuite:
         hermes_checker: HermesChecker | None = None,
         run_id: str | None = None,
         disk_usage: DiskUsageProbe | None = None,
+        dry_run_mode: bool = False,
     ):
         if agent_backend_checker is not None and hermes_checker is not None:
             raise ValueError("configure either agent_backend_checker or hermes_checker")
@@ -332,6 +333,7 @@ class HealthSuite:
             SelectedBackendReadinessChecker(hermes_checker=hermes_checker)
         )
         self.run_id = run_id
+        self.dry_run_mode = dry_run_mode
         self.disk_usage = disk_usage or shutil.disk_usage
 
     def run(self, *, send_test: bool = False) -> list[HealthCheckResult]:
@@ -605,7 +607,12 @@ class HealthSuite:
                 "product_policy_initialized",
                 "critical",
                 "failed",
-                "Product Policy Store global policy is not initialized; run `policy import-config`.",
+                "Product Policy Store global policy is not initialized; run "
+                + (
+                    "`policy import-config --mode dry-run`."
+                    if self.dry_run_mode
+                    else "`policy import-config`."
+                ),
                 {"missing": probe["missing"], "path": str(self.store.path)},
             )
         return HealthCheckResult(
@@ -710,7 +717,7 @@ class HealthSuite:
                 "required_user_scopes",
                 "critical",
                 "failed",
-                "auth status did not expose user scopes",
+                "auth status did not expose user scopes; run `lark-cli auth status --verify --json` and authorize the listed scopes",
             )
         granted = set(scope_text.split())
         missing = sorted(REQUIRED_USER_SCOPES - granted)
@@ -719,7 +726,11 @@ class HealthSuite:
                 "required_user_scopes",
                 "critical",
                 "failed",
-                "required user scopes are missing",
+                "required user scopes are missing: "
+                + ", ".join(missing)
+                + '; enable them for the app, then run `lark-cli auth login --scope "'
+                + " ".join(sorted(REQUIRED_USER_SCOPES))
+                + '"`',
                 {"missing": missing},
             )
         return HealthCheckResult(
@@ -754,7 +765,7 @@ class HealthSuite:
             "bot_identity",
             "critical",
             "failed",
-            "bot identity is not available",
+            "bot identity is not available; check the bound app, app credentials and bot capability",
             {
                 "status": bot.get("status"),
                 "message": bot.get("message"),
