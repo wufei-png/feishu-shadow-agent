@@ -52,6 +52,10 @@ VALID_FEEDBACK_REASONS = {
 class ChannelClient(Protocol):
     def on(self, name: str, handler: Callable[..., Any]) -> Callable[[], Any]: ...
 
+    def set_card_action_guard(
+        self, guard: Callable[[], bool], *, blocked_message: str
+    ) -> None: ...
+
     # SDK compatibility contract exposes a timeout parameter.
     async def connect_until_ready(
         self,
@@ -137,19 +141,6 @@ class CardActionProcessor:
             )
             return CardActionOutcome(
                 "forbidden", "error", "仅配置的 owner 可以操作此卡片。"
-            )
-
-        if not self.runtime_allows_actions():
-            self.logger.warning(
-                "card_action_rejected",
-                data={
-                    "reason": "runtime_health_failed",
-                    "event_id": request.event_id,
-                    "approval_id": request.approval_id,
-                },
-            )
-            return CardActionOutcome(
-                "blocked", "error", "守护进程健康检查未通过，请修复后重试。"
             )
 
         suggested_reply = _pending_suggested_reply(self.store, request.approval_id)
@@ -347,12 +338,16 @@ class FeishuCardActionConnection:
                 "interactive card credential environment variables are unset"
             )
         channel = self.channel_factory(self.app_id, self.app_secret)
-        self.processor.bind_channel(channel)
-        channel.on("cardAction", self.processor.handle)
-        channel.on("reconnecting", lambda: self._set_status("unhealthy"))
-        channel.on("reconnected", lambda: self._set_status("healthy"))
-        channel.on("error", self._on_channel_error)
         try:
+            self.processor.bind_channel(channel)
+            channel.set_card_action_guard(
+                self._runtime_allows_card_action,
+                blocked_message="守护进程健康检查未通过，请修复后重试。",
+            )
+            channel.on("cardAction", self.processor.handle)
+            channel.on("reconnecting", lambda: self._set_status("unhealthy"))
+            channel.on("reconnected", lambda: self._set_status("healthy"))
+            channel.on("error", self._on_channel_error)
             await channel.connect_until_ready(timeout=self.startup_timeout_seconds)
             self._set_status("healthy")
             self._startup_event.set()
@@ -360,6 +355,14 @@ class FeishuCardActionConnection:
             await asyncio.to_thread(self._stop_event.wait)
         finally:
             await channel.disconnect()
+
+    def _runtime_allows_card_action(self) -> bool:
+        if self.processor.runtime_allows_actions():
+            return True
+        self.logger.warning(
+            "card_action_rejected", data={"reason": "runtime_health_failed"}
+        )
+        return False
 
     def _on_channel_error(self, exc: object) -> None:
         self._set_status("unhealthy", str(exc))

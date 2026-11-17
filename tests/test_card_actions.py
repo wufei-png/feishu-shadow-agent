@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from feishu_shadow_agent.approval_cards import (
     CARD_ACTION_PROTOCOL,
     CARD_REPLY_MAX_LENGTH,
@@ -22,6 +24,7 @@ from feishu_shadow_agent.card_actions import (
 from feishu_shadow_agent.config import AppConfig, OwnerConfig
 from feishu_shadow_agent.daemon import Daemon
 from feishu_shadow_agent.jsonl import JSONLLogger
+from feishu_shadow_agent.lark_channel_compat import create_channel
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import HealthCheckResult
 
@@ -237,11 +240,11 @@ def test_card_actions_wait_for_runtime_health_and_can_retry_after_recovery(
     connection.processor.bind_channel(Channel())  # type: ignore[arg-type]
     event = _event(approval_id, action="send_suggestion")
 
-    assert connection.processor.handle(event).status == "blocked"
+    assert connection._runtime_allows_card_action() is False
     assert daemon._runtime_health_ok_for_tick(run_id="run_1") is True
     health.ok = False
     assert daemon._runtime_health_ok_for_tick(run_id="run_1") is False
-    assert connection.processor.handle(event).status == "blocked"
+    assert connection._runtime_allows_card_action() is False
     with store.connect() as conn:
         assert (
             conn.execute(
@@ -260,9 +263,105 @@ def test_card_actions_wait_for_runtime_health_and_can_retry_after_recovery(
 
     health.ok = True
     assert daemon._runtime_health_ok_for_tick(run_id="run_1") is True
+    assert connection._runtime_allows_card_action() is True
     assert connection.processor.handle(event).status == "applied"
     assert scheduled == ["updated"]
     assert wakeups == ["wake"]
+
+
+def test_sdk_rejects_unhealthy_click_before_dedup_and_returns_toast(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("lark_channel")
+    from lark_channel.channel.safety.pipeline import SafetyPipeline
+    from lark_channel.event.callback.model.p2_card_action_trigger import (
+        P2CardActionTrigger,
+    )
+
+    async def run() -> None:
+        store, approval_id = _store_with_approval(tmp_path)
+        processor = CardActionProcessor(
+            store=store,
+            config=AppConfig(owner=OwnerConfig(open_id="ou_owner")),
+            logger=JSONLLogger(tmp_path / "agent.jsonl"),
+            wake=lambda: None,
+            execution_mode="production",
+        )
+        channel = create_channel("cli_test", "secret_test")
+        sdk: Any = channel._channel
+        handled = asyncio.Event()
+        outcomes: list[str] = []
+        scheduled: list[asyncio.Task[Any]] = []
+        healthy = False
+
+        async def ignore_message(_message: Any) -> None:
+            return None
+
+        def schedule(coroutine: Any) -> asyncio.Task[Any]:
+            task = asyncio.create_task(coroutine)
+            scheduled.append(task)
+            return task
+
+        def handle(event: Any) -> None:
+            outcomes.append(processor.handle(event).status)
+            handled.set()
+
+        def event(event_id: str) -> Any:
+            return P2CardActionTrigger(
+                {
+                    "header": {"event_id": event_id},
+                    "event": {
+                        "operator": {"open_id": "ou_owner"},
+                        "context": {
+                            "open_message_id": "om_card",
+                            "open_chat_id": "oc_1",
+                        },
+                        "action": {
+                            "tag": "button",
+                            "value": {
+                                "protocol": CARD_ACTION_PROTOCOL,
+                                "action": "send_suggestion",
+                                "approval_id": approval_id,
+                            },
+                            "form_value": {},
+                        },
+                    },
+                }
+            )
+
+        sdk._safety = SafetyPipeline(
+            loop=asyncio.get_running_loop(), on_message=ignore_message
+        )
+        sdk.schedule = schedule
+        channel.on("cardAction", handle)
+        channel.set_card_action_guard(lambda: healthy, blocked_message="retry later")
+        try:
+            rejected = sdk._on_p2_card_action_trigger(event("evt_blocked"))
+            assert rejected.toast.type == "error"
+            assert rejected.toast.content == "retry later"
+            assert scheduled == []
+            with store.connect() as conn:
+                assert (
+                    conn.execute(
+                        "SELECT status FROM approvals WHERE short_id = ?",
+                        (approval_id,),
+                    ).fetchone()["status"]
+                    == "pending"
+                )
+
+            healthy = True
+            sdk._on_p2_card_action_trigger(event("evt_retry"))
+            await asyncio.wait_for(handled.wait(), timeout=2)
+            assert outcomes == ["applied"]
+            await asyncio.sleep(0)
+            sdk._on_p2_card_action_trigger(event("evt_retry"))
+            await asyncio.gather(*scheduled)
+            await asyncio.sleep(0)
+            assert outcomes == ["applied"]
+        finally:
+            await channel.disconnect()
+
+    asyncio.run(run())
 
 
 def test_card_action_is_owner_only_idempotent_and_wakes_dispatch(
@@ -368,6 +467,10 @@ class FakeChannel:
     def on(self, name: str, handler: Any) -> Any:
         self.handlers[name] = handler
         return lambda: None
+
+    def set_card_action_guard(self, guard: Any, *, blocked_message: str) -> None:
+        self.guard = guard
+        self.blocked_message = blocked_message
 
     async def connect_until_ready(
         self,
