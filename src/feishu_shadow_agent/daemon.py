@@ -37,7 +37,6 @@ class Daemon:
         app_config: AppConfig | None = None,
         feishu_client: IngestionFeishuClient | None = None,
         task_processor: TaskProcessingService | None = None,
-        send_owner_notifications: bool = False,
         run_metadata: dict[str, Any] | None = None,
         config_base_dir: str | Path | None = None,
         runtime_health_interval_seconds: int | None = None,
@@ -50,14 +49,9 @@ class Daemon:
         self.health_suite = health_suite
         self.tick_interval_seconds = tick_interval_seconds
         self.dry_run = dry_run
-        if dry_run and send_owner_notifications:
-            raise ValueError(
-                "dry-run approvals are local; owner notifications cannot be sent"
-            )
         self.app_config = app_config
         self.feishu_client = feishu_client
         self.task_processor = task_processor
-        self.send_owner_notifications = send_owner_notifications
         self.run_metadata = run_metadata or {}
         self.config_base_dir = (
             None if config_base_dir is None else Path(config_base_dir)
@@ -108,7 +102,6 @@ class Daemon:
                 "dry_run": self.dry_run,
                 "has_app_config": self.app_config is not None,
                 "has_feishu_client": self.feishu_client is not None,
-                "send_owner_notifications": self.send_owner_notifications,
             },
         )
         results: list[StageResult] = []
@@ -228,7 +221,6 @@ class Daemon:
                         data={
                             "stage": result.name,
                             "processed": result.processed,
-                            "send_owner_notifications": self.send_owner_notifications,
                         },
                     )
                 results.append(result)
@@ -278,7 +270,7 @@ class Daemon:
                     "previewed": dispatch.previewed,
                     "failed": dispatch.failed,
                     "approval_inbox_failed": approval_failed,
-                    "send_owner_notifications": self.send_owner_notifications,
+                    "owner_notifications_allowed": not self.dry_run,
                 },
             )
             dispatch_error = (
@@ -336,7 +328,7 @@ class Daemon:
                 data={
                     "dry_run": self.dry_run,
                     "tick_interval_seconds": self.tick_interval_seconds,
-                    "send_owner_notifications": self.send_owner_notifications,
+                    "owner_notifications_allowed": not self.dry_run,
                 },
             )
             observed_wakeup = self._current_wakeup_generation()

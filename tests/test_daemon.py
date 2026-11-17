@@ -434,6 +434,13 @@ def test_dry_run_does_not_contact_owner_inbox_or_send_notifications(
     assert "approval_inbox" not in fake.calls
     assert fake.owner_calls == []
     assert store.get_action(action_id).status == "pending"  # type: ignore[union-attr]
+    dispatch_log = next(
+        event["data"]
+        for line in (tmp_path / "agent.jsonl").read_text(encoding="utf-8").splitlines()
+        if (event := json.loads(line))["event"] == "daemon_stage_completed"
+        and event["data"]["stage"] == "dispatch"
+    )
+    assert dispatch_log["owner_notifications_allowed"] is False
 
 
 def test_keyboard_interrupt_finishes_run(tmp_path: Path) -> None:
@@ -1004,6 +1011,13 @@ def test_approval_inbox_failure_blocks_send_reply_but_allows_owner_notification(
     ]
     assert [call["dry_run"] for call in fake.reply_calls] == [True]
     assert [call["dry_run"] for call in fake.owner_calls] == [True, False]
+    dispatch_log = next(
+        event["data"]
+        for line in (tmp_path / "agent.jsonl").read_text(encoding="utf-8").splitlines()
+        if (event := json.loads(line))["event"] == "daemon_stage_completed"
+        and event["data"]["stage"] == "dispatch"
+    )
+    assert dispatch_log["owner_notifications_allowed"] is True
     with store.connect() as conn:
         send = conn.execute(
             "SELECT status, result_json FROM actions WHERE id = ?", (send_action,)

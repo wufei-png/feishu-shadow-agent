@@ -1080,7 +1080,7 @@ python -m feishu_shadow_agent daemon --dry-run
 - 不发送 owner 通知。
 - 记录 would-do。
 
-dry-run 审批只通过本地 Console 处理，不读取机器人审批私聊，也不发送 owner 通知或接收卡片回调。`--send-owner-notifications` 与 `--dry-run` 不兼容。
+dry-run 审批只通过本地 Console 处理，不读取机器人审批私聊，也不发送 owner 通知或接收卡片回调。生产模式下 owner 通知由正常的 dispatch 流程发送。
 
 ### replay
 
