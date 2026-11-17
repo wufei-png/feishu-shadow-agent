@@ -541,6 +541,7 @@ def _handle_daemon(args: argparse.Namespace) -> int:
             logger=logger,
             wake=daemon.wake,
             execution_mode="dry_run" if args.dry_run else "production",
+            runtime_allows_actions=daemon.runtime_health_allows_card_actions,
         )
     return daemon.run_forever()
 

@@ -58,7 +58,7 @@ class Daemon:
         )
         self.runtime_health_interval_seconds = runtime_health_interval_seconds
         self._last_runtime_health_at: float | None = None
-        self._runtime_health_ok = True
+        self._runtime_health_ok = False
         self.sleep_func = sleep_func
         self.ingestion_monotonic = ingestion_monotonic
         self._lifecycle_condition = threading.Condition()
@@ -80,7 +80,12 @@ class Daemon:
 
     def run_startup_health(self) -> tuple[bool, list[HealthCheckResult]]:
         results = self.health_suite.run(send_test=False)
-        return not has_critical_failure(results), results
+        self._runtime_health_ok = not has_critical_failure(results)
+        return self._runtime_health_ok, results
+
+    def runtime_health_allows_card_actions(self) -> bool:
+        """Expose the latest health verdict without triggering an extra probe."""
+        return self._runtime_health_ok
 
     def run_one_noop_tick(self, *, run_id: str) -> None:
         self.logger.emit(

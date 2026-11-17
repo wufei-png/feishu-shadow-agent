@@ -16,11 +16,14 @@ from feishu_shadow_agent.approval_cards import (
 from feishu_shadow_agent.card_actions import (
     CardActionProcessor,
     FeishuCardActionConnection,
+    create_card_action_connection,
     parse_card_action,
 )
 from feishu_shadow_agent.config import AppConfig, OwnerConfig
+from feishu_shadow_agent.daemon import Daemon
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
+from feishu_shadow_agent.types import HealthCheckResult
 
 
 def _store_with_approval(
@@ -187,6 +190,79 @@ def test_approval_card_keeps_long_suggestion_in_details_but_caps_form_default() 
     assert suggested in details
     assert reply_input["default_value"] == card_form_reply_value(suggested)
     assert len(reply_input["default_value"]) == CARD_REPLY_MAX_LENGTH
+
+
+def test_card_actions_wait_for_runtime_health_and_can_retry_after_recovery(
+    tmp_path: Path,
+) -> None:
+    store, approval_id = _store_with_approval(tmp_path)
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    logger = JSONLLogger(tmp_path / "agent.jsonl")
+    wakeups: list[str] = []
+
+    class Health:
+        ok = True
+
+        def run_runtime_critical(self) -> list[HealthCheckResult]:
+            return [
+                HealthCheckResult(
+                    "owner_config", "critical", "ok" if self.ok else "failed", "test"
+                )
+            ]
+
+    health = Health()
+    daemon = Daemon(
+        store=store,
+        logger=logger,
+        health_suite=health,  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=False,
+        runtime_health_interval_seconds=0,
+    )
+    connection = create_card_action_connection(
+        store=store,
+        config=config,
+        logger=logger,
+        wake=lambda: wakeups.append("wake"),
+        execution_mode="production",
+        runtime_allows_actions=daemon.runtime_health_allows_card_actions,
+    )
+    scheduled: list[str] = []
+
+    class Channel:
+        def schedule(self, coroutine: Any) -> None:
+            scheduled.append("updated")
+            coroutine.close()
+
+    connection.processor.bind_channel(Channel())  # type: ignore[arg-type]
+    event = _event(approval_id, action="send_suggestion")
+
+    assert connection.processor.handle(event).status == "blocked"
+    assert daemon._runtime_health_ok_for_tick(run_id="run_1") is True
+    health.ok = False
+    assert daemon._runtime_health_ok_for_tick(run_id="run_1") is False
+    assert connection.processor.handle(event).status == "blocked"
+    with store.connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT status FROM approvals WHERE short_id = ?", (approval_id,)
+            ).fetchone()["status"]
+            == "pending"
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM actions WHERE kind = 'send_reply'"
+            ).fetchone()[0]
+            == 0
+        )
+    assert scheduled == []
+    assert wakeups == []
+
+    health.ok = True
+    assert daemon._runtime_health_ok_for_tick(run_id="run_1") is True
+    assert connection.processor.handle(event).status == "applied"
+    assert scheduled == ["updated"]
+    assert wakeups == ["wake"]
 
 
 def test_card_action_is_owner_only_idempotent_and_wakes_dispatch(

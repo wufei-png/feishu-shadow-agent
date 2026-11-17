@@ -98,11 +98,13 @@ class CardActionProcessor:
         logger: JSONLLogger,
         wake: Callable[[], None],
         execution_mode: ExecutionMode,
+        runtime_allows_actions: Callable[[], bool] = lambda: True,
     ):
         self.config = config
         self.logger = logger
         self.wake = wake
         self.execution_mode = execution_mode
+        self.runtime_allows_actions = runtime_allows_actions
         self.store = store
         self.commands = OperatorCommandService(
             store,
@@ -135,6 +137,19 @@ class CardActionProcessor:
             )
             return CardActionOutcome(
                 "forbidden", "error", "仅配置的 owner 可以操作此卡片。"
+            )
+
+        if not self.runtime_allows_actions():
+            self.logger.warning(
+                "card_action_rejected",
+                data={
+                    "reason": "runtime_health_failed",
+                    "event_id": request.event_id,
+                    "approval_id": request.approval_id,
+                },
+            )
+            return CardActionOutcome(
+                "blocked", "error", "守护进程健康检查未通过，请修复后重试。"
             )
 
         suggested_reply = _pending_suggested_reply(self.store, request.approval_id)
@@ -365,6 +380,7 @@ def create_card_action_connection(
     logger: JSONLLogger,
     wake: Callable[[], None],
     execution_mode: ExecutionMode,
+    runtime_allows_actions: Callable[[], bool],
     channel_factory: ChannelFactory | None = None,
 ) -> FeishuCardActionConnection:
     cards = config.interactive_cards
@@ -374,6 +390,7 @@ def create_card_action_connection(
         logger=logger,
         wake=wake,
         execution_mode=execution_mode,
+        runtime_allows_actions=runtime_allows_actions,
     )
     kwargs: dict[str, Any] = {}
     if channel_factory is not None:
