@@ -57,6 +57,7 @@ class Daemon:
             None if config_base_dir is None else Path(config_base_dir)
         )
         self.runtime_health_interval_seconds = runtime_health_interval_seconds
+        self._health_lock = threading.RLock()
         self._last_runtime_health_at: float | None = None
         self._runtime_health_ok = False
         self.sleep_func = sleep_func
@@ -81,13 +82,15 @@ class Daemon:
     def run_startup_health(self) -> tuple[bool, list[HealthCheckResult]]:
         started_at = time.monotonic()
         results = self.health_suite.run(send_test=False)
-        self._runtime_health_ok = not has_critical_failure(results)
-        self._last_runtime_health_at = started_at if self._runtime_health_ok else None
-        return self._runtime_health_ok, results
+        ok = not has_critical_failure(results)
+        with self._health_lock:
+            self._runtime_health_ok = ok
+            self._last_runtime_health_at = started_at if ok else None
+        return ok, results
 
     def runtime_health_allows_card_actions(self) -> bool:
         """Reject expired health state without triggering an extra probe."""
-        return self._runtime_health_ok and self._dispatch_health_cache_is_current()
+        return self._dispatch_health_cache_is_current()
 
     def run_one_noop_tick(self, *, run_id: str) -> None:
         self.logger.emit(
@@ -132,8 +135,9 @@ class Daemon:
             if not policy_ok:
                 # Invalidate the cached verdict so callbacks are blocked now
                 # and recovery requires a fresh critical health check.
-                self._runtime_health_ok = False
-                self._last_runtime_health_at = None
+                with self._health_lock:
+                    self._runtime_health_ok = False
+                    self._last_runtime_health_at = None
             if not policy_ok or not self._runtime_health_ok_for_tick(run_id=run_id):
                 self.logger.emit(
                     "error",
@@ -456,32 +460,44 @@ class Daemon:
             signal.signal(signum, handler)
 
     def _runtime_health_ok_for_tick(self, *, run_id: str) -> bool:
-        interval = self._runtime_health_check_interval()
         now = time.monotonic()
-        last_health_at = self._last_runtime_health_at
-        if last_health_at is not None and not self._runtime_health_refresh_due(now=now):
+        with self._health_lock:
+            interval = self._runtime_health_check_interval()
+            last_health_at = self._last_runtime_health_at
+            cached_ok = self._runtime_health_ok
+            reuse = last_health_at is not None and not self._runtime_health_refresh_due(
+                now=now
+            )
+            if not reuse:
+                # Card callbacks must not use the old verdict while a new
+                # network health check is in progress.
+                self._runtime_health_ok = False
+                self._last_runtime_health_at = None
+        if reuse and last_health_at is not None:
             self.logger.debug(
                 "runtime_critical_health_reused",
                 run_id=run_id,
                 data={
-                    "ok": self._runtime_health_ok,
+                    "ok": cached_ok,
                     "interval_seconds": interval,
                     "age_seconds": round(now - last_health_at, 3),
                 },
             )
-            return self._runtime_health_ok
+            return cached_ok
         self.logger.debug(
             "runtime_critical_health_started",
             run_id=run_id,
-            data={"interval_seconds": interval, "previous_ok": self._runtime_health_ok},
+            data={"interval_seconds": interval, "previous_ok": cached_ok},
         )
         if hasattr(self.health_suite, "run_runtime_critical"):
             results = self.health_suite.run_runtime_critical()
         else:  # pragma: no cover - compatibility for narrow tests
             results = self.health_suite.run(send_test=False)
-        self._last_runtime_health_at = now
-        self._runtime_health_ok = not has_critical_failure(results)
-        if not self._runtime_health_ok:
+        ok = not has_critical_failure(results)
+        with self._health_lock:
+            self._last_runtime_health_at = now
+            self._runtime_health_ok = ok
+        if not ok:
             self.logger.emit(
                 "error",
                 "runtime_critical_health_failed",
@@ -494,35 +510,41 @@ class Daemon:
                 run_id=run_id,
                 data=summarize_results(results),
             )
-        return self._runtime_health_ok
+        return ok
 
     def _runtime_health_refresh_due(self, *, now: float) -> bool:
-        return self._last_runtime_health_at is None or (
-            now - self._last_runtime_health_at >= self._runtime_health_check_interval()
-        )
+        with self._health_lock:
+            last_health_at = self._last_runtime_health_at
+            return last_health_at is None or (
+                now - last_health_at >= self._runtime_health_check_interval()
+            )
 
     def _dispatch_health_cache_is_current(self) -> bool:
         # This only reads the local clock; a due refresh happens on the next tick.
-        if self._runtime_health_check_interval() <= 0:
-            return self._runtime_health_ok
-        if not self._runtime_health_refresh_due(now=time.monotonic()):
-            return self._runtime_health_ok
-        self._runtime_health_ok = False
-        self._last_runtime_health_at = None
+        with self._health_lock:
+            if not self._runtime_health_ok:
+                return False
+            if self._runtime_health_check_interval() <= 0:
+                return True
+            if not self._runtime_health_refresh_due(now=time.monotonic()):
+                return True
+            self._runtime_health_ok = False
+            self._last_runtime_health_at = None
         self.wake()
         return False
 
     def _runtime_health_check_interval(self) -> int:
-        if self.runtime_health_interval_seconds is not None:
-            return self.runtime_health_interval_seconds
-        if self.app_config is None:
-            return 0
-        health = self.app_config.health
-        return (
-            health.interval_seconds
-            if self._runtime_health_ok
-            else health.retry_interval_seconds
-        )
+        with self._health_lock:
+            if self.runtime_health_interval_seconds is not None:
+                return self.runtime_health_interval_seconds
+            if self.app_config is None:
+                return 0
+            health = self.app_config.health
+            return (
+                health.interval_seconds
+                if self._runtime_health_ok
+                else health.retry_interval_seconds
+            )
 
     def _runtime_product_policy_ok_for_tick(self, *, run_id: str) -> bool:
         try:

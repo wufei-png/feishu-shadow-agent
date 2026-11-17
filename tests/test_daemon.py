@@ -851,6 +851,65 @@ def test_card_health_cache_expires_without_a_network_check(
     assert suite.calls == 2
 
 
+def test_card_guard_is_fail_closed_during_concurrent_health_refresh(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    now = 0.0
+    monkeypatch.setattr("feishu_shadow_agent.daemon.time.monotonic", lambda: now)
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    started = threading.Event()
+    release = threading.Event()
+
+    class Health:
+        calls = 0
+
+        def run_runtime_critical(self) -> list[HealthCheckResult]:
+            self.calls += 1
+            if self.calls > 1:
+                started.set()
+                if not release.wait(timeout=2):
+                    raise TimeoutError("test health probe was not released")
+                return [HealthCheckResult("owner_config", "critical", "failed", "bad")]
+            return [HealthCheckResult("owner_config", "critical", "ok", "ok")]
+
+    suite = Health()
+    daemon = Daemon(
+        store=SQLiteStore(tmp_path / "agent.sqlite3"),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        health_suite=suite,  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=False,
+        app_config=config,
+    )
+    assert daemon._runtime_health_ok_for_tick(run_id="run_1") is True
+    now = config.health.interval_seconds
+    refresh_results: list[bool] = []
+    card_results: list[bool] = []
+    refresh = threading.Thread(
+        target=lambda: refresh_results.append(
+            daemon._runtime_health_ok_for_tick(run_id="run_1")
+        )
+    )
+    callback = threading.Thread(
+        target=lambda: card_results.append(daemon.runtime_health_allows_card_actions())
+    )
+    refresh.start()
+    try:
+        assert started.wait(timeout=2)
+        callback.start()
+        callback.join(timeout=1)
+        assert not callback.is_alive()
+        assert card_results == [False]
+    finally:
+        release.set()
+        refresh.join(timeout=2)
+        if callback.ident is not None:
+            callback.join(timeout=2)
+    assert not refresh.is_alive()
+    assert refresh_results == [False]
+    assert daemon.runtime_health_allows_card_actions() is False
+
+
 def test_runtime_owner_mismatch_blocks_tick_at_next_health_refresh(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
