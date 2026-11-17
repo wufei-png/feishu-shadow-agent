@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -440,6 +441,34 @@ def test_group_removal_holds_related_owner_notifications(tmp_path: Path) -> None
     store.retry_dispatch_action(source_action)
     assert store.group_send_allowed(source_action)
     assert store.is_group_policy_held("action", task_action)
+
+
+def test_failed_policy_delete_rolls_back_policy_and_work_holds(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.import_product_policy_from_config(_config(chats={"oc_1": ChatPolicyConfig()}))
+    message = _message(chat_id="oc_1")
+    store.upsert_message(message)
+    task = store.create_task_for_message(
+        message, watch_until="2999-01-01T00:00:00+00:00"
+    )
+    action = store.create_owner_notification_action(
+        task_id=task.id, payload={"type": "approval", "dedupe_key": "task"}
+    )
+    audits_before = store.list_policy_audits()
+    with store.connect() as conn:
+        conn.execute(
+            """CREATE TRIGGER reject_policy_delete_audit
+            BEFORE INSERT ON policy_audits WHEN NEW.new_json IS NULL
+            BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END"""
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="audit unavailable"):
+        store.delete_chat_product_policy("oc_1", actor="owner")
+
+    assert store.get_chat_product_policy("oc_1") is not None
+    assert not store.is_group_policy_held("task", task.id)
+    assert not store.is_group_policy_held("action", action)
+    assert store.list_policy_audits() == audits_before
 
 
 def test_membership_only_probes_current_group_activations(tmp_path: Path) -> None:

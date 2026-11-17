@@ -110,11 +110,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not send external replies; record local state and dispatch previews",
     )
-    daemon.add_argument(
-        "--send-owner-notifications",
-        action="store_true",
-        help="deprecated; incompatible with --dry-run (approvals use the local Console)",
-    )
     daemon.set_defaults(handler=_handle_daemon)
 
     console = subparsers.add_parser("console", help="run the local Operator Console")
@@ -497,12 +492,6 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         )
         return 2
     args.dry_run = args.dry_run or args.mode == "dry-run"
-    if args.dry_run and args.send_owner_notifications:
-        print(
-            "daemon error: --dry-run cannot send owner notifications; use the local Console",
-            file=sys.stderr,
-        )
-        return 2
     loaded, store, logger = _load_runtime(
         args.config, mode="dry-run" if args.dry_run else args.mode
     )
@@ -542,7 +531,6 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         app_config=loaded.config,
         feishu_client=client,
         task_processor=task_processor,
-        send_owner_notifications=args.send_owner_notifications,
         run_metadata=dict(_git_info(Path.cwd())),
         config_base_dir=loaded.base_dir,
     )
@@ -553,6 +541,7 @@ def _handle_daemon(args: argparse.Namespace) -> int:
             logger=logger,
             wake=daemon.wake,
             execution_mode="dry_run" if args.dry_run else "production",
+            runtime_allows_actions=daemon.runtime_health_allows_card_actions,
         )
     return daemon.run_forever()
 

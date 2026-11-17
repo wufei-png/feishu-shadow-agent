@@ -30,6 +30,7 @@ from .operator_queries.health import (
     RUN_RUNTIME_COLUMNS,
     HealthQuery,
     daemon_liveness,
+    daemon_runs,
     recent_errors,
     run_runtime_summary,
     store_read_uri,
@@ -101,19 +102,16 @@ class OperatorQueryService:
                     # This selects a module-level constant column list.
                     f"SELECT {RUN_RUNTIME_COLUMNS} FROM runs ORDER BY started_at DESC LIMIT 1"  # noqa: S608
                 ).fetchone()
-                daemon_run = conn.execute(
-                    # This selects a module-level constant column list.
-                    f"""
-                    SELECT {RUN_RUNTIME_COLUMNS}
-                    FROM runs
-                    WHERE last_tick_started_at IS NOT NULL
-                    ORDER BY last_tick_started_at DESC, started_at DESC
-                    LIMIT 1
-                    """,  # noqa: S608
-                ).fetchone()
+                daemon_run, _ = daemon_runs(
+                    conn, now=now, stale_after_seconds=daemon_stale_after_seconds
+                )
+                has_messages = bool(
+                    conn.execute("SELECT EXISTS(SELECT 1 FROM messages)").fetchone()[0]
+                )
         except ReadStoreUnavailable:
             last_run = None
             daemon_run = None
+            has_messages = None
         failed_or_needs_review = self.list_dispatch_actions(
             statuses=(
                 ActionStatus.FAILED.value,
@@ -122,11 +120,11 @@ class OperatorQueryService:
             limit=limit,
         )
         failed_commands = self._failed_approval_commands(limit=limit)
-        health_summary = self.health_issues(
+        health = self.health_issues(
             limit=limit,
             stale_after_seconds=stale_after_seconds,
             daemon_stale_after_seconds=daemon_stale_after_seconds,
-        )["summary"]
+        )
         attention_summary, attention_tasks = self._attention_work(
             now=now,
             stale_after_seconds=stale_after_seconds,
@@ -150,7 +148,8 @@ class OperatorQueryService:
                 limit=limit,
             ),
             "failed_or_needs_review_actions": failed_or_needs_review,
-            "health_issue_summary": health_summary,
+            "health_issue_summary": health["summary"],
+            "store_status": health["runtime"]["store"],
             "attention_summary": attention_summary,
             "attention_tasks": attention_tasks,
             "ingestion_status": self.ingestion_status(now=now),
@@ -158,6 +157,7 @@ class OperatorQueryService:
             "recent_health_warnings": self._recent_health_warnings(limit=limit),
             "recent_errors": recent_errors(failed_commands, failed_or_needs_review),
             "last_run": run_runtime_summary(last_run) if last_run else None,
+            "has_messages": has_messages,
             # Compatibility for current CLI users while status moves to the operator DTO boundary.
             "recent_expired_approvals": self.list_approvals(
                 status=ApprovalStatus.EXPIRED.value, limit=limit

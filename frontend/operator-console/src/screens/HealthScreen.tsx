@@ -325,6 +325,7 @@ function issueCopy(t: TFunction, issue: HealthIssue): { title: string; detail: s
   const exact: Record<string, [string, string]> = {
     "store-read-error": ["health.issue.storeRead.title", "health.issue.storeRead.detail"],
     "daemon-not-started": ["health.issue.daemonNotStarted.title", "health.issue.daemonNotStarted.detail"],
+    "daemon-startup-failed": ["health.issue.daemonStartupFailed.title", "health.issue.daemonStartupFailed.detail"],
     "daemon-stale": ["health.issue.daemonStale.title", "health.issue.daemonStale.detail"],
     "daemon-stopped": ["health.issue.daemonStopped.title", "health.issue.daemonStopped.detail"],
     "daemon-unknown": ["health.issue.daemonUnknown.title", "health.issue.daemonUnknown.detail"],

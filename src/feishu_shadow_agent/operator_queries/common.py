@@ -5,6 +5,7 @@ import sqlite3
 from datetime import datetime
 from typing import Any, cast
 
+from ..store.schema import is_current_schema
 from ..time_utils import parse_instant_or_none
 from ..types import ActionStatus, ApprovalStatus, TaskStatus
 
@@ -386,6 +387,8 @@ def _parse_datetime_or_none(value: Any) -> datetime | None:
 
 
 def _has_core_schema(conn: sqlite3.Connection) -> bool:
+    if not is_current_schema(conn):
+        return False
     rows = conn.execute(
         """
         SELECT name

@@ -14,7 +14,7 @@ from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.operator_commands import OperatorCommandService
 from feishu_shadow_agent.paths import resolve_agent_working_dir
 from feishu_shadow_agent.processing import ApprovalService, TaskProcessingService
-from feishu_shadow_agent.revision import assess_revision_impact
+from feishu_shadow_agent.revision import assess_revision_impact, plan_reply_review
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import (
     ApprovalTargetBinding,
@@ -131,6 +131,37 @@ def _message(text: str, *, is_deleted: bool = False) -> NormalizedMessage:
         is_deleted=is_deleted,
         raw={"message_position": "1"},
     )
+
+
+def test_revision_review_plan_distinguishes_audit_notification_and_approval() -> None:
+    message = replace(_message("revised"), revision=2)
+    previous = {
+        "text": "original",
+        "action_id": 42,
+        "target_message_id": "om_source",
+        "payload": {"reply_destination": {"chat_id": "oc_1", "location": "main"}},
+    }
+    common: dict[str, Any] = {
+        "message": message,
+        "task_short_id": "T1",
+        "previous_reply": previous,
+        "answerability": "auto_reply",
+        "decision_reason": None,
+        "target_message_id": "om_source",
+        "destination": {"chat_id": "oc_1", "location": "main"},
+    }
+
+    assert plan_reply_review(**common, current_reply="original").action == "audit"
+    assert plan_reply_review(**common, current_reply="changed").action == "notify_low"
+    high = plan_reply_review(
+        **common, current_reply="changed", revision_signals=["permission_change"]
+    )
+    assert high.action == "approval"
+    assert high.payload["requires_owner_approval"] is True
+    common["destination"] = {"chat_id": "oc_1", "location": "thread"}
+    moved = plan_reply_review(**common, current_reply="original")
+    assert moved.action == "notify_identical"
+    assert moved.payload["commands"] == ["/send T1 --location thread <final reply>"]
 
 
 def _seed_group_policy(store: SQLiteStore) -> None:

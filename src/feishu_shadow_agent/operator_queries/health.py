@@ -9,6 +9,7 @@ from typing import Any, cast
 from urllib.parse import quote
 
 from ..policy import ProductPolicyInvalidError, ProductPolicyMissingError
+from ..store.schema import is_current_schema, is_uninitialized_schema
 from ..store.sqlite_store import (
     LATEST_NON_OK_HEALTH_CHECKS_SQL,
     RUN_HEARTBEAT_STALE_AFTER_SECONDS,
@@ -102,16 +103,9 @@ class HealthQuery:
                     # This selects a module-level constant column list.
                     f"SELECT {_RUN_RUNTIME_COLUMNS} FROM runs ORDER BY started_at DESC LIMIT 1"  # noqa: S608
                 ).fetchone()
-                daemon_run = conn.execute(
-                    # This selects a module-level constant column list.
-                    f"""
-                    SELECT {_RUN_RUNTIME_COLUMNS}
-                    FROM runs
-                    WHERE last_tick_started_at IS NOT NULL
-                    ORDER BY last_tick_started_at DESC, started_at DESC
-                    LIMIT 1
-                    """,  # noqa: S608
-                ).fetchone()
+                daemon_run, latest_daemon_start = _daemon_runs(
+                    conn, now=now, stale_after_seconds=daemon_stale_after_seconds
+                )
                 failed_commands = conn.execute(
                     """
                     SELECT message_id, command, status, result_json, updated_at
@@ -172,6 +166,11 @@ class HealthQuery:
         try:
             last_run_dto = _run_runtime_summary(last_run) if last_run else None
             daemon_run_dto = _run_runtime_summary(daemon_run) if daemon_run else None
+            latest_daemon_start_dto = (
+                _run_runtime_summary(latest_daemon_start)
+                if latest_daemon_start
+                else None
+            )
             daemon_liveness = _daemon_liveness(
                 daemon_run_dto,
                 now=now,
@@ -193,6 +192,7 @@ class HealthQuery:
 
             runtime |= {
                 "daemon_liveness": daemon_liveness,
+                "last_daemon_start": latest_daemon_start_dto,
                 "last_run": last_run_dto,
                 "policy_status": policy_status,
             }
@@ -200,6 +200,20 @@ class HealthQuery:
             daemon_issue = _daemon_health_issue(daemon_liveness, detected_at=now)
             if daemon_issue is not None:
                 issues.append(daemon_issue)
+            if latest_daemon_start_dto is not None and latest_daemon_start_dto[
+                "run_id"
+            ] != daemon_liveness.get("run_id"):
+                latest_start_liveness = _daemon_liveness(
+                    latest_daemon_start_dto,
+                    now=now,
+                    stale_after_seconds=daemon_stale_after_seconds,
+                )
+                if latest_start_liveness["status"] == "startup_failed":
+                    latest_start_issue = _daemon_health_issue(
+                        latest_start_liveness, detected_at=now
+                    )
+                    if latest_start_issue is not None:
+                        issues.append(latest_start_issue)
             policy_issue = self.policy_health_issue(policy_status, detected_at=now)
             if policy_issue is not None:
                 issues.append(policy_issue)
@@ -327,6 +341,13 @@ class HealthQuery:
         try:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA query_only = ON")
+            if not is_uninitialized_schema(conn) and not is_current_schema(conn):
+                conn.close()
+                return {
+                    "status": "schema_incompatible",
+                    "available": False,
+                    "schema_initialized": False,
+                }
             schema_initialized = has_core_schema(conn)
         except sqlite3.DatabaseError:
             conn.close()
@@ -457,15 +478,25 @@ def _daemon_health_issue(
     liveness: dict[str, Any], *, detected_at: str
 ) -> dict[str, Any] | None:
     status = str(liveness.get("status") or "unknown")
-    if status == "live":
+    if status in {"live", "starting"}:
         return None
+    if status == "startup_failed":
+        return _health_issue(
+            issue_id="daemon-startup-failed",
+            severity="error",
+            category="daemon",
+            title="The latest daemon startup failed",
+            detail="The daemon stopped before its first tick; inspect health checks before restarting.",
+            detected_at=detected_at,
+            recommended_actions=["run_doctor", "inspect_runtime"],
+        )
     if status == "not_started":
         return _health_issue(
             issue_id="daemon-not-started",
             severity="warning",
             category="daemon",
             title="Daemon has not started",
-            detail="No daemon tick has been recorded in the operator store.",
+            detail="No daemon start has been recorded in the operator store.",
             detected_at=detected_at,
             recommended_actions=["run_doctor", "start_daemon"],
         )
@@ -670,6 +701,36 @@ def _store_read_uri(path: Path) -> str:
     return f"file:{quote(str(path.resolve()), safe='/')}?mode=ro"
 
 
+def _daemon_runs(
+    conn: sqlite3.Connection, *, now: str, stale_after_seconds: int
+) -> tuple[sqlite3.Row | None, sqlite3.Row | None]:
+    latest = conn.execute(
+        # Daemon run IDs use the run_ prefix, including failed starts before a tick.
+        f"""
+        SELECT {_RUN_RUNTIME_COLUMNS}
+        FROM runs
+        WHERE run_id GLOB 'run_*' OR last_tick_started_at IS NOT NULL
+        ORDER BY started_at DESC, rowid DESC
+        LIMIT 1
+        """  # noqa: S608
+    ).fetchone()
+    # Match the liveness calculation, which truncates age to whole seconds.
+    cutoff = shift_instant(now, delta=-timedelta(seconds=stale_after_seconds + 1))
+    active = conn.execute(
+        f"""
+        SELECT {_RUN_RUNTIME_COLUMNS}
+        FROM runs
+        WHERE (run_id GLOB 'run_*' OR last_tick_started_at IS NOT NULL)
+          AND status = 'running' AND julianday(last_heartbeat_at) > julianday(?)
+        ORDER BY CASE WHEN last_tick_started_at IS NOT NULL THEN 0 ELSE 1 END,
+                 started_at DESC, rowid DESC
+        LIMIT 1
+        """,  # noqa: S608
+        (cutoff,),
+    ).fetchone()
+    return active if active is not None else latest, latest
+
+
 def _run_runtime_summary(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "run_id": row["run_id"],
@@ -699,7 +760,13 @@ def _daemon_liveness(
         "run_id": last_run.get("run_id"),
         "run_status": run_status,
         "last_heartbeat_at": heartbeat,
+        "last_tick_started_at": last_run.get("last_tick_started_at"),
+        "last_tick_finished_at": last_run.get("last_tick_finished_at"),
     }
+    if run_status in {"health_failed", "crashed"} and not last_run.get(
+        "last_tick_started_at"
+    ):
+        return base | {"status": "startup_failed", "stale": False}
     if run_status != "running":
         return base | {"status": "stopped", "stale": False}
     heartbeat_dt = parse_datetime_or_none(heartbeat)
@@ -713,7 +780,11 @@ def _daemon_liveness(
     age_seconds = max(0, int((now_dt - heartbeat_dt).total_seconds()))
     stale = age_seconds > stale_after_seconds
     return base | {
-        "status": "stale" if stale else "live",
+        "status": "stale"
+        if stale
+        else "live"
+        if last_run.get("last_tick_started_at")
+        else "starting",
         "stale": stale,
         "heartbeat_age_seconds": age_seconds,
     }
@@ -769,6 +840,7 @@ def _minus_seconds(value: str, seconds: int) -> str:
 
 # Public read-only helpers used by the operator DTO boundary.
 RUN_RUNTIME_COLUMNS = _RUN_RUNTIME_COLUMNS
+daemon_runs = _daemon_runs
 recent_errors = _recent_errors
 run_runtime_summary = _run_runtime_summary
 daemon_liveness = _daemon_liveness

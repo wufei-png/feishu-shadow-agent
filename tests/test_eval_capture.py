@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from feishu_shadow_agent.config import ChatPolicyConfig, ConfigService
+from feishu_shadow_agent.evals.access import configured_group_ids
 from feishu_shadow_agent.evals.artifacts import (
     EvalError,
     read_jsonl,
@@ -40,6 +41,26 @@ class FakeLarkClient:
 
     def download_resource(self, **kwargs) -> LarkCliResult:
         raise AssertionError("test messages have no resources")
+
+
+def test_eval_policy_read_rejects_incompatible_database_without_writes(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        Path("tests/fixtures/minimal.config.yaml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    loaded = _seeded_config(config_path)
+    store = SQLiteStore(tmp_path / loaded.config.storage.sqlite_path)
+    with store.connect() as conn:
+        conn.execute("PRAGMA user_version = 8")
+    before = store.path.read_bytes()
+
+    with pytest.raises(EvalError, match="current schema baseline"):
+        configured_group_ids(loaded)
+
+    assert store.path.read_bytes() == before
 
 
 def test_capture_writes_flat_runnable_reviews_and_promotes_router(

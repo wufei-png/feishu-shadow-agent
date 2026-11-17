@@ -9,7 +9,7 @@ from typing import Any, Literal, TypeVar, cast
 from pydantic import ValidationError
 
 from ..config import LoadedConfig
-from ..ingestion import MessageNormalizer, normalize_message_sent_at
+from ..message_normalization import MessageNormalizer, normalize_message_sent_at
 from ..time_utils import parse_instant
 from .artifacts import (
     EvalError,

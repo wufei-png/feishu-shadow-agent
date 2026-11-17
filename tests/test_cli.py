@@ -246,7 +246,9 @@ def test_approve_and_reject_emit_operator_command_result(
     assert approved_actions == 1
 
 
-def test_daemon_send_owner_notifications_help_describes_dry_run_send(capsys) -> None:
+def test_daemon_help_describes_dry_run_without_obsolete_notification_flag(
+    capsys,
+) -> None:
     with pytest.raises(SystemExit) as exc:
         main(["daemon", "--help"])
 
@@ -256,13 +258,17 @@ def test_daemon_send_owner_notifications_help_describes_dry_run_send(capsys) -> 
     assert "no-op daemon skeleton" not in output
     assert "do not send external replies" in output
     assert "record local state and dispatch previews" in output
-    assert "incompatible with --dry-run" in output
-    assert "local Console" in output
+    assert "--send-owner-notifications" not in output
 
 
-def test_daemon_rejects_dry_run_owner_notifications(capsys) -> None:
-    assert main(["daemon", "--dry-run", "--send-owner-notifications"]) == 2
-    assert "cannot send owner notifications" in capsys.readouterr().err
+def test_daemon_rejects_obsolete_owner_notification_flag(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["daemon", "--dry-run", "--send-owner-notifications"])
+
+    assert exc.value.code == 2
+    assert (
+        "unrecognized arguments: --send-owner-notifications" in capsys.readouterr().err
+    )
 
 
 def test_config_schema_outputs_json_schema(capsys) -> None:
@@ -301,6 +307,20 @@ def test_config_validate_returns_two_for_invalid_config(tmp_path: Path, capsys) 
     assert captured.out == ""
     assert "config error:" in captured.err
     assert "owner" in captured.err
+
+
+def test_config_validate_reports_invalid_yaml_without_traceback(
+    tmp_path: Path, capsys
+) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text("owner:\n  open_id: [unterminated\n", encoding="utf-8")
+
+    assert main(["config", "validate", "--config", str(config)]) == 2
+
+    captured = capsys.readouterr()
+    assert "config error: invalid YAML at" in captured.err
+    assert str(config) in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_status_includes_failed_approval_commands(tmp_path: Path, capsys) -> None:

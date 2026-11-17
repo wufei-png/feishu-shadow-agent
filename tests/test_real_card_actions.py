@@ -80,6 +80,7 @@ def test_real_approval_action_e2e() -> None:
         logger=logger,
         wake=lambda: None,
         execution_mode="production",
+        runtime_allows_actions=lambda: True,
     )
     try:
         if not connection.start():

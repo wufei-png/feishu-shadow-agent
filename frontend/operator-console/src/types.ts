@@ -17,8 +17,15 @@ export type CommandResult = {
 
 export type DashboardSnapshot = {
   runtime_mode?: "production" | "dry_run";
-  daemon_liveness?: Record<string, unknown>;
+  daemon_liveness?: {
+    status?: string;
+    run_status?: string;
+    last_tick_started_at?: string | null;
+    last_tick_finished_at?: string | null;
+    [key: string]: unknown;
+  };
   policy_status?: PolicyStatus;
+  store_status?: { status?: string; available?: boolean; schema_initialized?: boolean };
   health_issue_summary?: HealthIssueSummary;
   attention_summary?: AttentionSummary;
   attention_tasks?: AttentionTask[];
@@ -32,6 +39,7 @@ export type DashboardSnapshot = {
   recent_health_warnings?: Array<Record<string, unknown>>;
   recent_errors?: Array<Record<string, unknown>>;
   failed_approval_commands?: Array<Record<string, unknown>>;
+  has_messages?: boolean | null;
   last_run?: {
     last_tick_started_at?: string | null;
     last_tick_finished_at?: string | null;

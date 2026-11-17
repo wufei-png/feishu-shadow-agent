@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import timedelta
@@ -11,13 +12,13 @@ from typing import Any, cast
 from .approval_cards import build_approval_card
 from .config import AppConfig
 from .feishu.client import FeishuClient
-from .ingestion import MessageNormalizer
 from .jsonl import JSONLLogger
 from .membership import (
     classify_bot_membership_absence,
     effective_membership_status,
     record_bot_membership_absence,
 )
+from .message_normalization import MessageNormalizer
 from .policy import PolicyResolver
 from .reply_destination import candidate_from_message, message_location
 from .store.sqlite_store import SQLiteStore
@@ -92,6 +93,7 @@ class Dispatcher:
         allow_owner_notification_actual: bool,
         include_owner_notifications: bool = True,
         blocked_send_reply_reason: str | None = None,
+        can_start_action: Callable[[], bool] | None = None,
         limit: int = 50,
     ) -> DispatchSummary:
         summary = DispatchSummary()
@@ -137,7 +139,14 @@ class Dispatcher:
                 "blocked_send_reply_reason": blocked_send_reply_reason,
             },
         )
-        for action in actions:
+        for index, action in enumerate(actions):
+            if can_start_action is not None and not can_start_action():
+                self.logger.info(
+                    "dispatch_deferred_runtime_health_due",
+                    run_id=run_id,
+                    data={"remaining": len(actions) - index},
+                )
+                break
             mode_allows_actual = action.execution_mode == "production"
             runtime_allows_actual = (
                 allow_send_reply_actual

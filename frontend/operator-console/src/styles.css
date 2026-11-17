@@ -668,6 +668,36 @@ h2 {
   font-size: 34px;
 }
 
+.next-step-panel {
+  display: grid;
+  justify-items: start;
+  gap: 9px;
+  margin-bottom: 16px;
+  padding: 16px;
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--status-info);
+  border-radius: var(--radius-small);
+  background: var(--surface-raised);
+}
+
+.next-step-panel h2,
+.next-step-panel p {
+  margin: 0;
+}
+
+.next-step-panel p:not(.eyebrow) {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.next-step-panel code {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
 .decision-index {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

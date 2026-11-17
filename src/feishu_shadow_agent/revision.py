@@ -4,7 +4,7 @@ import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from hashlib import sha256
-from typing import Literal
+from typing import Any, Literal, cast
 
 from .decision import DecisionReason
 from .types import NormalizedMessage
@@ -58,6 +58,105 @@ class RevisionAssessment:
     impact: RevisionImpact
     reasons: tuple[str, ...]
     reply_changed: bool
+
+
+@dataclass(frozen=True)
+class RevisionReviewPlan:
+    action: Literal["audit", "notify_identical", "notify_low", "approval"]
+    assessment: RevisionAssessment
+    payload: dict[str, Any]
+
+
+def plan_no_reply_review(
+    *,
+    message: NormalizedMessage,
+    previous_reply: dict[str, Any],
+    decision_reason: DecisionReason | None,
+) -> dict[str, Any]:
+    return {
+        "type": "revision_correction_review",
+        "message_id": message.message_id,
+        "source_message_id": message.message_id,
+        "source_revision": message.revision,
+        "previous_reply": previous_reply.get("text", ""),
+        "previous_action_id": previous_reply.get("action_id"),
+        "suggested_reply": "",
+        "impact": "uncertain",
+        "impact_reasons": ["new_revision_no_reply"],
+        "decision_reason": decision_reason,
+        "resolution_options": ["send_correction", "no_action"],
+        "edit_supported": False,
+        "correction_delivery": "explicit_message",
+        "dedupe_key": f"revision-review:{message.message_id}:{message.revision}",
+    }
+
+
+def plan_reply_review(
+    *,
+    message: NormalizedMessage,
+    task_short_id: str,
+    previous_reply: dict[str, Any],
+    current_reply: str,
+    answerability: str,
+    decision_reason: DecisionReason | None,
+    target_message_id: str,
+    destination: dict[str, str],
+    revision_signals: Iterable[str] = (),
+) -> RevisionReviewPlan:
+    previous_payload = previous_reply.get("payload")
+    previous_destination = (
+        cast(dict[str, Any], previous_payload).get("reply_destination")
+        if isinstance(previous_payload, dict)
+        else None
+    )
+    previous_destination = (
+        cast(dict[str, str], previous_destination)
+        if isinstance(previous_destination, dict)
+        else None
+    )
+    assessment = assess_revision_impact(
+        previous_reply=str(previous_reply.get("text") or ""),
+        current_reply=current_reply,
+        answerability=answerability,
+        decision_reason=decision_reason,
+        current_target_message_id=target_message_id,
+        previous_target_message_id=previous_reply.get("target_message_id"),
+        current_reply_destination=destination,
+        previous_reply_destination=previous_destination,
+        revision_signals=revision_signals,
+    )
+    payload: dict[str, Any] = {
+        "type": "revision_correction_review",
+        "message_id": message.message_id,
+        "source_message_id": message.message_id,
+        "source_revision": message.revision,
+        "previous_reply": previous_reply.get("text", ""),
+        "previous_action_id": previous_reply.get("action_id"),
+        "previous_reply_destination": previous_destination,
+        "reply_destination": destination,
+        "suggested_reply": current_reply,
+        "impact": assessment.impact,
+        "impact_reasons": list(assessment.reasons),
+        "decision_reason": decision_reason,
+        "resolution_options": ["send_correction", "no_action"],
+        "edit_supported": False,
+        "correction_delivery": "explicit_message",
+        "dedupe_key": f"revision-review:{message.message_id}:{message.revision}",
+    }
+    if "reply_destination_changed" in assessment.reasons:
+        payload["commands"] = [
+            f"/send {task_short_id} --location {destination['location']} <final reply>"
+        ]
+    if assessment.impact == "none":
+        action = "audit"
+    elif not assessment.reply_changed:
+        action = "notify_identical"
+    elif assessment.impact == "low":
+        action = "notify_low"
+    else:
+        action = "approval"
+        payload["requires_owner_approval"] = True
+    return RevisionReviewPlan(action=action, assessment=assessment, payload=payload)
 
 
 def assess_revision_impact(
@@ -136,5 +235,8 @@ __all__ = [
     "HIGH_IMPACT_DECISION_REASONS",
     "RevisionAssessment",
     "RevisionImpact",
+    "RevisionReviewPlan",
     "assess_revision_impact",
+    "plan_no_reply_review",
+    "plan_reply_review",
 ]

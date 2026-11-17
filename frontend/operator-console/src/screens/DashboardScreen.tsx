@@ -21,7 +21,7 @@ import {
 import { failedCommandResult } from "../commandResult";
 import { invalidateAfterMaintenanceCommand, queryKeys } from "../queryKeys";
 import { enumLabel } from "../presentation";
-import type { ApprovalSummary, AttentionTask, BotMembershipStatus, CommandResult, DispatchActionSummary, IngestionStatus, RouteKey } from "../types";
+import type { ApprovalSummary, AttentionTask, BotMembershipStatus, CommandResult, DashboardSnapshot, DispatchActionSummary, IngestionStatus, RouteKey } from "../types";
 
 export function DashboardScreen({ token, navigate }: { token: string; navigate: (route: RouteKey, selectedId?: string, view?: "attention" | "all") => void }) {
   const { t } = useTranslation();
@@ -65,6 +65,8 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
   const actionCount = attention?.total_item_count ?? 0;
   const sendAttention = (attention?.uncertain_action_count ?? 0) + (attention?.failed_action_count ?? 0);
   const blockedOrFailed = (attention?.blocked_processing_count ?? 0) + (attention?.failed_processing_count ?? 0);
+  const nextStep = dashboardNextStep(snapshot, dashboard.error);
+  const emptyBadge = nextStep?.state === "waiting" ? t("dashboard.waiting") : nextStep?.state === "starting" ? t("dashboard.preparing") : nextStep ? t("dashboard.notReady") : t("dashboard.cleared");
 
   return (
     <section className="work-grid" aria-label={t("dashboard.aria")}>
@@ -73,7 +75,7 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
           <SectionHeader
             eyebrow={t("dashboard.eyebrow")}
             title={t("dashboard.title")}
-            badge={<Badge tone={actionCount ? "warning" : "success"}>{actionCount ? t("dashboard.itemCount", { count: actionCount }) : t("dashboard.cleared")}</Badge>}
+            badge={<Badge tone={actionCount ? "warning" : nextStep?.state === "attention" ? "warning" : nextStep ? "info" : "success"}>{actionCount ? t("dashboard.itemCount", { count: actionCount }) : emptyBadge}</Badge>}
           >
             <p className="section-note">{t("dashboard.intro")}</p>
             <div className="command-buttons">
@@ -85,13 +87,14 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
             </div>
             {dashboard.error ? <p className="detail-note danger">{t("common.cachedRefreshError", { code: "" })}</p> : null}
           </SectionHeader>
+          {nextStep ? <NextStepPanel navigate={navigate} snapshot={snapshot} step={nextStep} /> : null}
           <div aria-label={t("dashboard.index")} className="decision-index">
             <DecisionLink count={sendAttention} hint={t("dashboard.viewDispatch")} label={t("dashboard.dispatchAttention")} onClick={() => navigate("dispatch", undefined, "attention")} tone="danger" />
             <DecisionLink count={attention?.pending_approval_count ?? 0} hint={t("dashboard.viewApproval")} label={t("dashboard.pendingApproval")} onClick={() => navigate("approvals")} tone="warning" />
             <DecisionLink count={blockedOrFailed} hint={t("dashboard.viewTasks")} label={t("dashboard.blockedTasks")} onClick={() => navigate("tasks", undefined, "all")} tone="danger" />
           </div>
           <p className="decision-context">{t("dashboard.affectedTasks", { count: attention?.affected_task_count ?? 0 })}</p>
-          {actionCount === 0 ? <EmptyState title={t("dashboard.emptyTitle")} detail={t("dashboard.emptyDetail")} /> : null}
+          {actionCount === 0 && !nextStep ? <EmptyState title={t("dashboard.emptyTitle")} detail={t("dashboard.emptyDetail")} /> : null}
         </div>
 
         <AttentionTasks tasks={attentionTasks} onTask={(taskId) => navigate("tasks", taskId)} />
@@ -117,7 +120,7 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
           <dl className="fact-list">
             <div><dt>{t("dashboard.initialization")}</dt><dd><Badge tone={policyStatus?.initialized ? "success" : "warning"}>{policyStatus?.initialized ? t("dashboard.initialized") : t("runtime.missing")}</Badge></dd></div>
             <div><dt>{t("dashboard.policyImportDiff")}</dt><dd><Badge tone={statusTone(policyDiff?.status)}>{enumLabel(t, "status", policyDiff?.status, t("common.unknown"))}</Badge></dd></div>
-            <div><dt>{t("dashboard.lastTick")}</dt><dd>{formatDate(snapshot?.last_run?.last_tick_finished_at)}</dd></div>
+            <div><dt>{t("dashboard.lastTick")}</dt><dd>{formatDate(snapshot?.daemon_liveness?.last_tick_finished_at)}</dd></div>
           </dl>
           <p className="detail-note">{policyDiffSummary(t, policyDiff?.status, policyStatus?.initialized === true)}</p>
           {policyDiff?.message ? (
@@ -169,6 +172,73 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
         </div>
 
       </aside>
+    </section>
+  );
+}
+
+type DashboardNextStep = {
+  title: string;
+  detail: string;
+  state: "attention" | "starting" | "waiting";
+  route?: RouteKey;
+  action?: string;
+  showCommand?: boolean;
+};
+
+function dashboardNextStep(snapshot: DashboardSnapshot | undefined, error: unknown): DashboardNextStep | null {
+  if (error || !snapshot) {
+    return { title: "dashboard.unknownTitle", detail: "dashboard.unknownDetail", state: "attention", route: "health", action: "dashboard.nextHealth" };
+  }
+  if (snapshot.store_status?.available === false) {
+    return { title: "dashboard.storeUnavailableTitle", detail: "dashboard.storeUnavailableDetail", state: "attention", route: "health", action: "dashboard.nextHealth" };
+  }
+  if (snapshot.policy_status?.initialized === false) {
+    return { title: "dashboard.setupPolicyTitle", detail: "dashboard.setupPolicyDetail", state: "attention", route: "policy", action: "dashboard.setupOpenPolicy" };
+  }
+  const daemon = snapshot.daemon_liveness?.status;
+  if (daemon === "startup_failed") {
+    return { title: "dashboard.startupFailedTitle", detail: "dashboard.startupFailedDetail", state: "attention", route: "health", action: "dashboard.nextHealth" };
+  }
+  if (daemon === "stale") {
+    return { title: "dashboard.staleTitle", detail: "dashboard.staleDetail", state: "attention", route: "health", action: "dashboard.nextHealth" };
+  }
+  if (daemon === "not_started") {
+    return { title: "dashboard.notStartedTitle", detail: "dashboard.notStartedDetail", state: "attention", route: "maintenance", action: "dashboard.openMaintenance", showCommand: true };
+  }
+  if (daemon === "stopped") {
+    return { title: "dashboard.stoppedTitle", detail: "dashboard.stoppedDetail", state: "attention", route: "health", action: "dashboard.nextHealth", showCommand: true };
+  }
+  if (daemon === "starting") {
+    return { title: "dashboard.startingTitle", detail: "dashboard.startingDetail", state: "starting", route: "health", action: "dashboard.nextHealth" };
+  }
+  if (daemon !== "live" || snapshot.policy_status?.initialized !== true) {
+    return { title: "dashboard.unknownTitle", detail: "dashboard.unknownDetail", state: "attention", route: "health", action: "dashboard.nextHealth" };
+  }
+  if (snapshot.health_issue_summary?.highest_severity === "error" || snapshot.health_issue_summary?.highest_severity === "critical") {
+    return { title: "dashboard.healthAttentionTitle", detail: "dashboard.healthAttentionDetail", state: "attention", route: "health", action: "dashboard.nextHealth" };
+  }
+  if (snapshot.has_messages === false) {
+    return { title: "dashboard.waitingMessageTitle", detail: "dashboard.waitingMessageDetail", state: "waiting", route: "tasks", action: "dashboard.openTasks" };
+  }
+  return null;
+}
+
+function NextStepPanel({ step, snapshot, navigate }: { step: DashboardNextStep; snapshot: DashboardSnapshot | undefined; navigate: (route: RouteKey) => void }) {
+  const { t } = useTranslation();
+  const mode = snapshot?.runtime_mode;
+  const route = step.route;
+  return (
+    <section aria-label={t("dashboard.nextStep")} className="next-step-panel">
+      <p className="eyebrow">{t("dashboard.nextStep")}</p>
+      <h2>{t(step.title)}</h2>
+      <p>{t(step.detail)}</p>
+      {step.showCommand && mode ? (
+        <>
+          {mode === "production" ? <p>{t("dashboard.productionStartWarning")}</p> : null}
+          <code>python -m feishu_shadow_agent daemon --config config.yaml{mode === "dry_run" ? " --dry-run" : ""}</code>
+        </>
+      ) : null}
+      {route && step.action ? <Button onClick={() => navigate(route)}>{t(step.action)}</Button> : null}
     </section>
   );
 }

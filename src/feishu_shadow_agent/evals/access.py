@@ -6,6 +6,7 @@ from typing import Any
 
 from ..config import LoadedConfig
 from ..paths import resolve_relative_path
+from ..store.schema import IncompatibleSchemaError, require_current_schema
 from .artifacts import EvalError, read_yaml
 
 
@@ -16,10 +17,11 @@ def configured_group_ids(loaded: LoadedConfig) -> set[str]:
         return set()
     try:
         with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as conn:
+            require_current_schema(conn)
             return {
                 str(row[0]) for row in conn.execute("SELECT chat_id FROM chat_policies")
             }
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, IncompatibleSchemaError) as exc:
         raise EvalError(f"cannot read effective group policies: {exc}") from exc
 
 

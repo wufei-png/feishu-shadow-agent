@@ -20,7 +20,7 @@ from feishu_shadow_agent.config import (
 )
 from feishu_shadow_agent.daemon import Daemon
 from feishu_shadow_agent.health import REQUIRED_USER_SCOPES, HealthSuite
-from feishu_shadow_agent.ingestion import IngestionService
+from feishu_shadow_agent.ingestion import IngestionService, StageResult
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.operator_query import OperatorQueryService
 from feishu_shadow_agent.processing import TaskProcessingService
@@ -67,6 +67,7 @@ class FakeFeishu:
         self.calls: list[str] = []
         self.search_items: dict[tuple[str, bool], list[dict[str, Any]]] = {}
         self.sent_counter = 0
+        self.user_open_id = "ou_owner"
 
     def version(self) -> LarkCliResult:
         return LarkCliResult(
@@ -79,7 +80,13 @@ class FakeFeishu:
             0,
             json_data={
                 "identities": {
-                    "user": {"scope": " ".join(sorted(REQUIRED_USER_SCOPES))},
+                    "user": {
+                        "openId": self.user_open_id,
+                        "available": True,
+                        "verified": True,
+                        "status": "ready",
+                        "scope": " ".join(sorted(REQUIRED_USER_SCOPES)),
+                    },
                     "bot": {"openId": "ou_bot", "available": True, "status": "ready"},
                 }
             },
@@ -430,6 +437,13 @@ def test_dry_run_does_not_contact_owner_inbox_or_send_notifications(
     assert "approval_inbox" not in fake.calls
     assert fake.owner_calls == []
     assert store.get_action(action_id).status == "pending"  # type: ignore[union-attr]
+    dispatch_log = next(
+        event["data"]
+        for line in (tmp_path / "agent.jsonl").read_text(encoding="utf-8").splitlines()
+        if (event := json.loads(line))["event"] == "daemon_stage_completed"
+        and event["data"]["stage"] == "dispatch"
+    )
+    assert dispatch_log["owner_notifications_allowed"] is False
 
 
 def test_keyboard_interrupt_finishes_run(tmp_path: Path) -> None:
@@ -807,6 +821,282 @@ def test_runtime_health_ok_uses_interval_seconds_before_next_refresh(
     assert suite.calls == 2
 
 
+def test_card_health_cache_expires_without_a_network_check(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    now = 0.0
+    monkeypatch.setattr("feishu_shadow_agent.daemon.time.monotonic", lambda: now)
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    config.health.retry_interval_seconds = 600
+    suite = SequenceHealthSuite(
+        [[HealthCheckResult("owner_config", "critical", "ok", "ok")]]
+    )
+    daemon = Daemon(
+        store=SQLiteStore(tmp_path / "agent.sqlite3"),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        health_suite=suite,  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=False,
+        app_config=config,
+    )
+
+    assert daemon.runtime_health_allows_card_actions() is False
+    assert daemon.run_startup_health()[0] is True
+    now = config.health.interval_seconds - 1
+    assert daemon.runtime_health_allows_card_actions() is True
+    now = config.health.interval_seconds
+    assert daemon.runtime_health_allows_card_actions() is False
+    assert suite.calls == 1
+    assert daemon._runtime_health_ok_for_tick(run_id="run_1") is True
+    assert suite.calls == 2
+
+
+def test_card_guard_is_fail_closed_during_concurrent_health_refresh(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    now = 0.0
+    monkeypatch.setattr("feishu_shadow_agent.daemon.time.monotonic", lambda: now)
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    started = threading.Event()
+    release = threading.Event()
+
+    class Health:
+        calls = 0
+
+        def run_runtime_critical(self) -> list[HealthCheckResult]:
+            self.calls += 1
+            if self.calls > 1:
+                started.set()
+                if not release.wait(timeout=2):
+                    raise TimeoutError("test health probe was not released")
+                return [HealthCheckResult("owner_config", "critical", "failed", "bad")]
+            return [HealthCheckResult("owner_config", "critical", "ok", "ok")]
+
+    suite = Health()
+    daemon = Daemon(
+        store=SQLiteStore(tmp_path / "agent.sqlite3"),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        health_suite=suite,  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=False,
+        app_config=config,
+    )
+    assert daemon._runtime_health_ok_for_tick(run_id="run_1") is True
+    now = config.health.interval_seconds
+    refresh_results: list[bool] = []
+    card_results: list[bool] = []
+    refresh = threading.Thread(
+        target=lambda: refresh_results.append(
+            daemon._runtime_health_ok_for_tick(run_id="run_1")
+        )
+    )
+    callback = threading.Thread(
+        target=lambda: card_results.append(daemon.runtime_health_allows_card_actions())
+    )
+    refresh.start()
+    try:
+        assert started.wait(timeout=2)
+        callback.start()
+        callback.join(timeout=1)
+        assert not callback.is_alive()
+        assert card_results == [False]
+    finally:
+        release.set()
+        refresh.join(timeout=2)
+        if callback.ident is not None:
+            callback.join(timeout=2)
+    assert not refresh.is_alive()
+    assert refresh_results == [False]
+    assert daemon.runtime_health_allows_card_actions() is False
+
+
+def test_runtime_owner_mismatch_blocks_tick_at_next_health_refresh(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    now = 0.0
+    monkeypatch.setattr("feishu_shadow_agent.daemon.time.monotonic", lambda: now)
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    _seed_policy(store, config)
+    store.record_run_start(run_id="run_1", dry_run=False)
+    task_id = _insert_task(store)
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+        },
+    )
+    assert action_id is not None
+    fake = FakeFeishu()
+    loaded = LoadedConfig(
+        config=config, path=tmp_path / "config.yaml", base_dir=tmp_path, raw={}
+    )
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=store,
+        feishu_client=fake,  # type: ignore[arg-type]
+        agent_backend_checker=lambda _: HealthCheckResult(
+            "backend", "critical", "ok", "ok"
+        ),
+        run_id="run_1",
+        disk_usage=lambda _: (1_000 * 1024**3, 500 * 1024**3, 500 * 1024**3),
+    )
+    daemon = Daemon(
+        store=store,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        health_suite=suite,
+        tick_interval_seconds=1,
+        dry_run=False,
+        app_config=config,
+        feishu_client=fake,  # type: ignore[arg-type]
+    )
+
+    assert daemon._runtime_health_ok_for_tick(run_id="run_1") is True
+    fake.user_open_id = "ou_other"
+    now = config.health.interval_seconds - 1
+    assert daemon._runtime_health_ok_for_tick(run_id="run_1") is True
+    now = config.health.interval_seconds
+    result = daemon.run_one_tick(run_id="run_1")
+
+    assert [item.name for item in result] == ["runtime_health"]
+    assert store.get_action(action_id).status == "pending"  # type: ignore[union-attr]
+    assert fake.reply_calls == []
+    assert fake.owner_calls == []
+
+
+def test_long_ingestion_refreshes_due_health_before_dispatch(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    now = 0.0
+    monkeypatch.setattr("feishu_shadow_agent.daemon.time.monotonic", lambda: now)
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    _seed_policy(store, config)
+    task_id = _insert_task(store)
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+        },
+    )
+    assert action_id is not None
+    fake = FakeFeishu()
+    loaded = LoadedConfig(
+        config=config, path=tmp_path / "config.yaml", base_dir=tmp_path, raw={}
+    )
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=store,
+        feishu_client=fake,  # type: ignore[arg-type]
+        agent_backend_checker=lambda _: HealthCheckResult(
+            "backend", "critical", "ok", "ok"
+        ),
+        disk_usage=lambda _: (1_000 * 1024**3, 500 * 1024**3, 500 * 1024**3),
+    )
+    daemon = Daemon(
+        store=store,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        health_suite=suite,
+        tick_interval_seconds=1,
+        dry_run=False,
+        app_config=config,
+        feishu_client=fake,  # type: ignore[arg-type]
+    )
+
+    def long_stage(*, run_id: str) -> StageResult:
+        nonlocal now
+        now = config.health.interval_seconds
+        fake.user_open_id = "ou_other"
+        return StageResult("long_stage", ok=True)
+
+    monkeypatch.setattr(
+        "feishu_shadow_agent.daemon.IngestionService.ordered_ingestion_stages",
+        lambda _: [long_stage],
+    )
+
+    results = daemon.run_one_tick(run_id="run_1")
+
+    assert results[-1].name == "runtime_health"
+    assert results[-1].ok is False
+    assert store.get_action(action_id).status == "pending"  # type: ignore[union-attr]
+    assert fake.reply_calls == []
+    assert fake.owner_calls == []
+
+
+def test_long_dispatch_defers_remaining_actions_until_health_refresh(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    now = 0.0
+    monkeypatch.setattr("feishu_shadow_agent.daemon.time.monotonic", lambda: now)
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    config.health.retry_interval_seconds = 600
+    _seed_policy(store, config)
+    first = store.create_owner_notification_action(
+        task_id=None, payload={"type": "owner_notification", "dedupe_key": "first"}
+    )
+    second = store.create_owner_notification_action(
+        task_id=None, payload={"type": "owner_notification", "dedupe_key": "second"}
+    )
+
+    class SlowFeishu(FakeFeishu):
+        def owner_message(self, **kwargs: Any) -> LarkCliResult:
+            nonlocal now
+            result = super().owner_message(**kwargs)
+            if not kwargs.get("dry_run"):
+                now = config.health.interval_seconds + 1
+                self.user_open_id = "ou_other"
+            return result
+
+    fake = SlowFeishu()
+    loaded = LoadedConfig(
+        config=config, path=tmp_path / "config.yaml", base_dir=tmp_path, raw={}
+    )
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=store,
+        feishu_client=fake,  # type: ignore[arg-type]
+        agent_backend_checker=lambda _: HealthCheckResult(
+            "backend", "critical", "ok", "ok"
+        ),
+        disk_usage=lambda _: (1_000 * 1024**3, 500 * 1024**3, 500 * 1024**3),
+    )
+    daemon = Daemon(
+        store=store,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        health_suite=suite,
+        tick_interval_seconds=1,
+        dry_run=False,
+        app_config=config,
+        feishu_client=fake,  # type: ignore[arg-type]
+    )
+
+    daemon.run_one_tick(run_id="run_1")
+
+    assert store.get_action(first).status == "sent"  # type: ignore[union-attr]
+    assert store.get_action(second).status == "pending"  # type: ignore[union-attr]
+    assert daemon.runtime_health_allows_card_actions() is False
+    assert len([call for call in fake.owner_calls if not call["dry_run"]]) == 1
+    with store.connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM health_checks WHERE check_name = 'owner_config'"
+            ).fetchone()[0]
+            == 1
+        )
+
+    result = daemon.run_one_tick(run_id="run_1")
+    assert result[-1].name == "runtime_health"
+    assert store.get_action(second).status == "pending"  # type: ignore[union-attr]
+    assert len([call for call in fake.owner_calls if not call["dry_run"]]) == 1
+
+
 def test_product_policy_missing_blocks_tick_even_when_runtime_health_is_cached(
     tmp_path: Path,
     monkeypatch: Any,
@@ -820,6 +1110,7 @@ def test_product_policy_missing_blocks_tick_even_when_runtime_health_is_cached(
     suite = SequenceHealthSuite(
         [
             [HealthCheckResult("lark_auth_verify", "critical", "ok", "ok")],
+            [HealthCheckResult("owner_config", "critical", "failed", "unverified")],
             [HealthCheckResult("lark_auth_verify", "critical", "ok", "ok")],
         ]
     )
@@ -834,6 +1125,7 @@ def test_product_policy_missing_blocks_tick_even_when_runtime_health_is_cached(
         feishu_client=fake,  # type: ignore[arg-type]
     )
     first = daemon.run_one_tick(run_id="run_1")
+    assert daemon.runtime_health_allows_card_actions() is True
     fake.calls.clear()
     task_id = _insert_task(store)
     action_id = store.create_send_reply_action(
@@ -863,6 +1155,7 @@ def test_product_policy_missing_blocks_tick_even_when_runtime_health_is_cached(
         "retention",
     ]
     assert [result.name for result in second] == ["runtime_health"]
+    assert daemon.runtime_health_allows_card_actions() is False
     assert suite.calls == 1
     assert fake.calls == []
     assert fake.reply_calls == []
@@ -882,6 +1175,16 @@ def test_product_policy_missing_blocks_tick_even_when_runtime_health_is_cached(
     assert action["status"] == "pending"
     assert health["status"] == "failed"
     assert "policy import-config" in health["message"]
+
+    store.import_product_policy_from_config(config)
+    now = 2.0
+    assert daemon.run_one_tick(run_id="run_1")[-1].name == "runtime_health"
+    assert daemon.runtime_health_allows_card_actions() is False
+    assert suite.calls == 2
+    now += config.health.retry_interval_seconds
+    daemon.run_one_tick(run_id="run_1")
+    assert daemon.runtime_health_allows_card_actions() is True
+    assert suite.calls == 3
 
 
 def test_approval_inbox_failure_blocks_send_reply_but_allows_owner_notification(
@@ -943,6 +1246,13 @@ def test_approval_inbox_failure_blocks_send_reply_but_allows_owner_notification(
     ]
     assert [call["dry_run"] for call in fake.reply_calls] == [True]
     assert [call["dry_run"] for call in fake.owner_calls] == [True, False]
+    dispatch_log = next(
+        event["data"]
+        for line in (tmp_path / "agent.jsonl").read_text(encoding="utf-8").splitlines()
+        if (event := json.loads(line))["event"] == "daemon_stage_completed"
+        and event["data"]["stage"] == "dispatch"
+    )
+    assert dispatch_log["owner_notifications_allowed"] is True
     with store.connect() as conn:
         send = conn.execute(
             "SELECT status, result_json FROM actions WHERE id = ?", (send_action,)

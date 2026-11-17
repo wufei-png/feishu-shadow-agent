@@ -11,6 +11,11 @@ from typing import Any, cast
 
 from .config import ConfigError, LoadedConfig
 from .paths import resolve_relative_path
+from .store.schema import (
+    IncompatibleSchemaError,
+    is_uninitialized_schema,
+    require_current_schema,
+)
 from .store.sqlite_store import PRODUCT_POLICY_KEY, SQLiteStore
 
 
@@ -131,6 +136,9 @@ def _read_production_policy(
         with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as connection:
             connection.row_factory = sqlite3.Row
             connection.execute("BEGIN")
+            if is_uninitialized_schema(connection):
+                return None
+            require_current_schema(connection)
             tables = {
                 row[0]
                 for row in connection.execute(
@@ -163,7 +171,7 @@ def _read_production_policy(
                 )
             ]
             return cast(dict[str, Any], policy), chats
-    except (sqlite3.Error, json.JSONDecodeError) as exc:
+    except (sqlite3.Error, json.JSONDecodeError, IncompatibleSchemaError) as exc:
         raise ConfigError(f"cannot read production policy for dry-run: {exc}") from exc
 
 

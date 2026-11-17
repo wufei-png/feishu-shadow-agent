@@ -38,6 +38,7 @@ class _Channel(Protocol):
 class _ChannelModule(Protocol):
     WSClient: type[Any]
     FeishuChannel: Callable[..., _Channel]
+    P2CardActionTriggerResponse: Callable[..., Any]
 
 
 class _WsModule(Protocol):
@@ -97,6 +98,25 @@ class CompatibleFeishuChannel:
 
     def on(self, name: str, handler: Any) -> Any:
         return self._channel.on(name, handler)
+
+    def set_card_action_guard(
+        self, guard: Callable[[], bool], *, blocked_message: str
+    ) -> None:
+        # The SDK otherwise queues the event before invoking handlers, caches a
+        # rejected click, and discards handler return values. Reject before its
+        # deduplication pipeline so a later click can be retried and receives a
+        # synchronous toast. An admitted event is already in flight.
+        channel = cast(Any, self._channel)
+        original = cast(Callable[[Any], Any], channel._on_p2_card_action_trigger)
+
+        def guarded(data: Any) -> Any:
+            if not guard():
+                return self._channel_module.P2CardActionTriggerResponse(
+                    {"toast": {"type": "error", "content": blocked_message}}
+                )
+            return original(data)
+
+        channel._on_p2_card_action_trigger = guarded
 
     # SDK compatibility contract exposes a timeout parameter.
     async def connect_until_ready(

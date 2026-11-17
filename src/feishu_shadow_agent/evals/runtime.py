@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ..config import LoadedConfig
-from ..ingestion import MessageNormalizer
 from ..jsonl import JSONLLogger
+from ..message_normalization import MessageNormalizer
 from ..paths import resolve_agent_working_dir
 from ..store.sqlite_store import SQLiteStore
 from ..time_utils import normalize_instant, parse_instant, shift_instant

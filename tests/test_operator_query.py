@@ -326,8 +326,125 @@ def test_dashboard_snapshot_includes_policy_status_and_omits_policy_audits(
     assert snapshot["policy_status"]["initialized"] is True
     assert snapshot["policy_status"]["chat_policy_count"] == 1
     assert snapshot["policy_status"]["policy_import_diff"]["status"] == "matches"
+    assert snapshot["has_messages"] is False
+    assert snapshot["store_status"]["available"] is True
     assert "policy_audits" not in snapshot
     json.dumps(snapshot)
+
+
+def test_dashboard_distinguishes_missing_store_from_uninitialized_policy(
+    tmp_path: Path,
+) -> None:
+    query = OperatorQueryService(SQLiteStore(tmp_path / "missing.sqlite3"))
+
+    snapshot = query.dashboard_snapshot()
+
+    assert snapshot["policy_status"]["initialized"] is False
+    assert snapshot["store_status"]["status"] == "missing"
+    assert snapshot["store_status"]["available"] is False
+    assert snapshot["health_issue_summary"]["highest_severity"] == "critical"
+    assert snapshot["has_messages"] is None
+    assert not query.store.path.exists()
+
+
+def test_dashboard_reports_latest_failed_start_even_after_a_doctor_run(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.initialize()
+    with store.connect() as conn:
+        conn.execute(
+            "INSERT INTO runs(run_id, started_at, status, dry_run, last_heartbeat_at, last_tick_started_at) "
+            "VALUES ('run_old', '2026-06-22T09:00:00Z', 'stopped', 1, '2026-06-22T09:01:00Z', '2026-06-22T09:01:00Z')"
+        )
+        conn.execute(
+            "INSERT INTO runs(run_id, started_at, status, dry_run) "
+            "VALUES ('run_failed', '2026-06-22T10:00:00Z', 'health_failed', 1)"
+        )
+        conn.execute(
+            "INSERT INTO runs(run_id, started_at, status, dry_run) "
+            "VALUES ('doctor_newer', '2026-06-22T10:01:00Z', 'ok', 1)"
+        )
+
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:02:00Z")
+    snapshot = query.dashboard_snapshot()
+    issues = query.health_issues()
+
+    assert snapshot["last_run"]["run_id"] == "doctor_newer"
+    assert snapshot["daemon_liveness"]["run_id"] == "run_failed"
+    assert snapshot["daemon_liveness"]["status"] == "startup_failed"
+    assert any(issue["id"] == "daemon-startup-failed" for issue in issues["issues"])
+
+
+def test_live_daemon_remains_visible_when_later_start_fails(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.initialize()
+    with store.connect() as conn:
+        conn.execute(
+            "INSERT INTO runs(run_id, started_at, status, dry_run, last_heartbeat_at, last_tick_started_at) "
+            "VALUES ('run_live', '2026-06-22T09:00:00Z', 'running', 1, '2026-06-22T10:03:00Z', '2026-06-22T10:03:00Z')"
+        )
+        conn.execute(
+            "INSERT INTO runs(run_id, started_at, status, dry_run) "
+            "VALUES ('run_failed', '2026-06-22T10:02:00Z', 'health_failed', 1)"
+        )
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:03:01Z")
+
+    snapshot = query.dashboard_snapshot()
+    issues = query.health_issues()
+
+    assert snapshot["daemon_liveness"]["run_id"] == "run_live"
+    assert snapshot["daemon_liveness"]["status"] == "live"
+    assert issues["runtime"]["daemon_liveness"]["run_id"] == "run_live"
+    assert issues["runtime"]["last_daemon_start"]["run_id"] == "run_failed"
+    assert any(issue["id"] == "daemon-startup-failed" for issue in issues["issues"])
+
+    stale_query = OperatorQueryService(store, now=lambda: "2026-06-22T10:10:00Z")
+    assert stale_query.dashboard_snapshot()["daemon_liveness"]["run_id"] == "run_failed"
+    assert (
+        stale_query.dashboard_snapshot()["daemon_liveness"]["status"]
+        == "startup_failed"
+    )
+
+
+def test_dashboard_distinguishes_starting_daemon_and_observed_messages(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(
+        tmp_path / "agent.sqlite3", clock=lambda: "2026-06-22T10:00:00Z"
+    )
+    store.record_run_start(run_id="run_starting", dry_run=True)
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:00:10Z")
+
+    assert query.dashboard_snapshot()["daemon_liveness"]["status"] == "starting"
+    assert query.dashboard_snapshot()["has_messages"] is False
+    with store.connect() as conn:
+        conn.execute(
+            "INSERT INTO messages(message_id, raw_json, inserted_at) VALUES ('om_1', '{}', 'now')"
+        )
+    assert query.dashboard_snapshot()["has_messages"] is True
+
+
+def test_live_daemon_takes_precedence_over_new_instance_still_starting(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.initialize()
+    with store.connect() as conn:
+        conn.execute(
+            "INSERT INTO runs(run_id, started_at, status, dry_run, last_heartbeat_at, last_tick_started_at) "
+            "VALUES ('run_live', '2026-06-22T09:00:00Z', 'running', 1, '2026-06-22T10:03:00Z', '2026-06-22T10:03:00Z')"
+        )
+        conn.execute(
+            "INSERT INTO runs(run_id, started_at, status, dry_run, last_heartbeat_at) "
+            "VALUES ('run_starting', '2026-06-22T10:02:00Z', 'running', 1, '2026-06-22T10:02:00Z')"
+        )
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:03:01Z")
+
+    assert query.dashboard_snapshot()["daemon_liveness"]["run_id"] == "run_live"
+    assert query.health_issues()["runtime"]["last_daemon_start"]["run_id"] == (
+        "run_starting"
+    )
 
 
 def test_dashboard_snapshot_health_summary_matches_open_health_issues(
@@ -1182,6 +1299,21 @@ def test_health_issues_reports_store_availability_without_migrating(
     assert unreadable["runtime"]["store"]["status"] == "unreadable"
     assert schema_incompatible["runtime"]["store"]["status"] == "schema_incompatible"
     assert schema_incompatible["issues"][0]["id"] == "store-schema_incompatible"
+
+
+def test_health_issues_rejects_an_unsupported_marked_database_without_writes(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.initialize()
+    with store.connect() as conn:
+        conn.execute("PRAGMA user_version = 8")
+    before = store.path.read_bytes()
+
+    response = OperatorQueryService(store).health_issues()
+
+    assert response["runtime"]["store"]["status"] == "schema_incompatible"
+    assert store.path.read_bytes() == before
 
 
 def test_health_issues_summary_count_is_not_truncated_by_list_limit(

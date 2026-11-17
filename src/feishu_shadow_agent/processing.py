@@ -39,7 +39,7 @@ from .resource_preflight import (
     message_has_substantive_resource_text,
     resource_status_counts,
 )
-from .revision import assess_revision_impact
+from .revision import plan_no_reply_review, plan_reply_review
 from .routing import CandidateCollector, RoutingResult
 from .store.sqlite_store import SQLiteStore
 from .task_session_runner import RevisionReviewContext, TaskSessionRunner
@@ -1569,24 +1569,11 @@ class TaskProcessingService:
                 watch_until=watch_until,
                 attempt_count=outcome.attempt_count,
                 reason="revision_no_reply_review",
-                payload={
-                    "type": "revision_correction_review",
-                    "message_id": message.message_id,
-                    "source_message_id": message.message_id,
-                    "source_revision": message.revision,
-                    "previous_reply": previous_sent_reply.get("text", ""),
-                    "previous_action_id": previous_sent_reply.get("action_id"),
-                    "suggested_reply": "",
-                    "impact": "uncertain",
-                    "impact_reasons": ["new_revision_no_reply"],
-                    "decision_reason": output.decision_reason,
-                    "resolution_options": ["send_correction", "no_action"],
-                    "edit_supported": False,
-                    "correction_delivery": "explicit_message",
-                    "dedupe_key": (
-                        f"revision-review:{message.message_id}:{message.revision}"
-                    ),
-                },
+                payload=plan_no_reply_review(
+                    message=message,
+                    previous_reply=previous_sent_reply,
+                    decision_reason=output.decision_reason,
+                ),
             )
 
         if output.answerability == "no_reply":
@@ -1829,53 +1816,19 @@ class TaskProcessingService:
             proposed_reply=postprocess.reply,
         )
         if previous_sent_reply is not None:
-            previous_payload = previous_sent_reply.get("payload")
-            previous_destination = (
-                cast(dict[str, Any], previous_payload).get("reply_destination")
-                if isinstance(previous_payload, dict)
-                else None
-            )
-            previous_destination = (
-                cast(dict[str, str], previous_destination)
-                if isinstance(previous_destination, dict)
-                else None
-            )
-            revision_assessment = assess_revision_impact(
-                previous_reply=str(previous_sent_reply.get("text") or ""),
+            revision_plan = plan_reply_review(
+                message=message,
+                task_short_id=task.short_id,
+                previous_reply=previous_sent_reply,
                 current_reply=composed.text,
                 answerability=output.answerability,
                 decision_reason=output.decision_reason,
-                current_target_message_id=reply_target_id,
-                previous_target_message_id=previous_sent_reply.get("target_message_id"),
-                current_reply_destination=destination,
-                previous_reply_destination=previous_destination,
+                target_message_id=reply_target_id,
+                destination=destination,
                 revision_signals=getattr(output, "revision_signals", ()),
             )
-            revision_payload = {
-                "type": "revision_correction_review",
-                "message_id": message.message_id,
-                "source_message_id": message.message_id,
-                "source_revision": message.revision,
-                "previous_reply": previous_sent_reply.get("text", ""),
-                "previous_action_id": previous_sent_reply.get("action_id"),
-                "previous_reply_destination": previous_destination,
-                "reply_destination": destination,
-                "suggested_reply": composed.text,
-                "impact": revision_assessment.impact,
-                "impact_reasons": list(revision_assessment.reasons),
-                "decision_reason": output.decision_reason,
-                "resolution_options": ["send_correction", "no_action"],
-                "edit_supported": False,
-                "correction_delivery": "explicit_message",
-                "dedupe_key": (
-                    f"revision-review:{message.message_id}:{message.revision}"
-                ),
-            }
-            if "reply_destination_changed" in revision_assessment.reasons:
-                revision_payload["commands"] = [
-                    f"/send {task.short_id} --location {destination['location']} <final reply>"
-                ]
-            if revision_assessment.impact == "none":
+            revision_payload = revision_plan.payload
+            if revision_plan.action == "audit":
                 next_status = "closed" if output.watch_action == "close" else "watching"
                 self.store.update_task_after_agent(
                     task_id=task.id,
@@ -1894,7 +1847,7 @@ class TaskProcessingService:
                 return ProcessingResult(
                     "audited_only", task.id, reason="revision_no_material_change"
                 )
-            if not revision_assessment.reply_changed:
+            if revision_plan.action == "notify_identical":
                 self.logger.warning(
                     "identical_correction_text",
                     run_id=run_id,
@@ -1902,7 +1855,7 @@ class TaskProcessingService:
                     data={
                         "message_id": message.message_id,
                         "source_revision": message.revision,
-                        "impact": revision_assessment.impact,
+                        "impact": revision_plan.assessment.impact,
                     },
                 )
                 return self._notify_revision_review(
@@ -1914,7 +1867,7 @@ class TaskProcessingService:
                     reason="revision_identical_text_review",
                     payload=revision_payload,
                 )
-            if revision_assessment.impact == "low":
+            if revision_plan.action == "notify_low":
                 return self._notify_revision_review(
                     task=task,
                     message=message,
@@ -1924,7 +1877,6 @@ class TaskProcessingService:
                     reason="revision_low_impact_correction_review",
                     payload=revision_payload,
                 )
-            revision_payload["requires_owner_approval"] = True
             approval_id = self.approvals.request_send_reply(
                 task=task,
                 reply_target_message_id=reply_target_id,
