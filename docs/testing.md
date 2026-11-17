@@ -127,7 +127,7 @@ git diff --check
 - `tests/test_lark_channel_compat.py`：官方 Channel SDK 的隔离 event loop、交互回调帧分发兼容层；只使用本地 fake frame，不访问飞书。
 - `tests/test_daemon.py`：tick 顺序、heartbeat、运行中 health fail-closed、approval inbox 失败保护、dispatch 行为。
 - `tests/test_dispatcher.py`：dry-run、真实发送、dispatch attempt、读回验证、stale sending 恢复。
-- `tests/test_store_schema.py`：SQLite current schema bootstrap、受支持的已标记旧 schema 迁移、busy timeout、约束、状态 enum 契约、幂等动作；未标记或不受支持的 schema 仍拒绝自动猜测迁移。
+- `tests/test_store_schema.py`：SQLite current schema bootstrap、非当前 schema 的无修改拒绝、busy timeout、约束、状态 enum 契约、幂等动作。
 - `tests/test_product_policy_store.py`：Product Policy Store 初始化探针、config import/replace、chat policy skip、audit old/new。
 - `tests/test_policy_runtime.py`：runtime resolver 从 Product Policy Store 读取、缺失全局策略 fail closed、DB policy 覆盖 YAML import source。
 - `tests/test_operator_query.py`：OperatorQueryService 只读 dashboard/detail DTO、overdue 派生、effective policy、Policy Import Diff 和 audit history。

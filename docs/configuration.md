@@ -129,6 +129,8 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 
 ## 运行时存储安全
 
+当前仅支持 `store/schema.sql` 中的 SQLite schema v9；空库会初始化为当前 schema，其他版本或未标记的已有数据库会被拒绝，不会自动迁移或删除。预演的生产策略快照和评估读取也只接受当前 schema。
+
 每个 SQLite 连接都会启用 `PRAGMA foreign_keys = ON` 和 `PRAGMA busy_timeout = 5000`，避免 daemon、status、replay 或本地审批命令短暂并发时立即报 `database is locked`。
 
 P8 暂不启用 `PRAGMA journal_mode=WAL`。当前部署形态以本地单文件 SQLite、手工复制/回放和简单清理为主；WAL 会额外生成 `-wal`/`-shm` 文件，容易让 operator 复制数据库或清理 `data/` 时漏文件。现阶段先用 busy timeout 改善短暂写锁等待，后续如果需要更高并发再单独评估 WAL。

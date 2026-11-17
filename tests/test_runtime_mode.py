@@ -92,6 +92,25 @@ def test_dry_run_can_import_yaml_without_creating_production_database(
     assert policy is not None and policy["auto_reply"] is True
 
 
+def test_dry_run_rejects_incompatible_production_policy_without_modifying_it(
+    tmp_path: Path,
+) -> None:
+    path = _config(tmp_path)
+    production = ConfigService().load(path)
+    prod_store = SQLiteStore(tmp_path / "data/agent.sqlite3")
+    prod_store.import_product_policy_from_config(production.config)
+    with prod_store.connect() as conn:
+        conn.execute("PRAGMA user_version = 8")
+    before = prod_store.path.read_bytes()
+
+    with pytest.raises(ConfigError, match="current schema baseline"):
+        _load_runtime(str(path), mode="dry-run")
+
+    assert prod_store.path.read_bytes() == before
+    dry_store = SQLiteStore(tmp_path / "data/agent.sqlite3.dry-run")
+    assert dry_store.get_product_policy() is None
+
+
 def test_dry_run_rejects_overlapping_resource_roots(tmp_path: Path) -> None:
     path = _config(tmp_path)
     path.write_text(

@@ -11,6 +11,7 @@ from ..config import LoadedConfig
 from ..ingestion import MessageNormalizer, normalize_message_sent_at
 from ..paths import resolve_relative_path
 from ..revision import message_semantic_hash
+from ..store.schema import IncompatibleSchemaError, require_current_schema
 from ..time_utils import format_instant, parse_instant_or_none, utc_now
 from ..types import LarkCliResult, MessagePage, NormalizedMessage
 from .access import configured_group_ids, require_configured_group
@@ -255,6 +256,7 @@ class CaptureService:
                 f"{database.as_uri()}?mode=ro", uri=True
             ) as connection:
                 connection.row_factory = sqlite3.Row
+                require_current_schema(connection)
                 rows = connection.execute(
                     # Placeholders are generated from message IDs; values remain bound.
                     f"""
@@ -272,7 +274,7 @@ class CaptureService:
                     """,  # noqa: S608
                     message_ids,
                 ).fetchall()
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, IncompatibleSchemaError) as exc:
             raise EvalError(
                 f"failed to record capture message provenance: {exc}"
             ) from exc
@@ -411,6 +413,7 @@ class CaptureService:
         try:
             connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
             connection.row_factory = sqlite3.Row
+            require_current_schema(connection)
             task_rows = connection.execute(
                 # The condition fragments contain only fixed SQL and generated
                 # placeholders; user values remain parameterized below.
@@ -440,7 +443,7 @@ class CaptureService:
                 """,
                 (message_id_from_raw(seed),),
             ).fetchone()
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, IncompatibleSchemaError) as exc:
             if connection is not None:
                 connection.close()
             raise EvalError(f"failed to read capture task fixtures: {exc}") from exc

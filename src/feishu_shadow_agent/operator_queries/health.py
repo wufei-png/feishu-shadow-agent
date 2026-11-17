@@ -9,6 +9,7 @@ from typing import Any, cast
 from urllib.parse import quote
 
 from ..policy import ProductPolicyInvalidError, ProductPolicyMissingError
+from ..store.schema import is_current_schema, is_uninitialized_schema
 from ..store.sqlite_store import (
     LATEST_NON_OK_HEALTH_CHECKS_SQL,
     RUN_HEARTBEAT_STALE_AFTER_SECONDS,
@@ -327,6 +328,13 @@ class HealthQuery:
         try:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA query_only = ON")
+            if not is_uninitialized_schema(conn) and not is_current_schema(conn):
+                conn.close()
+                return {
+                    "status": "schema_incompatible",
+                    "available": False,
+                    "schema_initialized": False,
+                }
             schema_initialized = has_core_schema(conn)
         except sqlite3.DatabaseError:
             conn.close()

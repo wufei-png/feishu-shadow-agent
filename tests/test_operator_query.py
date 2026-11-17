@@ -1184,6 +1184,21 @@ def test_health_issues_reports_store_availability_without_migrating(
     assert schema_incompatible["issues"][0]["id"] == "store-schema_incompatible"
 
 
+def test_health_issues_rejects_an_unsupported_marked_database_without_writes(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.initialize()
+    with store.connect() as conn:
+        conn.execute("PRAGMA user_version = 8")
+    before = store.path.read_bytes()
+
+    response = OperatorQueryService(store).health_issues()
+
+    assert response["runtime"]["store"]["status"] == "schema_incompatible"
+    assert store.path.read_bytes() == before
+
+
 def test_health_issues_summary_count_is_not_truncated_by_list_limit(
     tmp_path: Path,
 ) -> None:

@@ -46,11 +46,11 @@ from ..types import (
     TaskStatus,
     new_run_id,
 )
-from .migrate import migrate_schema
+from .schema import SQLITE_APPLICATION_ID as SQLITE_APPLICATION_ID
+from .schema import SQLITE_SCHEMA_VERSION as SQLITE_SCHEMA_VERSION
+from .schema import is_uninitialized_schema, require_current_schema
 
 SQLITE_BUSY_TIMEOUT_MS = 5000
-SQLITE_APPLICATION_ID = 1179861319
-SQLITE_SCHEMA_VERSION = 9
 RUN_HEARTBEAT_STALE_AFTER_SECONDS = 300
 PRODUCT_POLICY_KEY = "reply_policy"
 LATEST_NON_OK_HEALTH_CHECKS_SQL = """
@@ -122,36 +122,10 @@ class SQLiteStore:
                 return
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.connect() as conn:
-                has_schema = bool(
-                    conn.execute(
-                        """
-                        SELECT 1
-                        FROM sqlite_master
-                        WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-                        LIMIT 1
-                        """
-                    ).fetchone()
-                )
-                if not has_schema:
-                    schema = Path(__file__).with_name("schema.sql")
-                    conn.executescript(schema.read_text(encoding="utf-8"))
-                else:
-                    application_id = conn.execute("PRAGMA application_id").fetchone()[0]
-                    schema_version = conn.execute("PRAGMA user_version").fetchone()[0]
-                    if application_id != SQLITE_APPLICATION_ID:
-                        raise RuntimeError(
-                            "SQLite database is not the current schema baseline; "
-                            "configure an empty database"
-                        )
-                    if schema_version != SQLITE_SCHEMA_VERSION:
-                        migrate_schema(
-                            conn,
-                            current_version=int(schema_version),
-                            target_version=SQLITE_SCHEMA_VERSION,
-                        )
-                    else:
-                        schema = Path(__file__).with_name("schema.sql")
-                        conn.executescript(schema.read_text(encoding="utf-8"))
+                if not is_uninitialized_schema(conn):
+                    require_current_schema(conn)
+                schema = Path(__file__).with_name("schema.sql")
+                conn.executescript(schema.read_text(encoding="utf-8"))
             self._initialized = True
 
     def health_probe(self) -> None:

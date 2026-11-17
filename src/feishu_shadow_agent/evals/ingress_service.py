@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from ..agent_backend import AgentBackend
 from ..config import LoadedConfig
 from ..paths import resolve_relative_path
+from ..store.schema import IncompatibleSchemaError, require_current_schema
 from ..time_utils import format_instant, parse_instant, utc_now, utc_now_iso
 from ..types import LarkCliResult, MessagePage
 from .access import require_configured_group, validate_model_messages
@@ -460,6 +461,7 @@ def _active_task_fixtures(
     try:
         connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
+        require_current_schema(connection)
         rows = connection.execute(
             """
             SELECT t.id, t.chat_id, t.thread_id, wk.key
@@ -474,7 +476,7 @@ def _active_task_fixtures(
             """,
             (now, chat_id),
         ).fetchall()
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, IncompatibleSchemaError) as exc:
         if connection is not None:
             connection.close()
         raise EvalError(f"failed to read active-watch fixtures: {exc}") from exc
