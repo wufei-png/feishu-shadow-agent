@@ -274,9 +274,7 @@ def test_sdk_rejects_unhealthy_click_before_dedup_and_returns_toast(
 ) -> None:
     pytest.importorskip("lark_channel")
     from lark_channel.channel.safety.pipeline import SafetyPipeline
-    from lark_channel.event.callback.model.p2_card_action_trigger import (
-        P2CardActionTrigger,
-    )
+    from lark_channel.core.json import JSON as SDKJSON
 
     async def run() -> None:
         store, approval_id = _store_with_approval(tmp_path)
@@ -306,10 +304,14 @@ def test_sdk_rejects_unhealthy_click_before_dedup_and_returns_toast(
             outcomes.append(processor.handle(event).status)
             handled.set()
 
-        def event(event_id: str) -> Any:
-            return P2CardActionTrigger(
+        def event(event_id: str) -> bytes:
+            return json.dumps(
                 {
-                    "header": {"event_id": event_id},
+                    "schema": "2.0",
+                    "header": {
+                        "event_id": event_id,
+                        "event_type": "card.action.trigger",
+                    },
                     "event": {
                         "operator": {"open_id": "ou_owner"},
                         "context": {
@@ -327,7 +329,7 @@ def test_sdk_rejects_unhealthy_click_before_dedup_and_returns_toast(
                         },
                     },
                 }
-            )
+            ).encode()
 
         sdk._safety = SafetyPipeline(
             loop=asyncio.get_running_loop(), on_message=ignore_message
@@ -335,10 +337,14 @@ def test_sdk_rejects_unhealthy_click_before_dedup_and_returns_toast(
         sdk.schedule = schedule
         channel.on("cardAction", handle)
         channel.set_card_action_guard(lambda: healthy, blocked_message="retry later")
+        dispatcher = sdk._build_dispatcher()
         try:
-            rejected = sdk._on_p2_card_action_trigger(event("evt_blocked"))
+            rejected = dispatcher._do_without_validation(event("evt_blocked"))
             assert rejected.toast.type == "error"
             assert rejected.toast.content == "retry later"
+            assert json.loads(SDKJSON.marshal(rejected))["toast"]["content"] == (
+                "retry later"
+            )
             assert scheduled == []
             with store.connect() as conn:
                 assert (
@@ -350,11 +356,11 @@ def test_sdk_rejects_unhealthy_click_before_dedup_and_returns_toast(
                 )
 
             healthy = True
-            sdk._on_p2_card_action_trigger(event("evt_retry"))
+            dispatcher._do_without_validation(event("evt_retry"))
             await asyncio.wait_for(handled.wait(), timeout=2)
             assert outcomes == ["applied"]
             await asyncio.sleep(0)
-            sdk._on_p2_card_action_trigger(event("evt_retry"))
+            dispatcher._do_without_validation(event("evt_retry"))
             await asyncio.gather(*scheduled)
             await asyncio.sleep(0)
             assert outcomes == ["applied"]
