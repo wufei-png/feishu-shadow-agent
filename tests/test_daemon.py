@@ -940,6 +940,73 @@ def test_long_ingestion_refreshes_due_health_before_dispatch(
     assert fake.owner_calls == []
 
 
+def test_long_dispatch_defers_remaining_actions_until_health_refresh(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    now = 0.0
+    monkeypatch.setattr("feishu_shadow_agent.daemon.time.monotonic", lambda: now)
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    _seed_policy(store, config)
+    first = store.create_owner_notification_action(
+        task_id=None, payload={"type": "owner_notification", "dedupe_key": "first"}
+    )
+    second = store.create_owner_notification_action(
+        task_id=None, payload={"type": "owner_notification", "dedupe_key": "second"}
+    )
+
+    class SlowFeishu(FakeFeishu):
+        def owner_message(self, **kwargs: Any) -> LarkCliResult:
+            nonlocal now
+            result = super().owner_message(**kwargs)
+            if not kwargs.get("dry_run"):
+                now = config.health.interval_seconds + 1
+                self.user_open_id = "ou_other"
+            return result
+
+    fake = SlowFeishu()
+    loaded = LoadedConfig(
+        config=config, path=tmp_path / "config.yaml", base_dir=tmp_path, raw={}
+    )
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=store,
+        feishu_client=fake,  # type: ignore[arg-type]
+        agent_backend_checker=lambda _: HealthCheckResult(
+            "backend", "critical", "ok", "ok"
+        ),
+        disk_usage=lambda _: (1_000 * 1024**3, 500 * 1024**3, 500 * 1024**3),
+    )
+    daemon = Daemon(
+        store=store,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        health_suite=suite,
+        tick_interval_seconds=1,
+        dry_run=False,
+        app_config=config,
+        feishu_client=fake,  # type: ignore[arg-type]
+    )
+
+    daemon.run_one_tick(run_id="run_1")
+
+    assert store.get_action(first).status == "sent"  # type: ignore[union-attr]
+    assert store.get_action(second).status == "pending"  # type: ignore[union-attr]
+    assert daemon.runtime_health_allows_card_actions() is False
+    assert len([call for call in fake.owner_calls if not call["dry_run"]]) == 1
+    with store.connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM health_checks WHERE check_name = 'owner_config'"
+            ).fetchone()[0]
+            == 1
+        )
+
+    result = daemon.run_one_tick(run_id="run_1")
+    assert result[-1].name == "runtime_health"
+    assert store.get_action(second).status == "pending"  # type: ignore[union-attr]
+    assert len([call for call in fake.owner_calls if not call["dry_run"]]) == 1
+
+
 def test_product_policy_missing_blocks_tick_even_when_runtime_health_is_cached(
     tmp_path: Path,
     monkeypatch: Any,

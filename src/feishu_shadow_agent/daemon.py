@@ -285,7 +285,10 @@ class Daemon:
                 blocked_send_reply_reason="approval_inbox_failed"
                 if approval_failed and not self.dry_run
                 else None,
+                can_start_action=self._dispatch_health_cache_is_current,
             )
+            # The final action can itself consume the remaining cache lifetime.
+            self._dispatch_health_cache_is_current()
             self.logger.emit(
                 "info",
                 "daemon_stage_completed",
@@ -495,6 +498,16 @@ class Daemon:
         return self._last_runtime_health_at is None or (
             now - self._last_runtime_health_at >= self._runtime_health_check_interval()
         )
+
+    def _dispatch_health_cache_is_current(self) -> bool:
+        # This only reads the local clock; a due refresh happens on the next tick.
+        if self._runtime_health_check_interval() <= 0:
+            return self._runtime_health_ok
+        if not self._runtime_health_refresh_due(now=time.monotonic()):
+            return self._runtime_health_ok
+        self._runtime_health_ok = False
+        self.wake()
+        return False
 
     def _runtime_health_check_interval(self) -> int:
         if self.runtime_health_interval_seconds is not None:
