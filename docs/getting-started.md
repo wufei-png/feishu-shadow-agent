@@ -112,7 +112,7 @@ uv run --locked python -m feishu_shadow_agent policy import-config --config conf
 uv run --locked python -m feishu_shadow_agent doctor --config config.yaml --mode dry-run
 ```
 
-所有 critical 项应为 `OK`；失败时先按 `doctor` 的缺失 scope、CLI 路径或策略初始化提示修复。`owner.open_id` 必须与授权用户的 `openId` 一致，身份无法核实或不一致时 daemon 不会启动，doctor 也不会发送真实测试通知。运行中的身份按现有健康检查周期复核（默认 300 秒）；身份变更可能直到下一次检查才被发现，已发出的请求无法撤回。健康检查失败时交互卡片暂不接受操作，修复并恢复后可重新点击。若生产库已经初始化，首次打开预演环境会先复制生产的当前策略；它不会复制消息、任务或待发送动作。之后两套策略独立，需要时显式运行：
+所有 critical 项应为 `OK`；失败时先按 `doctor` 的缺失 scope、CLI 路径或策略初始化提示修复。`owner.open_id` 必须与授权用户的 `openId` 一致，身份无法核实或不一致时 daemon 不会启动，doctor 也不会发送真实测试通知。运行中的身份按现有健康检查周期复核（默认 300 秒）；身份变更可能直到下一次检查才被发现，已发出的请求无法撤回。健康检查失败或缓存到期时交互卡片暂不接受新操作，修复并恢复后可重新点击；健康有效时已经接收并排队的操作属于进行中，即使之后健康状态变差也可能完成审批和卡片更新。若生产库已经初始化，首次打开预演环境会先复制生产的当前策略；它不会复制消息、任务或待发送动作。之后两套策略独立，需要时显式运行：
 
 ```bash
 uv run --locked python -m feishu_shadow_agent policy sync-production --config config.yaml --mode dry-run

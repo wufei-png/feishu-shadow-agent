@@ -79,13 +79,15 @@ class Daemon:
             self._lifecycle_condition.notify_all()
 
     def run_startup_health(self) -> tuple[bool, list[HealthCheckResult]]:
+        started_at = time.monotonic()
         results = self.health_suite.run(send_test=False)
         self._runtime_health_ok = not has_critical_failure(results)
+        self._last_runtime_health_at = started_at if self._runtime_health_ok else None
         return self._runtime_health_ok, results
 
     def runtime_health_allows_card_actions(self) -> bool:
-        """Expose the latest health verdict without triggering an extra probe."""
-        return self._runtime_health_ok
+        """Reject expired health state without triggering an extra probe."""
+        return self._runtime_health_ok and self._dispatch_health_cache_is_current()
 
     def run_one_noop_tick(self, *, run_id: str) -> None:
         self.logger.emit(
@@ -506,6 +508,7 @@ class Daemon:
         if not self._runtime_health_refresh_due(now=time.monotonic()):
             return self._runtime_health_ok
         self._runtime_health_ok = False
+        self._last_runtime_health_at = None
         self.wake()
         return False
 

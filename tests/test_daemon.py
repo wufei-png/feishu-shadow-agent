@@ -821,6 +821,36 @@ def test_runtime_health_ok_uses_interval_seconds_before_next_refresh(
     assert suite.calls == 2
 
 
+def test_card_health_cache_expires_without_a_network_check(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    now = 0.0
+    monkeypatch.setattr("feishu_shadow_agent.daemon.time.monotonic", lambda: now)
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    config.health.retry_interval_seconds = 600
+    suite = SequenceHealthSuite(
+        [[HealthCheckResult("owner_config", "critical", "ok", "ok")]]
+    )
+    daemon = Daemon(
+        store=SQLiteStore(tmp_path / "agent.sqlite3"),
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        health_suite=suite,  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=False,
+        app_config=config,
+    )
+
+    assert daemon.runtime_health_allows_card_actions() is False
+    assert daemon.run_startup_health()[0] is True
+    now = config.health.interval_seconds - 1
+    assert daemon.runtime_health_allows_card_actions() is True
+    now = config.health.interval_seconds
+    assert daemon.runtime_health_allows_card_actions() is False
+    assert suite.calls == 1
+    assert daemon._runtime_health_ok_for_tick(run_id="run_1") is True
+    assert suite.calls == 2
+
+
 def test_runtime_owner_mismatch_blocks_tick_at_next_health_refresh(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -947,6 +977,7 @@ def test_long_dispatch_defers_remaining_actions_until_health_refresh(
     monkeypatch.setattr("feishu_shadow_agent.daemon.time.monotonic", lambda: now)
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    config.health.retry_interval_seconds = 600
     _seed_policy(store, config)
     first = store.create_owner_notification_action(
         task_id=None, payload={"type": "owner_notification", "dedupe_key": "first"}
