@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from .agent_backend import OwnerStyleBackend
 from .agent_invocation import AgentInvoker, agent_result_error, truncate_error
 from .config import AppConfig
-from .ingestion import MessageNormalizer
+from .message_normalization import MessageNormalizer
 from .p2p_scope import P2PScopeClient, list_non_bot_p2p_chats
 from .paths import resolve_agent_working_dir, resolve_relative_path
 from .prompt import OwnerStyleRefreshOutput, build_owner_style_refresh_prompt

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from ..config import LoadedConfig
-from ..ingestion import MessageNormalizer, normalize_message_sent_at
+from ..message_normalization import MessageNormalizer, normalize_message_sent_at
 from ..paths import resolve_relative_path
 from ..revision import message_semantic_hash
 from ..store.schema import IncompatibleSchemaError, require_current_schema

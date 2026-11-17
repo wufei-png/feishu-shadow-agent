@@ -5,7 +5,8 @@ from typing import Any, cast
 
 from ..agent_backend import AgentBackend
 from ..config import LoadedConfig
-from ..ingestion import IngestionService, MessageNormalizer
+from ..ingestion import IngestionService
+from ..message_normalization import MessageNormalizer
 from ..paths import resolve_agent_working_dir
 from ..processing import FORBIDDEN_MENTION_RE, TaskProcessingService
 from ..routing import TRIGGER_SOURCES, CandidateCollector

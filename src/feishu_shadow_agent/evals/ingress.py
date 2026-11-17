@@ -7,8 +7,8 @@ from typing import Any, cast
 from pydantic import ValidationError
 
 from ..agent_backend import AgentBackend
-from ..ingestion import MessageNormalizer, normalize_message_sent_at
 from ..message_eligibility import MessageEligibilityPolicy
+from ..message_normalization import MessageNormalizer, normalize_message_sent_at
 from ..prompt_instructions import prompt_text
 from ..types import NormalizedMessage
 from .artifacts import EvalError, message_id_from_raw, text_excerpt

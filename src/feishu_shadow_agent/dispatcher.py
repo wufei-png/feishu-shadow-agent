@@ -11,13 +11,13 @@ from typing import Any, cast
 from .approval_cards import build_approval_card
 from .config import AppConfig
 from .feishu.client import FeishuClient
-from .ingestion import MessageNormalizer
 from .jsonl import JSONLLogger
 from .membership import (
     classify_bot_membership_absence,
     effective_membership_status,
     record_bot_membership_absence,
 )
+from .message_normalization import MessageNormalizer
 from .policy import PolicyResolver
 from .reply_destination import candidate_from_message, message_location
 from .store.sqlite_store import SQLiteStore
