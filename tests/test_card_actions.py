@@ -342,9 +342,9 @@ def test_sdk_rejects_unhealthy_click_before_dedup_and_returns_toast(
             rejected = dispatcher._do_without_validation(event("evt_blocked"))
             assert rejected.toast.type == "error"
             assert rejected.toast.content == "retry later"
-            assert json.loads(SDKJSON.marshal(rejected))["toast"]["content"] == (
-                "retry later"
-            )
+            serialized = SDKJSON.marshal(rejected)
+            assert serialized is not None
+            assert json.loads(serialized)["toast"]["content"] == "retry later"
             assert scheduled == []
             with store.connect() as conn:
                 assert (
