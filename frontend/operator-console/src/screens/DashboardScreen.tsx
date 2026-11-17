@@ -189,6 +189,9 @@ function dashboardNextStep(snapshot: DashboardSnapshot | undefined, error: unkno
   if (error || !snapshot) {
     return { title: "dashboard.unknownTitle", detail: "dashboard.unknownDetail", state: "attention", route: "health", action: "dashboard.nextHealth" };
   }
+  if (snapshot.store_status?.available === false) {
+    return { title: "dashboard.storeUnavailableTitle", detail: "dashboard.storeUnavailableDetail", state: "attention", route: "health", action: "dashboard.nextHealth" };
+  }
   if (snapshot.policy_status?.initialized === false) {
     return { title: "dashboard.setupPolicyTitle", detail: "dashboard.setupPolicyDetail", state: "attention", route: "policy", action: "dashboard.setupOpenPolicy" };
   }

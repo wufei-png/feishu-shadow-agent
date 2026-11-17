@@ -120,11 +120,11 @@ class OperatorQueryService:
             limit=limit,
         )
         failed_commands = self._failed_approval_commands(limit=limit)
-        health_summary = self.health_issues(
+        health = self.health_issues(
             limit=limit,
             stale_after_seconds=stale_after_seconds,
             daemon_stale_after_seconds=daemon_stale_after_seconds,
-        )["summary"]
+        )
         attention_summary, attention_tasks = self._attention_work(
             now=now,
             stale_after_seconds=stale_after_seconds,
@@ -148,7 +148,8 @@ class OperatorQueryService:
                 limit=limit,
             ),
             "failed_or_needs_review_actions": failed_or_needs_review,
-            "health_issue_summary": health_summary,
+            "health_issue_summary": health["summary"],
+            "store_status": health["runtime"]["store"],
             "attention_summary": attention_summary,
             "attention_tasks": attention_tasks,
             "ingestion_status": self.ingestion_status(now=now),

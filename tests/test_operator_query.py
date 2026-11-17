@@ -327,8 +327,24 @@ def test_dashboard_snapshot_includes_policy_status_and_omits_policy_audits(
     assert snapshot["policy_status"]["chat_policy_count"] == 1
     assert snapshot["policy_status"]["policy_import_diff"]["status"] == "matches"
     assert snapshot["has_messages"] is False
+    assert snapshot["store_status"]["available"] is True
     assert "policy_audits" not in snapshot
     json.dumps(snapshot)
+
+
+def test_dashboard_distinguishes_missing_store_from_uninitialized_policy(
+    tmp_path: Path,
+) -> None:
+    query = OperatorQueryService(SQLiteStore(tmp_path / "missing.sqlite3"))
+
+    snapshot = query.dashboard_snapshot()
+
+    assert snapshot["policy_status"]["initialized"] is False
+    assert snapshot["store_status"]["status"] == "missing"
+    assert snapshot["store_status"]["available"] is False
+    assert snapshot["health_issue_summary"]["highest_severity"] == "critical"
+    assert snapshot["has_messages"] is None
+    assert not query.store.path.exists()
 
 
 def test_dashboard_reports_latest_failed_start_even_after_a_doctor_run(

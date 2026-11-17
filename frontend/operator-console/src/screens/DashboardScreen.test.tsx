@@ -66,6 +66,23 @@ describe("DashboardScreen", () => {
     expect(navigate).toHaveBeenCalledWith("policy");
   });
 
+  it("directs an unavailable store to health before suggesting policy import", async () => {
+    vi.mocked(api.getDashboard).mockResolvedValue(emptySnapshot({
+      policy_status: { initialized: false, policy_import_diff: { status: "unknown" } },
+      store_status: { status: "schema_incompatible", available: false },
+      health_issue_summary: { highest_severity: "critical", open_issue_count: 1 },
+      has_messages: null
+    }));
+    const navigate = vi.fn();
+    const user = userEvent.setup();
+    renderDashboard(navigate);
+
+    expect(await screen.findByRole("heading", { name: "无法访问运行数据库" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "先初始化产品策略" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "检查健康状态" }));
+    expect(navigate).toHaveBeenCalledWith("health");
+  });
+
   it("shows dry-run startup guidance in the correct mode", async () => {
     vi.mocked(api.getDashboard).mockResolvedValue(emptySnapshot());
     const navigate = vi.fn();
@@ -119,6 +136,7 @@ describe("DashboardScreen", () => {
     renderDashboard(vi.fn());
 
     expect(await screen.findByRole("heading", { name: "等待第一条消息" })).toBeTruthy();
+    expect(screen.getByText(/另一位成员在新消息中 @ 你的 owner 账号/)).toBeTruthy();
     expect(screen.queryByText("当前没有待处理事项")).toBeNull();
   });
 

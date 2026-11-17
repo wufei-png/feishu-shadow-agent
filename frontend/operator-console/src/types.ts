@@ -25,6 +25,7 @@ export type DashboardSnapshot = {
     [key: string]: unknown;
   };
   policy_status?: PolicyStatus;
+  store_status?: { status?: string; available?: boolean; schema_initialized?: boolean };
   health_issue_summary?: HealthIssueSummary;
   attention_summary?: AttentionSummary;
   attention_tasks?: AttentionTask[];
