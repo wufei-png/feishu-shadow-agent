@@ -953,6 +953,7 @@ def test_product_policy_missing_blocks_tick_even_when_runtime_health_is_cached(
     suite = SequenceHealthSuite(
         [
             [HealthCheckResult("lark_auth_verify", "critical", "ok", "ok")],
+            [HealthCheckResult("owner_config", "critical", "failed", "unverified")],
             [HealthCheckResult("lark_auth_verify", "critical", "ok", "ok")],
         ]
     )
@@ -967,6 +968,7 @@ def test_product_policy_missing_blocks_tick_even_when_runtime_health_is_cached(
         feishu_client=fake,  # type: ignore[arg-type]
     )
     first = daemon.run_one_tick(run_id="run_1")
+    assert daemon.runtime_health_allows_card_actions() is True
     fake.calls.clear()
     task_id = _insert_task(store)
     action_id = store.create_send_reply_action(
@@ -996,6 +998,7 @@ def test_product_policy_missing_blocks_tick_even_when_runtime_health_is_cached(
         "retention",
     ]
     assert [result.name for result in second] == ["runtime_health"]
+    assert daemon.runtime_health_allows_card_actions() is False
     assert suite.calls == 1
     assert fake.calls == []
     assert fake.reply_calls == []
@@ -1015,6 +1018,16 @@ def test_product_policy_missing_blocks_tick_even_when_runtime_health_is_cached(
     assert action["status"] == "pending"
     assert health["status"] == "failed"
     assert "policy import-config" in health["message"]
+
+    store.import_product_policy_from_config(config)
+    now = 2.0
+    assert daemon.run_one_tick(run_id="run_1")[-1].name == "runtime_health"
+    assert daemon.runtime_health_allows_card_actions() is False
+    assert suite.calls == 2
+    now += config.health.retry_interval_seconds
+    daemon.run_one_tick(run_id="run_1")
+    assert daemon.runtime_health_allows_card_actions() is True
+    assert suite.calls == 3
 
 
 def test_approval_inbox_failure_blocks_send_reply_but_allows_owner_notification(

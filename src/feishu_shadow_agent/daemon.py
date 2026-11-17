@@ -126,9 +126,13 @@ class Daemon:
                 heartbeat.record(result)
                 heartbeat.finish()
                 return results
-            if not self._runtime_product_policy_ok_for_tick(
-                run_id=run_id
-            ) or not self._runtime_health_ok_for_tick(run_id=run_id):
+            policy_ok = self._runtime_product_policy_ok_for_tick(run_id=run_id)
+            if not policy_ok:
+                # Invalidate the cached verdict so callbacks are blocked now
+                # and recovery requires a fresh critical health check.
+                self._runtime_health_ok = False
+                self._last_runtime_health_at = None
+            if not policy_ok or not self._runtime_health_ok_for_tick(run_id=run_id):
                 self.logger.emit(
                     "error",
                     "daemon_runtime_health_failed",
