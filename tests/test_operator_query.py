@@ -360,6 +360,37 @@ def test_dashboard_reports_latest_failed_start_even_after_a_doctor_run(
     assert any(issue["id"] == "daemon-startup-failed" for issue in issues["issues"])
 
 
+def test_live_daemon_remains_visible_when_later_start_fails(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.initialize()
+    with store.connect() as conn:
+        conn.execute(
+            "INSERT INTO runs(run_id, started_at, status, dry_run, last_heartbeat_at, last_tick_started_at) "
+            "VALUES ('run_live', '2026-06-22T09:00:00Z', 'running', 1, '2026-06-22T10:03:00Z', '2026-06-22T10:03:00Z')"
+        )
+        conn.execute(
+            "INSERT INTO runs(run_id, started_at, status, dry_run) "
+            "VALUES ('run_failed', '2026-06-22T10:02:00Z', 'health_failed', 1)"
+        )
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:03:01Z")
+
+    snapshot = query.dashboard_snapshot()
+    issues = query.health_issues()
+
+    assert snapshot["daemon_liveness"]["run_id"] == "run_live"
+    assert snapshot["daemon_liveness"]["status"] == "live"
+    assert issues["runtime"]["daemon_liveness"]["run_id"] == "run_live"
+    assert issues["runtime"]["last_daemon_start"]["run_id"] == "run_failed"
+    assert any(issue["id"] == "daemon-startup-failed" for issue in issues["issues"])
+
+    stale_query = OperatorQueryService(store, now=lambda: "2026-06-22T10:10:00Z")
+    assert stale_query.dashboard_snapshot()["daemon_liveness"]["run_id"] == "run_failed"
+    assert (
+        stale_query.dashboard_snapshot()["daemon_liveness"]["status"]
+        == "startup_failed"
+    )
+
+
 def test_dashboard_distinguishes_starting_daemon_and_observed_messages(
     tmp_path: Path,
 ) -> None:

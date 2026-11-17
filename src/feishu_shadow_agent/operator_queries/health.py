@@ -103,7 +103,9 @@ class HealthQuery:
                     # This selects a module-level constant column list.
                     f"SELECT {_RUN_RUNTIME_COLUMNS} FROM runs ORDER BY started_at DESC LIMIT 1"  # noqa: S608
                 ).fetchone()
-                daemon_run = _latest_daemon_run(conn)
+                daemon_run, latest_daemon_start = _daemon_runs(
+                    conn, now=now, stale_after_seconds=daemon_stale_after_seconds
+                )
                 failed_commands = conn.execute(
                     """
                     SELECT message_id, command, status, result_json, updated_at
@@ -164,6 +166,11 @@ class HealthQuery:
         try:
             last_run_dto = _run_runtime_summary(last_run) if last_run else None
             daemon_run_dto = _run_runtime_summary(daemon_run) if daemon_run else None
+            latest_daemon_start_dto = (
+                _run_runtime_summary(latest_daemon_start)
+                if latest_daemon_start
+                else None
+            )
             daemon_liveness = _daemon_liveness(
                 daemon_run_dto,
                 now=now,
@@ -185,6 +192,7 @@ class HealthQuery:
 
             runtime |= {
                 "daemon_liveness": daemon_liveness,
+                "last_daemon_start": latest_daemon_start_dto,
                 "last_run": last_run_dto,
                 "policy_status": policy_status,
             }
@@ -192,6 +200,20 @@ class HealthQuery:
             daemon_issue = _daemon_health_issue(daemon_liveness, detected_at=now)
             if daemon_issue is not None:
                 issues.append(daemon_issue)
+            if latest_daemon_start_dto is not None and latest_daemon_start_dto[
+                "run_id"
+            ] != daemon_liveness.get("run_id"):
+                latest_start_liveness = _daemon_liveness(
+                    latest_daemon_start_dto,
+                    now=now,
+                    stale_after_seconds=daemon_stale_after_seconds,
+                )
+                if latest_start_liveness["status"] == "startup_failed":
+                    latest_start_issue = _daemon_health_issue(
+                        latest_start_liveness, detected_at=now
+                    )
+                    if latest_start_issue is not None:
+                        issues.append(latest_start_issue)
             policy_issue = self.policy_health_issue(policy_status, detected_at=now)
             if policy_issue is not None:
                 issues.append(policy_issue)
@@ -679,8 +701,10 @@ def _store_read_uri(path: Path) -> str:
     return f"file:{quote(str(path.resolve()), safe='/')}?mode=ro"
 
 
-def _latest_daemon_run(conn: sqlite3.Connection) -> sqlite3.Row | None:
-    return conn.execute(
+def _daemon_runs(
+    conn: sqlite3.Connection, *, now: str, stale_after_seconds: int
+) -> tuple[sqlite3.Row | None, sqlite3.Row | None]:
+    latest = conn.execute(
         # Daemon run IDs use the run_ prefix, including failed starts before a tick.
         f"""
         SELECT {_RUN_RUNTIME_COLUMNS}
@@ -690,6 +714,20 @@ def _latest_daemon_run(conn: sqlite3.Connection) -> sqlite3.Row | None:
         LIMIT 1
         """  # noqa: S608
     ).fetchone()
+    # Match the liveness calculation, which truncates age to whole seconds.
+    cutoff = shift_instant(now, delta=-timedelta(seconds=stale_after_seconds + 1))
+    active = conn.execute(
+        f"""
+        SELECT {_RUN_RUNTIME_COLUMNS}
+        FROM runs
+        WHERE (run_id GLOB 'run_*' OR last_tick_started_at IS NOT NULL)
+          AND status = 'running' AND julianday(last_heartbeat_at) > julianday(?)
+        ORDER BY started_at DESC, rowid DESC
+        LIMIT 1
+        """,  # noqa: S608
+        (cutoff,),
+    ).fetchone()
+    return active if active is not None else latest, latest
 
 
 def _run_runtime_summary(row: sqlite3.Row) -> dict[str, Any]:
@@ -801,7 +839,7 @@ def _minus_seconds(value: str, seconds: int) -> str:
 
 # Public read-only helpers used by the operator DTO boundary.
 RUN_RUNTIME_COLUMNS = _RUN_RUNTIME_COLUMNS
-latest_daemon_run = _latest_daemon_run
+daemon_runs = _daemon_runs
 recent_errors = _recent_errors
 run_runtime_summary = _run_runtime_summary
 daemon_liveness = _daemon_liveness

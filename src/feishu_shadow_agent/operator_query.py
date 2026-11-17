@@ -30,7 +30,7 @@ from .operator_queries.health import (
     RUN_RUNTIME_COLUMNS,
     HealthQuery,
     daemon_liveness,
-    latest_daemon_run,
+    daemon_runs,
     recent_errors,
     run_runtime_summary,
     store_read_uri,
@@ -102,7 +102,9 @@ class OperatorQueryService:
                     # This selects a module-level constant column list.
                     f"SELECT {RUN_RUNTIME_COLUMNS} FROM runs ORDER BY started_at DESC LIMIT 1"  # noqa: S608
                 ).fetchone()
-                daemon_run = latest_daemon_run(conn)
+                daemon_run, _ = daemon_runs(
+                    conn, now=now, stale_after_seconds=daemon_stale_after_seconds
+                )
                 has_messages = bool(
                     conn.execute("SELECT EXISTS(SELECT 1 FROM messages)").fetchone()[0]
                 )
