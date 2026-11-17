@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Hashable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -17,6 +18,8 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from yaml.constructor import ConstructorError
+from yaml.nodes import MappingNode
 
 CONFIG_ENV_VAR = "FEISHU_SHADOW_AGENT_CONFIG"
 SKILL_NAME_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
@@ -25,6 +28,44 @@ ENV_VAR_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 class ConfigError(ValueError):
     pass
+
+
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    """Reject repeated explicit keys while preserving YAML merge overrides."""
+
+    def __init__(self, stream: str) -> None:
+        super().__init__(stream)
+        self._checked_mappings: set[int] = set()
+
+    def flatten_mapping(self, node: MappingNode) -> None:
+        if id(node) not in self._checked_mappings:
+            self._checked_mappings.add(id(node))
+            seen: set[Hashable] = set()
+            for key_node, _ in node.value:
+                key: object = (
+                    "<<"
+                    if key_node.tag == "tag:yaml.org,2002:merge"
+                    else cast(
+                        object,
+                        self.construct_object(key_node, deep=True),  # pyright: ignore[reportUnknownMemberType]
+                    )
+                )
+                if not isinstance(key, Hashable):
+                    raise ConstructorError(
+                        "while constructing a mapping",
+                        node.start_mark,
+                        "found an unhashable key",
+                        key_node.start_mark,
+                    )
+                if key in seen:
+                    raise ConstructorError(
+                        "while constructing a mapping",
+                        node.start_mark,
+                        f"duplicate key {key!r}",
+                        key_node.start_mark,
+                    )
+                seen.add(key)
+        super().flatten_mapping(node)
 
 
 def _non_empty_strings(value: list[str], *, field: str) -> list[str]:
@@ -729,9 +770,19 @@ class ConfigService:
         if not path.exists():
             raise ConfigError(f"config file not found: {path}")
         try:
-            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except OSError as exc:
+            raw = yaml.load(
+                path.read_text(encoding="utf-8"),
+                Loader=_UniqueKeySafeLoader,  # noqa: S506 - SafeLoader subclass
+            )
+        except (OSError, UnicodeError) as exc:
             raise ConfigError(f"failed to read config file: {exc}") from exc
+        except yaml.YAMLError as exc:
+            problem = getattr(exc, "problem", None) or "invalid YAML"
+            mark = getattr(exc, "problem_mark", None)
+            location = (
+                f"{path}:{mark.line + 1}:{mark.column + 1}" if mark else str(path)
+            )
+            raise ConfigError(f"invalid YAML at {location}: {problem}") from exc
         if raw is None:
             raw = {}
         if not isinstance(raw, dict):

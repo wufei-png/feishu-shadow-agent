@@ -303,6 +303,20 @@ def test_config_validate_returns_two_for_invalid_config(tmp_path: Path, capsys) 
     assert "owner" in captured.err
 
 
+def test_config_validate_reports_invalid_yaml_without_traceback(
+    tmp_path: Path, capsys
+) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text("owner:\n  open_id: [unterminated\n", encoding="utf-8")
+
+    assert main(["config", "validate", "--config", str(config)]) == 2
+
+    captured = capsys.readouterr()
+    assert "config error: invalid YAML at" in captured.err
+    assert str(config) in captured.err
+    assert "Traceback" not in captured.err
+
+
 def test_status_includes_failed_approval_commands(tmp_path: Path, capsys) -> None:
     config = _write_config(tmp_path)
     assert main(["reject", "--config", str(config), "a_missing"]) == 2

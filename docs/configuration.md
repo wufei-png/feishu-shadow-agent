@@ -47,7 +47,7 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `lifecycle` | object | 见下表 | 全局任务生命周期和审批过期设置。 |
 | `debug` | object | 见下表 | 调试用持久化开关。 |
 
-未知字段会被拒绝。兼容旧配置时，顶层 `hermes` 会在读入时迁移为 `agent_backend.hermes`，`debug.save_full_hermes_io` 会作为 `debug.save_full_agent_io` 的旧别名读入；新配置应使用表中的新字段。真实密钥不要写入 `config.yaml`，只允许写环境变量名，例如 `agent_backend.hermes.api_key_env`。
+未知字段和同一 YAML 映射内的重复显式键会被拒绝，错误提示包含文件位置；通过 YAML 合并锚点显式覆盖默认值仍然有效。兼容旧配置时，顶层 `hermes` 会在读入时迁移为 `agent_backend.hermes`，`debug.save_full_hermes_io` 会作为 `debug.save_full_agent_io` 的旧别名读入；新配置应使用表中的新字段。真实密钥不要写入 `config.yaml`，只允许写环境变量名，例如 `agent_backend.hermes.api_key_env`。
 
 ## 字段明细
 

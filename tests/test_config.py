@@ -57,6 +57,66 @@ def test_load_minimal_config() -> None:
     assert loaded.config.reply_postprocess.humanizer_zh.enabled is False
 
 
+@pytest.mark.parametrize(
+    ("content", "line", "column", "key"),
+    [
+        ("owner:\n  open_id: ou_owner\nowner:\n  open_id: ou_other\n", 3, 1, "owner"),
+        (
+            "owner:\n  open_id: ou_owner\nreply_policy:\n"
+            "  p2p_auto_reply: false\n  p2p_auto_reply: true\n",
+            5,
+            3,
+            "p2p_auto_reply",
+        ),
+        (
+            "owner:\n  open_id: ou_owner\nchats:\n  oc_one:\n"
+            "    <<: &defaults {auto_reply: false, auto_reply: true}\n",
+            5,
+            39,
+            "auto_reply",
+        ),
+    ],
+)
+def test_duplicate_yaml_keys_are_rejected_with_location(
+    tmp_path: Path, content: str, line: int, column: int, key: str
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(content, encoding="utf-8")
+
+    with pytest.raises(ConfigError) as error:
+        ConfigService().load(config_path)
+
+    assert f"{config_path}:{line}:{column}" in str(error.value)
+    assert f"duplicate key '{key}'" in str(error.value)
+
+
+def test_yaml_merge_allows_explicit_override(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "owner:\n  open_id: ou_owner\nchats:\n"
+        "  oc_one: &defaults\n    auto_reply: false\n    bot_joined: true\n"
+        "  oc_two:\n    <<: *defaults\n    auto_reply: true\n",
+        encoding="utf-8",
+    )
+
+    loaded = ConfigService().load(config_path)
+
+    assert loaded.config.chats["oc_one"].auto_reply is False
+    assert loaded.config.chats["oc_two"].auto_reply is True
+    assert loaded.config.chats["oc_two"].bot_joined is True
+
+
+def test_invalid_yaml_reports_location_without_source_text(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("owner:\n  open_id: [secret-value\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError) as error:
+        ConfigService().load(config_path)
+
+    assert f"invalid YAML at {config_path}:" in str(error.value)
+    assert "secret-value" not in str(error.value)
+
+
 def test_logging_jsonl_and_text_paths_must_resolve_to_different_files(
     tmp_path: Path,
 ) -> None:
