@@ -4,6 +4,8 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
+
 from feishu_shadow_agent.config import ConfigService, LoadedConfig
 from feishu_shadow_agent.health import (
     REQUIRED_USER_SCOPES,
@@ -14,6 +16,8 @@ from feishu_shadow_agent.health import (
     HermesHealthChecker,
     SelectedBackendReadinessChecker,
 )
+from feishu_shadow_agent.jsonl import JSONLLogger
+from feishu_shadow_agent.maintenance_commands import MaintenanceCommandService
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import HealthCheckResult, LarkCliResult
 
@@ -21,9 +25,16 @@ FIXTURE = Path(__file__).parent / "fixtures" / "minimal.config.yaml"
 
 
 class FakeFeishuClient:
-    def __init__(self, *, scopes: set[str] | None = None, bot_available: bool = True):
+    def __init__(
+        self,
+        *,
+        scopes: set[str] | None = None,
+        bot_available: bool = True,
+        user_open_id: object = "ou_owner",
+    ):
         self.scopes = scopes if scopes is not None else set(REQUIRED_USER_SCOPES)
         self.bot_available = bot_available
+        self.user_open_id = user_open_id
         self.owner_message_dry_runs: list[bool] = []
 
     def version(self) -> LarkCliResult:
@@ -37,7 +48,10 @@ class FakeFeishuClient:
             0,
             json_data={
                 "identities": {
-                    "user": {"scope": " ".join(sorted(self.scopes))},
+                    "user": {
+                        "openId": self.user_open_id,
+                        "scope": " ".join(sorted(self.scopes)),
+                    },
                     "bot": {
                         "available": self.bot_available,
                         "status": "ready" if self.bot_available else "missing",
@@ -210,6 +224,72 @@ def test_doctor_all_green_and_default_owner_notification_is_dry_run(
 
     assert not [result for result in results if result.is_critical_failure]
     assert client.owner_message_dry_runs == [True]
+
+
+@pytest.mark.parametrize("user_open_id", [None, "", "   ", 123, "ou_other"])
+def test_unverified_owner_blocks_real_doctor_notification_and_runtime_health(
+    tmp_path: Path, user_open_id: object
+) -> None:
+    loaded = ConfigService().load(FIXTURE)
+    store = _initialized_store(tmp_path, loaded)
+    client = FakeFeishuClient(user_open_id=user_open_id)
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=store,
+        feishu_client=client,
+        hermes_checker=ok_hermes,
+        run_id="doctor_1",
+        disk_usage=roomy_disk_usage,
+    )
+
+    results = suite.run(send_test=True)
+    runtime_results = suite.run_runtime_critical()
+
+    owner = next(result for result in results if result.name == "owner_config")
+    notification = next(
+        result for result in results if result.name == "owner_notification_send"
+    )
+    assert owner.is_critical_failure
+    assert notification.status == "failed"
+    assert notification.details["skipped"] is True
+    assert client.owner_message_dry_runs == []
+    assert next(
+        result for result in runtime_results if result.name == "owner_config"
+    ).is_critical_failure
+
+
+def test_console_doctor_does_not_send_when_owner_identity_is_unverified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loaded = ConfigService().load(FIXTURE)
+    store = _initialized_store(tmp_path, loaded)
+    client = FakeFeishuClient(user_open_id="ou_other")
+    service = MaintenanceCommandService(
+        loaded_config=loaded,
+        store=store,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+    )
+    monkeypatch.setattr(service, "_feishu_client", lambda: client)
+
+    def suite_factory(**kwargs: object) -> HealthSuite:
+        return HealthSuite(
+            loaded_config=loaded,
+            store=store,
+            feishu_client=client,
+            hermes_checker=ok_hermes,
+            run_id=str(kwargs["run_id"]),
+            disk_usage=roomy_disk_usage,
+        )
+
+    monkeypatch.setattr(
+        "feishu_shadow_agent.maintenance_commands.HealthSuite", suite_factory
+    )
+
+    result = service.doctor(send_test=True, actor="local_console")
+
+    assert result.status == "failed"
+    assert result.changed is False
+    assert client.owner_message_dry_runs == []
 
 
 def test_doctor_rejects_symlinked_resource_directory(tmp_path: Path) -> None:

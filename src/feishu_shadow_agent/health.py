@@ -353,8 +353,13 @@ class HealthSuite:
         )
         results.append(self._check_user_scopes(auth_json))
         results.append(self._check_bot_available(auth_json))
-        results.append(self._check_owner_config())
-        results.append(self._check_owner_notification(send_test=send_test))
+        owner_identity = self._check_owner_config(auth_json)
+        results.append(owner_identity)
+        results.append(
+            self._check_owner_notification(
+                send_test=send_test, identity_verified=owner_identity.status == "ok"
+            )
+        )
         backend_results = self.agent_backend_checker(self.loaded_config)
         if isinstance(backend_results, list):
             results.extend(backend_results)
@@ -382,7 +387,7 @@ class HealthSuite:
         )
         results.append(self._check_user_scopes(auth_json))
         results.append(self._check_bot_available(auth_json))
-        results.append(self._check_owner_config())
+        results.append(self._check_owner_config(auth_json))
         backend_results = self.agent_backend_checker(self.loaded_config)
         if isinstance(backend_results, list):
             results.extend(backend_results)
@@ -773,17 +778,57 @@ class HealthSuite:
             },
         )
 
-    def _check_owner_config(self) -> HealthCheckResult:
+    def _check_owner_config(self, auth_json: object) -> HealthCheckResult:
         owner = self.loaded_config.config.owner
+        user: dict[str, object] = {}
+        if isinstance(auth_json, dict):
+            identities = cast(dict[str, object], auth_json).get("identities")
+            if isinstance(identities, dict):
+                candidate = cast(dict[str, object], identities).get("user")
+                if isinstance(candidate, dict):
+                    user = cast(dict[str, object], candidate)
+        raw_open_id = user.get("openId") or user.get("open_id")
+        user_open_id = raw_open_id.strip() if isinstance(raw_open_id, str) else ""
+        if not user_open_id:
+            return HealthCheckResult(
+                "owner_config",
+                "critical",
+                "failed",
+                "authorized user open_id is unavailable; verify lark-cli user authorization",
+                {"reason": "authorized_user_open_id_unavailable"},
+            )
+        if user_open_id != owner.open_id:
+            return HealthCheckResult(
+                "owner_config",
+                "critical",
+                "failed",
+                "owner.open_id does not match the authorized lark-cli user",
+                {
+                    "reason": "owner_identity_mismatch",
+                    "configured_open_id": owner.open_id,
+                    "authorized_open_id": user_open_id,
+                },
+            )
         return HealthCheckResult(
             "owner_config",
             "critical",
             "ok",
-            "owner open_id is configured",
+            "owner open_id matches the authorized lark-cli user",
             {"open_id": owner.open_id, "name": owner.name},
         )
 
-    def _check_owner_notification(self, *, send_test: bool) -> HealthCheckResult:
+    def _check_owner_notification(
+        self, *, send_test: bool, identity_verified: bool
+    ) -> HealthCheckResult:
+        name = "owner_notification_send" if send_test else "owner_notification_dry_run"
+        if not identity_verified:
+            return HealthCheckResult(
+                name,
+                "warning",
+                "failed",
+                "owner notification check skipped because owner identity is unverified",
+                {"skipped": True, "reason": "owner_identity_unverified"},
+            )
         owner = self.loaded_config.config.owner
         result = self.feishu_client.owner_message(
             owner_open_id=owner.open_id,
@@ -791,7 +836,6 @@ class HealthSuite:
             idempotency_key=f"doctor_{new_run_id('owner')}",
             dry_run=not send_test,
         )
-        name = "owner_notification_send" if send_test else "owner_notification_dry_run"
         if not result.ok:
             return _command_failed(
                 name, result, "owner notification check failed", severity="warning"

@@ -67,6 +67,7 @@ class FakeFeishu:
         self.calls: list[str] = []
         self.search_items: dict[tuple[str, bool], list[dict[str, Any]]] = {}
         self.sent_counter = 0
+        self.user_open_id = "ou_owner"
 
     def version(self) -> LarkCliResult:
         return LarkCliResult(
@@ -79,7 +80,10 @@ class FakeFeishu:
             0,
             json_data={
                 "identities": {
-                    "user": {"scope": " ".join(sorted(REQUIRED_USER_SCOPES))},
+                    "user": {
+                        "openId": self.user_open_id,
+                        "scope": " ".join(sorted(REQUIRED_USER_SCOPES)),
+                    },
                     "bot": {"openId": "ou_bot", "available": True, "status": "ready"},
                 }
             },
@@ -805,6 +809,63 @@ def test_runtime_health_ok_uses_interval_seconds_before_next_refresh(
     daemon.run_one_tick(run_id="run_1")
 
     assert suite.calls == 2
+
+
+def test_runtime_owner_mismatch_blocks_tick_at_next_health_refresh(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    now = 0.0
+    monkeypatch.setattr("feishu_shadow_agent.daemon.time.monotonic", lambda: now)
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    _seed_policy(store, config)
+    store.record_run_start(run_id="run_1", dry_run=False)
+    task_id = _insert_task(store)
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+        },
+    )
+    assert action_id is not None
+    fake = FakeFeishu()
+    loaded = LoadedConfig(
+        config=config, path=tmp_path / "config.yaml", base_dir=tmp_path, raw={}
+    )
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=store,
+        feishu_client=fake,  # type: ignore[arg-type]
+        agent_backend_checker=lambda _: HealthCheckResult(
+            "backend", "critical", "ok", "ok"
+        ),
+        run_id="run_1",
+        disk_usage=lambda _: (1_000 * 1024**3, 500 * 1024**3, 500 * 1024**3),
+    )
+    daemon = Daemon(
+        store=store,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        health_suite=suite,
+        tick_interval_seconds=1,
+        dry_run=False,
+        app_config=config,
+        feishu_client=fake,  # type: ignore[arg-type]
+    )
+
+    assert daemon._runtime_health_ok_for_tick(run_id="run_1") is True
+    fake.user_open_id = "ou_other"
+    now = config.health.interval_seconds - 1
+    assert daemon._runtime_health_ok_for_tick(run_id="run_1") is True
+    now = config.health.interval_seconds
+    result = daemon.run_one_tick(run_id="run_1")
+
+    assert [item.name for item in result] == ["runtime_health"]
+    assert store.get_action(action_id).status == "pending"  # type: ignore[union-attr]
+    assert fake.reply_calls == []
+    assert fake.owner_calls == []
 
 
 def test_product_policy_missing_blocks_tick_even_when_runtime_health_is_cached(
