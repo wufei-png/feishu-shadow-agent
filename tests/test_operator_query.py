@@ -425,6 +425,28 @@ def test_dashboard_distinguishes_starting_daemon_and_observed_messages(
     assert query.dashboard_snapshot()["has_messages"] is True
 
 
+def test_live_daemon_takes_precedence_over_new_instance_still_starting(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.initialize()
+    with store.connect() as conn:
+        conn.execute(
+            "INSERT INTO runs(run_id, started_at, status, dry_run, last_heartbeat_at, last_tick_started_at) "
+            "VALUES ('run_live', '2026-06-22T09:00:00Z', 'running', 1, '2026-06-22T10:03:00Z', '2026-06-22T10:03:00Z')"
+        )
+        conn.execute(
+            "INSERT INTO runs(run_id, started_at, status, dry_run, last_heartbeat_at) "
+            "VALUES ('run_starting', '2026-06-22T10:02:00Z', 'running', 1, '2026-06-22T10:02:00Z')"
+        )
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:03:01Z")
+
+    assert query.dashboard_snapshot()["daemon_liveness"]["run_id"] == "run_live"
+    assert query.health_issues()["runtime"]["last_daemon_start"]["run_id"] == (
+        "run_starting"
+    )
+
+
 def test_dashboard_snapshot_health_summary_matches_open_health_issues(
     tmp_path: Path,
 ) -> None:

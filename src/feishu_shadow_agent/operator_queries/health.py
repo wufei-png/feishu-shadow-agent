@@ -722,7 +722,8 @@ def _daemon_runs(
         FROM runs
         WHERE (run_id GLOB 'run_*' OR last_tick_started_at IS NOT NULL)
           AND status = 'running' AND julianday(last_heartbeat_at) > julianday(?)
-        ORDER BY started_at DESC, rowid DESC
+        ORDER BY CASE WHEN last_tick_started_at IS NOT NULL THEN 0 ELSE 1 END,
+                 started_at DESC, rowid DESC
         LIMIT 1
         """,  # noqa: S608
         (cutoff,),
