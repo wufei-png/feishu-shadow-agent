@@ -5,7 +5,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as api from "../api";
-import type { DashboardSnapshot } from "../types";
+import type { DashboardSnapshot, RouteKey } from "../types";
 import { DashboardScreen } from "./DashboardScreen";
 
 vi.mock("../api", () => ({
@@ -51,7 +51,112 @@ describe("DashboardScreen", () => {
     await user.click(screen.getByRole("button", { name: /a_attention/ }));
     expect(navigate).toHaveBeenCalledWith("approvals", "a_attention");
   });
+
+  it("directs an uninitialized policy to the policy page", async () => {
+    vi.mocked(api.getDashboard).mockResolvedValue(emptySnapshot({
+      policy_status: { initialized: false, policy_import_diff: { status: "unknown" } }
+    }));
+    const navigate = vi.fn();
+    const user = userEvent.setup();
+    renderDashboard(navigate);
+
+    expect(await screen.findByRole("heading", { name: "先初始化产品策略" })).toBeTruthy();
+    expect(screen.queryByText("已清空")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "前往策略页" }));
+    expect(navigate).toHaveBeenCalledWith("policy");
+  });
+
+  it("shows dry-run startup guidance in the correct mode", async () => {
+    vi.mocked(api.getDashboard).mockResolvedValue(emptySnapshot());
+    const navigate = vi.fn();
+    const user = userEvent.setup();
+    renderDashboard(navigate);
+
+    expect(await screen.findByRole("heading", { name: "启动守护进程" })).toBeTruthy();
+    expect(screen.getByText(/python -m feishu_shadow_agent daemon/).textContent).toContain("--dry-run");
+    expect(screen.queryByText("当前没有待处理事项")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "前往维护页" }));
+    expect(navigate).toHaveBeenCalledWith("maintenance");
+  });
+
+  it("warns before showing a production startup command", async () => {
+    vi.mocked(api.getDashboard).mockResolvedValue(emptySnapshot({ runtime_mode: "production" }));
+    renderDashboard(vi.fn());
+
+    expect(await screen.findByText(/生产模式会按照当前策略真实发送/)).toBeTruthy();
+    expect(screen.getByText(/python -m feishu_shadow_agent daemon/).textContent).not.toContain("--dry-run");
+  });
+
+  it("keeps pending work visible when the latest daemon startup failed", async () => {
+    vi.mocked(api.getDashboard).mockResolvedValue({
+      ...snapshot(),
+      daemon_liveness: { status: "startup_failed" }
+    });
+    const navigate = vi.fn();
+    const user = userEvent.setup();
+    renderDashboard(navigate);
+
+    expect(await screen.findByRole("heading", { name: "最近一次启动失败" })).toBeTruthy();
+    expect(screen.getByText("待审批").parentElement?.textContent).toContain("23");
+    await user.click(screen.getByRole("button", { name: "检查健康状态" }));
+    expect(navigate).toHaveBeenCalledWith("health");
+  });
+
+  it.each([
+    ["starting", "守护进程正在启动"],
+    ["stale", "守护进程心跳已过期"],
+    ["stopped", "守护进程未运行"]
+  ])("explains the %s daemon state", async (status, title) => {
+    vi.mocked(api.getDashboard).mockResolvedValue(emptySnapshot({ daemon_liveness: { status } }));
+    renderDashboard(vi.fn());
+
+    expect(await screen.findByRole("heading", { name: title })).toBeTruthy();
+    expect(screen.queryByText("当前没有待处理事项")).toBeNull();
+  });
+
+  it("distinguishes waiting for the first message from a clear action queue", async () => {
+    vi.mocked(api.getDashboard).mockResolvedValue(emptySnapshot({ daemon_liveness: { status: "live" } }));
+    renderDashboard(vi.fn());
+
+    expect(await screen.findByRole("heading", { name: "等待第一条消息" })).toBeTruthy();
+    expect(screen.queryByText("当前没有待处理事项")).toBeNull();
+  });
+
+  it("shows a clear queue after a message has been recorded", async () => {
+    vi.mocked(api.getDashboard).mockResolvedValue(emptySnapshot({ daemon_liveness: { status: "live" }, has_messages: true }));
+    renderDashboard(vi.fn());
+
+    expect(await screen.findByRole("heading", { name: "当前没有待处理事项" })).toBeTruthy();
+    expect(screen.queryByText("等待第一条消息")).toBeNull();
+  });
 });
+
+function renderDashboard(navigate: (route: RouteKey, selectedId?: string, view?: "attention" | "all") => void) {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={queryClient}><DashboardScreen navigate={navigate} token="token" /></QueryClientProvider>);
+}
+
+function emptySnapshot(overrides: Partial<DashboardSnapshot> = {}): DashboardSnapshot {
+  return {
+    ...snapshot(),
+    runtime_mode: "dry_run",
+    daemon_liveness: { status: "not_started" },
+    has_messages: false,
+    attention_summary: {
+      pending_approval_count: 0,
+      overdue_approval_count: 0,
+      failed_action_count: 0,
+      uncertain_action_count: 0,
+      blocked_processing_count: 0,
+      failed_processing_count: 0,
+      affected_task_count: 0,
+      total_item_count: 0
+    },
+    attention_tasks: [],
+    pending_approvals: [],
+    ...overrides
+  };
+}
 
 function snapshot(): DashboardSnapshot {
   return {

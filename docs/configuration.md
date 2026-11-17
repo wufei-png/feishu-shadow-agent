@@ -139,7 +139,7 @@ P8 暂不启用 `PRAGMA journal_mode=WAL`。当前部署形态以本地单文件
 
 critical 期间 tick 在 health gate 处早退，`retention` 阶段同样不会执行，因此 daemon 不会自动回收空间。恢复需要人工清理磁盘，或运行 `python -m feishu_shadow_agent retention prune --config config.yaml` 删除过期资源后再让 health 重新通过。
 
-`status` 输出中的 `daemon_liveness` 来自最新有 daemon tick 的 run（例如 `last_tick_started_at IS NOT NULL`）的 heartbeat；`last_run` 仍保留最新任意 run，包括 doctor 等非 daemon run。该 daemon run 仍是 `running` 且 `last_heartbeat_at` 超过固定阈值未更新时，会显示为 `stale`；这表示上一次 daemon 可能卡住或崩溃，需要结合 JSONL 日志和进程状态确认。`runs.last_tick_summary_json` 只保留最近一个 tick 的阶段摘要，详细历史仍以 JSONL 为准。
+`status` 输出中的 `daemon_liveness` 来自最近一次 daemon 启动记录，包括尚未进入首次 tick 的启动；`last_run` 仍保留最新任意 run，包括 doctor 等非 daemon run。启动检查进行中显示 `starting`，首次 tick 前启动失败显示 `startup_failed`；运行中的 heartbeat 超过固定阈值未更新时显示 `stale`。`stale` 表示上一次 daemon 可能卡住或崩溃，需要结合 JSONL 日志和进程状态确认。`runs.last_tick_summary_json` 只保留最近一个 tick 的阶段摘要，详细历史仍以 JSONL 为准。
 
 Product Policy Store 是运行时 Product Policy 真相来源，包含全局 `product_policies`、复用的 per-chat `chat_policies` 和 `policy_audits`。默认导入只填缺失的全局策略和缺失的 chat policy；如果 `config.yaml` 省略 `reply_policy`，导入会使用 Pydantic 默认值并在结果中报告 `used_defaults: true`。`--replace` 会替换全局策略和 config 中列出的 chat policy，但不会删除 DB 中存在而 config 缺失的 chat policy。每个插入或替换都会写入 `policy_audits`。这类比较和导入语义叫 Policy Import Source / Policy Import Diff，不叫 config drift。
 

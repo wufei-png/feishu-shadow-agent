@@ -103,16 +103,7 @@ class HealthQuery:
                     # This selects a module-level constant column list.
                     f"SELECT {_RUN_RUNTIME_COLUMNS} FROM runs ORDER BY started_at DESC LIMIT 1"  # noqa: S608
                 ).fetchone()
-                daemon_run = conn.execute(
-                    # This selects a module-level constant column list.
-                    f"""
-                    SELECT {_RUN_RUNTIME_COLUMNS}
-                    FROM runs
-                    WHERE last_tick_started_at IS NOT NULL
-                    ORDER BY last_tick_started_at DESC, started_at DESC
-                    LIMIT 1
-                    """,  # noqa: S608
-                ).fetchone()
+                daemon_run = _latest_daemon_run(conn)
                 failed_commands = conn.execute(
                     """
                     SELECT message_id, command, status, result_json, updated_at
@@ -465,15 +456,25 @@ def _daemon_health_issue(
     liveness: dict[str, Any], *, detected_at: str
 ) -> dict[str, Any] | None:
     status = str(liveness.get("status") or "unknown")
-    if status == "live":
+    if status in {"live", "starting"}:
         return None
+    if status == "startup_failed":
+        return _health_issue(
+            issue_id="daemon-startup-failed",
+            severity="error",
+            category="daemon",
+            title="The latest daemon startup failed",
+            detail="The daemon stopped before its first tick; inspect health checks before restarting.",
+            detected_at=detected_at,
+            recommended_actions=["run_doctor", "inspect_runtime"],
+        )
     if status == "not_started":
         return _health_issue(
             issue_id="daemon-not-started",
             severity="warning",
             category="daemon",
             title="Daemon has not started",
-            detail="No daemon tick has been recorded in the operator store.",
+            detail="No daemon start has been recorded in the operator store.",
             detected_at=detected_at,
             recommended_actions=["run_doctor", "start_daemon"],
         )
@@ -678,6 +679,19 @@ def _store_read_uri(path: Path) -> str:
     return f"file:{quote(str(path.resolve()), safe='/')}?mode=ro"
 
 
+def _latest_daemon_run(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    return conn.execute(
+        # Daemon run IDs use the run_ prefix, including failed starts before a tick.
+        f"""
+        SELECT {_RUN_RUNTIME_COLUMNS}
+        FROM runs
+        WHERE run_id GLOB 'run_*' OR last_tick_started_at IS NOT NULL
+        ORDER BY started_at DESC, rowid DESC
+        LIMIT 1
+        """  # noqa: S608
+    ).fetchone()
+
+
 def _run_runtime_summary(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "run_id": row["run_id"],
@@ -707,7 +721,13 @@ def _daemon_liveness(
         "run_id": last_run.get("run_id"),
         "run_status": run_status,
         "last_heartbeat_at": heartbeat,
+        "last_tick_started_at": last_run.get("last_tick_started_at"),
+        "last_tick_finished_at": last_run.get("last_tick_finished_at"),
     }
+    if run_status in {"health_failed", "crashed"} and not last_run.get(
+        "last_tick_started_at"
+    ):
+        return base | {"status": "startup_failed", "stale": False}
     if run_status != "running":
         return base | {"status": "stopped", "stale": False}
     heartbeat_dt = parse_datetime_or_none(heartbeat)
@@ -721,7 +741,11 @@ def _daemon_liveness(
     age_seconds = max(0, int((now_dt - heartbeat_dt).total_seconds()))
     stale = age_seconds > stale_after_seconds
     return base | {
-        "status": "stale" if stale else "live",
+        "status": "stale"
+        if stale
+        else "live"
+        if last_run.get("last_tick_started_at")
+        else "starting",
         "stale": stale,
         "heartbeat_age_seconds": age_seconds,
     }
@@ -777,6 +801,7 @@ def _minus_seconds(value: str, seconds: int) -> str:
 
 # Public read-only helpers used by the operator DTO boundary.
 RUN_RUNTIME_COLUMNS = _RUN_RUNTIME_COLUMNS
+latest_daemon_run = _latest_daemon_run
 recent_errors = _recent_errors
 run_runtime_summary = _run_runtime_summary
 daemon_liveness = _daemon_liveness

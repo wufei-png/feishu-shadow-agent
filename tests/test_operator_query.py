@@ -326,8 +326,56 @@ def test_dashboard_snapshot_includes_policy_status_and_omits_policy_audits(
     assert snapshot["policy_status"]["initialized"] is True
     assert snapshot["policy_status"]["chat_policy_count"] == 1
     assert snapshot["policy_status"]["policy_import_diff"]["status"] == "matches"
+    assert snapshot["has_messages"] is False
     assert "policy_audits" not in snapshot
     json.dumps(snapshot)
+
+
+def test_dashboard_reports_latest_failed_start_even_after_a_doctor_run(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.initialize()
+    with store.connect() as conn:
+        conn.execute(
+            "INSERT INTO runs(run_id, started_at, status, dry_run, last_heartbeat_at, last_tick_started_at) "
+            "VALUES ('run_old', '2026-06-22T09:00:00Z', 'stopped', 1, '2026-06-22T09:01:00Z', '2026-06-22T09:01:00Z')"
+        )
+        conn.execute(
+            "INSERT INTO runs(run_id, started_at, status, dry_run) "
+            "VALUES ('run_failed', '2026-06-22T10:00:00Z', 'health_failed', 1)"
+        )
+        conn.execute(
+            "INSERT INTO runs(run_id, started_at, status, dry_run) "
+            "VALUES ('doctor_newer', '2026-06-22T10:01:00Z', 'ok', 1)"
+        )
+
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:02:00Z")
+    snapshot = query.dashboard_snapshot()
+    issues = query.health_issues()
+
+    assert snapshot["last_run"]["run_id"] == "doctor_newer"
+    assert snapshot["daemon_liveness"]["run_id"] == "run_failed"
+    assert snapshot["daemon_liveness"]["status"] == "startup_failed"
+    assert any(issue["id"] == "daemon-startup-failed" for issue in issues["issues"])
+
+
+def test_dashboard_distinguishes_starting_daemon_and_observed_messages(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(
+        tmp_path / "agent.sqlite3", clock=lambda: "2026-06-22T10:00:00Z"
+    )
+    store.record_run_start(run_id="run_starting", dry_run=True)
+    query = OperatorQueryService(store, now=lambda: "2026-06-22T10:00:10Z")
+
+    assert query.dashboard_snapshot()["daemon_liveness"]["status"] == "starting"
+    assert query.dashboard_snapshot()["has_messages"] is False
+    with store.connect() as conn:
+        conn.execute(
+            "INSERT INTO messages(message_id, raw_json, inserted_at) VALUES ('om_1', '{}', 'now')"
+        )
+    assert query.dashboard_snapshot()["has_messages"] is True
 
 
 def test_dashboard_snapshot_health_summary_matches_open_health_issues(

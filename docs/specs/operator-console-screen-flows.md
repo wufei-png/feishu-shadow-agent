@@ -192,6 +192,7 @@ Required sections:
 
 - Runtime strip summary.
 - Action Queue summary.
+- A next-step panel when policy is missing, startup failed, daemon state needs attention, or a running daemon has not recorded its first message. Pending work remains visible alongside this guidance.
 - Pending/overdue approval preview.
 - Dispatch recovery preview.
 - Policy status and Policy Import Diff summary.

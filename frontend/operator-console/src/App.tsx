@@ -298,7 +298,7 @@ function runtimeStripStatus(t: TFunction, snapshot: DashboardSnapshot | undefine
   const importDiff = snapshot?.policy_status?.policy_import_diff?.status ?? "unknown";
   const dataStale = updatedAt > 0 && Date.now() - updatedAt > 30_000;
   return [
-    { label: t("runtime.daemon"), value: enumLabel(t, "status", daemon), tone: daemon === "live" ? "success" : daemon === "unknown" ? "muted" : "warning" },
+    { label: t("runtime.daemon"), value: enumLabel(t, "status", daemon), tone: daemon === "live" ? "success" : daemon === "startup_failed" || daemon === "stale" ? "danger" : daemon === "starting" ? "info" : daemon === "unknown" ? "muted" : "warning" },
     { label: t("runtime.policy"), value: initialized ? t("runtime.initialized") : t("runtime.missing"), tone: initialized ? "success" : "warning" },
     { label: t("runtime.importDiff"), value: importDiff === "matches" ? t("runtime.matches") : importDiff === "differs" ? t("runtime.differs") : t("common.unknown"), tone: importDiff === "matches" ? "success" : "info" },
     { label: t("runtime.data"), value: error ? t("runtime.readFailed") : dataStale ? t("runtime.stale") : updatedAt ? t("runtime.latest") : t("runtime.waiting"), tone: error ? "danger" : dataStale ? "warning" : updatedAt ? "success" : "muted" }
