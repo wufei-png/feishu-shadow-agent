@@ -50,6 +50,9 @@ class FakeFeishuClient:
                 "identities": {
                     "user": {
                         "openId": self.user_open_id,
+                        "available": True,
+                        "verified": True,
+                        "status": "ready",
                         "scope": " ".join(sorted(self.scopes)),
                     },
                     "bot": {
@@ -256,6 +259,80 @@ def test_unverified_owner_blocks_real_doctor_notification_and_runtime_health(
     assert next(
         result for result in runtime_results if result.name == "owner_config"
     ).is_critical_failure
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"status": "verify_failed", "available": False, "verified": False},
+        {"status": "missing", "available": False, "verified": None},
+        {"status": "ready", "available": True, "verified": None},
+        {"status": "ready", "available": True, "verified": "true"},
+        {"status": "verify_failed", "available": True, "verified": True},
+        {"status": None, "available": True, "verified": True},
+        {"status": [], "available": True, "verified": True},
+    ],
+)
+def test_failed_or_unknown_user_verification_blocks_runtime_and_real_send(
+    tmp_path: Path, overrides: dict[str, object]
+) -> None:
+    loaded = ConfigService().load(FIXTURE)
+    store = _initialized_store(tmp_path, loaded)
+    client = FakeFeishuClient()
+    original_auth_status = client.auth_status
+
+    def auth_status(*, verify: bool = True) -> LarkCliResult:
+        result = original_auth_status(verify=verify)
+        assert result.json_data is not None
+        result.json_data["identities"]["user"].update(overrides)
+        # Top-level verification can describe the bot, not the user.
+        result.json_data["verified"] = True
+        result.json_data["identity"] = "bot"
+        return result
+
+    client.auth_status = auth_status
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=store,
+        feishu_client=client,
+        hermes_checker=ok_hermes,
+        disk_usage=roomy_disk_usage,
+    )
+
+    for results in (suite.run(send_test=True), suite.run_runtime_critical()):
+        owner = next(result for result in results if result.name == "owner_config")
+        assert owner.is_critical_failure
+        assert owner.details["reason"] == "authorized_user_identity_unverified"
+    assert client.owner_message_dry_runs == []
+
+
+def test_user_verified_after_token_refresh_is_accepted(tmp_path: Path) -> None:
+    loaded = ConfigService().load(FIXTURE)
+    client = FakeFeishuClient()
+    original_auth_status = client.auth_status
+
+    def auth_status(*, verify: bool = True) -> LarkCliResult:
+        result = original_auth_status(verify=verify)
+        assert result.json_data is not None
+        result.json_data["identities"]["user"]["status"] = "needs_refresh"
+        return result
+
+    client.auth_status = auth_status
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=_initialized_store(tmp_path, loaded),
+        feishu_client=client,
+        hermes_checker=ok_hermes,
+        disk_usage=roomy_disk_usage,
+    )
+
+    results = suite.run(send_test=True)
+
+    assert (
+        next(result for result in results if result.name == "owner_config").status
+        == "ok"
+    )
+    assert client.owner_message_dry_runs == [False]
 
 
 def test_console_doctor_does_not_send_when_owner_identity_is_unverified(

@@ -797,6 +797,21 @@ class HealthSuite:
                 "authorized user open_id is unavailable; verify lark-cli user authorization",
                 {"reason": "authorized_user_open_id_unavailable"},
             )
+        if (
+            user.get("available") is not True
+            or user.get("verified") is not True
+            or user.get("status") not in ("ready", "needs_refresh")
+        ):
+            return HealthCheckResult(
+                "owner_config",
+                "critical",
+                "failed",
+                "authorized lark-cli user identity could not be verified",
+                {
+                    "reason": "authorized_user_identity_unverified",
+                    "status": user.get("status"),
+                },
+            )
         if user_open_id != owner.open_id:
             return HealthCheckResult(
                 "owner_config",

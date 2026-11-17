@@ -82,6 +82,9 @@ class FakeFeishu:
                 "identities": {
                     "user": {
                         "openId": self.user_open_id,
+                        "available": True,
+                        "verified": True,
+                        "status": "ready",
                         "scope": " ".join(sorted(REQUIRED_USER_SCOPES)),
                     },
                     "bot": {"openId": "ou_bot", "available": True, "status": "ready"},
