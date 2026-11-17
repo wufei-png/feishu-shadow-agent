@@ -225,6 +225,24 @@ class Daemon:
                     )
                 results.append(result)
                 heartbeat.record(result)
+            # A single agent call can outlast the health interval. Refresh only
+            # when due before starting dispatch, while retaining the normal cache.
+            if self._runtime_health_refresh_due(now=time.monotonic()) and not (
+                self._runtime_health_ok_for_tick(run_id=run_id)
+            ):
+                self.logger.emit(
+                    "error",
+                    "daemon_runtime_health_failed",
+                    run_id=run_id,
+                    data={"actual_sends_blocked": True},
+                )
+                result = StageResult(
+                    "runtime_health", ok=False, error="runtime critical health failed"
+                )
+                results.append(result)
+                heartbeat.record(result)
+                heartbeat.finish()
+                return results
             approval_failed = any(
                 result.name == "approval_inbox" and not result.ok for result in results
             )
@@ -426,17 +444,15 @@ class Daemon:
     def _runtime_health_ok_for_tick(self, *, run_id: str) -> bool:
         interval = self._runtime_health_check_interval()
         now = time.monotonic()
-        if (
-            self._last_runtime_health_at is not None
-            and now - self._last_runtime_health_at < interval
-        ):
+        last_health_at = self._last_runtime_health_at
+        if last_health_at is not None and not self._runtime_health_refresh_due(now=now):
             self.logger.debug(
                 "runtime_critical_health_reused",
                 run_id=run_id,
                 data={
                     "ok": self._runtime_health_ok,
                     "interval_seconds": interval,
-                    "age_seconds": round(now - self._last_runtime_health_at, 3),
+                    "age_seconds": round(now - last_health_at, 3),
                 },
             )
             return self._runtime_health_ok
@@ -465,6 +481,11 @@ class Daemon:
                 data=summarize_results(results),
             )
         return self._runtime_health_ok
+
+    def _runtime_health_refresh_due(self, *, now: float) -> bool:
+        return self._last_runtime_health_at is None or (
+            now - self._last_runtime_health_at >= self._runtime_health_check_interval()
+        )
 
     def _runtime_health_check_interval(self) -> int:
         if self.runtime_health_interval_seconds is not None:

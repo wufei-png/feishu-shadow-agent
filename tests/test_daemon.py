@@ -20,7 +20,7 @@ from feishu_shadow_agent.config import (
 )
 from feishu_shadow_agent.daemon import Daemon
 from feishu_shadow_agent.health import REQUIRED_USER_SCOPES, HealthSuite
-from feishu_shadow_agent.ingestion import IngestionService
+from feishu_shadow_agent.ingestion import IngestionService, StageResult
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.operator_query import OperatorQueryService
 from feishu_shadow_agent.processing import TaskProcessingService
@@ -873,6 +873,68 @@ def test_runtime_owner_mismatch_blocks_tick_at_next_health_refresh(
     result = daemon.run_one_tick(run_id="run_1")
 
     assert [item.name for item in result] == ["runtime_health"]
+    assert store.get_action(action_id).status == "pending"  # type: ignore[union-attr]
+    assert fake.reply_calls == []
+    assert fake.owner_calls == []
+
+
+def test_long_ingestion_refreshes_due_health_before_dispatch(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    now = 0.0
+    monkeypatch.setattr("feishu_shadow_agent.daemon.time.monotonic", lambda: now)
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    _seed_policy(store, config)
+    task_id = _insert_task(store)
+    action_id = store.create_send_reply_action(
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={
+            "reply_target_message_id": "om_target",
+            "text": "hello",
+            "identity": "user",
+        },
+    )
+    assert action_id is not None
+    fake = FakeFeishu()
+    loaded = LoadedConfig(
+        config=config, path=tmp_path / "config.yaml", base_dir=tmp_path, raw={}
+    )
+    suite = HealthSuite(
+        loaded_config=loaded,
+        store=store,
+        feishu_client=fake,  # type: ignore[arg-type]
+        agent_backend_checker=lambda _: HealthCheckResult(
+            "backend", "critical", "ok", "ok"
+        ),
+        disk_usage=lambda _: (1_000 * 1024**3, 500 * 1024**3, 500 * 1024**3),
+    )
+    daemon = Daemon(
+        store=store,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        health_suite=suite,
+        tick_interval_seconds=1,
+        dry_run=False,
+        app_config=config,
+        feishu_client=fake,  # type: ignore[arg-type]
+    )
+
+    def long_stage(*, run_id: str) -> StageResult:
+        nonlocal now
+        now = config.health.interval_seconds
+        fake.user_open_id = "ou_other"
+        return StageResult("long_stage", ok=True)
+
+    monkeypatch.setattr(
+        "feishu_shadow_agent.daemon.IngestionService.ordered_ingestion_stages",
+        lambda _: [long_stage],
+    )
+
+    results = daemon.run_one_tick(run_id="run_1")
+
+    assert results[-1].name == "runtime_health"
+    assert results[-1].ok is False
     assert store.get_action(action_id).status == "pending"  # type: ignore[union-attr]
     assert fake.reply_calls == []
     assert fake.owner_calls == []
