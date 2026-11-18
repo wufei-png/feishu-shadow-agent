@@ -13,6 +13,7 @@ from .time_utils import shift_instant
 
 GROUP_MAIN_KEY = "__group_main__"
 SUBAGENT_EVENT_PREFIX = "internal:subagent:"
+CACHED_HISTORY_EVENT_ID = "internal:history"
 
 
 @dataclass(frozen=True)
@@ -62,10 +63,23 @@ class CoworkerStore:
             # The Feishu long connection expects a callback within three seconds.
             conn.execute("PRAGMA busy_timeout = 1500")
             conn.execute("BEGIN IMMEDIATE")
-            if conn.execute(
-                "SELECT 1 FROM coworker_events WHERE app_id = ? AND message_id = ? AND revision = 1",
+            existing = conn.execute(
+                "SELECT id, chat_id, event_id, group_activation_id, status FROM coworker_events WHERE app_id = ? AND message_id = ? AND revision = 1",
                 (app_id, message_id),
-            ).fetchone():
+            ).fetchone()
+            cache_only = (
+                existing is not None
+                and existing["chat_id"] == chat_id
+                and existing["status"] == "completed"
+                and (
+                    existing["event_id"] == CACHED_HISTORY_EVENT_ID
+                    or (
+                        existing["event_id"] is None
+                        and existing["group_activation_id"] is None
+                    )
+                )
+            )
+            if existing is not None and not cache_only:
                 return False
             if chat_layout == "group" and not message.get("thread_id"):
                 topic_key = GROUP_MAIN_KEY
@@ -84,6 +98,25 @@ class CoworkerStore:
                 },
                 ensure_ascii=False,
             )
+            event_id = header.get("event_id") or f"internal:live:{message_id}"
+            if cache_only and existing is not None:
+                cursor = conn.execute(
+                    """UPDATE coworker_events SET event_id = ?, topic_key = ?, group_activation_id = ?,
+                              raw_json = ?, status = ?, error = ?, received_at = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (
+                        event_id,
+                        topic_key,
+                        group_activation_id,
+                        payload,
+                        status,
+                        error,
+                        now,
+                        now,
+                        existing["id"],
+                    ),
+                )
+                return cursor.rowcount == 1
             cursor = conn.execute(
                 """
                 INSERT OR IGNORE INTO coworker_events(
@@ -93,7 +126,7 @@ class CoworkerStore:
                 """,
                 (
                     app_id,
-                    header.get("event_id"),
+                    event_id,
                     message_id,
                     chat_id,
                     topic_key,
@@ -155,7 +188,10 @@ class CoworkerStore:
                 "SELECT raw_json FROM coworker_events WHERE id = ?", (event_id,)
             ).fetchone()
             cursor = conn.execute(
-                "UPDATE coworker_events SET status = 'discarded', raw_json = NULL, error = 'discarded_by_operator', updated_at = ? WHERE id = ? AND status IN ('processing', 'needs_review')",
+                """UPDATE coworker_events SET status = 'discarded', raw_json = NULL,
+                          error = 'discarded_by_operator', updated_at = ?
+                   WHERE id = ? AND (status IN ('processing', 'needs_review') OR
+                         (status = 'queued' AND message_id LIKE 'internal:subagent:%'))""",
                 (self.store.clock(), event_id),
             )
             if cursor.rowcount != 1:
@@ -187,7 +223,16 @@ class CoworkerStore:
             if session is None:
                 raise ValueError("active coworker session not found")
             if conn.execute(
-                "SELECT 1 FROM coworker_events WHERE app_id = ? AND chat_id = ? AND topic_key = ? AND status IN ('queued', 'processing', 'needs_review')",
+                """SELECT 1 FROM coworker_events
+                   WHERE app_id = ? AND chat_id = ? AND topic_key = ? AND (
+                     status IN ('processing', 'needs_review') OR
+                     (status = 'queued' AND (
+                       message_id LIKE 'internal:subagent:%' OR
+                       CASE WHEN json_valid(raw_json)
+                            THEN json_extract(raw_json, '$._runtime.steer_state') IS NOT NULL
+                            ELSE 1 END
+                     ))
+                   )""",
                 (session["app_id"], session["chat_id"], session["thread_id"]),
             ).fetchone():
                 raise ValueError("resolve outstanding topic events before resetting")
@@ -994,10 +1039,18 @@ class CoworkerStore:
         with self.store.connect() as conn:
             conn.execute(
                 """
-                INSERT OR IGNORE INTO coworker_events(app_id, message_id, chat_id, topic_key, status, received_at, updated_at)
-                VALUES (?, ?, ?, ?, 'completed', ?, ?)
+                INSERT OR IGNORE INTO coworker_events(app_id, event_id, message_id, chat_id, topic_key, status, received_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 'completed', ?, ?)
                 """,
-                (app_id, message_id, chat_id, topic_key, now, now),
+                (
+                    app_id,
+                    CACHED_HISTORY_EVENT_ID,
+                    message_id,
+                    chat_id,
+                    topic_key,
+                    now,
+                    now,
+                ),
             )
 
 

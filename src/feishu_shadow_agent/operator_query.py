@@ -100,6 +100,7 @@ class OperatorQueryService:
             "runtime": None,
             "liveness": {"status": "unknown"},
             "memory_maintenance": None,
+            "backend_health": None,
             "sessions": [],
             "events": [],
             "subagents": [],
@@ -137,6 +138,14 @@ class OperatorQueryService:
                     result[key] = (
                         None if row is None else loads_json_object(row["value_json"])
                     )
+                backend_health = conn.execute(
+                    """SELECT status, message, checked_at FROM health_checks
+                       WHERE check_name = 'coworker_app_server'
+                       ORDER BY julianday(checked_at) DESC, id DESC LIMIT 1"""
+                ).fetchone()
+                result["backend_health"] = (
+                    None if backend_health is None else dict(backend_health)
+                )
                 queries = {
                     "sessions": "SELECT id, chat_id, thread_id, provider, state, updated_at FROM coworker_sessions ORDER BY id DESC LIMIT ?",
                     "events": "SELECT id, chat_id, topic_key, message_id, status, error, received_at, updated_at FROM coworker_events WHERE status NOT IN ('completed', 'discarded') ORDER BY id DESC LIMIT ?",

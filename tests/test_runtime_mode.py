@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -127,6 +128,24 @@ def test_dry_run_copies_coworker_policy_without_upgrading_v9_source(
     coworker = dry_store.get_product_policy("ai_coworker")
     assert coworker is not None and coworker["chat_id"] == "oc_one"
     assert prod_store.path.read_bytes() == before
+
+
+def test_dry_run_preserves_legacy_project_send_mode(tmp_path: Path) -> None:
+    path = _config(tmp_path)
+    loaded = ConfigService().load(path)
+    prod_store = SQLiteStore(tmp_path / "data/agent.sqlite3")
+    prod_store.import_product_policy_from_config(loaded.config)
+    legacy = {"enabled": True, "chat_id": "oc_one"}
+    with prod_store.connect() as conn:
+        conn.execute(
+            "INSERT INTO product_policies(key, policy_json, updated_at) VALUES (?, ?, ?)",
+            ("ai_coworker", json.dumps(legacy), "2026-01-01T00:00:00Z"),
+        )
+    _, dry_store, _ = _load_runtime(str(path), mode="dry-run")
+    policy = dry_store.get_product_policy("ai_coworker")
+    assert policy is not None and policy["send_mode"] == "project"
+    assert sync_production_policy(loaded, dry_store)["chat_count"] == 1
+    assert dry_store.get_product_policy("ai_coworker")["send_mode"] == "project"  # type: ignore[index]
 
 
 def test_dry_run_rejects_overlapping_resource_roots(tmp_path: Path) -> None:

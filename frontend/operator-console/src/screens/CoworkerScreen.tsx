@@ -129,7 +129,9 @@ export function CoworkerScreen({ token }: { token: string }) {
       />
     );
   const canRecover =
-    ["stopped", "not_started"].includes(data.liveness.status) ||
+    ["stopped", "not_started", "startup_failed"].includes(
+      data.liveness.status,
+    ) ||
     (data.liveness.status === "stale" && confirmedStopped);
   const changed = data.memory_maintenance?.memory_file_changed;
   const shown = (value: unknown) =>
@@ -232,6 +234,12 @@ export function CoworkerScreen({ token }: { token: string }) {
                     label={t("coworker.send")}
                     value={shown(data.runtime.send_mode)}
                   />
+                  {data.runtime.provider === "codex" && data.backend_health ? (
+                    <Fact
+                      label={t("coworker.backendHealth")}
+                      value={`${data.backend_health.status} · ${data.backend_health.message}`}
+                    />
+                  ) : null}
                 </FieldList>
               ) : (
                 <p className="detail-note">{t("coworker.runtimeUnknown")}</p>
@@ -373,7 +381,9 @@ export function CoworkerScreen({ token }: { token: string }) {
                     {event.topic_key} · {event.message_id} · {event.status}{" "}
                     {event.error ?? ""}
                   </span>
-                  {["processing", "needs_review"].includes(event.status) ? (
+                  {["processing", "needs_review"].includes(event.status) ||
+                  (event.status === "queued" &&
+                    event.message_id.startsWith("internal:subagent:")) ? (
                     <ConfirmButton
                       disabled={!canRecover || recover.isPending}
                       confirmLabel={t("coworker.confirmDiscard")}

@@ -195,6 +195,19 @@ def test_stale_coworker_recovery_requires_operator_to_confirm_process_stopped(
     )
 
 
+def test_coworker_recovery_allowed_after_startup_failure(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    store = _store(tmp_path)
+    store.record_run_start(run_id="run_failed", dry_run=False)
+    store.set_checkpoint("coworker.memory_maintenance", {"state": "needs_review"})
+    store.record_run_finish(run_id="run_failed", status="health_failed")
+    assert (
+        client.get("/api/coworker", headers=_auth()).json()["liveness"]["status"]
+        == "startup_failed"
+    )
+    assert client.post("/api/coworker/memory/reset", headers=_auth()).status_code == 200
+
+
 def test_coworker_console_only_displays_runtime_for_matching_live_run(
     tmp_path: Path,
 ) -> None:

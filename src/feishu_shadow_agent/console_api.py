@@ -368,7 +368,7 @@ def create_console_app(
         snapshot = query_service().coworker_status()
         status = snapshot["liveness"].get("status")
         if not snapshot["available"] or not (
-            status in {"stopped", "not_started"}
+            status in {"stopped", "not_started", "startup_failed"}
             or (status == "stale" and confirm_stopped)
         ):
             _raise_api_error(

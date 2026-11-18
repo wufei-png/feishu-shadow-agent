@@ -771,6 +771,74 @@ def test_stop_requested_during_startup_does_not_start_coworker_worker(
         assert conn.execute("SELECT status FROM runs").fetchone()[0] == "stopped"
 
 
+def test_coworker_does_not_start_without_event_connection(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+
+    class Worker:
+        started = False
+        service = type("Service", (), {"startup_provider": "codex"})()
+
+        def start(self) -> None:
+            self.started = True
+
+        def request_stop(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    class Connection:
+        healthy = False
+        finished_during_stop: str | None = None
+
+        def start(self) -> bool:
+            return self.healthy
+
+        def is_healthy(self) -> bool:
+            return self.healthy
+
+        def snapshot(self) -> dict[str, str]:
+            return {"status": "unhealthy", "last_error": "connection failed"}
+
+        def stop(self) -> None:
+            with store.connect() as conn:
+                self.finished_during_stop = conn.execute(
+                    "SELECT finished_at FROM runs"
+                ).fetchone()[0]
+
+    class StoppingDaemon(Daemon):
+        def run_one_tick(self, *, run_id: str) -> list[Any]:
+            self.request_stop()
+            return []
+
+    worker = Worker()
+    connection = Connection()
+    daemon = StoppingDaemon(
+        store=store,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        health_suite=FakeHealthSuite(
+            [HealthCheckResult("config_schema", "critical", "ok", "ok")]
+        ),  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=False,
+        business_mode="coworker",
+        coworker_worker=worker,  # type: ignore[arg-type]
+        card_action_connection=connection,  # type: ignore[arg-type]
+    )
+    assert daemon.run_forever() == 2
+    assert not worker.started
+    assert connection.finished_during_stop is None
+    with store.connect() as conn:
+        assert conn.execute("SELECT status FROM runs").fetchone()[0] == "health_failed"
+    assert store.latest_health_check_status("coworker_event_connection") == "failed"
+
+    connection.healthy = True
+    daemon.health_suite.run_id = "run_2"
+    assert daemon.run_forever() == 0
+    assert worker.started
+    assert store.latest_health_check_status("coworker_event_connection") == "ok"
+
+
 def test_unhandled_exception_marks_daemon_crashed(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     logger = JSONLLogger(tmp_path / "agent.jsonl")

@@ -124,6 +124,68 @@ it("allows stale-run recovery only after the operator confirms shutdown", async 
   );
 });
 
+it("allows recovery after a failed startup", async () => {
+  await setConsoleLanguage("zh-CN");
+  const data = snapshot();
+  data.liveness.status = "startup_failed";
+  data.memory_maintenance = { state: "needs_review" };
+  vi.mocked(api.getCoworker).mockResolvedValue(data);
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  render(
+    <QueryClientProvider client={client}>
+      <CoworkerScreen token="token" />
+    </QueryClientProvider>,
+  );
+  expect(
+    (
+      (await screen.findByRole("button", {
+        name: "解除记忆整理异常",
+      })) as HTMLButtonElement
+    ).disabled,
+  ).toBe(false);
+});
+
+it("shows a failed app server and allows discarding a queued completion", async () => {
+  await setConsoleLanguage("zh-CN");
+  const data = snapshot();
+  data.runtime = {
+    business_mode: "coworker",
+    send_mode: "agent_direct",
+    chat_id: "group",
+    provider: "codex",
+  };
+  data.backend_health = {
+    status: "failed",
+    message: "server stopped",
+    checked_at: "2026-11-18T00:00:00Z",
+  };
+  data.events = [
+    {
+      id: 9,
+      topic_key: "topic",
+      message_id: "internal:subagent:child",
+      status: "queued",
+      error: null,
+    },
+  ];
+  vi.mocked(api.getCoworker).mockResolvedValue(data);
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  render(
+    <QueryClientProvider client={client}>
+      <CoworkerScreen token="token" />
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText("failed · server stopped")).toBeTruthy();
+  expect(
+    (screen.getByRole("button", { name: "丢弃事件" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(false);
+});
+
 function snapshot(): CoworkerSnapshot {
   const policy = {
     enabled: true,

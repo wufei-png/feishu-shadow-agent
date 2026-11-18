@@ -1287,13 +1287,13 @@ class SQLiteStore:
                     ).fetchone()
                     counts[name] = int(row["count"])
                     continue
-                cursor = conn.execute(
+                conn.execute(
                     # Table and clauses come from the fixed retention spec;
                     # all data values remain bound parameters.
                     f"{prefix} UPDATE {table} SET {set_sql} WHERE {where_sql} {guard}",  # noqa: S608
                     (*set_params, *where_params),
                 )
-                counts[name] = int(cursor.rowcount)
+                counts[name] = int(conn.execute("SELECT changes()").fetchone()[0])
         return counts
 
     def pending_retention_identifiers(
@@ -2778,6 +2778,7 @@ class SQLiteStore:
         self.initialize()
         now = self.clock()
         with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT * FROM actions WHERE id = ?", (action_id,)
             ).fetchone()
@@ -2794,6 +2795,10 @@ class SQLiteStore:
                     """,
                     (ActionStatus.CANCELLED.value, now, action_id),
                 )
+            conn.execute(
+                "UPDATE coworker_delegations SET status = 'failed', updated_at = ? WHERE request_action_id = ? AND status = 'pending'",
+                (now, action_id),
+            )
             updated = conn.execute(
                 "SELECT * FROM actions WHERE id = ?", (action_id,)
             ).fetchone()
@@ -3545,6 +3550,14 @@ class SQLiteStore:
                 UPDATE coworker_delegations SET status = 'failed', updated_at = ?
                 WHERE status = 'pending' AND request_approval_id IN
                   (SELECT id FROM approvals WHERE status IN ('rejected', 'expired'))
+                """,
+                (now,),
+            )
+            conn.execute(
+                """
+                UPDATE coworker_delegations SET status = 'failed', updated_at = ?
+                WHERE status = 'pending' AND request_action_id IN
+                  (SELECT id FROM actions WHERE status = 'cancelled')
                 """,
                 (now,),
             )

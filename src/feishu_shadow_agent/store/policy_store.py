@@ -505,6 +505,8 @@ class PolicyStore:
         """Atomically replace policy only, retaining and holding other local state."""
         normalized_global = _normalize_global_product_policy(global_policy)
         normalized_chats = [_normalize_chat_product_policy(chat) for chat in chats]
+        if coworker_policy is not None and "send_mode" not in coworker_policy:
+            coworker_policy = {**coworker_policy, "send_mode": "project"}
         normalized_coworker = (
             None
             if coworker_policy is None

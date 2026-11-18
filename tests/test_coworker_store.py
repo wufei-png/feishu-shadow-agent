@@ -58,6 +58,35 @@ def test_topic_aliases_and_claims_preserve_shared_session_and_serial_order(
     )
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_realtime_event_promotes_cached_history_once(
+    tmp_path: Path, legacy: bool
+) -> None:
+    db = SQLiteStore(tmp_path / "agent.sqlite3")
+    store = CoworkerStore(db)
+    store.cache_history_message(
+        app_id="app", chat_id="chat_a", topic_key="root", message_id="root"
+    )
+    if legacy:
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE coworker_events SET event_id = NULL WHERE message_id = 'root'"
+            )
+    assert store.enqueue(
+        app_id="app", bot_open_id="bot", raw=_event("root"), group_activation_id=1
+    )
+    event = store.claim_next()
+    assert (
+        event is not None
+        and event.message_id == "root"
+        and event.group_activation_id == 1
+    )
+    store.finish_event(event.id)
+    assert not store.enqueue(
+        app_id="app", bot_open_id="bot", raw=_event("root"), group_activation_id=1
+    )
+
+
 def test_unresolved_or_conflicting_topic_is_held_for_review(tmp_path: Path) -> None:
     db = SQLiteStore(tmp_path / "agent.sqlite3")
     store = CoworkerStore(db)
@@ -245,6 +274,72 @@ def test_uncertain_event_requires_explicit_discard_before_session_reset(
             ).fetchone()[0]
             == 2
         )
+
+
+def test_session_reset_preserves_queued_followup_for_new_session(
+    tmp_path: Path,
+) -> None:
+    db = SQLiteStore(tmp_path / "agent.sqlite3")
+    store = CoworkerStore(db)
+    store.enqueue(app_id="app", bot_open_id="bot", raw=_event("root"))
+    first = store.claim_next()
+    assert first is not None
+    session = store.get_or_create_session(
+        app_id="app",
+        chat_id="chat_a",
+        topic_key=first.topic_key,
+        provider="codex",
+        working_dir="/repo",
+    )
+    store.save_session_id(session.id, "broken-session")
+    store.finish_event(first.id, error="session resume failed")
+    store.enqueue(
+        app_id="app",
+        bot_open_id="bot",
+        raw=_event("next", thread_id="root", root_id="root"),
+    )
+    store.discard_event(first.id, daemon_stopped=True)
+    store.reset_session(session.id, daemon_stopped=True)
+    queued = store.claim_next()
+    assert queued is not None and queued.message_id == "next"
+    fresh = store.get_or_create_session(
+        app_id="app",
+        chat_id="chat_a",
+        topic_key=queued.topic_key,
+        provider="codex",
+        working_dir="/repo",
+    )
+    assert fresh.id != session.id and fresh.backend_session_id is None
+
+
+def test_session_reset_requires_resolving_queued_subagent_completion(
+    tmp_path: Path,
+) -> None:
+    db = SQLiteStore(tmp_path / "agent.sqlite3")
+    store = CoworkerStore(db)
+    store.enqueue(app_id="app", bot_open_id="bot", raw=_event("root"))
+    first = store.claim_next()
+    assert first is not None
+    session = store.get_or_create_session(
+        app_id="app",
+        chat_id="chat_a",
+        topic_key=first.topic_key,
+        provider="codex",
+        working_dir="/repo",
+    )
+    store.finish_event(first.id)
+    with db.connect() as conn:
+        cursor = conn.execute(
+            """INSERT INTO coworker_events(app_id, message_id, chat_id, topic_key, raw_json, status, received_at, updated_at)
+               VALUES ('app', 'internal:subagent:child:turn', 'chat_a', ?, '{}', 'queued', ?, ?)""",
+            (first.topic_key, db.clock(), db.clock()),
+        )
+        event_id = cursor.lastrowid
+    assert event_id is not None
+    with pytest.raises(ValueError, match="resolve outstanding"):
+        store.reset_session(session.id, daemon_stopped=True)
+    store.discard_event(event_id, daemon_stopped=True)
+    store.reset_session(session.id, daemon_stopped=True)
 
 
 def test_history_gap_is_not_lost_when_reconnect_races_backfill(tmp_path: Path) -> None:

@@ -32,6 +32,7 @@ from feishu_shadow_agent.coworker_replay import (
 from feishu_shadow_agent.dispatcher import Dispatcher
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.operator_commands import OperatorCommandService
+from feishu_shadow_agent.operator_query import OperatorQueryService
 from feishu_shadow_agent.retention import RetentionService
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import LarkCliResult, MessagePage
@@ -265,6 +266,58 @@ class FakeAppServer:
             )
         finally:
             self.active.remove(thread_id)
+
+
+def test_app_server_exit_marks_health_and_preserves_queued_events(
+    tmp_path: Path,
+) -> None:
+    service, db, _backend, _feishu = _service(tmp_path)
+    server = FakeAppServer(service)
+    service.app_server = server  # type: ignore[assignment]
+    wakeups: list[bool] = []
+    worker = CoworkerWorker(
+        service,
+        runtime_allows_processing=lambda: True,
+        wake_daemon=lambda: wakeups.append(True),
+    )
+    service.receive(_event("m1", sender="alice", text="处理", mention=True), "bot")
+    wakeups.clear()
+    server.closed = True
+    assert not worker._server_allows_processing()
+    assert db.latest_health_check_status("coworker_app_server") == "failed"
+    assert (
+        OperatorQueryService(db).coworker_status()["backend_health"]["status"]
+        == "failed"
+    )
+    assert wakeups
+    with db.connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT status FROM coworker_events WHERE message_id = 'm1'"
+            ).fetchone()[0]
+            == "queued"
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM health_checks WHERE check_name = 'coworker_app_server'"
+            ).fetchone()[0]
+            == 1
+        )
+    assert not worker._server_allows_processing()
+    with db.connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM health_checks WHERE check_name = 'coworker_app_server'"
+            ).fetchone()[0]
+            == 1
+        )
+    db.update_coworker_policy({"memory_maintenance": False}, actor="test")
+    server.closed = False
+    worker.start()
+    try:
+        assert db.latest_health_check_status("coworker_app_server") == "ok"
+    finally:
+        worker.stop()
 
 
 def _subagent_activity(
@@ -1015,6 +1068,27 @@ def test_cache_backfill_accepts_feishu_millisecond_timestamps(
     assert result["history_state"][0]["needs_backfill"] == 0
 
 
+@pytest.mark.parametrize("created", ["1794900000000", 1794900000000])
+def test_live_event_accepts_feishu_millisecond_timestamps(
+    tmp_path: Path, created: str | int
+) -> None:
+    service, db, backend, _feishu = _service(tmp_path)
+    raw = _event("m1", sender="alice", text="请总结", mention=True)
+    cast(dict[str, Any], cast(dict[str, Any], raw["event"])["message"])[
+        "create_time"
+    ] = created
+    service.receive(raw, "bot")
+    assert service.process_next()
+    assert len(backend.prompts) == 1
+    with db.connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT sent_at FROM messages WHERE message_id = 'm1'"
+            ).fetchone()[0]
+            == "2026-11-17T07:20:00+00:00"
+        )
+
+
 def test_prompt_contains_current_message_without_preloaded_history(
     tmp_path: Path,
 ) -> None:
@@ -1029,6 +1103,24 @@ def test_prompt_contains_current_message_without_preloaded_history(
     assert "共享长期记忆" in backend.prompts[-1]
     assert "存放提炼的长期事实和偏好" in backend.prompts[-1]
     assert "使用 `lark-im` skill 和 `lark-cli` 搜索或读取" in backend.prompts[-1]
+
+
+def test_prompt_identifies_people_mentioned_in_current_message(tmp_path: Path) -> None:
+    service, _db, backend, _feishu = _service(tmp_path)
+    raw = _event(
+        "m1", sender="alice", text="@_user_1 请 @_user_2 更新进度", mention=True
+    )
+    message = cast(dict[str, Any], cast(dict[str, Any], raw["event"])["message"])
+    message["mentions"] = [
+        {"key": "@_user_1", "name": "AI 同事", "id": {"open_id": "bot"}},
+        {"key": "@_user_2", "name": "Bob", "id": {"open_id": "ou_bob"}},
+    ]
+    service.receive(raw, "bot")
+
+    assert service.process_next()
+    prompt = backend.prompts[-1]
+    assert "`@_user_2` → `Bob`（ID：`ou_bob`）" in prompt
+    assert "`@_user_1` → `AI 同事`（ID：`bot`）" in prompt
 
 
 def test_prompt_renders_message_as_verbatim_data_with_safe_fence(
@@ -1321,6 +1413,33 @@ def test_partner_timeout_is_queued_once_after_the_request_was_sent(
     assert json.loads(actions[0]["payload_json"])["source"] == "coworker_timeout"
 
 
+def test_cancelled_partner_dispatch_releases_pending_delegation(tmp_path: Path) -> None:
+    service, db, backend, _feishu = _service(tmp_path, partner_bots={"Box": "peer"})
+    backend.outputs = [{"action": "delegate", "text": "检查构建", "partner": "Box"}]
+    service.receive(_event("m1", sender="alice", text="检查", mention=True), "bot")
+    assert service.process_next()
+    with db.connect() as conn:
+        action_id = conn.execute(
+            "SELECT request_action_id FROM coworker_delegations"
+        ).fetchone()[0]
+    db.cancel_dispatch_action(action_id)
+    with db.connect() as conn:
+        assert (
+            conn.execute("SELECT status FROM coworker_delegations").fetchone()[0]
+            == "failed"
+        )
+    backend.outputs = [{"action": "delegate", "text": "重新检查", "partner": "Box"}]
+    service.receive(_event("m2", sender="alice", text="再检查", mention=True), "bot")
+    assert service.process_next()
+    with db.connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM coworker_delegations WHERE status = 'pending'"
+            ).fetchone()[0]
+            == 1
+        )
+
+
 def test_explicit_remember_is_persisted_before_reply(tmp_path: Path) -> None:
     service, db, backend, _feishu = _service(tmp_path)
     backend.outputs = [{"action": "reply", "text": "记住了。", "partner": None}]
@@ -1473,6 +1592,26 @@ def test_daily_memory_failure_retries_at_next_scheduled_time(tmp_path: Path) -> 
     assert db.get_checkpoint("coworker.memory_maintenance")["state"] == "failed"  # type: ignore[index]
     now[0] = datetime(2026, 11, 19, 1).astimezone().isoformat()
     assert service.maintain_memory_if_due()
+
+
+def test_daily_memory_timeout_waits_for_review_instead_of_retrying(
+    tmp_path: Path,
+) -> None:
+    service, db, backend, _feishu = _service(tmp_path)
+    now = [datetime(2026, 11, 18, 1).astimezone().isoformat()]
+    db.clock = lambda: now[0]
+    calls: list[str] = []
+
+    def timed_out(*_args: Any, **_kwargs: Any) -> AgentRunResult:
+        calls.append("run")
+        return AgentRunResult(argv=[], exit_code=None, error="timeout", timed_out=True)
+
+    backend.natural_task_session = timed_out  # type: ignore[method-assign]
+    assert service.maintain_memory_if_due()
+    assert db.get_checkpoint("coworker.memory_maintenance")["state"] == "needs_review"  # type: ignore[index]
+    now[0] = datetime(2026, 11, 19, 1).astimezone().isoformat()
+    assert not service.maintain_memory_if_due()
+    assert calls == ["run"]
 
 
 def test_dispatch_rechecks_source_edits_and_coworker_policy(tmp_path: Path) -> None:

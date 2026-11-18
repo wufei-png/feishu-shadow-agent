@@ -19,6 +19,7 @@ export type CoworkerSnapshot = {
   runtime: { business_mode: string; send_mode: string | null; chat_id: string | null; provider: string | null } | null;
   liveness: { status: string };
   memory_maintenance: { state?: string; last_attempt?: string; last_success_at?: string; memory_file_changed?: boolean | null; error_type?: string | null } | null;
+  backend_health?: { status: string; message: string; checked_at: string } | null;
   sessions: Array<{ id: number; thread_id: string; state: string; provider: string }>;
   events: Array<{ id: number; topic_key: string; message_id: string; status: string; error: string | null }>;
   subagents: Array<{ child_thread_id: string; status: string; outcome: string | null }>;

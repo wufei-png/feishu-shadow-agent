@@ -33,6 +33,7 @@ export const consoleCopy = {
   "coworker.enableMode": ["启用 AI 同事模式", "Enable AI coworker mode"],
   "coworker.group": ["目标群", "Group"],
   "coworker.provider": ["后端", "Backend"],
+  "coworker.backendHealth": ["App Server 健康状态", "App Server health"],
   "coworker.send": ["发送方式", "Send mode"],
   "coworker.trigger": ["回复触发", "Reply trigger"],
   "coworker.history": ["历史来源", "History source"],

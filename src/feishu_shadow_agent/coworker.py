@@ -45,7 +45,12 @@ from .reply_destination import candidate_from_message
 from .store.policy_store import COWORKER_POLICY_KEY
 from .store.sqlite_store import SQLiteStore
 from .time_utils import format_instant, parse_instant_or_none, utc_now
-from .types import CoworkerDelegationSpec, MessagePage, NormalizedMessage
+from .types import (
+    CoworkerDelegationSpec,
+    HealthCheckResult,
+    MessagePage,
+    NormalizedMessage,
+)
 
 
 class CoworkerFeishu(Protocol):
@@ -419,6 +424,8 @@ class CoworkerService:
                 "error_type": None,
             }
             self.store.set_checkpoint("coworker.memory_maintenance", running)
+            agent_started = False
+            known_failure = False
             try:
                 prompt = _build_memory_prompt(
                     policy,
@@ -436,12 +443,18 @@ class CoworkerService:
                     memory_path=memory.path,
                 )
                 backend = self.backend_factory(self.config, policy, self.base_dir)
+                agent_started = True
                 result = backend.natural_task_session(
                     prompt,
                     session_id=None,
                     cwd=resolve_agent_working_dir(
                         self.config.agent_backend.working_dir, self.base_dir
                     ),
+                )
+                known_failure = (
+                    not result.ok
+                    and result.exit_code is not None
+                    and not result.timed_out
                 )
                 identity = identify_prompt("coworker_memory", prompt)
                 self.store.record_agent_audit(
@@ -494,6 +507,7 @@ class CoworkerService:
                     | {
                         "state": "needs_review"
                         if isinstance(exc, _StartupPolicyChanged)
+                        or (agent_started and not known_failure)
                         else "failed",
                         "memory_file_changed": _memory_file_changed(
                             before, memory.path
@@ -1341,6 +1355,8 @@ class CoworkerWorker:
         self._steer_thread: threading.Thread | None = None
         self._memory_thread: threading.Thread | None = None
         self._server_started = False
+        self._server_health_lock = threading.Lock()
+        self._server_failure_reported = False
         self.service.wake = self.wake
 
     def wake(self) -> None:
@@ -1360,6 +1376,34 @@ class CoworkerWorker:
         if server is not None:
             server.start()
             self._server_started = True
+            with self._server_health_lock:
+                self._server_failure_reported = False
+                self.service.store.record_health_results(
+                    run_id=None,
+                    results=[
+                        HealthCheckResult(
+                            "coworker_app_server",
+                            "critical",
+                            "ok",
+                            "Codex app-server is ready",
+                        )
+                    ],
+                )
+        elif (
+            self.service.store.latest_health_check_status("coworker_app_server")
+            is not None
+        ):
+            self.service.store.record_health_results(
+                run_id=None,
+                results=[
+                    HealthCheckResult(
+                        "coworker_app_server",
+                        "critical",
+                        "ok",
+                        "Selected backend does not use Codex app-server",
+                    )
+                ],
+            )
         policy = self.service.current_policy()
         count = policy.max_concurrent_topics if server is not None and policy else 1
         self._threads = [
@@ -1432,8 +1476,8 @@ class CoworkerWorker:
         while not self._stop.is_set():
             try:
                 if (
-                    self.runtime_allows_processing()
-                    and self._server_allows_processing()
+                    self._server_allows_processing()
+                    and self.runtime_allows_processing()
                 ):
                     if self.service.process_next():
                         continue
@@ -1465,8 +1509,8 @@ class CoworkerWorker:
         while not self._stop.is_set():
             try:
                 if (
-                    self.runtime_allows_processing()
-                    and self._server_allows_processing()
+                    self._server_allows_processing()
+                    and self.runtime_allows_processing()
                     and self.service.process_next_steer()
                 ):
                     continue
@@ -1481,6 +1525,22 @@ class CoworkerWorker:
         server, chat_id = self.service.app_server, self.service.startup_chat_id
         if server is None or server.is_healthy():
             return True
+        with self._server_health_lock:
+            if not self._server_failure_reported:
+                self.service.store.record_health_results(
+                    run_id=None,
+                    results=[
+                        HealthCheckResult(
+                            "coworker_app_server",
+                            "critical",
+                            "failed",
+                            "Codex app-server stopped; messages remain queued until the daemon is restarted",
+                        )
+                    ],
+                )
+                self.service.logger.error("coworker_app_server_unhealthy")
+                self._server_failure_reported = True
+                self.wake_daemon()
         if chat_id is not None:
             for child in self.service.events.running_subagents(
                 app_id=self.service.app_id, chat_id=chat_id
@@ -1532,7 +1592,11 @@ def event_message_from_raw(raw: dict[str, Any], *, bot_id: str) -> dict[str, Any
     message["mentions"] = mentions
     message["is_at_me"] = bot_id in mentions
     created = message.get("create_time")
-    if isinstance(created, str) and created.isdigit():
+    if (
+        isinstance(created, (str, int))
+        and not isinstance(created, bool)
+        and str(created).isdigit()
+    ):
         message["create_time"] = format_instant(
             datetime.fromtimestamp(int(created) / 1000, UTC)
         )
@@ -1548,6 +1612,7 @@ def _prompt_message(message: NormalizedMessage) -> dict[str, Any]:
         "text": message.text,
         "message_type": message.message_type,
         "is_deleted": message.is_deleted,
+        "mention_details": mention_details(message.raw.get("mention_details")),
         "resources": [
             {"type": resource.resource_type, "file_key": resource.file_key}
             for resource in message.resources
@@ -1793,6 +1858,18 @@ def _build_prompt(
             location.append(f"- 发送时间：{_inline(current['sent_at'])}。")
         if current.get("message_type"):
             location.append(f"- 消息类型：{_inline(current['message_type'])}。")
+        for mention in mention_details(current.get("mention_details")):
+            key, name, identifier = (
+                mention.get("key"),
+                mention.get("name"),
+                mention.get("open_id"),
+            )
+            label = _inline(key or name or identifier)
+            if key and name:
+                label += f" → {_inline(name)}"
+            if identifier and identifier != (key or name):
+                label += f"（ID：{_inline(identifier)}）"
+            location.append(f"- 提及：{label}。")
         resources = current.get("resources")
         if isinstance(resources, list):
             for raw_resource in cast(list[Any], resources):

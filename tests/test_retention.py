@@ -252,7 +252,9 @@ def test_automatic_retention_protects_pending_chain_without_retaining_other_data
         config=AppConfig(owner=OwnerConfig(open_id="ou_owner")),
         base_dir=tmp_path,
     )
-    service.prune(now=NOW, protect_pending=True)
+    summary = service.prune(now=NOW, protect_pending=True)
+    assert summary.raw_messages_pruned == 1
+    assert summary.content_scrubbed == summary.content_candidates
     assert (tmp_path / "data/resources/om_pending/image.bin").exists()
     assert not (tmp_path / "data/resources/om_finished/image.bin").exists()
     with store.connect() as conn:
@@ -269,6 +271,19 @@ def test_automatic_retention_protects_pending_chain_without_retaining_other_data
     assert "secret action pending" in actions["action_pending"]
     assert actions["action_finished"] == RAW_JSON_PRUNED_PLACEHOLDER
     assert tuple(event) == ("queued", '{"event":"keep"}')
+
+
+def test_automatic_retention_reports_zero_when_nothing_is_pruned(
+    tmp_path: Path,
+) -> None:
+    service = RetentionService(
+        store=SQLiteStore(tmp_path / "agent.sqlite3"),
+        config=AppConfig(owner=OwnerConfig(open_id="ou_owner")),
+        base_dir=tmp_path,
+    )
+    summary = service.prune(now=NOW, protect_pending=True)
+    assert summary.raw_messages_pruned == 0
+    assert all(count == 0 for count in summary.content_scrubbed.values())
 
 
 def test_retention_scrubs_full_chain_except_effective_watch(tmp_path: Path) -> None:

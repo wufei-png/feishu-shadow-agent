@@ -393,6 +393,7 @@ class Daemon:
         )
         previous_signal_handlers = self._install_signal_handlers()
         finish_status: str | None = None
+        finish_health_summary: dict[str, object] | None = None
         try:
             self.logger.debug(
                 "daemon_startup_health_started",
@@ -405,14 +406,65 @@ class Daemon:
                 self.logger.emit(
                     "error", "daemon_startup_health_failed", run_id=run_id, data=summary
                 )
-                self.store.record_run_finish(
-                    run_id=run_id, status="health_failed", health_summary=summary
-                )
+                finish_status = "health_failed"
+                finish_health_summary = summary
                 return 2
             if self._stop_is_requested():
                 finish_status = "stopped"
                 return 0
+            if (
+                self.business_mode == "shadow"
+                and self.store.latest_health_check_status("coworker_app_server")
+                is not None
+            ):
+                self.store.record_health_results(
+                    run_id=run_id,
+                    results=[
+                        HealthCheckResult(
+                            "coworker_app_server",
+                            "critical",
+                            "ok",
+                            "Shadow mode does not use Codex app-server",
+                        )
+                    ],
+                )
             self._start_card_action_connection(run_id=run_id)
+            if self.business_mode == "coworker" and (
+                self.card_action_connection is None
+                or not self.card_action_connection.is_healthy()
+            ):
+                failure = HealthCheckResult(
+                    "coworker_event_connection",
+                    "critical",
+                    "failed",
+                    "AI coworker requires a healthy Feishu event connection",
+                    {},
+                )
+                self.store.record_health_results(run_id=run_id, results=[failure])
+                summary = summarize_results([failure])
+                self.logger.emit(
+                    "error", "daemon_startup_health_failed", run_id=run_id, data=summary
+                )
+                finish_status = "health_failed"
+                finish_health_summary = summary
+                return 2
+            if (
+                self.store.latest_health_check_status("coworker_event_connection")
+                is not None
+            ):
+                self.store.record_health_results(
+                    run_id=run_id,
+                    results=[
+                        HealthCheckResult(
+                            "coworker_event_connection",
+                            "critical",
+                            "ok",
+                            "Feishu event connection is ready"
+                            if self.business_mode == "coworker"
+                            else "Shadow mode does not require a coworker event connection",
+                        )
+                    ],
+                )
             if self._stop_is_requested():
                 finish_status = "stopped"
                 return 0
@@ -478,7 +530,11 @@ class Daemon:
             if finish_status is not None:
                 if finish_status == "stopped":
                     self.logger.emit("info", "daemon_stopped", run_id=run_id)
-                self.store.record_run_finish(run_id=run_id, status=finish_status)
+                self.store.record_run_finish(
+                    run_id=run_id,
+                    status=finish_status,
+                    health_summary=finish_health_summary,
+                )
 
     def _start_card_action_connection(self, *, run_id: str) -> None:
         connection = self.card_action_connection
