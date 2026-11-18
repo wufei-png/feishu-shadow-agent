@@ -1,5 +1,6 @@
 config.yaml
 config.*.yaml
+config_*.yaml
 aiwork.md
 docs/other_records/
 data/
