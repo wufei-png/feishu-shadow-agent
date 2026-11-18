@@ -124,6 +124,24 @@ jobs:
                   path = f"feishu_shadow_agent/console_static/assets/{asset}"
                   assert path in names, f"missing {path}"
           PY
+      - name: Smoke-test installed wheel
+        run: |
+          set -euo pipefail
+          wheel_venv="$RUNNER_TEMP/wheel-venv"
+          smoke_dir="$RUNNER_TEMP/wheel-smoke"
+          uv venv --python 3.11 "$wheel_venv"
+          uv pip install --python "$wheel_venv/bin/python" dist/*.whl
+          mkdir -p "$smoke_dir"
+          cd "$smoke_dir"
+          "$wheel_venv/bin/python" -m feishu_shadow_agent --help
+          "$wheel_venv/bin/python" - <<'PY'
+          from importlib.resources import files
+
+          index = files("feishu_shadow_agent").joinpath("console_static").joinpath("index.html")
+          assert index.is_file(), f"missing packaged console index: {index}"
+          html = index.read_text(encoding="utf-8")
+          assert '<div id="root">' in html, "packaged index is not the Operator Console shell"
+          PY
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: python-distributions
