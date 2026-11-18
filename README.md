@@ -100,7 +100,7 @@ python -m feishu_shadow_agent console --config config.yaml
 
 每次 owner 处理审批都会写一条不可变反馈，区分建议直接发送、编辑后发送、不发送继续关注和不发送结束任务。反馈不会自动修改 Product Policy。默认保留敏感文本 30 天；到期只清空原记录中的敏感字段，保留最小审计元数据，不级联删除任务链记录。仍处于有效 `watch_until` 的 watching task 暂缓清理，具体可通过 `retention` 配置。
 
-从源码修改 `frontend/operator-console/` 后，需要依次运行 `lint`、`test` 和 `build`；build 会把 renderer 重新写入 Python 包内的 bundled static assets。
+从源码修改 `frontend/operator-console/` 后，先运行 `npm --prefix frontend/operator-console ci` 安装锁定依赖，再依次运行 `lint`、`test` 和 `build`；build 会把 renderer 重新写入 Python 包内的 bundled static assets。
 
 ## 测试
 
