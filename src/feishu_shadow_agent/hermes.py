@@ -28,21 +28,28 @@ from .config import (
 # contract; the subprocess adapter itself accepts the provider's optional value.
 HermesRunner = Callable[..., AgentRunResult]
 SESSION_ID_RE = re.compile(r"session_id:\s*([^\s]+)")
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+TIRITH_WARNING = (
+    "⚠ tirith security scanner enabled but not available "
+    "— command scanning will use pattern matching only"
+)
 
 
 @dataclass(frozen=True)
 class HermesExecutionPolicy:
-    toolsets: str
+    toolsets: str | None
     yolo: bool = False
 
     def cli_args(self) -> list[str]:
-        args = ["--toolsets", self.toolsets]
+        args = [] if self.toolsets is None else ["--toolsets", self.toolsets]
         if self.yolo:
             args.append("--yolo")
         return args
 
 
 def hermes_execution_policy(profile: ToolPermissionsProfile) -> HermesExecutionPolicy:
+    if profile == "inherit":
+        return HermesExecutionPolicy(toolsets=None)
     if profile == "read_only":
         return HermesExecutionPolicy(toolsets="safe")
     if profile == "full_access":
@@ -162,6 +169,29 @@ class HermesCliClient:
         del output_model
         return self.task_session(prompt, session_id=session_id, cwd=cwd)
 
+    def natural_task_session(
+        self,
+        prompt: str,
+        *,
+        session_id: str | None = None,
+        cwd: str | Path | None = None,
+    ) -> AgentRunResult:
+        effective_prompt = (
+            append_explicit_context_paths(prompt, self.explicit_context_paths)
+            if session_id is None
+            else prompt
+        )
+        return self._run(
+            self.build_chat_command(
+                prompt=effective_prompt,
+                max_turns=self.config.session_max_turns,
+                session_id=session_id,
+                include_session_skills=True,
+            ),
+            cwd=cwd,
+            parse_json=False,
+        )
+
     def structured_output(
         self,
         prompt: str,
@@ -211,7 +241,9 @@ class HermesCliClient:
             cwd=cwd,
         )
 
-    def _run(self, argv: list[str], *, cwd: str | Path | None = None) -> AgentRunResult:
+    def _run(
+        self, argv: list[str], *, cwd: str | Path | None = None, parse_json: bool = True
+    ) -> AgentRunResult:
         run_cwd = self.cwd if cwd is None else Path(cwd)
         if self._runner is not None:
             result = self._runner(argv, self.config.timeout_seconds)
@@ -222,7 +254,17 @@ class HermesCliClient:
         # Hermes writes session metadata to stderr while stdout remains the strict
         # JSON contract consumed by the daemon.
         parsed_session_id = result.session_id or _parse_session_id(result.stderr)
-        stdout = result.stdout.strip()
+        if not parse_json:
+            return AgentRunResult(
+                argv=result.argv,
+                exit_code=result.exit_code,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                session_id=parsed_session_id,
+                latency_ms=result.latency_ms,
+                backend_provider=self.provider,
+            )
+        stdout = _strip_known_stdout_warnings(result.stdout)
         try:
             json_data: Any = json.loads(stdout)
         except json.JSONDecodeError as exc:
@@ -316,6 +358,14 @@ def _decode_command_output(value: str | bytes | None) -> str:
 def _parse_session_id(stderr: str) -> str | None:
     match = SESSION_ID_RE.search(stderr or "")
     return match.group(1) if match else None
+
+
+def _strip_known_stdout_warnings(stdout: str) -> str:
+    """Hermes 0.20 can print this startup warning even with quiet mode."""
+    lines = stdout.strip().splitlines()
+    while lines and ANSI_ESCAPE_RE.sub("", lines[0]).strip() == TIRITH_WARNING:
+        lines.pop(0)
+    return "\n".join(lines).strip()
 
 
 def _latency_ms(started: float) -> int:

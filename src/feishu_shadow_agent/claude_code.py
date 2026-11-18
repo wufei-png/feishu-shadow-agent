@@ -43,6 +43,8 @@ class ClaudeCodeExecutionPolicy:
 def claude_code_execution_policy(
     profile: ToolPermissionsProfile,
 ) -> ClaudeCodeExecutionPolicy:
+    if profile == "inherit":
+        return ClaudeCodeExecutionPolicy(args=[])
     if profile == "read_only":
         tools = ",".join(READ_ONLY_TOOLS)
         return ClaudeCodeExecutionPolicy(
@@ -83,6 +85,9 @@ class ClaudeCodeCliClient:
         runner: ClaudeCodeRunner | None = None,
     ):
         self.config = config
+        self.inherit_native_tools = (
+            tool_permissions == "inherit" and config_scope == "native"
+        )
         self.execution_policy = claude_code_execution_policy(tool_permissions)
         self.read_only_execution_policy = claude_code_execution_policy("read_only")
         self.config_scope = config_scope
@@ -110,10 +115,9 @@ class ClaudeCodeCliClient:
             "--json-schema",
             json.dumps(output_schema, ensure_ascii=False, separators=(",", ":")),
             *policy.args,
-            "--mcp-config",
-            EMPTY_MCP_CONFIG,
-            "--strict-mcp-config",
         ]
+        if not self.inherit_native_tools or policy.args:
+            argv.extend(["--mcp-config", EMPTY_MCP_CONFIG, "--strict-mcp-config"])
         if self.config_scope == "isolated":
             argv.extend(["--setting-sources", "local"])
         if self.auto_context == "disabled":

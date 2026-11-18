@@ -279,6 +279,7 @@ def test_config_schema_outputs_json_schema(capsys) -> None:
     assert schema["properties"]["tool_permissions"]["enum"] == [
         "read_only",
         "full_access",
+        "inherit",
     ]
     assert "description" in schema["properties"]["reply_policy"]
     assert (

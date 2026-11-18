@@ -97,6 +97,42 @@ def test_codex_cli_can_use_native_config_and_auto_context() -> None:
     assert "--ignore-rules" not in argv
 
 
+def test_codex_inherit_does_not_override_native_permissions_or_instructions() -> None:
+    commands: list[list[str]] = []
+
+    def runner(argv: list[str], *_args: object) -> AgentRunResult:
+        commands.append(argv)
+        _write_last_message(
+            argv, {"route": "ignore", "target_task_id": None, "reason": "test"}
+        )
+        return AgentRunResult(
+            argv=argv,
+            exit_code=0,
+            stdout='{"type":"thread.started","thread_id":"s1"}\n',
+        )
+
+    client = CodexCliClient(
+        config=CodexConfig(path="codex"),
+        tool_permissions="inherit",
+        config_scope="native",
+        auto_context="enabled",
+        runner=runner,
+    )
+    result = client.structured_task_session("test", output_model=TaskRouterOutput)
+
+    assert result.ok
+    argv = commands[0]
+    assert not {
+        "--sandbox",
+        "--search",
+        "--ask-for-approval",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--ignore-user-config",
+        "--ignore-rules",
+    } & set(argv)
+    assert not any(arg.startswith("developer_instructions=") for arg in argv)
+
+
 def test_codex_cli_builds_resume_command_for_followup_session() -> None:
     client = CodexCliClient(config=CodexConfig(path="/bin/codex"))
 
@@ -111,6 +147,23 @@ def test_codex_cli_builds_resume_command_for_followup_session() -> None:
         "019f3d87-afa5-7140-9ba2-2c92ec10de87",
         "-",
     ]
+
+
+def test_natural_coworker_session_resumes_without_json_output_schema() -> None:
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], *_args: object) -> AgentRunResult:
+        calls.append(argv)
+        _write_last_message(argv, "已处理")
+        return AgentRunResult(argv=argv, exit_code=0, session_id="session")
+
+    client = CodexCliClient(config=CodexConfig(path="codex"), runner=runner)
+    result = client.natural_task_session("处理群消息", session_id="session")
+
+    assert result.ok and result.session_id == "session"
+    assert "--output-schema" not in calls[0]
+    assert "--json" in calls[0]
+    assert calls[0][-3:] == ["resume", "session", "-"]
 
 
 def test_codex_cli_parses_last_message_json_and_thread_id() -> None:

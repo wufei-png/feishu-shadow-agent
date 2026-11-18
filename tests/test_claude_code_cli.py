@@ -86,6 +86,23 @@ def test_claude_code_can_use_native_config_and_auto_context() -> None:
     assert "--safe-mode" not in argv
 
 
+def test_claude_code_inherit_preserves_native_tools_and_mcp() -> None:
+    client = ClaudeCodeCliClient(
+        config=ClaudeCodeConfig(path="claude"),
+        tool_permissions="inherit",
+        config_scope="native",
+        auto_context="enabled",
+    )
+    argv = client.build_print_command(output_schema={"type": "object"})
+    assert not {
+        "--tools",
+        "--permission-mode",
+        "--strict-mcp-config",
+        "--mcp-config",
+        "--safe-mode",
+    } & set(argv)
+
+
 def test_claude_code_builds_resume_command_for_followup_session() -> None:
     client = ClaudeCodeCliClient(config=ClaudeCodeConfig(path="/bin/claude"))
 

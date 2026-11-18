@@ -377,7 +377,7 @@ class ClaudeCodeConfig(StrictModel):
     )
 
 
-ToolPermissionsProfile = Literal["read_only", "full_access"]
+ToolPermissionsProfile = Literal["read_only", "full_access", "inherit"]
 ConfigScopeMode = Literal["isolated", "native"]
 AutoContextMode = Literal["disabled", "enabled"]
 ConfigAgentBackendProvider = Literal["hermes", "codex", "claude_code"]
@@ -456,6 +456,143 @@ class AgentBackendConfig(StrictModel):
         if not cleaned:
             raise ValueError("agent_backend.working_dir must not be empty")
         return cleaned
+
+
+class CoworkerPartnerConfig(StrictModel):
+    open_id: str = Field(
+        min_length=1,
+        description="The partner bot's open ID in this application's identity space.",
+    )
+    description: str = Field(
+        default="",
+        description="The partner's responsibilities and when to delegate to it.",
+    )
+
+
+class CoworkerConfig(StrictModel):
+    enabled: StrictBool = Field(
+        default=False,
+        description="Enable the AI coworker for one explicitly configured group.",
+    )
+    chat_id: str | None = Field(
+        default=None,
+        description="The single Feishu group permitted to use coworker mode.",
+    )
+    provider: Literal["codex", "hermes"] = Field(
+        default="codex", description="Backend provider for coworker conversations."
+    )
+    send_mode: Literal["agent_direct", "project"] = Field(
+        default="agent_direct",
+        description="Fix the coworker send path for the lifetime of the daemon.",
+    )
+    trigger_mode: Literal["mention", "followups"] = Field(
+        default="mention", description="When to invoke the coworker agent."
+    )
+    history_source: Literal["live_on_demand", "local_cache"] = Field(
+        default="live_on_demand", description="Where to acquire topic history."
+    )
+    history_limit: int = Field(
+        default=30,
+        ge=1,
+        le=50,
+        description="Default page size for local cache queries and bounded cache backfill.",
+    )
+    agent_timeout_seconds: int = Field(
+        default=600,
+        ge=1,
+        le=7200,
+        description="Maximum wall time for one coworker agent turn.",
+    )
+    max_concurrent_topics: int = Field(
+        default=3,
+        ge=1,
+        le=16,
+        description="Maximum concurrently running coworker topic turns.",
+    )
+    subagent_timeout_seconds: int = Field(
+        default=3600,
+        ge=60,
+        le=86400,
+        description="Maximum time to drain background subagents during graceful shutdown.",
+    )
+    partner_bots: dict[str, str | CoworkerPartnerConfig] = Field(
+        default_factory=dict,
+        description="Allowed partner names mapped to bot open IDs or an open ID with a responsibility description.",
+    )
+    delegation_timeout_seconds: int = Field(
+        default=900,
+        ge=30,
+        le=86400,
+        description="How long to wait for a partner result.",
+    )
+    delegation_rate_limit: int = Field(
+        default=5,
+        ge=1,
+        le=100,
+        description="Maximum delegations to one partner in the rate window per topic.",
+    )
+    delegation_rate_window_seconds: int = Field(
+        default=900,
+        ge=30,
+        le=86400,
+        description="Rate window for partner delegations in a topic.",
+    )
+    memory_maintenance: StrictBool = Field(
+        default=True, description="Allow background maintenance of long-term context."
+    )
+    shared_memory_path: str = Field(
+        default="data/coworker-shared-memory.md",
+        min_length=1,
+        description="One shared memory file, resolved relative to the configuration directory.",
+    )
+    memory_maintenance_time: str = Field(
+        default="00:00",
+        description="Daily memory maintenance time in the daemon's local timezone (HH:MM).",
+        json_schema_extra={"pattern": r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"},
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_memory_interval(cls, value: Any) -> Any:
+        # Existing imported policies contain this field even when it was omitted
+        # from YAML. Daily scheduling replaces the old interval semantics.
+        if not isinstance(value, dict):
+            return value
+        raw = cast(dict[str, Any], value)
+        if "memory_maintenance_interval_seconds" in raw:
+            migrated = dict(raw)
+            migrated.pop("memory_maintenance_interval_seconds")
+            return migrated
+        return raw
+
+    @field_validator("memory_maintenance_time")
+    @classmethod
+    def validate_memory_maintenance_time(cls, value: str) -> str:
+        if re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", value) is None:
+            raise ValueError("memory_maintenance_time must be HH:MM in 24-hour time")
+        return value
+
+    @model_validator(mode="after")
+    def validate_target_and_partners(self) -> CoworkerConfig:
+        if self.enabled and not (self.chat_id and self.chat_id.strip()):
+            raise ValueError("coworker.chat_id is required when coworker is enabled")
+        identifiers = [self.partner_open_id(name) for name in self.partner_bots]
+        if any(not name.strip() for name in self.partner_bots) or any(
+            not identifier.strip() for identifier in identifiers
+        ):
+            raise ValueError(
+                "coworker.partner_bots names and open IDs must not be empty"
+            )
+        if len(set(identifiers)) != len(identifiers):
+            raise ValueError("coworker.partner_bots open IDs must be unique")
+        return self
+
+    def partner_open_id(self, name: str) -> str:
+        partner = self.partner_bots[name]
+        return partner if isinstance(partner, str) else partner.open_id
+
+    def partner_open_ids(self) -> set[str]:
+        return {self.partner_open_id(name) for name in self.partner_bots}
 
 
 class ReplyPolicyConfig(StrictModel):
@@ -688,6 +825,10 @@ class AppConfig(StrictModel):
         default_factory=AgentBackendConfig,
         description="Agent backend provider, isolation policy, explicit context, and provider-specific settings.",
     )
+    coworker: CoworkerConfig = Field(
+        default_factory=CoworkerConfig,
+        description="Single-group AI coworker policy import source, disabled by default.",
+    )
     reply_policy: ReplyPolicyConfig = Field(
         default_factory=ReplyPolicyConfig,
         description="Global auto-reply policy used before chat-specific overrides.",
@@ -702,7 +843,7 @@ class AppConfig(StrictModel):
     )
     tool_permissions: ToolPermissionsProfile = Field(
         default="read_only",
-        description="Agent backend tool permission profile: read_only or full_access.",
+        description="Agent backend tool permission profile: read_only, full_access, or inherit native settings.",
     )
     retention: RetentionConfig = Field(
         default_factory=RetentionConfig, description="Local data retention settings."

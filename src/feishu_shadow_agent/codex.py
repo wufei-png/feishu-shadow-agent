@@ -55,6 +55,8 @@ class CodexExecutionPolicy:
 
 
 def codex_execution_policy(profile: ToolPermissionsProfile) -> CodexExecutionPolicy:
+    if profile == "inherit":
+        return CodexExecutionPolicy(root_args=[], exec_args=[])
     if profile == "read_only":
         return CodexExecutionPolicy(
             root_args=["--search", "--ask-for-approval", "never"],
@@ -85,6 +87,9 @@ class CodexCliClient:
         runner: CodexRunner | None = None,
     ):
         self.config = config
+        self.inherit_native_instructions = (
+            tool_permissions == "inherit" and config_scope == "native"
+        )
         self.execution_policy = codex_execution_policy(tool_permissions)
         self.read_only_execution_policy = codex_execution_policy("read_only")
         self.config_scope = config_scope
@@ -102,7 +107,7 @@ class CodexCliClient:
     def build_exec_command(
         self,
         *,
-        output_schema_path: str | Path,
+        output_schema_path: str | Path | None,
         output_path: str | Path,
         session_id: str | None = None,
         cwd: str | Path | None = None,
@@ -141,15 +146,10 @@ class CodexCliClient:
         run_cwd = self.cwd if cwd is None else Path(cwd)
         if run_cwd is not None:
             argv.extend(["--cd", str(run_cwd)])
-        argv.extend(
-            [
-                "--json",
-                "--output-schema",
-                str(output_schema_path),
-                "--output-last-message",
-                str(output_path),
-            ]
-        )
+        argv.append("--json")
+        if output_schema_path is not None:
+            argv.extend(["--output-schema", str(output_schema_path)])
+        argv.extend(["--output-last-message", str(output_path)])
         effective_model = self.config.model if model is None else model
         if effective_model:
             argv.extend(["--model", effective_model])
@@ -182,7 +182,9 @@ class CodexCliClient:
             session_id=session_id,
             cwd=cwd,
             include_session_skills=session_id is None,
-            developer_instructions=TASK_SESSION_DEVELOPER_INSTRUCTIONS,
+            developer_instructions=None
+            if self.inherit_native_instructions
+            else TASK_SESSION_DEVELOPER_INSTRUCTIONS,
         )
 
     def structured_task_session(
@@ -199,7 +201,9 @@ class CodexCliClient:
             session_id=session_id,
             cwd=cwd,
             include_session_skills=session_id is None,
-            developer_instructions=TASK_SESSION_DEVELOPER_INSTRUCTIONS,
+            developer_instructions=None
+            if self.inherit_native_instructions
+            else TASK_SESSION_DEVELOPER_INSTRUCTIONS,
         )
 
     def structured_output(
@@ -212,6 +216,21 @@ class CodexCliClient:
     ) -> AgentRunResult:
         return self._run(
             prompt, output_model=output_model, session_id=session_id, cwd=cwd
+        )
+
+    def natural_task_session(
+        self,
+        prompt: str,
+        *,
+        session_id: str | None = None,
+        cwd: str | Path | None = None,
+    ) -> AgentRunResult:
+        return self._run(
+            prompt,
+            output_model=None,
+            session_id=session_id,
+            cwd=cwd,
+            include_session_skills=session_id is None,
         )
 
     def reply_postprocess(
@@ -240,7 +259,7 @@ class CodexCliClient:
         self,
         prompt: str,
         *,
-        output_model: type[BaseModel],
+        output_model: type[BaseModel] | None,
         session_id: str | None = None,
         cwd: str | Path | None = None,
         execution_policy: CodexExecutionPolicy | None = None,
@@ -257,7 +276,11 @@ class CodexCliClient:
             effective_prompt = append_codex_skill_mentions(
                 effective_prompt, self.session_skill_names
             )
-        schema_path = _write_temp_json(agent_output_schema(output_model))
+        schema_path = (
+            _write_temp_json(agent_output_schema(output_model))
+            if output_model is not None
+            else None
+        )
         output_path = _empty_temp_path()
         argv = self.build_exec_command(
             output_schema_path=schema_path,
@@ -284,6 +307,8 @@ class CodexCliClient:
             if not result.ok:
                 return _with_codex_provider(result, session_id=parsed_session_id)
             json_text = _last_message_text(result.stdout, output_path)
+            if output_model is None:
+                return _with_codex_provider(result, session_id=parsed_session_id)
             if not json_text:
                 return AgentRunResult(
                     argv=result.argv,
@@ -319,7 +344,8 @@ class CodexCliClient:
                 backend_provider=self.provider,
             )
         finally:
-            _unlink_quietly(schema_path)
+            if schema_path is not None:
+                _unlink_quietly(schema_path)
             _unlink_quietly(output_path)
 
     def requested_skill_names(self) -> list[str]:

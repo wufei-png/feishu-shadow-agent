@@ -81,6 +81,32 @@ def test_hermes_cli_can_use_native_config_and_auto_context() -> None:
     assert "--ignore-rules" not in argv
 
 
+def test_hermes_inherit_preserves_native_tool_selection() -> None:
+    client = HermesCliClient(
+        config=HermesConfig(path="hermes"),
+        tool_permissions="inherit",
+        config_scope="native",
+        auto_context="enabled",
+    )
+    argv = client.build_chat_command(prompt="{}", max_turns=1)
+    assert not {"--toolsets", "--yolo", "--ignore-rules", "--ignore-user-config"} & set(
+        argv
+    )
+
+
+def test_hermes_natural_coworker_session_accepts_plain_text() -> None:
+    def runner(argv: list[str], timeout: int) -> AgentRunResult:
+        return AgentRunResult(
+            argv=argv, exit_code=0, stdout="已完成", stderr="session_id: s1"
+        )
+
+    client = HermesCliClient(config=HermesConfig(path="hermes"), runner=runner)
+    result = client.natural_task_session("处理群消息", session_id="s1")
+    assert result.ok and result.session_id == "s1"
+    assert result.json_data is None
+    assert "--resume" in result.argv
+
+
 def test_hermes_cli_injects_explicit_skills_only_for_task_session() -> None:
     client = HermesCliClient(
         config=HermesConfig(path="/bin/hermes"),
@@ -185,6 +211,35 @@ def test_hermes_cli_rejects_non_json_stdout() -> None:
     assert not result.ok
     assert result.session_id == "sid"
     assert "not valid JSON" in (result.error or "")
+
+
+def test_hermes_accepts_only_the_known_tirith_warning_before_json() -> None:
+    def runner(argv: list[str], timeout: int) -> AgentRunResult:
+        return AgentRunResult(
+            argv=argv,
+            exit_code=0,
+            stdout=(
+                "\x1b[2m⚠ tirith security scanner enabled but not available "
+                "— command scanning will use pattern matching only\x1b[0m\n"
+                '{"route":"ignore","target_task_id":null,"reason":"done"}'
+            ),
+        )
+
+    result = HermesCliClient(
+        config=HermesConfig(path="hermes"), runner=runner
+    ).task_session("prompt")
+    assert result.ok
+    assert result.json_data is not None and result.json_data["route"] == "ignore"
+
+    def unknown_warning(argv: list[str], timeout: int) -> AgentRunResult:
+        return AgentRunResult(
+            argv=argv, exit_code=0, stdout='unknown warning\n{"route":"ignore"}'
+        )
+
+    result = HermesCliClient(
+        config=HermesConfig(path="hermes"), runner=unknown_warning
+    ).task_session("prompt")
+    assert not result.ok
 
 
 def test_reply_postprocess_uses_safe_toolset_without_resume_or_skills() -> None:

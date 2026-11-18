@@ -244,6 +244,185 @@
       "title": "CodexConfig",
       "type": "object"
     },
+    "CoworkerConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Enable the AI coworker for one explicitly configured group.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "chat_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The single Feishu group permitted to use coworker mode.",
+          "title": "Chat Id"
+        },
+        "provider": {
+          "default": "codex",
+          "description": "Backend provider for coworker conversations.",
+          "enum": [
+            "codex",
+            "hermes"
+          ],
+          "title": "Provider",
+          "type": "string"
+        },
+        "send_mode": {
+          "default": "agent_direct",
+          "description": "Fix the coworker send path for the lifetime of the daemon.",
+          "enum": [
+            "agent_direct",
+            "project"
+          ],
+          "title": "Send Mode",
+          "type": "string"
+        },
+        "trigger_mode": {
+          "default": "mention",
+          "description": "When to invoke the coworker agent.",
+          "enum": [
+            "mention",
+            "followups"
+          ],
+          "title": "Trigger Mode",
+          "type": "string"
+        },
+        "history_source": {
+          "default": "live_on_demand",
+          "description": "Where to acquire topic history.",
+          "enum": [
+            "live_on_demand",
+            "local_cache"
+          ],
+          "title": "History Source",
+          "type": "string"
+        },
+        "history_limit": {
+          "default": 30,
+          "description": "Default page size for local cache queries and bounded cache backfill.",
+          "maximum": 50,
+          "minimum": 1,
+          "title": "History Limit",
+          "type": "integer"
+        },
+        "agent_timeout_seconds": {
+          "default": 600,
+          "description": "Maximum wall time for one coworker agent turn.",
+          "maximum": 7200,
+          "minimum": 1,
+          "title": "Agent Timeout Seconds",
+          "type": "integer"
+        },
+        "max_concurrent_topics": {
+          "default": 3,
+          "description": "Maximum concurrently running coworker topic turns.",
+          "maximum": 16,
+          "minimum": 1,
+          "title": "Max Concurrent Topics",
+          "type": "integer"
+        },
+        "subagent_timeout_seconds": {
+          "default": 3600,
+          "description": "Maximum time to drain background subagents during graceful shutdown.",
+          "maximum": 86400,
+          "minimum": 60,
+          "title": "Subagent Timeout Seconds",
+          "type": "integer"
+        },
+        "partner_bots": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/CoworkerPartnerConfig"
+              }
+            ]
+          },
+          "description": "Allowed partner names mapped to bot open IDs or an open ID with a responsibility description.",
+          "title": "Partner Bots",
+          "type": "object"
+        },
+        "delegation_timeout_seconds": {
+          "default": 900,
+          "description": "How long to wait for a partner result.",
+          "maximum": 86400,
+          "minimum": 30,
+          "title": "Delegation Timeout Seconds",
+          "type": "integer"
+        },
+        "delegation_rate_limit": {
+          "default": 5,
+          "description": "Maximum delegations to one partner in the rate window per topic.",
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Delegation Rate Limit",
+          "type": "integer"
+        },
+        "delegation_rate_window_seconds": {
+          "default": 900,
+          "description": "Rate window for partner delegations in a topic.",
+          "maximum": 86400,
+          "minimum": 30,
+          "title": "Delegation Rate Window Seconds",
+          "type": "integer"
+        },
+        "memory_maintenance": {
+          "default": true,
+          "description": "Allow background maintenance of long-term context.",
+          "title": "Memory Maintenance",
+          "type": "boolean"
+        },
+        "shared_memory_path": {
+          "default": "data/coworker-shared-memory.md",
+          "description": "One shared memory file, resolved relative to the configuration directory.",
+          "minLength": 1,
+          "title": "Shared Memory Path",
+          "type": "string"
+        },
+        "memory_maintenance_time": {
+          "default": "00:00",
+          "description": "Daily memory maintenance time in the daemon's local timezone (HH:MM).",
+          "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$",
+          "title": "Memory Maintenance Time",
+          "type": "string"
+        }
+      },
+      "title": "CoworkerConfig",
+      "type": "object"
+    },
+    "CoworkerPartnerConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "open_id": {
+          "description": "The partner bot's open ID in this application's identity space.",
+          "minLength": 1,
+          "title": "Open Id",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "description": "The partner's responsibilities and when to delegate to it.",
+          "title": "Description",
+          "type": "string"
+        }
+      },
+      "required": [
+        "open_id"
+      ],
+      "title": "CoworkerPartnerConfig",
+      "type": "object"
+    },
     "DaemonConfig": {
       "additionalProperties": false,
       "properties": {
@@ -907,6 +1086,10 @@
       "$ref": "#/$defs/AgentBackendConfig",
       "description": "Agent backend provider, isolation policy, explicit context, and provider-specific settings."
     },
+    "coworker": {
+      "$ref": "#/$defs/CoworkerConfig",
+      "description": "Single-group AI coworker policy import source, disabled by default."
+    },
     "reply_policy": {
       "$ref": "#/$defs/ReplyPolicyConfig",
       "description": "Global auto-reply policy used before chat-specific overrides."
@@ -925,10 +1108,11 @@
     },
     "tool_permissions": {
       "default": "read_only",
-      "description": "Agent backend tool permission profile: read_only or full_access.",
+      "description": "Agent backend tool permission profile: read_only, full_access, or inherit native settings.",
       "enum": [
         "read_only",
-        "full_access"
+        "full_access",
+        "inherit"
       ],
       "title": "Tool Permissions",
       "type": "string"
