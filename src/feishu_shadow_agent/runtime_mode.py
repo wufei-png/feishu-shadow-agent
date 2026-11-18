@@ -11,7 +11,9 @@ from typing import Any, cast
 
 from .config import ConfigError, LoadedConfig
 from .paths import resolve_relative_path
+from .store.policy_store import COWORKER_POLICY_KEY
 from .store.schema import (
+    SQLITE_APPLICATION_ID,
     IncompatibleSchemaError,
     is_uninitialized_schema,
     require_current_schema,
@@ -126,7 +128,7 @@ def _policy_lock(store: SQLiteStore) -> Generator[None, None, None]:
 
 def _read_production_policy(
     loaded: LoadedConfig,
-) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any] | None] | None:
     database = resolve_relative_path(
         loaded.config.storage.sqlite_path, loaded.base_dir
     ).resolve()
@@ -138,7 +140,10 @@ def _read_production_policy(
             connection.execute("BEGIN")
             if is_uninitialized_schema(connection):
                 return None
-            require_current_schema(connection)
+            app_id = connection.execute("PRAGMA application_id").fetchone()[0]
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if app_id != SQLITE_APPLICATION_ID or version not in (9, 10):
+                require_current_schema(connection)
             tables = {
                 row[0]
                 for row in connection.execute(
@@ -170,7 +175,22 @@ def _read_production_policy(
                     "SELECT chat_id, name, auto_reply, bot_joined, reply_identity, allow_user_fallback, resource_download FROM chat_policies ORDER BY chat_id"
                 )
             ]
-            return cast(dict[str, Any], policy), chats
+            coworker_row = connection.execute(
+                "SELECT policy_json FROM product_policies WHERE key = ?",
+                (COWORKER_POLICY_KEY,),
+            ).fetchone()
+            coworker: Any = (
+                None
+                if coworker_row is None
+                else json.loads(coworker_row["policy_json"])
+            )
+            if coworker is not None and not isinstance(coworker, dict):
+                raise ConfigError("production coworker policy has an invalid format")
+            return (
+                cast(dict[str, Any], policy),
+                chats,
+                cast(dict[str, Any] | None, coworker),
+            )
     except (sqlite3.Error, json.JSONDecodeError, IncompatibleSchemaError) as exc:
         raise ConfigError(f"cannot read production policy for dry-run: {exc}") from exc
 
@@ -179,10 +199,13 @@ def _apply_snapshot(
     store: SQLiteStore,
     global_policy: dict[str, Any],
     chats: list[dict[str, Any]],
+    coworker_policy: dict[str, Any] | None,
     *,
     source: str,
 ) -> None:
     try:
-        store.replace_product_policy_snapshot(global_policy, chats, source=source)
+        store.replace_product_policy_snapshot(
+            global_policy, chats, source=source, coworker_policy=coworker_policy
+        )
     except (ValueError, sqlite3.Error) as exc:
         raise ConfigError(f"production policy snapshot is invalid: {exc}") from exc

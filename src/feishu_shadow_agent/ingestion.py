@@ -10,7 +10,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from .config import AppConfig
+from .config import AppConfig, CoworkerConfig
 from .feishu.lark_cli import LarkCliCommandError
 from .jsonl import JSONLLogger
 from .message_eligibility import MessageEligibilityPolicy
@@ -29,6 +29,7 @@ from .resource_processing import ResourceQuotaDecision as ResourceQuotaDecision
 from .resource_processing import ResourceQuotaGuard as ResourceQuotaGuard
 from .revision import message_semantic_hash
 from .routing import MessageRouter, RoutingResult
+from .store.policy_store import COWORKER_POLICY_KEY
 from .store.sqlite_store import SQLiteStore
 from .time_utils import (
     format_instant,
@@ -38,6 +39,7 @@ from .time_utils import (
     shift_instant,
 )
 from .types import (
+    BusinessScope,
     LarkCliResult,
     MessagePage,
     NormalizedMessage,
@@ -207,11 +209,13 @@ class IngestionService:
         preserve_resource_base_path: bool = False,
         monotonic: Callable[[], float] | None = None,
         dry_run: bool = False,
+        approval_scope: BusinessScope = "all",
     ):
         self.store = store
         self.feishu_client = feishu_client
         self.config = config
         self.dry_run = dry_run
+        self.approval_scope = approval_scope
         self._p2p_scope_attempted = False
         self._p2p_scope: set[str] = set()
         self._p2p_scope_error: str | None = None
@@ -465,7 +469,12 @@ class IngestionService:
         )
         if not bot_open_id:
             raise RuntimeError("bot open_id is missing from lark-cli auth status")
-        window = self._window("approval_inbox", source="approval_inbox", run_id=run_id)
+        checkpoint = (
+            "approval_inbox.coworker"
+            if self.approval_scope == "coworker"
+            else "approval_inbox"
+        )
+        window = self._window(checkpoint, source="approval_inbox", run_id=run_id)
         drain = self._drain(
             lambda token, page_size, _page_limit: self.feishu_client.list_p2p_messages(
                 user_id=bot_open_id,
@@ -1188,6 +1197,18 @@ class IngestionService:
                 },
             )
             raise
+        if message.chat_type == "group":
+            coworker = self.store.get_product_policy(COWORKER_POLICY_KEY)
+            if coworker is not None:
+                coworker_policy = CoworkerConfig.model_validate(coworker)
+                if (
+                    coworker_policy.enabled
+                    and coworker_policy.chat_id == message.chat_id
+                ):
+                    self.logger.info(
+                        "coworker_group_shadow_ingestion_skipped", run_id=run_id
+                    )
+                    return None
         if message.chat_type == "group" and (
             not message.chat_id
             or self.store.get_chat_product_policy(message.chat_id) is None

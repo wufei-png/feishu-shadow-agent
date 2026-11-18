@@ -14,18 +14,25 @@ from feishu_shadow_agent.cli import main
 from feishu_shadow_agent.config import (
     AppConfig,
     ChatPolicyConfig,
+    CoworkerConfig,
     DaemonConfig,
     LoadedConfig,
     OwnerConfig,
 )
 from feishu_shadow_agent.daemon import Daemon
+from feishu_shadow_agent.dispatcher import DispatchSummary
 from feishu_shadow_agent.health import REQUIRED_USER_SCOPES, HealthSuite
 from feishu_shadow_agent.ingestion import IngestionService, StageResult
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.operator_query import OperatorQueryService
 from feishu_shadow_agent.processing import TaskProcessingService
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
-from feishu_shadow_agent.types import HealthCheckResult, LarkCliResult, MessagePage
+from feishu_shadow_agent.types import (
+    BusinessScope,
+    HealthCheckResult,
+    LarkCliResult,
+    MessagePage,
+)
 
 
 class FakeHealthSuite:
@@ -221,6 +228,195 @@ def _seed_policy(store: SQLiteStore, config: AppConfig) -> None:
         store.clock = previous_clock
 
 
+@pytest.mark.parametrize("send_mode", ["agent_direct", "project"])
+def test_coworker_daemon_does_not_run_shadow_ingestion_or_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, send_mode: str
+) -> None:
+    config = AppConfig(
+        owner=OwnerConfig(open_id="ou_owner"),
+        chats={"oc_test": ChatPolicyConfig(auto_reply=True, bot_joined=True)},
+        coworker=CoworkerConfig(enabled=True, chat_id="oc_test", send_mode=send_mode),  # type: ignore[arg-type]
+    )
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    _seed_policy(store, config)
+    calls: list[str] = []
+
+    def forbidden_ingestion(self: IngestionService) -> list[Any]:
+        raise AssertionError("shadow ingestion must not be started")
+
+    def forbidden_retries(
+        self: IngestionService, *, run_id: str, limit: int = 20
+    ) -> StageResult:
+        raise AssertionError("shadow retries must not be started")
+
+    def capture_dispatch(self: Any, **kwargs: Any) -> DispatchSummary:
+        calls.append(kwargs["scope"])
+        return DispatchSummary()
+
+    monkeypatch.setattr(
+        IngestionService, "ordered_ingestion_stages", forbidden_ingestion
+    )
+    monkeypatch.setattr(IngestionService, "run_processing_retries", forbidden_retries)
+    monkeypatch.setattr(
+        "feishu_shadow_agent.daemon.Dispatcher.dispatch", capture_dispatch
+    )
+    daemon = Daemon(
+        store=store,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        health_suite=FakeHealthSuite([HealthCheckResult("ok", "critical", "ok", "ok")]),  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=True,
+        app_config=config,
+        feishu_client=FakeFeishu(),  # type: ignore[arg-type]
+        business_mode="coworker",
+        coworker_send_mode=send_mode,
+        coworker_chat_id="oc_test",
+        runtime_health_interval_seconds=0,
+    )
+    results = daemon.run_one_tick(run_id="run_1")
+    assert all(result.ok for result in results)
+    assert calls == (["coworker"] if send_mode == "project" else [])
+
+
+def test_changing_business_mode_requires_daemon_restart(tmp_path: Path) -> None:
+    config = AppConfig(owner=OwnerConfig(open_id="ou_owner"))
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    _seed_policy(store, config)
+    daemon = Daemon(
+        store=store,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        health_suite=FakeHealthSuite([HealthCheckResult("ok", "critical", "ok", "ok")]),  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=True,
+        app_config=config,
+        feishu_client=FakeFeishu(),  # type: ignore[arg-type]
+        business_mode="shadow",
+        runtime_health_interval_seconds=0,
+    )
+    config.coworker.enabled = True
+    config.coworker.chat_id = "oc_test"
+    config.chats["oc_test"] = ChatPolicyConfig()
+    store.import_product_policy_from_config(config, replace=True)
+    results = daemon.run_one_tick(run_id="run_1")
+    assert results[-1].name == "runtime_health" and not results[-1].ok
+
+
+@pytest.mark.parametrize(
+    ("business_mode", "send_mode", "source"),
+    [
+        ("shadow", None, "coworker"),
+        ("coworker", "project", "auto_reply"),
+        ("coworker", "agent_direct", "coworker"),
+    ],
+)
+def test_retention_protects_suspended_work_but_cleans_other_content(
+    tmp_path: Path, business_mode: str, send_mode: str | None, source: str
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    store.initialize()
+    payload = json.dumps({"source": source, "text": "preserve until resumed"})
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO actions(idempotency_key, kind, status, payload_json, created_at, updated_at)
+            VALUES ('suspended', 'send_reply', 'pending', ?, '2020-01-01', '2020-01-01')
+            """,
+            (payload,),
+        )
+        conn.execute(
+            """
+            INSERT INTO actions(idempotency_key, kind, status, payload_json, created_at, updated_at)
+            VALUES ('finished', 'send_reply', 'sent', '{"text":"old"}', '2020-01-01', '2020-01-01')
+            """
+        )
+    daemon = Daemon(
+        store=store,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        health_suite=FakeHealthSuite([]),  # type: ignore[arg-type]
+        tick_interval_seconds=1,
+        dry_run=False,
+        app_config=AppConfig(owner=OwnerConfig(open_id="ou_owner")),
+        business_mode=business_mode,  # type: ignore[arg-type]
+        coworker_send_mode=send_mode,
+        config_base_dir=tmp_path,
+    )
+    assert daemon._run_retention_stage(run_id="run_1").ok
+    with store.connect() as conn:
+        rows = dict(conn.execute("SELECT idempotency_key, payload_json FROM actions"))
+    assert rows["suspended"] == payload
+    assert json.loads(rows["finished"]) == {"retention_pruned": True}
+    assert store.get_checkpoint("retention.last_pruned_at") is not None
+
+
+@pytest.mark.parametrize("send_mode", ["agent_direct", "project"])
+def test_coworker_cli_start_does_not_construct_shadow_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, send_mode: str
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+owner:
+  open_id: ou_owner
+interactive_cards:
+  enabled: true
+coworker:
+  enabled: true
+  chat_id: oc_test
+  send_mode: agent_direct
+chats:
+  oc_test:
+    bot_joined: true
+storage:
+  sqlite_path: agent.sqlite3
+logging:
+  jsonl_path: agent.jsonl
+""".lstrip().replace("send_mode: agent_direct", f"send_mode: {send_mode}"),
+        encoding="utf-8",
+    )
+    assert main(["policy", "import-config", "--config", str(config_path)]) == 0
+    observed: dict[str, Any] = {}
+
+    class StubDaemon:
+        def __init__(self, **kwargs: Any):
+            observed.update(kwargs)
+            self.coworker_worker: Any = None
+            self.card_action_connection: Any = None
+
+        def wake(self) -> None:
+            pass
+
+        def runtime_health_allows_card_actions(self) -> bool:
+            return True
+
+        def run_forever(self) -> int:
+            return 0
+
+    def forbidden_shadow_backend(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("shadow backend must not start in coworker mode")
+
+    monkeypatch.setattr("feishu_shadow_agent.cli.Daemon", StubDaemon)
+    monkeypatch.setattr(
+        "feishu_shadow_agent.cli.create_agent_backend", forbidden_shadow_backend
+    )
+    monkeypatch.setattr(
+        "feishu_shadow_agent.cli.LarkCliClient.get_chat_layout",
+        lambda *_a, **_k: "group",
+    )
+
+    def card_connection(**kwargs: Any) -> object:
+        observed["register_card_actions"] = kwargs["register_card_actions"]
+        return object()
+
+    monkeypatch.setattr(
+        "feishu_shadow_agent.cli.create_card_action_connection", card_connection
+    )
+    assert main(["daemon", "--config", str(config_path)]) == 0
+    assert observed["business_mode"] == "coworker"
+    assert observed["task_processor"] is None
+    assert observed["coworker_send_mode"] == send_mode
+    assert observed["register_card_actions"] is (send_mode == "project")
+
+
 def test_startup_critical_failure_does_not_enter_loop(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     logger = JSONLLogger(tmp_path / "agent.jsonl")
@@ -341,9 +537,11 @@ def test_daemon_tick_expires_overdue_approvals_before_approval_inbox(
     events: list[str] = []
 
     class TrackingStore(SQLiteStore):
-        def expire_pending_approvals(self, *, now: str | None = None) -> int:
+        def expire_pending_approvals(
+            self, *, now: str | None = None, scope: BusinessScope = "all"
+        ) -> int:
             events.append("expire")
-            return super().expire_pending_approvals(now=now)
+            return super().expire_pending_approvals(now=now, scope=scope)
 
     class TrackingFeishu(FakeFeishu):
         def list_p2p_messages(self, **kwargs: Any) -> MessagePage:
@@ -475,6 +673,102 @@ def test_keyboard_interrupt_finishes_run(tmp_path: Path) -> None:
     assert row["status"] == "stopped"
     assert row["git_commit"] == "abc123"
     assert row["git_dirty"] == 1
+
+
+def test_daemon_stops_accepting_coworker_work_before_waiting_for_worker(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    order: list[str] = []
+
+    class Worker:
+        stopping = False
+
+        def start(self) -> None:
+            pass
+
+        def request_stop(self) -> None:
+            if not self.stopping:
+                self.stopping = True
+                order.append("stop_worker_ingress")
+
+        def stop(self) -> None:
+            with store.connect() as conn:
+                assert (
+                    conn.execute(
+                        "SELECT finished_at FROM runs WHERE run_id = 'run_1'"
+                    ).fetchone()[0]
+                    is None
+                )
+            order.append("worker_finished")
+
+    class Connection:
+        def stop(self) -> None:
+            order.append("connection_stopped")
+
+    class StoppingDaemon(Daemon):
+        def _start_card_action_connection(self, *, run_id: str) -> None:
+            pass
+
+        def run_one_tick(self, *, run_id: str) -> list[Any]:
+            self.request_stop()
+            return []
+
+    daemon = StoppingDaemon(
+        store=store,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        health_suite=FakeHealthSuite(  # type: ignore[arg-type]
+            [HealthCheckResult("config_schema", "critical", "ok", "ok")]
+        ),
+        tick_interval_seconds=1,
+        dry_run=False,
+        coworker_worker=Worker(),  # type: ignore[arg-type]
+        card_action_connection=Connection(),  # type: ignore[arg-type]
+    )
+    assert daemon.run_forever() == 0
+    assert order == ["stop_worker_ingress", "connection_stopped", "worker_finished"]
+    with store.connect() as conn:
+        row = conn.execute("SELECT status, finished_at FROM runs").fetchone()
+    assert row["status"] == "stopped" and row["finished_at"] is not None
+
+
+def test_stop_requested_during_startup_does_not_start_coworker_worker(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+
+    class Worker:
+        started = False
+
+        def start(self) -> None:
+            self.started = True
+
+        def request_stop(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    class StoppingHealth(FakeHealthSuite):
+        def run(self, *, send_test: bool = False) -> list[HealthCheckResult]:
+            daemon.request_stop()
+            return super().run(send_test=send_test)
+
+    worker = Worker()
+    daemon = Daemon(
+        store=store,
+        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        health_suite=StoppingHealth(  # type: ignore[arg-type]
+            [HealthCheckResult("config_schema", "critical", "ok", "ok")]
+        ),
+        tick_interval_seconds=1,
+        dry_run=True,
+        coworker_worker=worker,  # type: ignore[arg-type]
+    )
+    assert daemon.run_forever() == 0
+    assert not worker.started
+    with store.connect() as conn:
+        assert conn.execute("SELECT status FROM runs").fetchone()[0] == "stopped"
 
 
 def test_unhandled_exception_marks_daemon_crashed(tmp_path: Path) -> None:

@@ -28,6 +28,8 @@ def test_prompt_catalog_bumps_rewritten_kinds_to_v2() -> None:
         "ingress_judge": "v2",
         "semantic_judge": "v2",
         "structured_output": "v1",
+        "coworker": "v4",
+        "coworker_memory": "v3",
     }
 
 

@@ -12,6 +12,8 @@ PROMPT_VERSIONS: Final[dict[str, str]] = {
     "ingress_judge": "v2",
     "semantic_judge": "v2",
     "structured_output": "v1",
+    "coworker": "v4",
+    "coworker_memory": "v3",
 }
 
 

@@ -15,6 +15,7 @@ from .types import (
     ActionRecord,
     ApprovalOutcome,
     ApprovalTargetBinding,
+    BusinessScope,
     ExecutionMode,
     FeedbackReason,
     new_run_id,
@@ -86,9 +87,11 @@ class ApprovalCommandService:
         store: SQLiteStore,
         *,
         keep_watching_until_factory: Callable[[], str] | None = None,
+        scope: BusinessScope = "all",
     ):
         self.store = store
         self.keep_watching_until_factory = keep_watching_until_factory
+        self.scope: BusinessScope = scope
 
     def approve(
         self,
@@ -275,6 +278,7 @@ class ApprovalCommandService:
             execution_mode=execution_mode,
             requested_outcome=requested_outcome,
             expected_target_binding=target_binding,
+            scope=self.scope,
         )
         raw_status = str(raw.get("status", "failed"))
         result = _dict_result(raw.get("result"))
@@ -864,9 +868,12 @@ class OperatorCommandService:
         *,
         readback_marker: DispatchReadbackMarker | None = None,
         keep_watching_until_factory: Callable[[], str] | None = None,
+        approval_scope: BusinessScope = "all",
     ):
         self.approvals = ApprovalCommandService(
-            store, keep_watching_until_factory=keep_watching_until_factory
+            store,
+            keep_watching_until_factory=keep_watching_until_factory,
+            scope=approval_scope,
         )
         self.dispatch = DispatchCommandService(store, readback_marker=readback_marker)
         self.processing_retries = ProcessingRetryCommandService(store)

@@ -39,10 +39,15 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `lark_cli` | object | 见下表 | `lark-cli` 可执行文件和超时。 |
 | `interactive_cards` | object | 见下表 | 可选的审批卡片回调长连接；默认关闭，消息获取仍走 user 轮询。 |
 | `agent_backend` | object | 见下表 | Agent backend 选择、上下文隔离策略和 provider 专属参数。 |
+| `coworker` | object | 默认关闭 | 单测试群公开 AI 同事的策略导入来源，参见[运行与验证](operations/single-group-ai-coworker.md)。 |
+| `coworker.send_mode` | `agent_direct`/`project` | `agent_direct` | 启动时确定发送路径；直发使用模型的原生工具权限，代发使用项目的结构化协议和发送策略。修改后需导入策略并重启。 |
+| `coworker.partner_bots` | map | `{}` | 按名称配置飞书伙伴的 `open_id` 和可选 `description`；也接受名称到 open ID 的简写。职责会提供给同事 Agent。 |
+| `coworker.memory_maintenance` | bool | `true` | AI 同事模式中启用独立后台记忆整理。 |
+| `coworker.memory_maintenance_time` | `HH:MM` | `00:00` | 每日本机时区的整理时间。错过定时点后，下次启动 AI 同事时合并补跑一次。 |
 | `reply_policy` | object | 见下表 | Policy Import Source 中的全局自动回复策略。 |
 | `reply_postprocess` | object | 见下表 | 可选的一次性回复表达改写；默认关闭，不改变现有回复路径。 |
 | `chats` | map | `{}` | Policy Import Source 中按 Feishu `chat_id` 声明的群级策略，例如 `oc_xxx`。 |
-| `tool_permissions` | enum | `read_only` | Agent backend 工具权限档位：`read_only` 或 `full_access`。Hermes、Codex 和 Claude Code backend 都会映射到各自 CLI 的权限边界。 |
+| `tool_permissions` | enum | `read_only` | Agent backend 工具权限档位：`read_only`、`full_access` 或 `inherit`。Hermes、Codex 和 Claude Code backend 都会映射到各自 CLI 的权限边界。 |
 | `retention` | object | 见下表 | 本地数据保留时间。 |
 | `lifecycle` | object | 见下表 | 全局任务生命周期和审批过期设置。 |
 | `debug` | object | 见下表 | 调试用持久化开关。 |
@@ -75,7 +80,7 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `interactive_cards.app_secret_env` | string | `FEISHU_APP_SECRET` | 保存飞书应用密钥的环境变量名；必须与 `app_id_env` 不同。 |
 | `interactive_cards.startup_timeout_seconds` | int `> 0` | `10` | daemon 启动时等待卡片回调长连接变为健康的最长秒数；超时后继续以文本兜底运行。 |
 | `agent_backend.provider` | `hermes`/`codex`/`claude_code` | `hermes` | Agent backend provider。被选中的 provider 必须覆盖 task router、task session、reply postprocess 和 owner style refresh。 |
-| `agent_backend.max_attempts` | int `>= 1` | `3` | 单次 Agent 调用的最大尝试次数。Router、Task Session、reply postprocess 和 owner style refresh 共用；`read_only` 与 `full_access` 不分叉。`full_access` 重试可能重复 Agent 工具副作用，系统不提供额外的副作用幂等兼容层。 |
+| `agent_backend.max_attempts` | int `>= 1` | `3` | 单次 Agent 调用的最大尝试次数。各权限档位共用；`full_access` 和 `inherit` 重试可能重复 Agent 工具副作用，系统不提供额外的副作用幂等兼容层。 |
 | `agent_backend.working_dir` | string/null | `null` | Agent 子进程运行目录；`null` 表示 `config.yaml` 所在目录。相对路径基于配置文件目录解析。新 task 创建时会把解析后的绝对路径固化到 `tasks.agent_working_dir`；后续 follow-up/reopen 继续使用 task 内记录的目录，不随配置漂移。无 task 的 router 使用当前配置解析结果。 |
 | `agent_backend.config_scope` | `isolated`/`native` | `isolated` | 是否加载普通用户级配置；不等同于清除 credentials、managed policy 或 auth state。各 provider 映射见“Agent Backend 上下文语义”。 |
 | `agent_backend.auto_context` | `disabled`/`enabled` | `disabled` | 是否加载 CLI 自带规则、memory、默认 skill 等隐式上下文。不同 CLI 的实际含义不同，见“Agent Backend 上下文语义”。 |
@@ -129,7 +134,7 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 
 ## 运行时存储安全
 
-当前仅支持 `store/schema.sql` 中的 SQLite schema v9；空库会初始化为当前 schema，其他版本或未标记的已有数据库会被拒绝，不会自动迁移或删除。预演的生产策略快照和评估读取也只接受当前 schema。
+当前 `store/schema.sql` 的 SQLite schema 为 v11；空库会初始化为当前 schema，已标记的 v9 和 v10 数据库会事务式升级，其他版本或未标记的已有数据库会被拒绝。预演的只读生产策略快照可读取 v9、v10 或 v11，其他只读评估入口以各自说明为准。
 
 每个 SQLite 连接都会启用 `PRAGMA foreign_keys = ON` 和 `PRAGMA busy_timeout = 5000`，避免 daemon、status、replay 或本地审批命令短暂并发时立即报 `database is locked`。
 
@@ -167,7 +172,7 @@ Console 覆盖 Dashboard、Approvals、Tasks、Dispatch、Feedback、Policy、Se
 
 资源下载先通过 chat policy，再受本地限额保护。单文件超过 `storage.max_resource_bytes` 时，刚下载的文件会被删除，`resources.download_status` 置为 `too_large`，`path` 置空，并把尝试路径和大小写入 `raw_json`。`resource_dir` 用量超过 `storage.max_resource_dir_bytes` 时，刚下载文件会被删除，当前和后续资源标记为 `quota_exceeded` 且 `path` 置空。`too_large` / `quota_exceeded` 会阻塞 task session agent，并创建 owner notification；第一版不让 agent 在缺少资源的情况下语义降级回答。
 
-Agent backend 的默认 `timeout_seconds: null` 允许模型完成配置的 turns 和工具探索，不会在固定 60 秒截断。daemon 当前按消息串行执行 Agent；一次无限时调用未返回前，本 tick 的后续消息和 dispatch 会暂停。需要故障隔离上限的部署可显式配置正整数。startup/runtime health 与 doctor 不继承该值，仍由 `health.timeout_seconds` 限时。
+影子模式的 Agent backend 默认 `timeout_seconds: null`，不会在固定 60 秒截断；该模式按消息串行执行，一次无限时调用未返回前，本 tick 的后续消息和 dispatch 会暂停。需要故障隔离上限的部署可显式配置正整数。AI 同事模式使用独立的超时和话题并发设置，见[运行说明](operations/single-group-ai-coworker.md)。startup/runtime health 与 doctor 仍由 `health.timeout_seconds` 限时。
 
 ## Agent Backend 上下文语义
 
@@ -177,7 +182,7 @@ Agent backend 的默认 `timeout_seconds: null` 允许模型完成配置的 turn
 | --- | --- | --- | --- |
 | Hermes | 传 `--ignore-user-config`。 | 传 `--ignore-rules`，跳过 Hermes 自动规则、memory 和预加载 skill。 | `hermes.skill_paths` 通过原生 `--skills <path>` 传给 Task Session；`explicit_context.paths` 只在新建 session 的 prompt 中标为尚未加载。Router 不接收二者。Hermes resume 可再次携带 `--skills`，但不重复 prompt 路径块。 |
 | Codex | 传 `codex exec --ignore-user-config`，但它只是不加载 `$CODEX_HOME/config.toml`；auth 仍使用 `CODEX_HOME`。 | 传 `--ignore-rules`，但该 flag 只跳过 user/project execpolicy `.rules`；禁用 `AGENTS.md`、memory、skills、MCP 等需要更强 wrapper 层隔离。 | 仅在新建 Task Session 的 stdin 末尾追加 `codex.skills` 对应的 `$name`；`explicit_context.paths` 先以尚未加载的路径块展示。程序不使用 `skills.config`，也不判断 Codex 是否实际发现。resume、Router、judge 和 postprocess 不重复加入。 |
-| Claude Code | 传 `--setting-sources local`，避免加载 user/project settings；auth 和 managed policy 仍由 Claude Code 自身处理。 | 传 `--safe-mode`，禁用 CLAUDE.md、skills、plugins、hooks、MCP servers、custom commands/agents 等自定义上下文；不使用 `--bare` 作为默认 baseline。 | Claude Code v1 不支持 native skill 或 `explicit_context.paths`；每次调用都传 `--strict-mcp-config` 和空 MCP config，避免加载全局 MCP。 |
+| Claude Code | 传 `--setting-sources local`，避免加载 user/project settings；auth 和 managed policy 仍由 Claude Code 自身处理。 | 传 `--safe-mode`，禁用 CLAUDE.md、skills、plugins、hooks、MCP servers、custom commands/agents 等自定义上下文；不使用 `--bare` 作为默认 baseline。 | Claude Code v1 不支持显式传入 native skill 或 `explicit_context.paths`；除 `inherit` 与 `config_scope: native` 组合外，传 `--strict-mcp-config` 和空 MCP config。 |
 
 最重要的边界：Codex `--ignore-rules` 不是“禁项目规则、memory、skills”的总开关；它只处理 execpolicy `.rules`。如果 `agent_backend.provider: codex` 指向含项目规则的工作目录，这些规则仍可能影响 Codex 行为。
 
@@ -189,6 +194,7 @@ Agent backend 的默认 `timeout_seconds: null` 允许模型完成配置的 turn
 | --- | --- | --- | --- | --- |
 | `read_only` | `--toolsets safe` | top-level `--search --ask-for-approval never` + `exec --sandbox read-only` | `--permission-mode dontAsk --tools Read,Grep,Glob,LS,WebFetch,WebSearch --allowedTools Read,Grep,Glob,LS,WebFetch,WebSearch` | Hermes `safe` 禁用本地写操作类工具；Codex 在只读 sandbox 下运行并禁止交互审批，仍允许 live search；Claude Code 只暴露 read/search 类工具且不允许 Bash。它们都不是“零副作用”。 |
 | `full_access` | `--toolsets hermes-cli --yolo` | top-level `--search` + `exec --dangerously-bypass-approvals-and-sandbox` | `--permission-mode bypassPermissions --dangerously-skip-permissions --tools default` | 显式危险模式。Backend 可执行本地写工具，也可能自行调用飞书 CLI 产生外部写入；这些调用不经过项目内置的 policy、approval、dry-run 和 dispatch gate。 |
+| `inherit` | 不传 `--toolsets` 或 `--yolo` | 不传 sandbox、approval 或 search 覆盖 | 不传 permission mode 或 tools 覆盖 | 使用选定环境的原生权限，具体生效设置及无 TTY 行为由 backend 决定。与 `config_scope: native` 配合时读取用户原生配置；外部工具副作用不受本项目发送门禁保证。 |
 
 `context_access` 不跟随写权限开放。只要本地 DB 存在，Router 会收到受 `query_scope` 限制的 bounded snapshot 和 read-only SQLite URI；Task Session 已由 Messages 提供会话正文，只收到 read-only URI、allowed tables 与当前 task scope，不再复制 snapshot。Hermes `safe` 没有本地 file/SQLite 工具：Router 使用 snapshot，Task Session 使用 Messages；具备只读 SQLite client 的 backend 才能直接查询 `read_only_uri`。
 
@@ -221,9 +227,9 @@ hermes chat -q <prompt> -Q --source <source> --toolsets <...> [--yolo] --max-tur
 
 Codex 只按 `agent_backend.codex.skills` 中的名称生成原生显式调用，例如新 Task Session 业务 prompt 最后一行的 `$docmate`。skill 必须由部署环境预先安装到 Codex 原生发现范围；本程序不读取 `SKILL.md`、不注册任意路径，也不模拟 Codex 的仓库根发现算法。完整 skill 是否加载由 Codex 决定，配置只表示 requested/configured。运行中的旧 session 不因配置变化自动增加 skill，需要新建或显式重置 session。生产 prompt、输出 schema 和 audit response 不增加 skill trace 字段。
 
-Codex Task Session 还会通过 CLI `-c developer_instructions=...` 传入固定的非交互约束：工具探索保持静默，只返回一个最终 JSON 对象。该约束属于 Codex adapter，不进入 backend-neutral 业务 prompt，也不用于 Router、judge、reply postprocess 或 owner style refresh；`--output-schema`、`--output-last-message` 和 Python schema 校验仍共同约束最终输出。
+影子模式 Codex Task Session 通常通过 CLI `-c developer_instructions=...` 传入固定的非交互约束：工具探索保持静默，只返回一个最终 JSON 对象。`tool_permissions: inherit` 且 `config_scope: native` 时不传该覆盖项，以保留用户原有的 `developer_instructions`。结构化输出使用 `--output-schema`、`--output-last-message` 和 Python schema 校验。AI 同事的默认直发模式使用自然输出，不附加强制 JSON；它沿用后端原生配置，详见[同事模式运行说明](operations/single-group-ai-coworker.md)。
 
-生产 Task Session 输入使用紧凑的 Markdown 混合格式，固定顺序为 Instructions、Reply Context、Messages、非空 Resources、可选 Context Access、Output Contract，Codex 新 session 的显式 skill 引用随后占最后一行。Messages 是飞书正文的唯一嵌入来源；Reply Context 只保留 current/root id、合法回复目标和非空 chat type；Context Access 不复制消息 snapshot；空 Resources section 和 null message 字段完全省略。Output Contract 是模型可见的精简字段约束，最终 JSON 仍由 provider-native schema（支持时）和 Python schema 双重校验。Router、reply postprocess 和 owner style refresh 保持各自现有输入格式。
+影子模式的生产 Task Session 输入使用紧凑的 Markdown 混合格式，固定顺序为 Instructions、Reply Context、Messages、非空 Resources、可选 Context Access、Output Contract，Codex 新 session 的显式 skill 引用随后占最后一行。Messages 是飞书正文的唯一嵌入来源；Reply Context 只保留 current/root id、合法回复目标和非空 chat type；Context Access 不复制消息 snapshot；空 Resources section 和 null message 字段完全省略。Output Contract 是模型可见的精简字段约束，最终 JSON 仍由 provider-native schema（支持时）和 Python schema 双重校验。Router、reply postprocess 和 owner style refresh 保持各自现有输入格式。
 
 Reply postprocess 和 owner style refresh 也是 `hermes chat -q -Q` 一次性调用，但固定使用 read-only tool policy：
 

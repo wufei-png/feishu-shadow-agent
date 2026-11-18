@@ -145,6 +145,7 @@ class PolicyResolver:
         had_forbidden_mentions: bool,
         proposed_reply: str,
         final_reply: str,
+        allow_unmentioned: bool = False,
     ) -> ReplyPolicyDecision:
         chat_type = task.chat_type or message.chat_type
         # Read the global policy once: it carries both the chat defaults and the
@@ -172,7 +173,7 @@ class PolicyResolver:
                 )
             return ReplyPolicyDecision(True, "ok", "user", policy.policy_source)
         if chat_type == "group":
-            if not message.direct_mention:
+            if not message.direct_mention and not allow_unmentioned:
                 return ReplyPolicyDecision(
                     False, "group_not_direct_mention", "user", policy.policy_source
                 )

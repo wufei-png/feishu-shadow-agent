@@ -3585,6 +3585,84 @@ def test_approval_inbox_approves_pending_request_and_advances_checkpoint(
     assert task["closed_at"] is None
 
 
+def test_coworker_approval_inbox_leaves_shadow_command_for_shadow_mode(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    cfg, fake = _config(), FakeFeishu()
+    logger = JSONLLogger(tmp_path / "agent.jsonl")
+    original_approval = ApprovalService(store=store, config=cfg)
+    shadow_service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=cfg,
+        logger=logger,
+        approval_service=original_approval,
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    created = shadow_service.process_raw_message(
+        _message("om_root", chat_id="ou_chat", chat_type="p2p", sender_id="ou_a"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert created is not None and created.task is not None
+    original_approval.request_send_reply(
+        task=created.task,
+        reply_target_message_id="om_root",
+        proposed_reply="reply",
+        reason="test",
+    )
+    with store.connect() as conn:
+        approval = conn.execute("SELECT short_id FROM approvals").fetchone()[0]
+    fake.pages[None] = MessagePage(
+        [
+            _message(
+                "om_cmd",
+                chat_id="ou_bot_chat",
+                chat_type="p2p",
+                sender_id="ou_owner",
+                sender_name="Owner",
+                text=f"/approve {approval}",
+            )
+        ]
+    )
+    coworker_service = IngestionService(
+        store=store,
+        feishu_client=fake,
+        config=cfg,
+        logger=logger,
+        approval_service=ApprovalService(
+            store=store, config=cfg, approval_scope="coworker"
+        ),
+        approval_scope="coworker",
+        clock=lambda: "2026-06-22T10:10:00+08:00",
+    )
+    assert coworker_service.run_approval_inbox(run_id="run_coworker").processed == 1
+    assert store.get_checkpoint("approval_inbox.coworker") is not None
+    assert store.get_checkpoint("approval_inbox") is None
+    with store.connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT status FROM approvals WHERE short_id=?", (approval,)
+            ).fetchone()[0]
+            == "pending"
+        )
+        assert conn.execute("SELECT COUNT(*) FROM approval_commands").fetchone()[0] == 0
+    shadow_service.approval_service = ApprovalService(
+        store=store, config=cfg, approval_scope="shadow"
+    )
+    shadow_service.approval_scope = "shadow"
+    assert shadow_service.run_approval_inbox(run_id="run_shadow").processed == 1
+    with store.connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT status FROM approvals WHERE short_id=?", (approval,)
+            ).fetchone()[0]
+            == "approved"
+        )
+
+
 def test_approval_inbox_fetch_failure_does_not_advance_checkpoint(
     tmp_path: Path,
 ) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 from collections.abc import Callable, Iterable
@@ -28,6 +29,9 @@ from ..types import (
     ApprovalOutcome,
     ApprovalStatus,
     ApprovalTargetBinding,
+    BusinessMode,
+    BusinessScope,
+    CoworkerDelegationSpec,
     DispatchAttemptRecord,
     DispatchAttemptStatus,
     DispatchClaim,
@@ -55,7 +59,7 @@ from .policy_store import PRODUCT_POLICY_KEY as PRODUCT_POLICY_KEY
 from .policy_store import PolicyStore
 from .schema import SQLITE_APPLICATION_ID as SQLITE_APPLICATION_ID
 from .schema import SQLITE_SCHEMA_VERSION as SQLITE_SCHEMA_VERSION
-from .schema import is_uninitialized_schema, require_current_schema
+from .schema import is_uninitialized_schema, require_current_schema, upgrade_v9_schema
 
 SQLITE_BUSY_TIMEOUT_MS = 5000
 RUN_HEARTBEAT_STALE_AFTER_SECONDS = 300
@@ -86,19 +90,133 @@ ORDER BY julianday(checked_at) DESC, id DESC
 LIMIT 1
 """
 STALE_SENDING_ACTIONS_SQL = """
-SELECT *
-FROM actions
-WHERE status = 'sending'
-  AND julianday(updated_at) <= julianday(?)
-ORDER BY updated_at, id
+SELECT a.*
+FROM actions a
+WHERE a.status = 'sending'
+  AND julianday(a.updated_at) <= julianday(?)
 """
+ACTION_COWORKER_SQL = """(CASE json_extract(a.payload_json, '$.business_mode')
+  WHEN 'coworker' THEN 1 WHEN 'shadow' THEN 0 ELSE (
+  COALESCE(json_extract(a.payload_json, '$.source'), '') LIKE 'coworker%'
+  OR EXISTS (
+    SELECT 1 FROM approvals p WHERE p.id = a.approval_id
+      AND (CASE json_extract(p.payload_json, '$.business_mode')
+        WHEN 'coworker' THEN 1 WHEN 'shadow' THEN 0
+        ELSE COALESCE(json_extract(p.payload_json, '$.source'), '') LIKE 'coworker%' END)
+  )
+  OR EXISTS (
+    SELECT 1 FROM routing_audits r
+    WHERE r.target_task_id = a.task_id AND r.route_reason = 'coworker_turn'
+  )
+) END)"""
+APPROVAL_COWORKER_SQL = """(CASE json_extract(p.payload_json, '$.business_mode')
+  WHEN 'coworker' THEN 1 WHEN 'shadow' THEN 0 ELSE (
+  COALESCE(json_extract(p.payload_json, '$.source'), '') LIKE 'coworker%'
+  OR EXISTS (
+    SELECT 1 FROM routing_audits r
+    WHERE r.target_task_id = p.task_id AND r.route_reason = 'coworker_turn'
+  )
+) END)"""
 EXPIRE_PENDING_APPROVALS_SQL = """
-SELECT id
-FROM approvals
-WHERE status = 'pending'
-  AND expires_at IS NOT NULL
-  AND julianday(expires_at) < julianday(?)
+SELECT p.id
+FROM approvals p
+WHERE p.status = 'pending'
+  AND p.expires_at IS NOT NULL
+  AND julianday(p.expires_at) < julianday(?)
 """
+
+PENDING_RETENTION_CTE = """
+WITH pending_tasks(task_id) AS (
+  SELECT task_id FROM actions WHERE task_id IS NOT NULL AND status IN ('pending', 'sending', 'failed_needs_review')
+  UNION SELECT id FROM tasks WHERE status = 'watching' AND watch_until IS NULL
+  UNION SELECT task_id FROM approvals WHERE task_id IS NOT NULL AND status = 'pending'
+  UNION SELECT task_id FROM processing_retry_attempts WHERE task_id IS NOT NULL AND status IN ('queued', 'claimed')
+  UNION SELECT t.id FROM tasks t JOIN coworker_events e ON e.message_id = t.root_message_id
+    WHERE e.status IN ('queued', 'processing', 'needs_review')
+  UNION SELECT tm.task_id FROM task_messages tm JOIN coworker_events e ON e.message_id = tm.message_id
+    WHERE e.status IN ('queued', 'processing', 'needs_review')
+), pending_messages(message_id) AS (
+  SELECT t.root_message_id FROM tasks t JOIN pending_tasks p ON p.task_id = t.id WHERE t.root_message_id IS NOT NULL
+  UNION SELECT tm.message_id FROM task_messages tm JOIN pending_tasks p ON p.task_id = tm.task_id
+  UNION SELECT message_id FROM coworker_events WHERE status IN ('queued', 'processing', 'needs_review')
+  UNION SELECT source_message_id FROM actions WHERE source_message_id IS NOT NULL AND status IN ('pending', 'sending', 'failed_needs_review')
+  UNION SELECT target_message_id FROM actions WHERE target_message_id IS NOT NULL AND status IN ('pending', 'sending', 'failed_needs_review')
+  UNION SELECT source_message_id FROM approvals WHERE source_message_id IS NOT NULL AND status = 'pending'
+  UNION SELECT message_id FROM processing_retry_attempts WHERE status IN ('queued', 'claimed')
+  UNION SELECT e.message_id FROM coworker_subagents s
+    JOIN coworker_events e ON e.id = s.origin_event_id WHERE s.status IN ('running', 'needs_review')
+  UNION SELECT source.message_id FROM coworker_events e
+    JOIN coworker_events source ON source.id = CASE WHEN json_valid(e.raw_json)
+      THEN json_extract(e.raw_json, '$._internal.origin_event_id') END
+    WHERE e.status IN ('queued', 'processing', 'needs_review')
+), pending_actions(action_id) AS (
+  SELECT id FROM actions WHERE status IN ('pending', 'sending', 'failed_needs_review')
+  UNION SELECT a.id FROM actions a JOIN pending_tasks p ON p.task_id = a.task_id
+), pending_approvals(approval_id) AS (
+  SELECT id FROM approvals WHERE status = 'pending'
+  UNION SELECT a.id FROM approvals a JOIN pending_tasks p ON p.task_id = a.task_id
+)
+"""
+PENDING_RETENTION_GUARDS = {
+    "messages": "NOT EXISTS (SELECT 1 FROM pending_messages p WHERE p.message_id = messages.message_id)",
+    "tasks": "NOT EXISTS (SELECT 1 FROM pending_tasks p WHERE p.task_id = tasks.id)",
+    "task_background_versions": "NOT EXISTS (SELECT 1 FROM pending_tasks p WHERE p.task_id = task_background_versions.task_id)",
+    "task_watch_keys": "NOT EXISTS (SELECT 1 FROM pending_tasks p WHERE p.task_id = task_watch_keys.task_id)",
+    "approvals": "NOT EXISTS (SELECT 1 FROM pending_approvals p WHERE p.approval_id = approvals.id)",
+    "actions": "NOT EXISTS (SELECT 1 FROM pending_actions p WHERE p.action_id = actions.id)",
+    "dispatch_attempts": "NOT EXISTS (SELECT 1 FROM pending_actions p WHERE p.action_id = dispatch_attempts.action_id)",
+    "resources": "NOT EXISTS (SELECT 1 FROM pending_messages p WHERE p.message_id = resources.message_id)",
+    "agent_audits": """NOT EXISTS (SELECT 1 FROM pending_tasks p WHERE p.task_id = agent_audits.task_id)
+      AND NOT EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(agent_audits.input_message_ids_json)
+        THEN agent_audits.input_message_ids_json ELSE '[]' END) j JOIN pending_messages p ON p.message_id = j.value)""",
+    "approval_commands": """NOT EXISTS (SELECT 1 FROM approval_feedback f JOIN pending_tasks p ON p.task_id = f.task_id
+      WHERE f.command_id = approval_commands.message_id)""",
+    "approval_feedback": "NOT EXISTS (SELECT 1 FROM pending_tasks p WHERE p.task_id = approval_feedback.task_id)",
+    "message_processing": """NOT EXISTS (SELECT 1 FROM pending_tasks p WHERE p.task_id = message_processing.task_id)
+      AND NOT EXISTS (SELECT 1 FROM pending_messages p WHERE p.message_id = message_processing.message_id)""",
+    "processing_retry_attempts": """NOT EXISTS (SELECT 1 FROM pending_tasks p WHERE p.task_id = processing_retry_attempts.task_id)
+      AND NOT EXISTS (SELECT 1 FROM pending_messages p WHERE p.message_id = processing_retry_attempts.message_id)""",
+}
+
+
+def _scope_condition(scope: BusinessScope, coworker_expression: str) -> str:
+    if scope == "all":
+        return ""
+    if scope == "coworker":
+        return " AND " + coworker_expression
+    if scope == "shadow":
+        return " AND NOT " + coworker_expression
+    raise ValueError("unknown business scope")
+
+
+def _mark_coworker_payload(
+    conn: sqlite3.Connection,
+    payload: dict[str, Any],
+    *,
+    task_id: int | None,
+    approval_id: int | None = None,
+) -> dict[str, Any]:
+    """Persist an explicit origin on new coworker work; retain legacy inference."""
+    if (
+        payload.get("business_mode") == "shadow"
+        or payload.get("business_mode") == "coworker"
+    ):
+        return payload
+    source = payload.get("source")
+    is_coworker = isinstance(source, str) and source.startswith("coworker")
+    if not is_coworker and approval_id is not None:
+        query = "SELECT " + APPROVAL_COWORKER_SQL + " FROM approvals p WHERE p.id = ?"  # noqa: S608
+        row = conn.execute(query, (approval_id,)).fetchone()
+        is_coworker = row is not None and bool(row[0])
+    if not is_coworker and task_id is not None:
+        is_coworker = (
+            conn.execute(
+                "SELECT 1 FROM routing_audits WHERE target_task_id = ? AND route_reason = 'coworker_turn' LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            is not None
+        )
+    return {**payload, "business_mode": "coworker"} if is_coworker else payload
 
 
 def _store_now_iso() -> str:
@@ -134,6 +252,7 @@ class SQLiteStore:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.connect() as conn:
                 if not is_uninitialized_schema(conn):
+                    upgrade_v9_schema(conn)
                     require_current_schema(conn)
                 schema = Path(__file__).with_name("schema.sql")
                 conn.executescript(schema.read_text(encoding="utf-8"))
@@ -147,6 +266,13 @@ class SQLiteStore:
         self, key: str = PRODUCT_POLICY_KEY
     ) -> dict[str, Any] | None:
         return self._policy_store.get_product_policy(key)
+
+    def update_coworker_policy(
+        self, changes: dict[str, Any], *, actor: str, reason: str | None = None
+    ) -> dict[str, Any]:
+        return self._policy_store.update_coworker_policy(
+            changes, actor=actor, reason=reason
+        )
 
     def get_chat_product_policy(self, chat_id: str) -> dict[str, Any] | None:
         return self._policy_store.get_chat_product_policy(chat_id)
@@ -202,10 +328,15 @@ class SQLiteStore:
         )
 
     def replace_product_policy_snapshot(
-        self, global_policy: dict[str, Any], chats: list[dict[str, Any]], *, source: str
+        self,
+        global_policy: dict[str, Any],
+        chats: list[dict[str, Any]],
+        *,
+        source: str,
+        coworker_policy: dict[str, Any] | None = None,
     ) -> None:
         self._policy_store.replace_product_policy_snapshot(
-            global_policy, chats, source=source
+            global_policy, chats, source=source, coworker_policy=coworker_policy
         )
 
     def record_run_start(
@@ -770,6 +901,7 @@ class SQLiteStore:
                 WHERE r.status = 'queued'
                   AND NOT EXISTS (SELECT 1 FROM group_policy_holds h WHERE h.kind = 'retry' AND h.item_id = r.id)
                   AND NOT EXISTS (SELECT 1 FROM group_policy_holds h WHERE h.kind = 'task' AND h.item_id = r.task_id)
+                  AND NOT EXISTS (SELECT 1 FROM routing_audits owner WHERE owner.target_task_id = r.task_id AND owner.route_reason = 'coworker_turn')
                   AND (m.chat_type != 'group' OR EXISTS (
                     SELECT 1 FROM chat_policies cp WHERE cp.chat_id = m.chat_id
                   ))
@@ -911,6 +1043,7 @@ class SQLiteStore:
         now: str,
         replacement_json: str,
         dry_run: bool,
+        protect_pending: bool = False,
     ) -> dict[str, int]:
         """Scrub expired content while retaining relational and audit metadata."""
         active_task_for_message = """
@@ -1139,11 +1272,17 @@ class SQLiteStore:
         counts: dict[str, int] = {}
         with self.connect() as conn:
             for name, table, set_sql, set_params, where_sql, where_params in specs:
+                prefix = PENDING_RETENTION_CTE if protect_pending else ""
+                guard = (
+                    " AND (" + PENDING_RETENTION_GUARDS[name] + ")"
+                    if protect_pending
+                    else ""
+                )
                 if dry_run:
                     row = conn.execute(
                         # Table and clauses come from the fixed retention spec;
                         # all data values remain bound parameters.
-                        f"SELECT COUNT(*) AS count FROM {table} WHERE {where_sql}",  # noqa: S608
+                        f"{prefix} SELECT COUNT(*) AS count FROM {table} WHERE {where_sql} {guard}",  # noqa: S608
                         where_params,
                     ).fetchone()
                     counts[name] = int(row["count"])
@@ -1151,11 +1290,47 @@ class SQLiteStore:
                 cursor = conn.execute(
                     # Table and clauses come from the fixed retention spec;
                     # all data values remain bound parameters.
-                    f"UPDATE {table} SET {set_sql} WHERE {where_sql}",  # noqa: S608
+                    f"{prefix} UPDATE {table} SET {set_sql} WHERE {where_sql} {guard}",  # noqa: S608
                     (*set_params, *where_params),
                 )
                 counts[name] = int(cursor.rowcount)
         return counts
+
+    def pending_retention_identifiers(
+        self,
+    ) -> tuple[set[str], set[str], set[str], set[str]]:
+        """Return IDs for log protection while pending work remains actionable."""
+        self.initialize()
+        with self.connect() as conn:
+            # Every fragment below is a fixed SQL constant, not user input.
+            task_rows = conn.execute(
+                PENDING_RETENTION_CTE  # noqa: S608
+                + "SELECT t.id, t.short_id FROM tasks t JOIN pending_tasks p ON p.task_id = t.id"
+            ).fetchall()
+            message_rows = conn.execute(
+                PENDING_RETENTION_CTE + "SELECT message_id FROM pending_messages"  # noqa: S608
+            ).fetchall()
+            action_rows = conn.execute(
+                PENDING_RETENTION_CTE + "SELECT action_id FROM pending_actions"  # noqa: S608
+            ).fetchall()
+            approval_rows = conn.execute(
+                PENDING_RETENTION_CTE  # noqa: S608
+                + "SELECT a.id, a.short_id FROM approvals a JOIN pending_approvals p ON p.approval_id = a.id"
+            ).fetchall()
+        return (
+            {str(value) for row in task_rows for value in (row["id"], row["short_id"])},
+            {
+                str(row["message_id"])
+                for row in message_rows
+                if row["message_id"] is not None
+            },
+            {str(row["action_id"]) for row in action_rows},
+            {
+                str(value)
+                for row in approval_rows
+                for value in (row["id"], row["short_id"])
+            },
+        )
 
     def list_effective_active_task_identifiers(self, *, now: str) -> set[str]:
         """Return task identifiers whose content is still retention-protected."""
@@ -1240,11 +1415,14 @@ class SQLiteStore:
             for identifier in (str(row["id"]), str(row["short_id"]))
         }
 
-    def list_prunable_resources(self, *, cutoff: str, now: str) -> list[sqlite3.Row]:
+    def list_prunable_resources(
+        self, *, cutoff: str, now: str, protect_pending: bool = False
+    ) -> list[sqlite3.Row]:
         self.initialize()
         with self.connect() as conn:
-            return conn.execute(
-                """
+            query = (
+                (PENDING_RETENTION_CTE if protect_pending else "")  # noqa: S608
+                + """
                 SELECT r.*
                 FROM resources r
                 WHERE r.download_status = 'downloaded'
@@ -1259,8 +1437,16 @@ class SQLiteStore:
                       AND t.watch_until IS NOT NULL
                       AND julianday(t.watch_until) > julianday(?)
                   )
-                ORDER BY r.updated_at, r.id
-                """,
+                """
+                + (
+                    " AND NOT EXISTS (SELECT 1 FROM pending_messages p WHERE p.message_id = r.message_id)"
+                    if protect_pending
+                    else ""
+                )
+                + " ORDER BY r.updated_at, r.id"
+            )
+            return conn.execute(
+                query,
                 (cutoff, now),
             ).fetchall()
 
@@ -1706,6 +1892,17 @@ class SQLiteStore:
             ).fetchone()
         return None if row is None else _task_from_row(row)
 
+    def task_is_coworker(self, task_id: int) -> bool:
+        self.initialize()
+        with self.connect() as conn:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM routing_audits WHERE target_task_id = ? AND route_reason = 'coworker_turn' LIMIT 1",
+                    (task_id,),
+                ).fetchone()
+                is not None
+            )
+
     def get_active_tasks_for_chat(self, chat_id: str, *, now: str) -> list[TaskRecord]:
         self.initialize()
         with self.connect() as conn:
@@ -1714,6 +1911,7 @@ class SQLiteStore:
                 SELECT * FROM tasks
                 WHERE chat_id = ?
                   AND status = 'watching'
+                  AND NOT EXISTS (SELECT 1 FROM routing_audits owner WHERE owner.target_task_id = tasks.id AND owner.route_reason = 'coworker_turn')
                   AND NOT EXISTS (SELECT 1 FROM group_policy_holds h WHERE h.kind = 'task' AND h.item_id = tasks.id)
                   AND (watch_until IS NULL OR julianday(watch_until) > julianday(?))
                 ORDER BY updated_at DESC, id DESC
@@ -1739,6 +1937,7 @@ class SQLiteStore:
                 WHERE t.chat_id = ?
                   AND wk.key = ?
                   AND t.status = 'watching'
+                  AND NOT EXISTS (SELECT 1 FROM routing_audits owner WHERE owner.target_task_id = t.id AND owner.route_reason = 'coworker_turn')
                   AND NOT EXISTS (SELECT 1 FROM group_policy_holds h WHERE h.kind = 'task' AND h.item_id = t.id)
                   AND (t.watch_until IS NULL OR julianday(t.watch_until) > julianday(?))
                 ORDER BY t.updated_at DESC, t.id DESC
@@ -1874,6 +2073,7 @@ class SQLiteStore:
                 FROM tasks t
                 WHERE t.chat_id = ?
                   AND t.status = 'closed'
+                  AND NOT EXISTS (SELECT 1 FROM routing_audits owner WHERE owner.target_task_id = t.id AND owner.route_reason = 'coworker_turn')
                   AND julianday(t.updated_at) >= julianday(?)
                   AND ({where_related})
                 ORDER BY t.updated_at DESC, t.id DESC
@@ -1973,6 +2173,7 @@ class SQLiteStore:
                 FROM tasks t
                 JOIN task_watch_keys wk ON wk.task_id = t.id
                 WHERE t.status = 'watching'
+                  AND NOT EXISTS (SELECT 1 FROM routing_audits owner WHERE owner.target_task_id = t.id AND owner.route_reason = 'coworker_turn')
                   AND NOT EXISTS (SELECT 1 FROM group_policy_holds h WHERE h.kind = 'task' AND h.item_id = t.id)
                   AND (t.watch_until IS NULL OR julianday(t.watch_until) > julianday(?))
                   AND t.chat_id IS NOT NULL
@@ -1985,6 +2186,7 @@ class SQLiteStore:
                   NULL AS thread_id
                 FROM tasks t
                 WHERE t.status = 'watching'
+                  AND NOT EXISTS (SELECT 1 FROM routing_audits owner WHERE owner.target_task_id = t.id AND owner.route_reason = 'coworker_turn')
                   AND NOT EXISTS (SELECT 1 FROM group_policy_holds h WHERE h.kind = 'task' AND h.item_id = t.id)
                   AND (t.watch_until IS NULL OR julianday(t.watch_until) > julianday(?))
                   AND t.chat_id IS NOT NULL
@@ -2005,6 +2207,7 @@ class SQLiteStore:
                 FROM tasks t
                 JOIN messages m ON m.message_id = t.root_message_id
                 WHERE t.status = 'watching'
+                  AND NOT EXISTS (SELECT 1 FROM routing_audits owner WHERE owner.target_task_id = t.id AND owner.route_reason = 'coworker_turn')
                   AND NOT EXISTS (SELECT 1 FROM group_policy_holds h WHERE h.kind = 'task' AND h.item_id = t.id)
                   AND (t.watch_until IS NULL OR julianday(t.watch_until) > julianday(?))
                   AND t.chat_type = 'group'
@@ -2120,46 +2323,33 @@ class SQLiteStore:
         return int(row["count"])
 
     def list_dispatchable_actions(
-        self, *, limit: int = 50, kind: str | None = None
+        self, *, limit: int = 50, kind: str | None = None, scope: BusinessScope = "all"
     ) -> list[ActionRecord]:
         self.initialize()
+        if scope not in {"all", "shadow", "coworker"}:
+            raise ValueError("unknown business scope")
         with self.connect() as conn:
-            if kind is None:
-                rows = conn.execute(
-                    """
-                    SELECT a.*
-                    FROM actions a
-                    WHERE a.status = 'pending'
-                      AND a.kind IN ('send_reply', 'owner_notification')
-                      AND NOT EXISTS (SELECT 1 FROM group_policy_holds h WHERE h.kind = 'action' AND h.item_id = a.id)
-                      AND (a.kind != 'send_reply' OR NOT EXISTS (
-                        SELECT 1 FROM tasks t WHERE t.id = a.task_id AND t.chat_type = 'group'
-                          AND NOT EXISTS (SELECT 1 FROM chat_policies cp WHERE cp.chat_id = t.chat_id)
-                      ))
-                    ORDER BY CASE WHEN execution_mode = 'production' THEN 0 ELSE 1 END,
-                             created_at, id
-                    LIMIT ?
-                    """,
-                    (limit,),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """
-                    SELECT a.*
-                    FROM actions a
-                    WHERE a.status = 'pending'
-                      AND a.kind = ?
-                      AND NOT EXISTS (SELECT 1 FROM group_policy_holds h WHERE h.kind = 'action' AND h.item_id = a.id)
-                      AND (a.kind != 'send_reply' OR NOT EXISTS (
-                        SELECT 1 FROM tasks t WHERE t.id = a.task_id AND t.chat_type = 'group'
-                          AND NOT EXISTS (SELECT 1 FROM chat_policies cp WHERE cp.chat_id = t.chat_id)
-                      ))
-                    ORDER BY CASE WHEN execution_mode = 'production' THEN 0 ELSE 1 END,
-                             created_at, id
-                    LIMIT ?
-                    """,
-                    (kind, limit),
-                ).fetchall()
+            # The scope expression comes only from fixed SQL constants.
+            query = f"""
+            SELECT a.*
+            FROM actions a
+            WHERE a.status = 'pending'
+              AND a.kind IN ('send_reply', 'owner_notification')
+              AND (? IS NULL OR a.kind = ?)
+              AND NOT EXISTS (SELECT 1 FROM group_policy_holds h WHERE h.kind = 'action' AND h.item_id = a.id)
+              AND (a.kind != 'send_reply' OR NOT EXISTS (
+                SELECT 1 FROM tasks t WHERE t.id = a.task_id AND t.chat_type = 'group'
+                  AND NOT EXISTS (SELECT 1 FROM chat_policies cp WHERE cp.chat_id = t.chat_id)
+              ))
+            {_scope_condition(scope, ACTION_COWORKER_SQL)}
+            ORDER BY CASE WHEN a.execution_mode = 'production' THEN 0 ELSE 1 END,
+                     a.created_at, a.id
+            LIMIT ?
+            """  # noqa: S608
+            rows = conn.execute(
+                query,
+                (kind, kind, limit),
+            ).fetchall()
         return [_action_from_row(row) for row in rows]
 
     def get_action(self, action_id: int) -> ActionRecord | None:
@@ -2416,16 +2606,19 @@ class SQLiteStore:
         *,
         stale_after_seconds: int = 900,
         now: str | None = None,
+        scope: BusinessScope = "all",
     ) -> list[dict[str, Any]]:
         self.initialize()
         effective_now = now or self.clock()
         cutoff = _minus_seconds(effective_now, stale_after_seconds)
         recovered: list[dict[str, Any]] = []
         with self.connect() as conn:
-            rows = conn.execute(
-                STALE_SENDING_ACTIONS_SQL,
-                (cutoff,),
-            ).fetchall()
+            query = (
+                STALE_SENDING_ACTIONS_SQL
+                + _scope_condition(scope, ACTION_COWORKER_SQL)
+                + " ORDER BY a.updated_at, a.id"
+            )
+            rows = conn.execute(query, (cutoff,)).fetchall()
             for row in rows:
                 action_id = int(row["id"])
                 latest = _latest_dispatch_attempt_locked(conn, action_id=action_id)
@@ -2837,11 +3030,15 @@ class SQLiteStore:
             ).fetchone()
         return None if row is None else _action_from_row(row)
 
-    def expire_pending_approvals(self, *, now: str | None = None) -> int:
+    def expire_pending_approvals(
+        self, *, now: str | None = None, scope: BusinessScope = "all"
+    ) -> int:
         self.initialize()
         effective_now = now or self.clock()
         with self.connect() as conn:
-            return self._expire_pending_approvals_locked(conn, now=effective_now)
+            return self._expire_pending_approvals_locked(
+                conn, now=effective_now, scope=scope
+            )
 
     def replay_summary(
         self, message_id: str, *, now: str | None = None
@@ -3219,6 +3416,190 @@ class SQLiteStore:
                 now=now,
             )
 
+    def create_coworker_delegation_action(
+        self,
+        *,
+        delegation: CoworkerDelegationSpec,
+        task_id: int,
+        target_message_id: str,
+        payload: dict[str, Any],
+        execution_mode: ExecutionMode,
+    ) -> int:
+        """Commit the outgoing action and its correlation record together."""
+        self.initialize()
+        now = self.clock()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            bound = _bind_payload_to_latest_external_message_locked(
+                conn, task_id=task_id, payload=payload
+            )
+            bound = _bind_unique_reply_destination_locked(
+                conn,
+                task_id=task_id,
+                target_message_id=target_message_id,
+                payload=bound,
+            )
+            action_id = self._create_send_reply_action_locked(
+                conn,
+                task_id=task_id,
+                target_message_id=target_message_id,
+                payload=bound,
+                approval_id=None,
+                execution_mode=execution_mode,
+                now=now,
+            )
+            if action_id is None:
+                raise ValueError("delegation send action already exists")
+            self._insert_coworker_delegation_locked(
+                conn,
+                delegation=delegation,
+                task_id=task_id,
+                action_id=action_id,
+                approval_id=None,
+                now=now,
+            )
+            return action_id
+
+    def _insert_coworker_delegation_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        delegation: CoworkerDelegationSpec,
+        task_id: int,
+        action_id: int | None,
+        approval_id: int | None,
+        now: str,
+    ) -> None:
+        session = conn.execute(
+            "SELECT chat_id FROM coworker_sessions WHERE id = ? AND state = 'active'",
+            (delegation.session_id,),
+        ).fetchone()
+        task = conn.execute(
+            "SELECT chat_id FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if session is None or task is None or session["chat_id"] != task["chat_id"]:
+            raise ValueError("delegation session and task do not share an active group")
+        if conn.execute(
+            "SELECT 1 FROM coworker_delegations WHERE session_id = ? AND peer_id = ? AND status = 'pending'",
+            (delegation.session_id, delegation.peer_id),
+        ).fetchone():
+            raise ValueError("a delegation to this peer is already pending")
+        cutoff = shift_instant(
+            now, delta=-timedelta(seconds=delegation.rate_window_seconds)
+        )
+        recent = conn.execute(
+            "SELECT COUNT(*) FROM coworker_delegations WHERE session_id = ? AND peer_id = ? AND julianday(created_at) >= julianday(?)",
+            (delegation.session_id, delegation.peer_id, cutoff),
+        ).fetchone()[0]
+        if int(recent) >= delegation.rate_limit:
+            raise ValueError("delegation rate limit reached")
+        conn.execute(
+            """
+            INSERT INTO coworker_delegations(id, session_id, peer_id, hop, request_action_id, request_approval_id, status, deadline, timeout_seconds, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+            """,
+            (
+                delegation.id,
+                delegation.session_id,
+                delegation.peer_id,
+                delegation.hop,
+                action_id,
+                approval_id,
+                delegation.deadline,
+                delegation.timeout_seconds,
+                now,
+                now,
+            ),
+        )
+
+    def _link_coworker_approval_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        payload: dict[str, Any],
+        approval_id: int,
+        action_id: int,
+        now: str,
+    ) -> None:
+        if payload.get("source") != "coworker_delegate_approval":
+            return
+        cursor = conn.execute(
+            "UPDATE coworker_delegations SET request_action_id = ?, updated_at = ? WHERE id = ? AND request_approval_id = ? AND status = 'pending'",
+            (action_id, now, payload.get("coworker_delegation_id"), approval_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("delegation approval is missing its pending correlation")
+
+    def expire_coworker_delegations(self) -> int:
+        """Queue one timeout reply only after a delegation was actually sent."""
+        self.initialize()
+        now = self.clock()
+        now_instant = parse_instant_or_none(now)
+        if now_instant is None:
+            raise ValueError("invalid clock while checking delegations")
+        count = 0
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                UPDATE coworker_delegations SET status = 'failed', updated_at = ?
+                WHERE status = 'pending' AND request_approval_id IN
+                  (SELECT id FROM approvals WHERE status IN ('rejected', 'expired'))
+                """,
+                (now,),
+            )
+            rows = conn.execute(
+                """
+                SELECT d.*, a.task_id, a.target_message_id, a.payload_json,
+                       a.execution_mode, a.updated_at AS sent_at
+                FROM coworker_delegations d JOIN actions a ON a.id = d.request_action_id
+                JOIN coworker_sessions s ON s.id = d.session_id
+                WHERE d.status = 'pending' AND a.status = 'sent'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM coworker_events e
+                    WHERE e.app_id = s.app_id AND e.chat_id = s.chat_id AND e.topic_key = s.thread_id
+                      AND e.status IN ('queued', 'processing')
+                  )
+                """
+            ).fetchall()
+            for row in rows:
+                deadline = str(row["deadline"])
+                if not row["timer_started"]:
+                    deadline = shift_instant(
+                        str(row["sent_at"]),
+                        delta=timedelta(seconds=int(row["timeout_seconds"])),
+                    )
+                    conn.execute(
+                        "UPDATE coworker_delegations SET deadline = ?, timer_started = 1, updated_at = ? WHERE id = ?",
+                        (deadline, now, row["id"]),
+                    )
+                deadline_instant = parse_instant_or_none(deadline)
+                if deadline_instant is None or deadline_instant > now_instant:
+                    continue
+                payload = _loads_json_object(row["payload_json"])
+                peer_name = str(payload.get("coworker_peer_name") or "伙伴")[:100]
+                payload.update(
+                    {
+                        "text": f"伙伴 {peer_name} 在约定时间内没有回复（协作 ID：{row['id']}）。",
+                        "source": "coworker_timeout",
+                    }
+                )
+                self._create_send_reply_action_locked(
+                    conn,
+                    task_id=int(row["task_id"]),
+                    target_message_id=str(row["target_message_id"]),
+                    payload=payload,
+                    approval_id=None,
+                    execution_mode=cast(ExecutionMode, row["execution_mode"]),
+                    now=now,
+                )
+                conn.execute(
+                    "UPDATE coworker_delegations SET status = 'timed_out', updated_at = ? WHERE id = ? AND status = 'pending'",
+                    (now, row["id"]),
+                )
+                count += 1
+        return count
+
     def create_owner_notification_action(
         self,
         *,
@@ -3250,6 +3631,7 @@ class SQLiteStore:
         notify_payload: dict[str, Any] | None = None,
         approval_timeout_hours: int | None = 24,
         execution_mode: ExecutionMode = "production",
+        coworker_delegation: CoworkerDelegationSpec | None = None,
     ) -> int:
         self.initialize()
         now = self.clock()
@@ -3262,6 +3644,7 @@ class SQLiteStore:
             payload = _bind_payload_to_latest_external_message_locked(
                 conn, task_id=task_id, payload=payload
             )
+            payload = _mark_coworker_payload(conn, payload, task_id=task_id)
             target = payload.get("reply_target_message_id") or payload.get(
                 "target_message_id"
             )
@@ -3295,6 +3678,15 @@ class SQLiteStore:
                 ),
             )
             approval_id = _cursor_lastrowid(cursor)
+            if coworker_delegation is not None:
+                self._insert_coworker_delegation_locked(
+                    conn,
+                    delegation=coworker_delegation,
+                    task_id=task_id,
+                    action_id=None,
+                    approval_id=approval_id,
+                    now=now,
+                )
             if notify_payload is not None:
                 self._create_owner_notification_action_locked(
                     conn,
@@ -3434,10 +3826,21 @@ class SQLiteStore:
         execution_mode: ExecutionMode = "production",
         requested_outcome: ApprovalOutcome | None = None,
         expected_target_binding: ApprovalTargetBinding | None = None,
+        scope: BusinessScope = "all",
     ) -> dict[str, Any]:
         self.initialize()
         now = self.clock()
         with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if scope != "all" and verb in {"approve", "reject", "send"}:
+                target_mode = self._approval_target_mode_locked(conn, target_id)
+                if target_mode != scope:
+                    return {
+                        "status": "ignored_scope",
+                        "result": {
+                            "error": "target is unavailable in the current business mode"
+                        },
+                    }
             keep_watching_reject_task_id = self._keep_watching_reject_task_id_locked(
                 conn,
                 verb=verb,
@@ -3447,6 +3850,7 @@ class SQLiteStore:
                 conn,
                 now=now,
                 exclude_task_id=keep_watching_reject_task_id,
+                scope=scope,
             )
             existing = conn.execute(
                 "SELECT status, result_json FROM approval_commands WHERE message_id = ?",
@@ -3505,19 +3909,54 @@ class SQLiteStore:
             )
         return {"status": status, "result": result}
 
+    def _approval_target_mode_locked(
+        self, conn: sqlite3.Connection, target_id: str
+    ) -> BusinessMode | None:
+        if target_id.startswith("a_"):
+            query = (
+                "SELECT "  # noqa: S608
+                + APPROVAL_COWORKER_SQL
+                + " AS is_coworker FROM approvals p WHERE p.short_id = ?"
+            )
+            row = conn.execute(query, (target_id,)).fetchone()
+        elif target_id.startswith("t_"):
+            row = conn.execute(
+                """
+                SELECT EXISTS (
+                  SELECT 1 FROM routing_audits r
+                  WHERE r.target_task_id = t.id AND r.route_reason = 'coworker_turn'
+                ) OR EXISTS (
+                  SELECT 1 FROM approvals p WHERE p.task_id = t.id
+                    AND (CASE json_extract(p.payload_json, '$.business_mode')
+                      WHEN 'coworker' THEN 1 WHEN 'shadow' THEN 0
+                      ELSE COALESCE(json_extract(p.payload_json, '$.source'), '') LIKE 'coworker%' END)
+                ) AS is_coworker
+                FROM tasks t WHERE t.short_id = ?
+                """,
+                (target_id,),
+            ).fetchone()
+        else:
+            return None
+        if row is None:
+            return None
+        return "coworker" if row["is_coworker"] else "shadow"
+
     def _expire_pending_approvals_locked(
         self,
         conn: sqlite3.Connection,
         *,
         now: str,
         exclude_task_id: int | None = None,
+        scope: BusinessScope = "all",
     ) -> int:
-        query = EXPIRE_PENDING_APPROVALS_SQL
+        query = EXPIRE_PENDING_APPROVALS_SQL + _scope_condition(
+            scope, APPROVAL_COWORKER_SQL
+        )
         params: list[Any] = [now]
         if exclude_task_id is not None:
-            query += " AND (task_id IS NULL OR task_id != ?)"
+            query += " AND (p.task_id IS NULL OR p.task_id != ?)"
             params.append(exclude_task_id)
-        query += " ORDER BY expires_at, id"
+        query += " ORDER BY p.expires_at, p.id"
         rows = conn.execute(query, params).fetchall()
         expired = 0
         for row in rows:
@@ -3676,6 +4115,11 @@ class SQLiteStore:
                 (resolved_status, now, approval["id"]),
             )
             if verb == "reject":
+                if payload.get("source") == "coworker_delegate_approval":
+                    conn.execute(
+                        "UPDATE coworker_delegations SET status = 'failed', updated_at = ? WHERE request_approval_id = ? AND status = 'pending'",
+                        (now, approval["id"]),
+                    )
                 keep_watching = (
                     requested_outcome == "no_send_keep_watching"
                     if requested_outcome is not None
@@ -3781,9 +4225,17 @@ class SQLiteStore:
                 raise ValueError(
                     "active send action already exists for this task and reply target"
                 )
-            self._mark_task_watching_after_send_locked(
-                conn, task_id=int(approval["task_id"]), now=now
+            self._link_coworker_approval_locked(
+                conn,
+                payload=payload,
+                approval_id=int(approval["id"]),
+                action_id=action_id,
+                now=now,
             )
+            if not str(payload.get("source") or "").startswith("coworker"):
+                self._mark_task_watching_after_send_locked(
+                    conn, task_id=int(approval["task_id"]), now=now
+                )
             approval_outcome: ApprovalOutcome = "suggestion_sent"
             self._record_approval_feedback_locked(
                 conn,
@@ -3916,6 +4368,45 @@ class SQLiteStore:
                 "identity": "user",
                 "source": "owner_send",
             }
+            if str(original_payload.get("source") or "").startswith("coworker"):
+                payload["identity"] = "bot"
+                is_delegation = (
+                    original_payload.get("source") == "coworker_delegate_approval"
+                )
+                payload["source"] = (
+                    "coworker_delegate_approval"
+                    if is_delegation
+                    else "coworker_approval"
+                )
+                for key in (
+                    "coworker_snapshot_verified",
+                    "coworker_source_update_time",
+                    "coworker_source_content_sha256",
+                    "coworker_peer_id",
+                    "coworker_peer_name",
+                    "coworker_delegation_id",
+                ):
+                    if key in original_payload:
+                        payload[key] = original_payload[key]
+                if is_delegation:
+                    peer = payload.get("coworker_peer_id")
+                    delegation_id = payload.get("coworker_delegation_id")
+                    mentions = set(
+                        re.findall(
+                            r"<at\s+[^>]*user_id=[\"']([^\"']+)[\"'][^>]*>",
+                            reply_text,
+                            re.IGNORECASE,
+                        )
+                    )
+                    if (
+                        not isinstance(peer, str)
+                        or mentions != {peer}
+                        or not isinstance(delegation_id, str)
+                        or delegation_id not in reply_text
+                    ):
+                        raise ValueError(
+                            "edited delegation must retain the configured partner mention and collaboration ID"
+                        )
             payload["reply_destination"] = _resolve_reply_destination_locked(
                 conn,
                 task=task,
@@ -3991,9 +4482,17 @@ class SQLiteStore:
                 raise ValueError(
                     "active send action already exists for this task and reply target"
                 )
-            self._mark_task_watching_after_send_locked(
-                conn, task_id=int(task["id"]), now=now
+            self._link_coworker_approval_locked(
+                conn,
+                payload=payload,
+                approval_id=approval_id,
+                action_id=action_id,
+                now=now,
             )
+            if not str(payload.get("source") or "").startswith("coworker"):
+                self._mark_task_watching_after_send_locked(
+                    conn, task_id=int(task["id"]), now=now
+                )
             approval = conn.execute(
                 "SELECT * FROM approvals WHERE id = ?", (approval_id,)
             ).fetchone()
@@ -4352,6 +4851,9 @@ class SQLiteStore:
         payload = _bind_payload_to_latest_external_message_locked(
             conn, task_id=task_id, payload=payload
         )
+        payload = _mark_coworker_payload(
+            conn, payload, task_id=task_id, approval_id=approval_id
+        )
         source_message_id = _payload_source_message_id(payload)
         source_revision = _payload_source_revision(payload)
         # Same task/target/text is terminal only for the same source revision.
@@ -4507,6 +5009,9 @@ class SQLiteStore:
         )
         seed = f"{execution_mode}:{seed_value}"
         idempotency_key = f"owner-{sha256(seed.encode('utf-8')).hexdigest()[:16]}"
+        payload = _mark_coworker_payload(
+            conn, payload, task_id=task_id, approval_id=approval_id
+        )
         source_message_id = _payload_source_message_id(payload)
         source_revision = _payload_source_revision(payload)
         cursor = conn.execute(

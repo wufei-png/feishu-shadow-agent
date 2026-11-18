@@ -1,7 +1,7 @@
 BEGIN IMMEDIATE;
 
 PRAGMA application_id = 1179861319;
-PRAGMA user_version = 9;
+PRAGMA user_version = 11;
 
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -401,5 +401,110 @@ ON actions(
 WHERE kind = 'send_reply'
   AND status IN ('pending', 'sending', 'failed_needs_review')
   AND target_message_id IS NOT NULL;
+
+-- coworker schema begin
+CREATE TABLE IF NOT EXISTS coworker_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  app_id TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  generation INTEGER NOT NULL DEFAULT 1,
+  backend_session_id TEXT,
+  agent_working_dir TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'closed', 'unrecoverable')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (app_id, chat_id, thread_id, provider, generation)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_coworker_active_session
+ON coworker_sessions(app_id, chat_id, thread_id, provider) WHERE state = 'active';
+CREATE TABLE IF NOT EXISTS coworker_topic_aliases (
+  app_id TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  alias TEXT NOT NULL,
+  topic_key TEXT NOT NULL,
+  PRIMARY KEY (app_id, chat_id, alias)
+);
+CREATE TABLE IF NOT EXISTS coworker_history_state (
+  app_id TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  topic_key TEXT NOT NULL,
+  needs_backfill INTEGER NOT NULL DEFAULT 1,
+  generation INTEGER NOT NULL DEFAULT 0,
+  has_more INTEGER,
+  last_error TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (app_id, chat_id, topic_key)
+);
+CREATE TABLE IF NOT EXISTS coworker_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  app_id TEXT NOT NULL,
+  event_id TEXT,
+  message_id TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  topic_key TEXT NOT NULL,
+  group_activation_id INTEGER,
+  revision INTEGER NOT NULL DEFAULT 1,
+  raw_json TEXT,
+  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'processing', 'completed', 'needs_review', 'discarded')),
+  error TEXT,
+  received_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (app_id, message_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_coworker_events_status ON coworker_events(status, received_at, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_coworker_events_processing_topic
+ON coworker_events(app_id, chat_id, topic_key) WHERE status = 'processing';
+CREATE TABLE IF NOT EXISTS coworker_memory_events (
+  event_id INTEGER PRIMARY KEY,
+  processed_at TEXT NOT NULL,
+  FOREIGN KEY (event_id) REFERENCES coworker_events(id)
+);
+CREATE TABLE IF NOT EXISTS coworker_delegations (
+  id TEXT PRIMARY KEY,
+  session_id INTEGER NOT NULL,
+  peer_id TEXT NOT NULL,
+  hop INTEGER NOT NULL DEFAULT 1,
+  request_action_id INTEGER,
+  request_approval_id INTEGER,
+  request_message_id TEXT,
+  result_message_id TEXT,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'timed_out', 'failed')),
+  deadline TEXT NOT NULL,
+  timeout_seconds INTEGER NOT NULL,
+  timer_started INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES coworker_sessions(id),
+  FOREIGN KEY (request_action_id) REFERENCES actions(id),
+  FOREIGN KEY (request_approval_id) REFERENCES approvals(id)
+);
+CREATE INDEX IF NOT EXISTS idx_coworker_delegations_waiting
+ON coworker_delegations(session_id, peer_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_coworker_one_pending_peer
+ON coworker_delegations(session_id, peer_id) WHERE status = 'pending';
+-- coworker background schema begin
+CREATE TABLE IF NOT EXISTS coworker_subagents (
+  child_thread_id TEXT PRIMARY KEY,
+  parent_thread_id TEXT NOT NULL,
+  agent_path TEXT NOT NULL,
+  session_id INTEGER NOT NULL,
+  origin_event_id INTEGER NOT NULL,
+  bot_open_id TEXT NOT NULL,
+  child_turn_id TEXT,
+  outcome TEXT,
+  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'needs_review')),
+  owner_pid INTEGER NOT NULL,
+  owner_host TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES coworker_sessions(id),
+  FOREIGN KEY (origin_event_id) REFERENCES coworker_events(id)
+);
+CREATE INDEX IF NOT EXISTS idx_coworker_subagents_session_status
+ON coworker_subagents(session_id, status);
+-- coworker background schema end
+-- coworker schema end
 
 COMMIT;

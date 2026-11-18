@@ -51,6 +51,40 @@ class LarkCliClient:
             argv.append("--verify")
         return argv
 
+    def get_chat_layout(self, *, chat_id: str) -> str:
+        if not chat_id:
+            raise ValueError("chat_id is required")
+        result = self.run_json(
+            [
+                self.path,
+                "im",
+                "chats",
+                "get",
+                "--as",
+                "bot",
+                "--json",
+                "--chat-id",
+                chat_id,
+            ]
+        )
+        if not result.ok:
+            raise LarkCliCommandError(result)
+        payload = result.json_data
+        if not isinstance(payload, dict):
+            raise ValueError("chat details response is not an object")
+        data_value: Any = cast(dict[str, Any], payload).get("data", payload)
+        if not isinstance(data_value, dict):
+            raise ValueError("chat details are unavailable")
+        data = cast(dict[str, Any], data_value)
+        if isinstance(data.get("chat"), dict):
+            data = cast(dict[str, Any], data["chat"])
+        mode, message_type = data.get("chat_mode"), data.get("group_message_type")
+        if mode == "topic" or (mode == "group" and message_type == "thread"):
+            return "topic"
+        if mode == "group" and message_type == "chat":
+            return "group"
+        raise ValueError("chat mode and message format could not be determined")
+
     def build_user_p2p_chat_list(self, *, page_token: str | None = None) -> list[str]:
         argv = [
             self.path,
@@ -556,10 +590,11 @@ class LarkCliClient:
         page_token: str | None = None,
         page_size: int = 50,
         order: str = "asc",
+        as_identity: str = "user",
     ) -> MessagePage:
         result = self.run_json(
             self.build_chat_messages_list(
-                as_identity="user",
+                as_identity=as_identity,
                 chat_id=chat_id,
                 start=start,
                 end=end,
@@ -605,12 +640,14 @@ class LarkCliClient:
         thread_id: str,
         page_token: str | None = None,
         page_size: int = 50,
+        as_identity: str = "user",
+        order: str = "asc",
     ) -> MessagePage:
         result = self.run_json(
             self.build_threads_messages_list(
-                as_identity="user",
+                as_identity=as_identity,
                 thread=thread_id,
-                order="asc",
+                order=order,
                 page_token=page_token,
                 page_size=page_size,
             )

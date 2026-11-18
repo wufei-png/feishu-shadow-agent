@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import threading
 from collections.abc import Callable
 from http import HTTPStatus
@@ -117,6 +118,29 @@ class CompatibleFeishuChannel:
             return original(data)
 
         channel._on_p2_card_action_trigger = guarded
+
+    def set_raw_message_handler(
+        self, handler: Callable[[dict[str, Any], str], None]
+    ) -> None:
+        """Persist messages synchronously before the SDK acknowledges the frame."""
+        channel = cast(Any, self._channel)
+        original = cast(Callable[[Any], Any], channel._on_p2_im_message_receive_v1)
+
+        def receive(data: Any) -> Any:
+            identity = channel.bot_identity
+            bot_id = getattr(identity, "open_id", None)
+            if not isinstance(bot_id, str) or not bot_id:
+                raise RuntimeError("Feishu bot identity is not resolved")
+            encoded = self._ws_module.JSON.marshal(data)
+            if not encoded:
+                raise ValueError("unable to serialize Feishu message event")
+            raw: Any = json.loads(encoded)
+            if not isinstance(raw, dict):
+                raise ValueError("Feishu message event is not an object")
+            handler(cast(dict[str, Any], raw), bot_id)
+            return original(data)
+
+        channel._on_p2_im_message_receive_v1 = receive
 
     # SDK compatibility contract exposes a timeout parameter.
     async def connect_until_ready(

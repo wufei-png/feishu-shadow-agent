@@ -9,20 +9,22 @@ from typing import Any, cast
 
 from .card_actions import FeishuCardActionConnection
 from .config import AppConfig
-from .dispatcher import Dispatcher
+from .coworker import CoworkerWorker
+from .dispatcher import Dispatcher, DispatchSummary
 from .feishu.client import FeishuClient
 from .health import HealthSuite, has_critical_failure, summarize_results
 from .ingestion import IngestionFeishuClient, IngestionService, StageResult
 from .jsonl import JSONLLogger
 from .membership import BotMembershipService
-from .processing import TaskProcessingService
+from .processing import ApprovalService, TaskProcessingService
 from .retention import (
     RetentionService,
     daemon_retention_is_due,
     record_daemon_retention_checkpoint,
 )
+from .store.policy_store import COWORKER_POLICY_KEY
 from .store.sqlite_store import SQLiteStore
-from .types import HealthCheckResult, RunTickStatus, new_run_id
+from .types import BusinessMode, HealthCheckResult, RunTickStatus, new_run_id
 
 
 class Daemon:
@@ -43,6 +45,10 @@ class Daemon:
         sleep_func: Callable[[float], None] = time.sleep,
         ingestion_monotonic: Callable[[], float] | None = None,
         card_action_connection: FeishuCardActionConnection | None = None,
+        coworker_worker: CoworkerWorker | None = None,
+        business_mode: BusinessMode = "shadow",
+        coworker_send_mode: str | None = None,
+        coworker_chat_id: str | None = None,
     ):
         self.store = store
         self.logger = logger
@@ -66,6 +72,10 @@ class Daemon:
         self._wakeup_generation = 0
         self._stop_requested = False
         self.card_action_connection = None if dry_run else card_action_connection
+        self.coworker_worker = coworker_worker
+        self.business_mode: BusinessMode = business_mode
+        self.coworker_send_mode = coworker_send_mode
+        self.coworker_chat_id = coworker_chat_id
 
     def wake(self) -> None:
         """Wake the daemon loop so queued operator actions dispatch promptly."""
@@ -74,6 +84,8 @@ class Daemon:
             self._lifecycle_condition.notify_all()
 
     def request_stop(self) -> None:
+        if self.coworker_worker is not None:
+            self.coworker_worker.request_stop()
         with self._lifecycle_condition:
             self._stop_requested = True
             self._wakeup_generation += 1
@@ -116,7 +128,14 @@ class Daemon:
         )
         results: list[StageResult] = []
         try:
-            expired_approvals = self.store.expire_pending_approvals()
+            dispatch_enabled = (
+                self.business_mode == "shadow" or self.coworker_send_mode == "project"
+            )
+            expired_approvals = (
+                self.store.expire_pending_approvals(scope=self.business_mode)
+                if dispatch_enabled
+                else 0
+            )
             if expired_approvals:
                 self.logger.emit(
                     "info",
@@ -158,6 +177,17 @@ class Daemon:
                 config=self.app_config,
                 logger=self.logger,
                 task_processor=self.task_processor,
+                approval_service=(
+                    ApprovalService(
+                        store=self.store,
+                        config=self.app_config,
+                        execution_mode="dry_run" if self.dry_run else "production",
+                        approval_scope="coworker",
+                    )
+                    if self.business_mode == "coworker" and dispatch_enabled
+                    else None
+                ),
+                approval_scope=self.business_mode,
                 config_base_dir=self.config_base_dir,
                 monotonic=self.ingestion_monotonic,
                 dry_run=self.dry_run,
@@ -168,20 +198,34 @@ class Daemon:
                 config=self.app_config,
                 logger=self.logger,
                 execution_mode="dry_run" if self.dry_run else "production",
+                business_mode=self.business_mode,
             )
 
             def run_bot_membership(*, run_id: str) -> StageResult:
-                summary = membership.refresh(run_id=run_id)
+                summary = membership.refresh(
+                    run_id=run_id,
+                    chat_id=self.coworker_chat_id
+                    if self.business_mode == "coworker"
+                    else None,
+                )
                 return StageResult("bot_membership", ok=True, processed=summary.probed)
 
-            stages = [
-                run_bot_membership,
-                service.run_processing_retries,
+            approval_stage = (
                 service.run_approval_inbox_placeholder
                 if self.dry_run
-                else service.run_approval_inbox,
-                *service.ordered_ingestion_stages(),
-            ]
+                else service.run_approval_inbox
+            )
+            if self.business_mode == "shadow":
+                stages = [
+                    run_bot_membership,
+                    service.run_processing_retries,
+                    approval_stage,
+                    *service.ordered_ingestion_stages(),
+                ]
+            elif dispatch_enabled:
+                stages = [run_bot_membership, approval_stage]
+            else:
+                stages = []
             for stage in stages:
                 try:
                     result = stage(run_id=run_id)
@@ -276,22 +320,29 @@ class Daemon:
                 config=self.app_config,
                 logger=self.logger,
                 interactive_cards_available=(
-                    self.card_action_connection is not None
+                    self.app_config.interactive_cards.enabled
+                    and not self.dry_run
+                    and self.card_action_connection is not None
                     and self.card_action_connection.is_healthy()
                 ),
             )
             # Owner commands are the safety valve for outgoing replies. If the inbox is
             # unhealthy, external send_reply actions stay preview-only while owner
             # notifications can still surface the failure.
-            dispatch = dispatcher.dispatch(
-                run_id=run_id,
-                allow_send_reply_actual=not self.dry_run and not approval_failed,
-                allow_owner_notification_actual=not self.dry_run,
-                include_owner_notifications=not self.dry_run,
-                blocked_send_reply_reason="approval_inbox_failed"
-                if approval_failed and not self.dry_run
-                else None,
-                can_start_action=self._dispatch_health_cache_is_current,
+            dispatch = (
+                dispatcher.dispatch(
+                    run_id=run_id,
+                    allow_send_reply_actual=not self.dry_run and not approval_failed,
+                    allow_owner_notification_actual=not self.dry_run,
+                    include_owner_notifications=not self.dry_run,
+                    blocked_send_reply_reason="approval_inbox_failed"
+                    if approval_failed and not self.dry_run
+                    else None,
+                    can_start_action=self._dispatch_health_cache_is_current,
+                    scope=self.business_mode,
+                )
+                if dispatch_enabled
+                else DispatchSummary()
             )
             # The final action can itself consume the remaining cache lifetime.
             self._dispatch_health_cache_is_current()
@@ -307,6 +358,7 @@ class Daemon:
                     "failed": dispatch.failed,
                     "approval_inbox_failed": approval_failed,
                     "owner_notifications_allowed": not self.dry_run,
+                    "business_mode": self.business_mode,
                 },
             )
             dispatch_error = (
@@ -340,6 +392,7 @@ class Daemon:
             run_id=run_id, dry_run=self.dry_run, **self.run_metadata
         )
         previous_signal_handlers = self._install_signal_handlers()
+        finish_status: str | None = None
         try:
             self.logger.debug(
                 "daemon_startup_health_started",
@@ -356,7 +409,28 @@ class Daemon:
                     run_id=run_id, status="health_failed", health_summary=summary
                 )
                 return 2
+            if self._stop_is_requested():
+                finish_status = "stopped"
+                return 0
             self._start_card_action_connection(run_id=run_id)
+            if self._stop_is_requested():
+                finish_status = "stopped"
+                return 0
+            self.store.set_checkpoint(
+                "runtime.business_mode",
+                {
+                    "run_id": run_id,
+                    "business_mode": self.business_mode,
+                    "send_mode": self.coworker_send_mode,
+                    "chat_id": self.coworker_chat_id,
+                    "provider": self.coworker_worker.service.startup_provider
+                    if self.business_mode == "coworker"
+                    and self.coworker_worker is not None
+                    else None,
+                },
+            )
+            if self.coworker_worker is not None:
+                self.coworker_worker.start()
             self.logger.emit(
                 "info",
                 "daemon_started",
@@ -365,6 +439,8 @@ class Daemon:
                     "dry_run": self.dry_run,
                     "tick_interval_seconds": self.tick_interval_seconds,
                     "owner_notifications_allowed": not self.dry_run,
+                    "business_mode": self.business_mode,
+                    "coworker_send_mode": self.coworker_send_mode,
                 },
             )
             observed_wakeup = self._current_wakeup_generation()
@@ -373,7 +449,7 @@ class Daemon:
                 observed_wakeup = self._wait_for_next_tick(observed_wakeup)
         except KeyboardInterrupt:
             self.logger.emit("info", "daemon_interrupted", run_id=run_id)
-            self.store.record_run_finish(run_id=run_id, status="stopped")
+            finish_status = "stopped"
             return 0
         except Exception as exc:
             self.logger.emit(
@@ -382,16 +458,27 @@ class Daemon:
                 run_id=run_id,
                 data={"error": str(exc), "error_type": type(exc).__name__},
             )
-            self.store.record_run_finish(run_id=run_id, status="crashed")
+            finish_status = "crashed"
             raise
         else:
-            self.logger.emit("info", "daemon_stopped", run_id=run_id)
-            self.store.record_run_finish(run_id=run_id, status="stopped")
+            finish_status = "stopped"
             return 0
         finally:
-            if self.card_action_connection is not None:
-                self.card_action_connection.stop()
-            self._restore_signal_handlers(previous_signal_handlers)
+            try:
+                if self.coworker_worker is not None:
+                    self.coworker_worker.request_stop()
+                if self.card_action_connection is not None:
+                    self.card_action_connection.stop()
+            finally:
+                try:
+                    if self.coworker_worker is not None:
+                        self.coworker_worker.stop()
+                finally:
+                    self._restore_signal_handlers(previous_signal_handlers)
+            if finish_status is not None:
+                if finish_status == "stopped":
+                    self.logger.emit("info", "daemon_stopped", run_id=run_id)
+                self.store.record_run_finish(run_id=run_id, status=finish_status)
 
     def _start_card_action_connection(self, *, run_id: str) -> None:
         connection = self.card_action_connection
@@ -549,6 +636,7 @@ class Daemon:
     def _runtime_product_policy_ok_for_tick(self, *, run_id: str) -> bool:
         try:
             probe = self.store.product_policy_initialization_probe()
+            raw_coworker = self.store.get_product_policy(COWORKER_POLICY_KEY)
         except Exception as exc:  # noqa: BLE001  # pragma: no cover - platform-specific detail
             # Store implementations can fail with platform-specific errors;
             # convert them into a health result for the current tick.
@@ -561,6 +649,39 @@ class Daemon:
             )
         else:
             if probe["initialized"]:
+                configured_mode = (
+                    "coworker"
+                    if raw_coworker is not None and raw_coworker.get("enabled") is True
+                    else "shadow"
+                )
+                configured_send_mode = (
+                    raw_coworker.get("send_mode", "project")
+                    if raw_coworker is not None
+                    else None
+                )
+                if configured_mode != self.business_mode or (
+                    configured_mode == "coworker"
+                    and (
+                        configured_send_mode != self.coworker_send_mode
+                        or raw_coworker is None
+                        or raw_coworker.get("chat_id") != self.coworker_chat_id
+                    )
+                ):
+                    result = HealthCheckResult(
+                        "business_mode",
+                        "critical",
+                        "failed",
+                        "Business mode changed; restart the daemon to apply the new mode",
+                        {
+                            "running_mode": self.business_mode,
+                            "configured_mode": configured_mode,
+                        },
+                    )
+                    self.store.record_health_results(run_id=run_id, results=[result])
+                    self.logger.emit(
+                        "error", "daemon_business_mode_changed", run_id=run_id
+                    )
+                    return False
                 return True
             result = HealthCheckResult(
                 "product_policy_initialized",
@@ -609,7 +730,7 @@ class Daemon:
                 config=self.app_config,
                 base_dir=base_dir,
                 logger=self.logger,
-            ).prune(run_id=run_id)
+            ).prune(run_id=run_id, protect_pending=True)
             record_daemon_retention_checkpoint(self.store, summary=summary)
         except Exception as exc:  # noqa: BLE001
             # Retention is an independent daemon stage; surface failures while

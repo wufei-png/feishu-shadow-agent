@@ -10,7 +10,7 @@ from html import escape
 from typing import Any, cast
 
 from .approval_cards import build_approval_card
-from .config import AppConfig
+from .config import AppConfig, CoworkerConfig
 from .feishu.client import FeishuClient
 from .jsonl import JSONLLogger
 from .membership import (
@@ -18,14 +18,16 @@ from .membership import (
     effective_membership_status,
     record_bot_membership_absence,
 )
-from .message_normalization import MessageNormalizer
+from .message_normalization import MessageNormalizer, message_content_fingerprint
 from .policy import PolicyResolver
 from .reply_destination import candidate_from_message, message_location
+from .store.policy_store import COWORKER_POLICY_KEY
 from .store.sqlite_store import SQLiteStore
 from .time_utils import format_instant, utc_now
 from .types import (
     ActionRecord,
     ActionStatus,
+    BusinessScope,
     DispatchAttemptStatus,
     DispatchErrorStage,
     LarkCliResult,
@@ -95,9 +97,12 @@ class Dispatcher:
         blocked_send_reply_reason: str | None = None,
         can_start_action: Callable[[], bool] | None = None,
         limit: int = 50,
+        scope: BusinessScope = "all",
     ) -> DispatchSummary:
         summary = DispatchSummary()
-        recovered = self.store.mark_stale_sending_actions_failed_needs_review()
+        recovered = self.store.mark_stale_sending_actions_failed_needs_review(
+            scope=scope
+        )
         if recovered:
             self.logger.warning(
                 "dispatch_stale_sending_recovered",
@@ -117,14 +122,16 @@ class Dispatcher:
                         dedupe_suffix="stale_recovery",
                     )
         actions = self.store.list_dispatchable_actions(
-            limit=limit, kind=None if include_owner_notifications else "send_reply"
+            limit=limit,
+            kind=None if include_owner_notifications else "send_reply",
+            scope=scope,
         )
         if allow_owner_notification_actual:
             seen_action_ids = {action.id for action in actions}
             actions.extend(
                 action
                 for action in self.store.list_dispatchable_actions(
-                    limit=limit, kind="owner_notification"
+                    limit=limit, kind="owner_notification", scope=scope
                 )
                 if action.id not in seen_action_ids
             )
@@ -566,6 +573,9 @@ class Dispatcher:
                         error=send.error or send.stderr,
                         absence=membership_absence,
                         execution_mode=action.execution_mode,
+                        business_mode="coworker"
+                        if self.store.task_is_coworker(task.id)
+                        else "shadow",
                     )
             attempt_status = _send_failure_attempt_status(send)
             action_status = (
@@ -736,6 +746,81 @@ class Dispatcher:
                 task = self.store.get_task_by_id(action.task_id)
             except KeyError:
                 return _local_error(action, "send_reply task is missing")
+            source = str(action.payload.get("source") or "")
+            if source.startswith("coworker"):
+                raw_policy = self.store.get_product_policy(COWORKER_POLICY_KEY)
+                try:
+                    coworker = (
+                        None
+                        if raw_policy is None
+                        else CoworkerConfig.model_validate(raw_policy)
+                    )
+                except ValueError:
+                    coworker = None
+                if (
+                    coworker is None
+                    or not coworker.enabled
+                    or coworker.chat_id != task.chat_id
+                ):
+                    return _local_error(action, "coworker_policy_disabled_or_changed")
+                if identity != "bot":
+                    return _local_error(action, "coworker_requires_bot_identity")
+                if (
+                    source in {"coworker_delegate", "coworker_delegate_approval"}
+                    and action.payload.get("coworker_peer_id")
+                    not in coworker.partner_open_ids()
+                ):
+                    return _local_error(action, "coworker_peer_not_allowed")
+                if source in {"coworker_delegate", "coworker_delegate_approval"}:
+                    peer_id = action.payload.get("coworker_peer_id")
+                    delegation_id = action.payload.get("coworker_delegation_id")
+                    if (
+                        not isinstance(peer_id, str)
+                        or _expected_mentions(text) != {peer_id}
+                        or not isinstance(delegation_id, str)
+                        or delegation_id not in text
+                    ):
+                        return _local_error(
+                            action, "coworker_delegation_identity_invalid"
+                        )
+                if action.payload.get("coworker_snapshot_verified") is not True:
+                    return _local_error(action, "coworker_source_snapshot_unverified")
+                try:
+                    source_page = self.feishu.get_messages(
+                        as_identity="bot", message_ids=[target_message_id]
+                    )
+                except Exception:  # noqa: BLE001
+                    return _local_error(action, "coworker_source_refresh_failed")
+                source_item = next(
+                    (
+                        item
+                        for item in source_page.items
+                        if item.get("message_id") == target_message_id
+                    ),
+                    None,
+                )
+                if source_item is None or source_item.get("chat_id") not in (
+                    None,
+                    task.chat_id,
+                ):
+                    return _local_error(action, "coworker_source_unavailable")
+                if (
+                    source_item.get("is_deleted")
+                    or source_item.get("deleted")
+                    or source_item.get("update_time")
+                    != action.payload.get("coworker_source_update_time")
+                    or not action.payload.get("coworker_source_content_sha256")
+                    or message_content_fingerprint(source_item)
+                    != action.payload.get("coworker_source_content_sha256")
+                ):
+                    return _local_error(action, "coworker_source_changed_or_deleted")
+                if (
+                    source not in {"coworker_approval", "coworker_delegate_approval"}
+                    and not PolicyResolver(self.store)
+                    .resolve_chat_policy(task.chat_id, task.chat_type)
+                    .auto_reply
+                ):
+                    return _local_error(action, "coworker_auto_reply_disabled")
             target = self.store.get_message(target_message_id)
             candidate = (
                 None
@@ -767,6 +852,9 @@ class Dispatcher:
                         if (
                             policy.reply_identity == "bot_preferred"
                             and policy.allow_user_fallback
+                            and not str(action.payload.get("source") or "").startswith(
+                                "coworker"
+                            )
                         ):
                             identity = "user"
                         else:

@@ -2,19 +2,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sqlite3
 import subprocess
 import sys
 from collections.abc import Sequence
 from datetime import timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any, TypedDict
 
 import yaml
 
-from .agent_backend_factory import create_agent_backend
+from .agent_backend_factory import coworker_runtime_config, create_agent_backend
 from .agent_invocation import AgentInvoker
 from .card_actions import create_card_action_connection
-from .config import ConfigError, ConfigService, LoadedConfig
+from .codex_app_server import CodexAppServer
+from .config import ConfigError, ConfigService, CoworkerConfig, LoadedConfig
 from .console_api import (
     console_static_ready,
     create_console_app,
@@ -25,12 +29,19 @@ from .console_security import (
     generate_console_token,
     validate_console_bind_host,
 )
+from .coworker import CoworkerService, CoworkerWorker
+from .coworker_replay import (
+    CoworkerReplaySnapshot,
+    replay_recorded_events,
+    snapshot_from_local_store,
+)
+from .coworker_store import CoworkerStore
 from .daemon import Daemon
 from .dispatcher import Dispatcher
 from .evals import EvalError
 from .evals.config import load_evaluation_config
 from .evals.service import EvalService
-from .feishu.lark_cli import LarkCliClient
+from .feishu.lark_cli import LarkCliClient, LarkCliCommandError
 from .health import HealthSuite, has_critical_failure, summarize_results
 from .jsonl import JSONLLogger
 from .operator_commands import CommandResult, OperatorCommandService, command_exit_code
@@ -45,6 +56,8 @@ from .runtime_mode import (
     initialize_dry_run_policy,
     sync_production_policy,
 )
+from .store.policy_store import COWORKER_POLICY_KEY
+from .store.schema import IncompatibleSchemaError
 from .store.sqlite_store import SQLiteStore
 from .time_utils import shift_instant
 from .types import new_run_id, utc_now_iso
@@ -139,6 +152,56 @@ def build_parser() -> argparse.ArgumentParser:
     status = subparsers.add_parser("status", help="show daemon and queue status")
     _add_config_arg(status)
     status.set_defaults(handler=_handle_status)
+
+    coworker = subparsers.add_parser("coworker", help="AI coworker status and recovery")
+    coworker_subparsers = coworker.add_subparsers(dest="coworker_command")
+    coworker_status = coworker_subparsers.add_parser(
+        "status", help="show coworker sessions and pending work"
+    )
+    _add_config_arg(coworker_status)
+    coworker_status.set_defaults(handler=_handle_coworker_status)
+    coworker_discard = coworker_subparsers.add_parser(
+        "discard-event", help="discard an uncertain event without replay"
+    )
+    _add_config_arg(coworker_discard)
+    coworker_discard.add_argument("--event-id", required=True, type=int)
+    coworker_discard.add_argument(
+        "--daemon-stopped", action="store_true", required=True
+    )
+    coworker_discard.set_defaults(handler=_handle_coworker_discard)
+    coworker_reset = coworker_subparsers.add_parser(
+        "reset-session", help="close a topic session so its next turn creates a new one"
+    )
+    _add_config_arg(coworker_reset)
+    coworker_reset.add_argument("--session-id", required=True, type=int)
+    coworker_reset.add_argument("--daemon-stopped", action="store_true", required=True)
+    coworker_reset.set_defaults(handler=_handle_coworker_reset)
+    coworker_memory = coworker_subparsers.add_parser(
+        "reset-memory-review", help="clear a reviewed memory maintenance failure"
+    )
+    _add_config_arg(coworker_memory)
+    coworker_memory.add_argument("--daemon-stopped", action="store_true", required=True)
+    coworker_memory.set_defaults(handler=_handle_coworker_memory_reset)
+    coworker_replay = coworker_subparsers.add_parser(
+        "replay", help="replay recorded SDK events offline with a fake backend"
+    )
+    coworker_replay.add_argument("--snapshot", required=True)
+    coworker_replay.add_argument("--trigger-mode", choices=["mention", "followups"])
+    coworker_replay.add_argument("--chat-layout", choices=["group", "topic"])
+    coworker_replay.add_argument(
+        "--history-source", choices=["live_on_demand", "local_cache"]
+    )
+    coworker_replay.set_defaults(handler=_handle_coworker_replay)
+    coworker_export = coworker_subparsers.add_parser(
+        "export-replay",
+        help="reconstruct a private replay snapshot from stored messages",
+    )
+    _add_config_arg(coworker_export)
+    coworker_export.add_argument("--app-id", required=True)
+    coworker_export.add_argument("--bot-open-id", required=True)
+    coworker_export.add_argument("--output", required=True)
+    coworker_export.add_argument("--limit", type=int, default=100)
+    coworker_export.set_defaults(handler=_handle_coworker_export)
 
     replay = subparsers.add_parser(
         "replay", help="explain local state and preview dispatch"
@@ -508,20 +571,30 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         run_id=run_id,
         dry_run_mode=args.dry_run,
     )
+    raw_coworker = store.get_product_policy(COWORKER_POLICY_KEY)
+    if raw_coworker is not None and "send_mode" not in raw_coworker:
+        raw_coworker = {**raw_coworker, "send_mode": "project"}
+    coworker_policy = (
+        None if raw_coworker is None else CoworkerConfig.model_validate(raw_coworker)
+    )
+    coworker_enabled = coworker_policy is not None and coworker_policy.enabled
     backend_config = loaded.config.agent_backend
     agent_working_dir = resolve_agent_working_dir(
         backend_config.working_dir, loaded.base_dir
     )
-    agent_backend = create_agent_backend(loaded.config, base_dir=loaded.base_dir)
-    task_processor = TaskProcessingService(
-        store=store,
-        config=loaded.config,
-        agent_backend=agent_backend,
-        logger=logger,
-        agent_working_dir=agent_working_dir,
-        config_base_dir=loaded.base_dir,
-        dry_run=args.dry_run,
-    )
+    task_processor = None
+    if not coworker_enabled:
+        agent_backend = create_agent_backend(loaded.config, base_dir=loaded.base_dir)
+        task_processor = TaskProcessingService(
+            store=store,
+            config=loaded.config,
+            agent_backend=agent_backend,
+            logger=logger,
+            agent_working_dir=agent_working_dir,
+            config_base_dir=loaded.base_dir,
+            dry_run=args.dry_run,
+            approval_scope="shadow",
+        )
     daemon = Daemon(
         store=store,
         logger=logger,
@@ -533,8 +606,56 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         task_processor=task_processor,
         run_metadata=dict(_git_info(Path.cwd())),
         config_base_dir=loaded.base_dir,
+        business_mode="coworker" if coworker_enabled else "shadow",
+        coworker_send_mode=coworker_policy.send_mode
+        if coworker_enabled and coworker_policy
+        else None,
+        coworker_chat_id=coworker_policy.chat_id
+        if coworker_enabled and coworker_policy
+        else None,
     )
-    if loaded.config.interactive_cards.enabled and not args.dry_run:
+    message_handler = None
+    on_message_reconnect = None
+    if coworker_enabled:
+        if coworker_policy is None or coworker_policy.chat_id is None:
+            raise ValueError("enabled coworker policy requires a chat ID")
+        try:
+            chat_layout = client.get_chat_layout(chat_id=coworker_policy.chat_id)
+        except (LarkCliCommandError, ValueError) as exc:
+            print(
+                f"coworker error: cannot determine group layout ({type(exc).__name__}); "
+                "check bot membership and group information permissions",
+                file=sys.stderr,
+            )
+            return 2
+        service = CoworkerService(
+            store=store,
+            config=loaded.config,
+            feishu=client,
+            logger=logger,
+            base_dir=loaded.base_dir,
+            app_id=os.environ.get(loaded.config.interactive_cards.app_id_env, ""),
+            dry_run=args.dry_run,
+            chat_layout=chat_layout,
+        )
+        if coworker_policy.provider == "codex":
+            runtime = coworker_runtime_config(loaded.config, coworker_policy)
+            service.app_server = CodexAppServer(
+                config=runtime.agent_backend.codex,
+                skill_names=runtime.agent_backend.codex.skills,
+                explicit_context_paths=runtime.agent_backend.explicit_context.paths,
+                on_notification=service.on_app_server_notification,
+            )
+        daemon.coworker_worker = CoworkerWorker(
+            service,
+            runtime_allows_processing=daemon.runtime_health_allows_card_actions,
+            wake_daemon=daemon.wake,
+        )
+        message_handler = service.receive
+        on_message_reconnect = partial(service.events.mark_history_gaps, service.app_id)
+    if (
+        loaded.config.interactive_cards.enabled and not args.dry_run
+    ) or coworker_enabled:
         daemon.card_action_connection = create_card_action_connection(
             store=store,
             config=loaded.config,
@@ -542,6 +663,18 @@ def _handle_daemon(args: argparse.Namespace) -> int:
             wake=daemon.wake,
             execution_mode="dry_run" if args.dry_run else "production",
             runtime_allows_actions=daemon.runtime_health_allows_card_actions,
+            message_handler=message_handler,
+            register_card_actions=loaded.config.interactive_cards.enabled
+            and not args.dry_run
+            and (
+                not coworker_enabled
+                or (
+                    coworker_policy is not None
+                    and coworker_policy.send_mode == "project"
+                )
+            ),
+            on_message_reconnect=on_message_reconnect,
+            approval_scope="coworker" if coworker_enabled else "shadow",
         )
     return daemon.run_forever()
 
@@ -625,6 +758,129 @@ def _handle_status(args: argparse.Namespace) -> int:
     ).dashboard_snapshot()
     snapshot["runtime_mode"] = args.mode or "production"
     print(yaml.safe_dump(snapshot, allow_unicode=True, sort_keys=False), end="")
+    return 0
+
+
+def _handle_coworker_status(args: argparse.Namespace) -> int:
+    loaded = ConfigService().load(args.config)
+    if args.mode == "dry-run":
+        loaded = dry_run_config(loaded)
+    path = resolve_relative_path(loaded.config.storage.sqlite_path, loaded.base_dir)
+    if not path.exists():
+        print(
+            yaml.safe_dump({"status": "database_missing"}, allow_unicode=True), end=""
+        )
+        return 0
+    store = SQLiteStore(path)
+    snapshot = CoworkerStore(store).status()
+    effective_policy = store.get_product_policy(COWORKER_POLICY_KEY)
+    snapshot["effective_policy"] = effective_policy
+    if effective_policy is not None:
+        snapshot["effective_send_mode"] = effective_policy.get("send_mode", "project")
+    snapshot["policy_matches_config"] = (
+        effective_policy == loaded.config.coworker.model_dump(mode="json")
+        if effective_policy is not None
+        else not loaded.config.coworker.enabled
+    )
+    print(yaml.safe_dump(snapshot, allow_unicode=True, sort_keys=False), end="")
+    return 0
+
+
+def _handle_coworker_discard(args: argparse.Namespace) -> int:
+    _, store, _ = _load_runtime(args.config, mode=args.mode)
+    try:
+        CoworkerStore(store).discard_event(
+            args.event_id, daemon_stopped=args.daemon_stopped
+        )
+    except ValueError as exc:
+        print(f"coworker error: {exc}", file=sys.stderr)
+        return 2
+    print(f"discarded event {args.event_id}")
+    return 0
+
+
+def _handle_coworker_reset(args: argparse.Namespace) -> int:
+    _, store, _ = _load_runtime(args.config, mode=args.mode)
+    try:
+        CoworkerStore(store).reset_session(
+            args.session_id, daemon_stopped=args.daemon_stopped
+        )
+    except ValueError as exc:
+        print(f"coworker error: {exc}", file=sys.stderr)
+        return 2
+    print(f"closed session {args.session_id}; the next turn creates a new session")
+    return 0
+
+
+def _handle_coworker_memory_reset(args: argparse.Namespace) -> int:
+    _, store, _ = _load_runtime(args.config, mode=args.mode)
+    checkpoint = store.get_checkpoint("coworker.memory_maintenance") or {}
+    if checkpoint.get("state") not in {"needs_review", "in_progress", "failed"}:
+        print(
+            "coworker error: memory maintenance is not awaiting review", file=sys.stderr
+        )
+        return 2
+    store.set_checkpoint(
+        "coworker.memory_maintenance",
+        checkpoint | {"state": "idle", "error_type": None},
+    )
+    print("memory maintenance review cleared")
+    return 0
+
+
+def _handle_coworker_replay(args: argparse.Namespace) -> int:
+    try:
+        path = Path(args.snapshot)
+        if path.stat().st_size > 10 * 1024 * 1024:
+            raise ValueError("snapshot is too large")
+        snapshot = CoworkerReplaySnapshot.model_validate_json(path.read_bytes())
+        changes: dict[str, Any] = {}
+        if args.chat_layout:
+            changes["chat_layout"] = args.chat_layout
+        if args.trigger_mode:
+            changes["trigger_mode"] = args.trigger_mode
+        if args.history_source:
+            changes["history_source"] = args.history_source
+        snapshot = snapshot.model_copy(update=changes)
+        report = replay_recorded_events(snapshot)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        # Validation errors may contain message bodies; do not print them.
+        print(f"coworker replay failed: {type(exc).__name__}", file=sys.stderr)
+        return 2
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _handle_coworker_export(args: argparse.Namespace) -> int:
+    try:
+        loaded = ConfigService().load(args.config)
+        if args.mode == "dry-run":
+            loaded = dry_run_config(loaded)
+        database = resolve_relative_path(
+            loaded.config.storage.sqlite_path, loaded.base_dir
+        )
+        snapshot = snapshot_from_local_store(
+            database, app_id=args.app_id, bot_open_id=args.bot_open_id, limit=args.limit
+        )
+        data = snapshot.model_dump_json(indent=2).encode("utf-8")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(args.output, flags, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(data)
+        except Exception:
+            Path(args.output).unlink(missing_ok=True)
+            raise
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        sqlite3.Error,
+        IncompatibleSchemaError,
+    ) as exc:
+        print(f"coworker export failed: {type(exc).__name__}", file=sys.stderr)
+        return 2
+    print(f"wrote {len(snapshot.events)} reconstructed events to {args.output}")
     return 0
 
 
@@ -946,9 +1202,9 @@ def _validate_case_args(case: Path | None, cases: Path | None) -> None:
 
 
 def _warn_eval_full_access_repeat(loaded: LoadedConfig, repeat: int) -> None:
-    if loaded.config.tool_permissions == "full_access" and repeat > 1:
+    if loaded.config.tool_permissions != "read_only" and repeat > 1:
         print(
-            "warning: full_access agent tools may repeat external side effects across eval trials",
+            f"warning: {loaded.config.tool_permissions} agent tools may repeat external side effects across eval trials",
             file=sys.stderr,
         )
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 import shutil
 import subprocess
@@ -7,14 +8,16 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Protocol, cast
 
 from .agent_backend import AgentRunResult
+from .agent_backend_factory import coworker_runtime_config
 from .agent_skill_context import load_agent_skill_names
 from .claude_code import claude_code_execution_policy
 from .codex import codex_execution_policy
-from .config import LoadedConfig
+from .config import AppConfig, CoworkerConfig, LoadedConfig
 from .hermes import hermes_execution_policy
 from .paths import (
     resolve_agent_skill_path,
@@ -22,6 +25,7 @@ from .paths import (
     resolve_relative_path,
 )
 from .storage_usage import DiskUsageProbe, resolve_storage_usage
+from .store.policy_store import COWORKER_POLICY_KEY
 from .store.sqlite_store import SQLiteStore
 from .types import HealthCheckResult, LarkCliResult, new_run_id
 
@@ -353,6 +357,7 @@ class HealthSuite:
         )
         results.append(self._check_user_scopes(auth_json))
         results.append(self._check_bot_available(auth_json))
+        results.extend(self._check_coworker(auth_json))
         owner_identity = self._check_owner_config(auth_json)
         results.append(owner_identity)
         results.append(
@@ -360,13 +365,15 @@ class HealthSuite:
                 send_test=send_test, identity_verified=owner_identity.status == "ok"
             )
         )
-        backend_results = self.agent_backend_checker(self.loaded_config)
-        if isinstance(backend_results, list):
-            results.extend(backend_results)
-        else:
-            results.append(backend_results)
-        results.append(self._check_agent_explicit_skills())
-        results.extend(self._check_reply_postprocess_guidance())
+        coworker_config = self._active_coworker_config()
+        if coworker_config is None:
+            backend_results = self.agent_backend_checker(self.loaded_config)
+            if isinstance(backend_results, list):
+                results.extend(backend_results)
+            else:
+                results.append(backend_results)
+            results.extend(self._check_reply_postprocess_guidance())
+        results.append(self._check_agent_explicit_skills(coworker_config))
         self.store.record_health_results(run_id=self.run_id, results=results)
         return results
 
@@ -387,12 +394,14 @@ class HealthSuite:
         )
         results.append(self._check_user_scopes(auth_json))
         results.append(self._check_bot_available(auth_json))
+        results.extend(self._check_coworker(auth_json))
         results.append(self._check_owner_config(auth_json))
-        backend_results = self.agent_backend_checker(self.loaded_config)
-        if isinstance(backend_results, list):
-            results.extend(backend_results)
-        else:
-            results.append(backend_results)
+        if self._active_coworker_config() is None:
+            backend_results = self.agent_backend_checker(self.loaded_config)
+            if isinstance(backend_results, list):
+                results.extend(backend_results)
+            else:
+                results.append(backend_results)
         self.store.record_health_results(run_id=self.run_id, results=results)
         return results
 
@@ -404,6 +413,139 @@ class HealthSuite:
             "config schema is valid",
             {"path": str(self.loaded_config.path)},
         )
+
+    def _active_coworker_config(self) -> AppConfig | None:
+        try:
+            raw = self.store.get_product_policy(COWORKER_POLICY_KEY)
+            if raw is None:
+                return None
+            policy = CoworkerConfig.model_validate(raw)
+            if not policy.enabled:
+                return None
+            return coworker_runtime_config(self.loaded_config.config, policy)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _check_coworker(self, auth_json: object) -> list[HealthCheckResult]:
+        try:
+            raw = self.store.get_product_policy(COWORKER_POLICY_KEY)
+            if raw is None:
+                return []
+            policy = CoworkerConfig.model_validate(raw)
+            if not policy.enabled:
+                return []
+            cards = self.loaded_config.config.interactive_cards
+            app_id = os.environ.get(cards.app_id_env, "")
+            app_secret = os.environ.get(cards.app_secret_env, "")
+            auth_app: object = (
+                cast(dict[str, object], auth_json).get("appId")
+                if isinstance(auth_json, dict)
+                else None
+            )
+            missing: list[str] = []
+            if not app_id or not app_secret:
+                missing.append("event_connection_credentials")
+            if not app_id or auth_app != app_id:
+                missing.append("event_and_lark_cli_app_identity_mismatch")
+            if importlib.util.find_spec("lark_channel") is None:
+                missing.append("lark_channel_sdk")
+            if (
+                not policy.chat_id
+                or self.store.get_chat_product_policy(policy.chat_id) is None
+            ):
+                missing.append("explicit_group_policy")
+            check = HealthCheckResult(
+                "coworker_configuration",
+                "critical",
+                "failed" if missing else "ok",
+                "AI coworker prerequisites are missing"
+                if missing
+                else "AI coworker prerequisites are configured",
+                {
+                    "missing": missing,
+                    "chat_id": policy.chat_id,
+                    "provider": policy.provider,
+                },
+            )
+            loaded = replace(
+                self.loaded_config,
+                config=coworker_runtime_config(self.loaded_config.config, policy),
+            )
+            backend = self.agent_backend_checker(loaded)
+            checks = backend if isinstance(backend, list) else [backend]
+            capabilities: list[HealthCheckResult] = []
+            if policy.provider == "codex":
+                codex = loaded.config.agent_backend.codex
+                path = codex.path or "codex"
+                cwd = resolve_agent_working_dir(
+                    loaded.config.agent_backend.working_dir, loaded.base_dir
+                )
+                timeout = loaded.config.health.timeout_seconds
+                app_server = _run_codex_command(
+                    [path, "app-server", "--help"], timeout_seconds=timeout, cwd=cwd
+                )
+                capabilities.append(
+                    HealthCheckResult(
+                        "coworker_codex_app_server",
+                        "critical",
+                        "ok" if app_server.ok else "failed",
+                        "Codex app-server command is available"
+                        if app_server.ok
+                        else "Codex app-server command is unavailable",
+                        {"exit_code": app_server.exit_code, "error": app_server.error},
+                    )
+                )
+                features = _run_codex_command(
+                    [path, "features", "list"], timeout_seconds=timeout, cwd=cwd
+                )
+                lines = [line.split() for line in features.stdout.splitlines()]
+                multi_agent = (
+                    next(
+                        (
+                            line[-1]
+                            for line in lines
+                            if len(line) >= 2 and line[0] == "multi_agent"
+                        ),
+                        None,
+                    )
+                    if features.ok
+                    else None
+                )
+                capabilities.append(
+                    HealthCheckResult(
+                        "coworker_codex_multi_agent",
+                        "warning",
+                        "ok" if multi_agent == "true" else "failed",
+                        "Codex native multi-agent is enabled"
+                        if multi_agent == "true"
+                        else "Codex native multi-agent is disabled or could not be checked",
+                        {"enabled": multi_agent == "true", "detected": multi_agent},
+                    )
+                )
+            else:
+                capabilities.append(
+                    HealthCheckResult(
+                        "coworker_background_subagents",
+                        "warning",
+                        "failed",
+                        "Hermes coworker backend does not provide the Codex background subagent integration",
+                    )
+                )
+            return [
+                check,
+                *[replace(result, name=f"coworker_{result.name}") for result in checks],
+                *capabilities,
+            ]
+        except Exception as exc:  # noqa: BLE001
+            return [
+                HealthCheckResult(
+                    "coworker_configuration",
+                    "critical",
+                    "failed",
+                    "AI coworker configuration could not be checked",
+                    {"error_type": type(exc).__name__},
+                )
+            ]
 
     def _check_sqlite_writable(self) -> HealthCheckResult:
         try:
@@ -863,8 +1005,10 @@ class HealthSuite:
             {"dry_run": not send_test, "argv": result.argv},
         )
 
-    def _check_agent_explicit_skills(self) -> HealthCheckResult:
-        backend = self.loaded_config.config.agent_backend
+    def _check_agent_explicit_skills(
+        self, config: AppConfig | None = None
+    ) -> HealthCheckResult:
+        backend = (config or self.loaded_config.config).agent_backend
         explicit_paths = backend.explicit_context.paths
         codex_skills = backend.codex.skills if backend.provider == "codex" else []
         hermes_skills = (
@@ -1371,13 +1515,14 @@ def _claude_code_capabilities_result(
 
 def _required_codex_exec_flags(loaded: LoadedConfig) -> list[str]:
     required = [
-        "--sandbox",
         "--output-schema",
         "--output-last-message",
         "--json",
         "--skip-git-repo-check",
     ]
     backend = loaded.config.agent_backend
+    if loaded.config.tool_permissions == "read_only":
+        required.append("--sandbox")
     if backend.config_scope == "isolated":
         required.append("--ignore-user-config")
     if backend.auto_context == "disabled":
@@ -1397,12 +1542,14 @@ def _required_claude_code_print_flags(loaded: LoadedConfig) -> list[str]:
         "--output-format",
         "--json-schema",
         "--resume",
-        "--permission-mode",
-        "--tools",
-        "--allowedTools",
-        "--mcp-config",
-        "--strict-mcp-config",
     ]
+    if loaded.config.tool_permissions != "inherit":
+        required.extend(["--permission-mode", "--tools"])
+    if (
+        loaded.config.tool_permissions != "inherit"
+        or loaded.config.agent_backend.config_scope == "isolated"
+    ):
+        required.extend(["--mcp-config", "--strict-mcp-config"])
     if loaded.config.agent_backend.config_scope == "isolated":
         required.append("--setting-sources")
     if loaded.config.agent_backend.auto_context == "disabled":
@@ -1410,7 +1557,7 @@ def _required_claude_code_print_flags(loaded: LoadedConfig) -> list[str]:
     if loaded.config.agent_backend.claude_code.model:
         required.append("--model")
     if loaded.config.tool_permissions == "read_only":
-        required.append("dontAsk")
+        required.extend(["dontAsk", "--allowedTools"])
     if loaded.config.tool_permissions == "full_access":
         required.extend(["bypassPermissions", "--dangerously-skip-permissions"])
     return required
@@ -1445,7 +1592,9 @@ def _hermes_tool_permissions_result(
             details,
         )
     help_text = f"{result.stdout}\n{result.stderr}"
-    required_flags = ["--toolsets", *_required_hermes_backend_flags(loaded)]
+    required_flags = _required_hermes_backend_flags(loaded)
+    if policy.toolsets is not None:
+        required_flags.append("--toolsets")
     missing = [flag for flag in required_flags if flag not in help_text]
     if policy.yolo and "--yolo" not in help_text:
         missing.append("--yolo")

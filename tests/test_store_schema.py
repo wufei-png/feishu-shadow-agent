@@ -39,6 +39,10 @@ EXPECTED_TABLES = {
     "approval_feedback",
     "message_processing",
     "processing_retry_attempts",
+    "coworker_sessions",
+    "coworker_events",
+    "coworker_delegations",
+    "coworker_subagents",
 }
 
 
@@ -102,7 +106,7 @@ def test_schema_initialize_does_not_treat_nonempty_metadata_as_a_blank_database(
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("version", [0, 1, 2, 3, 4, 5, 6, 7, 8, 10])
+@pytest.mark.parametrize("version", [0, 1, 2, 3, 4, 5, 6, 7, 8, 12])
 def test_schema_initialize_rejects_other_versions_without_modifying_database(
     tmp_path: Path, version: int
 ) -> None:
@@ -112,9 +116,96 @@ def test_schema_initialize_rejects_other_versions_without_modifying_database(
         conn.execute(f"PRAGMA user_version = {version}")
 
     before = path.read_bytes()
-    with pytest.raises(RuntimeError, match=f"version={version}.*version=9"):
+    with pytest.raises(
+        RuntimeError, match=f"version={version}.*version={SQLITE_SCHEMA_VERSION}"
+    ):
         SQLiteStore(path).initialize()
     assert path.read_bytes() == before
+
+
+def test_schema_upgrades_v9_without_losing_existing_data(tmp_path: Path) -> None:
+    path = tmp_path / "agent.sqlite3"
+    schema_path = Path(__file__).parents[1] / "src/feishu_shadow_agent/store/schema.sql"
+    schema = schema_path.read_text(encoding="utf-8")
+    before, after = schema.split("-- coworker schema begin", 1)
+    _, after = after.split("-- coworker schema end", 1)
+    old_schema = (before + after).replace(
+        "PRAGMA user_version = 11;", "PRAGMA user_version = 9;"
+    )
+    with sqlite3.connect(path) as conn:
+        conn.executescript(old_schema)
+        conn.execute(
+            "INSERT INTO checkpoints(key, value_json, updated_at) VALUES ('saved', '{}', 'now')"
+        )
+
+    store = SQLiteStore(path)
+    store.initialize()
+
+    with store.connect() as conn:
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0] == SQLITE_SCHEMA_VERSION
+        )
+        assert (
+            conn.execute("SELECT key FROM checkpoints WHERE key = 'saved'").fetchone()[
+                0
+            ]
+            == "saved"
+        )
+        assert conn.execute("SELECT COUNT(*) FROM coworker_sessions").fetchone()[0] == 0
+
+
+def test_schema_upgrades_v10_with_existing_coworker_sessions(tmp_path: Path) -> None:
+    path = tmp_path / "agent.sqlite3"
+    schema_path = Path(__file__).parents[1] / "src/feishu_shadow_agent/store/schema.sql"
+    before, after = schema_path.read_text(encoding="utf-8").split(
+        "-- coworker background schema begin", 1
+    )
+    _, after = after.split("-- coworker background schema end", 1)
+    schema = (before + after).replace(
+        "PRAGMA user_version = 11;", "PRAGMA user_version = 10;"
+    )
+    with sqlite3.connect(path) as conn:
+        conn.executescript(schema)
+        conn.execute(
+            """INSERT INTO coworker_sessions(app_id, chat_id, thread_id, provider,
+               agent_working_dir, created_at, updated_at) VALUES ('app', 'chat', 'thread',
+               'codex', '/tmp', 'now', 'now')"""
+        )
+    store = SQLiteStore(path)
+    store.initialize()
+    with store.connect() as conn:
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0] == SQLITE_SCHEMA_VERSION
+        )
+        assert conn.execute("SELECT COUNT(*) FROM coworker_sessions").fetchone()[0] == 1
+        assert (
+            conn.execute("SELECT COUNT(*) FROM coworker_subagents").fetchone()[0] == 0
+        )
+
+
+def test_schema_upgrade_failure_rolls_back(tmp_path: Path) -> None:
+    path = tmp_path / "agent.sqlite3"
+    with sqlite3.connect(path) as conn:
+        conn.execute(f"PRAGMA application_id = {SQLITE_APPLICATION_ID}")
+        conn.execute("PRAGMA user_version = 9")
+        conn.execute("CREATE VIEW coworker_sessions AS SELECT 1 AS id")
+
+    with pytest.raises(sqlite3.OperationalError):
+        SQLiteStore(path).initialize()
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert (
+            conn.execute(
+                "SELECT type FROM sqlite_master WHERE name = 'coworker_sessions'"
+            ).fetchone()[0]
+            == "view"
+        )
+        assert (
+            conn.execute(
+                "SELECT name FROM sqlite_master WHERE name = 'coworker_events'"
+            ).fetchone()
+            is None
+        )
 
 
 def test_unique_constraints_are_enforced(tmp_path: Path) -> None:

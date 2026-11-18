@@ -1,15 +1,88 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from typing import Any, cast
 
 import pytest
 
 pytest.importorskip("lark_channel")
 
+from lark_channel.channel.bot_identity import BotIdentity
 from lark_channel.ws import client as ws_module
 from lark_channel.ws.pb.pbbp2_pb2 import Frame
 
 from feishu_shadow_agent.lark_channel_compat import create_channel
+
+
+def test_raw_message_is_persisted_before_sdk_dispatch_returns() -> None:
+    async def run() -> None:
+        channel = create_channel("cli_test", "secret_test")
+        inner = cast(Any, channel._channel)
+        inner._bot_identity = BotIdentity(open_id="ou_bot")
+        observed: list[Any] = []
+        inner._on_p2_im_message_receive_v1 = lambda _data: observed.append("scheduled")
+        channel.set_raw_message_handler(lambda raw, bot: observed.append((raw, bot)))
+        dispatcher = inner._build_dispatcher()
+        payload = {
+            "schema": "2.0",
+            "header": {
+                "event_type": "im.message.receive_v1",
+                "event_id": "evt_1",
+                "app_id": "cli_test",
+                "tenant_key": "tenant",
+            },
+            "event": {
+                "sender": {"sender_id": {"open_id": "ou_user"}, "sender_type": "user"},
+                "message": {
+                    "message_id": "om_1",
+                    "chat_id": "oc_1",
+                    "chat_type": "group",
+                    "message_type": "text",
+                    "content": '{"text":"hello"}',
+                    "mentions": [{"id": {"open_id": "ou_bot"}, "key": "@_user_1"}],
+                },
+            },
+        }
+        dispatcher._do_without_validation(json.dumps(payload).encode())
+        raw, bot = observed[0]
+        assert bot == "ou_bot"
+        assert raw["event"]["message"]["message_id"] == "om_1"
+        assert raw["event"]["message"]["mentions"][0]["id"]["open_id"] == "ou_bot"
+        assert observed[1] == "scheduled"
+        await channel.disconnect()
+
+    asyncio.run(run())
+
+
+def test_raw_message_failure_propagates_before_acknowledgement() -> None:
+    async def run() -> None:
+        channel = create_channel("cli_test", "secret_test")
+        inner = cast(Any, channel._channel)
+        inner._bot_identity = BotIdentity(open_id="ou_bot")
+
+        def fail(_raw: object, _bot: str) -> None:
+            raise RuntimeError("storage unavailable")
+
+        channel.set_raw_message_handler(fail)
+        dispatcher = inner._build_dispatcher()
+        payload = {
+            "schema": "2.0",
+            "header": {
+                "event_type": "im.message.receive_v1",
+                "event_id": "evt_1",
+                "app_id": "cli_test",
+            },
+            "event": {
+                "sender": {},
+                "message": {"message_id": "om_1", "chat_id": "oc_1"},
+            },
+        }
+        with pytest.raises(RuntimeError, match="storage unavailable"):
+            dispatcher._do_without_validation(json.dumps(payload).encode())
+        await channel.disconnect()
+
+    asyncio.run(run())
 
 
 def test_channel_uses_an_idle_sdk_loop_outside_project_loop() -> None:

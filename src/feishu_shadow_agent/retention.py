@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import AppConfig
+from .coworker_store import CoworkerStore
 from .jsonl import JSONLLogger
 from .store.sqlite_store import SQLiteStore
 from .time_utils import format_instant, parse_instant, utc_now
@@ -98,6 +99,7 @@ class RetentionService:
         run_id: str | None = None,
         dry_run: bool = False,
         now: datetime | None = None,
+        protect_pending: bool = False,
     ) -> RetentionSummary:
         now = _aware_utc(now or utc_now())
         raw_cutoff = _cutoff_iso(now, self.config.retention.raw_message_days)
@@ -118,15 +120,29 @@ class RetentionService:
         protected_log_approval_ids = (
             self.store.list_effective_active_approval_identifiers(now=now_iso)
         )
+        if protect_pending:
+            tasks, messages, actions, approvals = (
+                self.store.pending_retention_identifiers()
+            )
+            protected_log_task_ids.update(tasks)
+            protected_log_message_ids.update(messages)
+            protected_log_action_ids.update(actions)
+            protected_log_approval_ids.update(approvals)
         content_candidates = self.store.scrub_sensitive_content(
             cutoff=raw_cutoff,
             feedback_cutoff=feedback_content_cutoff,
             now=now_iso,
             replacement_json=RAW_JSON_PRUNED_PLACEHOLDER,
             dry_run=True,
+            protect_pending=protect_pending,
         )
+        coworker_candidates = CoworkerStore(self.store).scrub_expired_payloads(
+            cutoff=raw_cutoff, dry_run=True, protect_pending=protect_pending
+        )
+        if coworker_candidates:
+            content_candidates["coworker_events"] = coworker_candidates
         resource_rows = self.store.list_prunable_resources(
-            cutoff=resource_cutoff, now=now_iso
+            cutoff=resource_cutoff, now=now_iso, protect_pending=protect_pending
         )
         log_content_candidates = (
             {}
@@ -175,7 +191,13 @@ class RetentionService:
                 now=now_iso,
                 replacement_json=RAW_JSON_PRUNED_PLACEHOLDER,
                 dry_run=False,
+                protect_pending=protect_pending,
             )
+            coworker_scrubbed = CoworkerStore(self.store).scrub_expired_payloads(
+                cutoff=raw_cutoff, dry_run=False, protect_pending=protect_pending
+            )
+            if coworker_scrubbed:
+                content_scrubbed["coworker_events"] = coworker_scrubbed
             expired = self.store.mark_resources_expired(expired_resource_ids)
             if self.logger is not None:
                 log_content_scrubbed = self.logger.scrub_before(

@@ -5,12 +5,13 @@ import sqlite3
 from collections.abc import Callable
 from typing import Any
 
-from ..config import AppConfig, ChatPolicyConfig, ReplyPolicyConfig
+from ..config import AppConfig, ChatPolicyConfig, CoworkerConfig, ReplyPolicyConfig
 from ._common import cursor_lastrowid as _cursor_lastrowid
 from ._common import json_row_dict as _json_row_dict
 from ._common import loads_json_object as _loads_json_object
 
 PRODUCT_POLICY_KEY = "reply_policy"
+COWORKER_POLICY_KEY = "ai_coworker"
 
 
 class PolicyStore:
@@ -226,8 +227,100 @@ class PolicyStore:
                     result["audit_count"] += 1
                 else:
                     result["skipped"]["chats"].append(chat_id)
+            coworker = config.coworker.model_dump(mode="json")
+            existing_coworker = conn.execute(
+                "SELECT policy_json FROM product_policies WHERE key = ?",
+                (COWORKER_POLICY_KEY,),
+            ).fetchone()
+            if existing_coworker is None and config.coworker.enabled:
+                conn.execute(
+                    "INSERT INTO product_policies(key, policy_json, updated_at) VALUES (?, ?, ?)",
+                    (COWORKER_POLICY_KEY, _policy_json(coworker), now),
+                )
+                self._record_policy_audit_locked(
+                    conn,
+                    scope="global",
+                    policy_key=COWORKER_POLICY_KEY,
+                    old_policy=None,
+                    new_policy=coworker,
+                    actor=actor,
+                    reason=audit_reason,
+                    now=now,
+                )
+                result["inserted"]["global"].append(COWORKER_POLICY_KEY)
+                result["audit_count"] += 1
+            elif existing_coworker is not None and replace:
+                old_coworker = json.loads(existing_coworker["policy_json"])
+                conn.execute(
+                    "UPDATE product_policies SET policy_json = ?, updated_at = ? WHERE key = ?",
+                    (_policy_json(coworker), now, COWORKER_POLICY_KEY),
+                )
+                self._record_policy_audit_locked(
+                    conn,
+                    scope="global",
+                    policy_key=COWORKER_POLICY_KEY,
+                    old_policy=old_coworker,
+                    new_policy=coworker,
+                    actor=actor,
+                    reason=audit_reason,
+                    now=now,
+                )
+                result["replaced"]["global"].append(COWORKER_POLICY_KEY)
+                result["audit_count"] += 1
+            elif existing_coworker is not None:
+                result["skipped"]["global"].append(COWORKER_POLICY_KEY)
         result["initialization"] = self.product_policy_initialization_probe()
         return result
+
+    def update_coworker_policy(
+        self, changes: dict[str, Any], *, actor: str, reason: str | None = None
+    ) -> dict[str, Any]:
+        allowed = {
+            "enabled",
+            "chat_id",
+            "provider",
+            "send_mode",
+            "trigger_mode",
+            "history_source",
+            "memory_maintenance",
+            "memory_maintenance_time",
+        }
+        if not changes or not set(changes).issubset(allowed):
+            raise ValueError("unsupported coworker policy change")
+        self.initialize()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT policy_json FROM product_policies WHERE key = ?",
+                (COWORKER_POLICY_KEY,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("coworker policy is not imported")
+            old = json.loads(row["policy_json"])
+            if "send_mode" not in old:
+                old["send_mode"] = "project"
+            current = CoworkerConfig.model_validate(old).model_dump(mode="json")
+            updated = CoworkerConfig.model_validate(current | changes).model_dump(
+                mode="json"
+            )
+            if current == updated:
+                return {"changed": False, "policy": current, "audit_id": None}
+            now = self.clock()
+            conn.execute(
+                "UPDATE product_policies SET policy_json = ?, updated_at = ? WHERE key = ?",
+                (_policy_json(updated), now, COWORKER_POLICY_KEY),
+            )
+            audit_id = self._record_policy_audit_locked(
+                conn,
+                scope="global",
+                policy_key=COWORKER_POLICY_KEY,
+                old_policy=old,
+                new_policy=updated,
+                actor=actor,
+                reason=reason or "coworker policy update",
+                now=now,
+            )
+        return {"changed": True, "policy": updated, "audit_id": audit_id}
 
     def update_product_policy(
         self,
@@ -402,11 +495,21 @@ class PolicyStore:
         }
 
     def replace_product_policy_snapshot(
-        self, global_policy: dict[str, Any], chats: list[dict[str, Any]], *, source: str
+        self,
+        global_policy: dict[str, Any],
+        chats: list[dict[str, Any]],
+        *,
+        source: str,
+        coworker_policy: dict[str, Any] | None = None,
     ) -> None:
         """Atomically replace policy only, retaining and holding other local state."""
         normalized_global = _normalize_global_product_policy(global_policy)
         normalized_chats = [_normalize_chat_product_policy(chat) for chat in chats]
+        normalized_coworker = (
+            None
+            if coworker_policy is None
+            else CoworkerConfig.model_validate(coworker_policy).model_dump(mode="json")
+        )
         incoming = {str(chat["chat_id"]): chat for chat in normalized_chats}
         self.initialize()
         actor = "dry_run_policy_sync"
@@ -433,6 +536,37 @@ class PolicyStore:
                     policy_key=PRODUCT_POLICY_KEY,
                     old_policy=old_global,
                     new_policy=normalized_global,
+                    actor=actor,
+                    reason=reason,
+                    now=now,
+                )
+            coworker_row = conn.execute(
+                "SELECT policy_json FROM product_policies WHERE key = ?",
+                (COWORKER_POLICY_KEY,),
+            ).fetchone()
+            old_coworker = (
+                None
+                if coworker_row is None
+                else json.loads(coworker_row["policy_json"])
+            )
+            if old_coworker != normalized_coworker:
+                if normalized_coworker is None:
+                    conn.execute(
+                        "DELETE FROM product_policies WHERE key = ?",
+                        (COWORKER_POLICY_KEY,),
+                    )
+                else:
+                    conn.execute(
+                        "INSERT INTO product_policies(key, policy_json, updated_at) VALUES (?, ?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET policy_json = excluded.policy_json, updated_at = excluded.updated_at",
+                        (COWORKER_POLICY_KEY, _policy_json(normalized_coworker), now),
+                    )
+                self._record_policy_audit_locked(
+                    conn,
+                    scope="global",
+                    policy_key=COWORKER_POLICY_KEY,
+                    old_policy=old_coworker,
+                    new_policy=normalized_coworker,
                     actor=actor,
                     reason=reason,
                     now=now,

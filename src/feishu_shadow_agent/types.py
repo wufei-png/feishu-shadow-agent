@@ -14,6 +14,8 @@ SenderRole = Literal[
     "external_user_message", "owner_message", "bot_message", "agent_message"
 ]
 ExecutionMode: TypeAlias = Literal["dry_run", "production"]
+BusinessMode: TypeAlias = Literal["shadow", "coworker"]
+BusinessScope: TypeAlias = Literal["all", "shadow", "coworker"]
 ApprovalOutcome: TypeAlias = Literal[
     "suggestion_sent",
     "edited_sent",
@@ -34,6 +36,18 @@ class ApprovalTargetBinding:
     task_id: int | None
     source_message_id: str | None
     source_revision: int | None
+
+
+@dataclass(frozen=True)
+class CoworkerDelegationSpec:
+    id: str
+    session_id: int
+    peer_id: str
+    hop: int
+    deadline: str
+    timeout_seconds: int
+    rate_limit: int
+    rate_window_seconds: int
 
 
 class TaskStatus(StrEnum):

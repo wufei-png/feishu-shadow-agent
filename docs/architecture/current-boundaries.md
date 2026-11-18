@@ -4,7 +4,7 @@ This document describes the current implementation boundary for Feishu Shadow Ag
 
 ## Product Shape
 
-Feishu Shadow Agent is a local, single-owner Feishu assistant. It watches direct owner mentions in group chats and P2P messages, asks an agent backend for semantic work, and replies only through code-owned policy, approval, dispatch, and audit gates.
+Feishu Shadow Agent is a local, single-owner Feishu assistant with two mutually exclusive daemon modes. Shadow mode watches direct owner mentions in group chats and P2P messages and uses the project's policy, approval, dispatch, and audit gates. The opt-in AI coworker mode receives events for one configured group and can let the agent send directly with its native tool permissions; project dispatch remains an alternative.
 
 Current non-goals remain deliberate:
 
@@ -12,8 +12,8 @@ Current non-goals remain deliberate:
 - No LaunchAgent, cron, systemd, desktop binary, or service installer.
 - No runtime merge between `config.yaml` and Product Policy Store.
 - No automatic resend when dispatch state is uncertain.
-- No agent-side execution of Feishu sends.
-- No full WebSocket message ingestion. User-authenticated polling remains the message source; the optional official SDK connection handles card actions only.
+- No direct Feishu sending workflow in shadow mode; its prompts use project dispatch, while native tool capabilities depend on the backend environment.
+- No WebSocket message ingestion for shadow tasks. Shadow uses user-authenticated polling; the SDK connection handles approval cards and, in coworker mode, the configured group's message events.
 - No automatic Product Policy changes learned from approval feedback.
 
 ## Document Precedence
@@ -33,11 +33,12 @@ Other phase plans can still be useful for rationale, acceptance commands, and ol
 
 These rules belong in deterministic code and tests. Do not delegate them to prompt wording alone:
 
-- Feishu identity selection: user reads, user P2P replies, bot owner notifications, bot-preferred group replies, and bot resource downloads.
-- Message ingress eligibility: group `@owner`, P2P, `@All` suppression, sender role classification, and loop guard.
-- Deterministic routing ownership and shortcuts: a revision stays with its original active task; otherwise reply-to, thread, and burst-window attachment are evaluated in that order before TaskRouter. Every structural lookup remains scoped to the current chat.
+- Feishu identity selection: shadow ingestion uses user reads, user P2P replies, bot owner notifications, bot-preferred group replies, and bot resource downloads. Project-owned coworker reads and replies use the configured bot identity without a user-identity fallback; the agent's own tools use their effective permissions and are guided by prompt instructions.
+- Message ingress eligibility: shadow group `@owner` and P2P rules remain separate from the opt-in coworker group's bot events, trigger and peer-correlation rules. Both suppress unintended `@All` triggers and distinguish self messages.
+- Shadow routing ownership and shortcuts: a revision stays with its original active task; otherwise reply-to, thread, and burst-window attachment are evaluated in that order before TaskRouter. Each daemon runs exactly one business mode until restart: shadow ingestion and retries are stopped in coworker mode, and project-owned dispatch and approval queues are limited to the active mode. Coworker sessions are group-shared for ordinary messages and topic-shared for threads. Every structural lookup remains scoped to the current chat.
 - Product Policy resolution: Product Policy Store as runtime truth, explicit Policy Import Source comparison, and fail-closed behavior when global policy is missing.
-- SQLite schema: empty stores initialize to the current baseline; existing stores with another version or application marker are rejected without migration, including read-only policy snapshots and evaluation reads.
+- Coworker Codex execution uses one persistent App Server: root turns are serialized within a group/topic session and can run concurrently across topics. The model chooses whether to spawn or interact with native subagents. The project records child state, forwards follow-ups to active root turns, and resumes the root on completion; an accepted steer is not proof of a completed action. Hermes remains a one-shot backend and does not provide this background integration.
+- SQLite schema: empty stores initialize to v11; marked v9 and v10 stores upgrade transactionally without dropping existing data. Other versions or application markers are rejected. Read-only policy snapshots can read v9, v10 or v11 without modifying the source.
 - Removing a group policy holds its watching tasks, queued processing retries and pending send actions. Re-adding the policy does not release these holds; an operator explicitly reopens a task or retries an action. In-flight provider calls cannot be retracted, and successful send evidence remains authoritative.
 - Resource gates: bot joined, resource download enabled, size/quota checks, retryable download failures, and owner notification on blocked resources.
 - Storage capacity guard: `runtime_storage_capacity` measures the sqlite, log, and resource roots and blocks ingestion and real sends only when free space on the tightest runtime filesystem drops below the fixed critical floor. A low-space warning never blocks runtime work, and a measurement failure never becomes a blocking verdict.
@@ -49,24 +50,24 @@ These rules belong in deterministic code and tests. Do not delegate them to prom
 - Operator mutations: all state-changing owner actions, including card callbacks, go through Operator Command services and return `CommandResult`.
 - Operator read models: CLI status and console reads go through `OperatorQueryService`, not direct store DTO snapshots.
 - Approval provenance: dry-run approvals/actions never become production sends; production requires a fresh production approval.
-- Full-chain retention: after the configured content window, messages, inactive task state, task background content/reasons, approvals, actions, dispatch results, resources, agent audits, approval commands/feedback, processing errors, and log payloads are scrubbed in place. Minimal audit rows remain; only a watching task whose `watch_until` is still in the future delays scrubbing.
+- Full-chain retention: after the configured content window, messages, inactive task state, task background content/reasons, approvals, actions, dispatch results, resources, agent audits, approval commands/feedback, processing errors, and log payloads are scrubbed in place. Minimal audit rows remain. Automatic daemon retention also protects pending work and its related records; manual `retention prune` retains its existing behavior and can scrub paused work.
 
 ## Agent Prompt Architecture And Trust Boundary
 
 Runtime prompt responsibilities are split by authority:
 
-- `agent_output_contract.py` owns the canonical Pydantic output models and runtime validation. Provider-native output schemas and the compact Task Session contract are derived from those models; no prompt wording is a second validation authority.
+- `agent_output_contract.py` owns the shadow mode's canonical Pydantic output models and runtime validation. Provider-native output schemas and the compact Task Session contract are derived from those models. Coworker project dispatch has its own structured output; agent-direct mode accepts natural output and does not dispatch that output again.
 - `prompt.py` owns backend-neutral runtime prompt builders and task-specific instructions. `prompt_instructions.py` owns shared evidence, data-boundary, skill, and Context Access rules. Output-enum escalation stays in each kind's output contract or kind-specific instruction.
 - Codex/Hermes/Claude adapter instructions remain provider-specific and are injected by the adapter layer. Evaluation judge prompts remain under `evals/` and are not added to production prompts.
-- The runtime prompt catalog is `router`, `task_session`, `reply_postprocess`, and `owner_style_refresh`; production `agent_audits` currently persist the first three, while owner-style refresh has no production audit row. Evaluation adds `ingress_judge`, `semantic_judge`, and the generic `structured_output` fallback. `agent_audits.request_type` is the persisted prompt kind. Audit rows and eval artifacts record the catalog version and SHA-256 of the exact backend-neutral business prompt, before provider-specific wrapper injection; full prompt text remains debug-only.
+- The runtime prompt catalog includes `router`, `task_session`, `reply_postprocess`, `owner_style_refresh`, `coworker`, and `coworker_memory`; production audits include the coworker prompt kinds, while owner-style refresh has no production audit row. Evaluation adds `ingress_judge`, `semantic_judge`, and the generic `structured_output` fallback. `agent_audits.request_type` is the persisted prompt kind. Audit rows and eval artifacts record the catalog version and SHA-256 of the exact backend-neutral business prompt; full prompt text remains debug-only.
 
-Context Access has an intentionally narrow trust boundary. Its URI, allowed tables, and query scope are logically read-only, enforced primarily by the model-visible instructions and the model's instruction following. This remains true when `tool_permissions: full_access` gives the backend other local write-capable tools; it is not a filesystem or security sandbox. Stronger local isolation requires `read_only` or an external sandbox. The project's built-in Feishu dispatch applies schema, policy, approval, dry-run, idempotency and dispatch gates. A `full_access` Agent can independently invoke shell commands or Feishu CLI and make external changes; those tool calls are outside the built-in dispatch gates, including during dry-run.
+Context Access has an intentionally narrow trust boundary. Its URI, allowed tables, and query scope are logically read-only, enforced primarily by the model-visible instructions and the model's instruction following. This remains true when `tool_permissions: full_access` or inherited native permissions give the backend other local write-capable tools; it is not a filesystem or security sandbox. Stronger local isolation requires `read_only` or an external sandbox. The project's built-in Feishu dispatch applies schema, policy, approval, dry-run, idempotency and dispatch gates. An Agent can independently invoke shell commands or Feishu CLI and make external changes when its effective permissions allow; those tool calls are outside the built-in dispatch gates, including during dry-run.
 
 Owner-provided task background is a separate, explicit evidence channel. Operator Command appends a task-scoped version for set, replace, or clear; it does not reset `agent_session_id` or change task ownership. `TaskSessionRunner` reads only the latest non-cleared value and injects it only when building a fresh provider session. Changes made after a session is created apply only to a future fresh session; resumed sessions never receive them. The prompt labels background as owner-supplied evidence rather than an instruction. It asks the model to weigh the source, context and timing of conflicts and to request owner review when a material conflict remains unresolved. This is model judgment, not a deterministic conflict detector.
 
 ## Agent-Owned Judgement
 
-These decisions can be handled by the agent, but only inside code-provided candidates and schemas:
+These shadow-mode decisions can be handled by the agent inside code-provided candidates and schemas. Coworker agent-direct mode instead uses native tools as described above:
 
 - Ambiguous task ownership after deterministic routing fails.
 - Whether the task has enough evidence for `auto_reply`, `needs_owner`, or `no_reply`.

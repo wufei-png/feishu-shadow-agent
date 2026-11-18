@@ -115,6 +115,13 @@ class MessageRouter:
                 )
                 if existing is not None:
                     decision, task = existing
+                    if task is not None and self.store.task_is_coworker(task.id):
+                        return self._audit(
+                            message,
+                            RouteDecision(
+                                RouteName.IGNORE, reason="other_business_mode"
+                            ),
+                        )
                     stage = _processing_stage_for_decision(decision)
                     stage_final = (
                         stage is not None
@@ -171,6 +178,11 @@ class MessageRouter:
             message.message_id
         )
         if sent_action_task is not None:
+            if self.store.task_is_coworker(sent_action_task.id):
+                return self._audit(
+                    message,
+                    RouteDecision(RouteName.IGNORE, reason="other_business_mode"),
+                )
             # Readback messages prove a dispatch happened. Link them to the task
             # audit trail, then ignore them as fresh work to prevent reply loops.
             decision = self.store.record_agent_message_for_task_and_audit(
@@ -307,6 +319,7 @@ class MessageRouter:
                 for task in tasks
                 if task.chat_id == message.chat_id
                 and not self.store.is_group_policy_held("task", task.id)
+                and not self.store.task_is_coworker(task.id)
             ]
             active = [task for task in same_chat if _is_active(task, now=now)]
             if len(active) == 1:
@@ -348,8 +361,10 @@ class MessageRouter:
         active: list[TaskRecord] = []
         for task_id in self.store.find_task_ids_for_message(message.message_id):
             task = self.store.get_task_by_id(task_id)
-            if _is_active(task, now=now) and not self.store.is_group_policy_held(
-                "task", task.id
+            if (
+                _is_active(task, now=now)
+                and not self.store.is_group_policy_held("task", task.id)
+                and not self.store.task_is_coworker(task.id)
             ):
                 active.append(task)
         if len(active) != 1:

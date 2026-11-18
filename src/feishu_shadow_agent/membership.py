@@ -9,7 +9,7 @@ from .config import AppConfig
 from .jsonl import JSONLLogger
 from .store.sqlite_store import SQLiteStore
 from .time_utils import normalize_instant, parse_instant_or_none, shift_instant
-from .types import ExecutionMode, LarkCliResult, utc_now_iso
+from .types import BusinessMode, ExecutionMode, LarkCliResult, utc_now_iso
 
 MembershipStatus = Literal["present", "absent", "unknown"]
 
@@ -55,6 +55,7 @@ class BotMembershipService:
         logger: JSONLLogger,
         clock: Callable[[], str] = utc_now_iso,
         execution_mode: ExecutionMode = "production",
+        business_mode: BusinessMode = "shadow",
     ):
         self.store = store
         self.feishu = feishu_client
@@ -62,10 +63,15 @@ class BotMembershipService:
         self.logger = logger
         self.clock = lambda: normalize_instant(clock())
         self.execution_mode: ExecutionMode = execution_mode
+        self.business_mode: BusinessMode = business_mode
 
-    def refresh(self, *, run_id: str) -> BotMembershipRefreshSummary:
+    def refresh(
+        self, *, run_id: str, chat_id: str | None = None
+    ) -> BotMembershipRefreshSummary:
         now = self.clock()
         candidates = self.store.list_bot_membership_candidate_chats()
+        if chat_id is not None:
+            candidates = [candidate for candidate in candidates if candidate == chat_id]
         activations = {
             str(item["chat_id"]): item["activation_id"]
             for item in self.store.list_chat_policy_activations()
@@ -123,6 +129,7 @@ class BotMembershipService:
                 source="active_probe",
                 error=error,
                 run_id=run_id,
+                business_mode=self.business_mode,
             )
             summary = BotMembershipRefreshSummary(
                 candidates=summary.candidates,
@@ -161,6 +168,7 @@ def record_bot_membership_absence(
     error: str | None,
     absence: BotMembershipAbsence,
     execution_mode: ExecutionMode = "production",
+    business_mode: BusinessMode = "shadow",
 ) -> None:
     if (
         not chat_id
@@ -181,6 +189,7 @@ def record_bot_membership_absence(
         error_code=absence.error_code,
         error_endpoint=absence.endpoint,
         run_id=run_id,
+        business_mode=business_mode,
     )
 
 
@@ -198,6 +207,7 @@ def _record_observation(
     run_id: str | None,
     error_code: int | None = None,
     error_endpoint: str | None = None,
+    business_mode: BusinessMode = "shadow",
 ) -> bool:
     previous = store.get_bot_membership_fact(chat_id) or {}
     previous_status = previous.get("status")
@@ -241,6 +251,8 @@ def _record_observation(
                 else "bot_membership_recovered",
                 "chat_id": chat_id,
                 "membership_status": status,
+                "source": f"{business_mode}_membership",
+                "business_mode": business_mode,
                 "dedupe_key": f"bot-membership:{chat_id}:{status}:{episode}",
             },
             execution_mode=execution_mode,

@@ -111,6 +111,24 @@ def test_dry_run_rejects_incompatible_production_policy_without_modifying_it(
     assert dry_store.get_product_policy() is None
 
 
+def test_dry_run_copies_coworker_policy_without_upgrading_v9_source(
+    tmp_path: Path,
+) -> None:
+    path = _config(tmp_path)
+    with path.open("a", encoding="utf-8") as output:
+        output.write("\ncoworker:\n  enabled: true\n  chat_id: oc_one\n")
+    loaded = ConfigService().load(path)
+    prod_store = SQLiteStore(tmp_path / "data/agent.sqlite3")
+    prod_store.import_product_policy_from_config(loaded.config)
+    with prod_store.connect() as conn:
+        conn.execute("PRAGMA user_version = 9")
+    before = prod_store.path.read_bytes()
+    _, dry_store, _ = _load_runtime(str(path), mode="dry-run")
+    coworker = dry_store.get_product_policy("ai_coworker")
+    assert coworker is not None and coworker["chat_id"] == "oc_one"
+    assert prod_store.path.read_bytes() == before
+
+
 def test_dry_run_rejects_overlapping_resource_roots(tmp_path: Path) -> None:
     path = _config(tmp_path)
     path.write_text(

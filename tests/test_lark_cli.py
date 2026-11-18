@@ -1,9 +1,43 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from feishu_shadow_agent.feishu.lark_cli import LarkCliClient, LarkCliCommandError
 from feishu_shadow_agent.types import LarkCliResult
+
+
+@pytest.mark.parametrize(
+    ("details", "expected"),
+    [
+        ({"chat_mode": "group", "group_message_type": "chat"}, "group"),
+        ({"chat_mode": "group", "group_message_type": "thread"}, "topic"),
+        ({"chat_mode": "topic"}, "topic"),
+    ],
+)
+def test_group_layout_uses_bot_group_metadata(
+    details: dict[str, Any], expected: str
+) -> None:
+    seen: list[list[str]] = []
+
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        seen.append(argv)
+        return LarkCliResult(argv=argv, exit_code=0, json_data={"data": details})
+
+    assert LarkCliClient(runner=runner).get_chat_layout(chat_id="oc_a") == expected
+    assert seen[0][seen[0].index("--as") + 1] == "bot"
+    assert seen[0][seen[0].index("--chat-id") + 1] == "oc_a"
+
+
+def test_unknown_group_layout_is_not_guessed() -> None:
+    def runner(argv: list[str], timeout: int) -> LarkCliResult:
+        return LarkCliResult(
+            argv=argv, exit_code=0, json_data={"data": {"chat_mode": "group"}}
+        )
+
+    with pytest.raises(ValueError, match="could not be determined"):
+        LarkCliClient(runner=runner).get_chat_layout(chat_id="oc_a")
 
 
 def test_build_messages_search_for_group_at_me() -> None:

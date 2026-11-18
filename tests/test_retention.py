@@ -218,6 +218,59 @@ def test_feedback_audit_row_is_always_kept_after_content_expiry(tmp_path: Path) 
     assert feedback["decision_reason"] == "insufficient_evidence"
 
 
+def test_automatic_retention_protects_pending_chain_without_retaining_other_data(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    for suffix in ("pending", "finished"):
+        _insert_sensitive_chain(
+            store, suffix, status="closed", watch_until=None, created_at=OLD
+        )
+        _write_resource(tmp_path, f"data/resources/om_{suffix}/image.bin")
+        _insert_resource(
+            store,
+            f"om_{suffix}",
+            f"download-{suffix}",
+            f"data/resources/om_{suffix}/image.bin",
+        )
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE actions SET status='pending' WHERE idempotency_key='action_pending'"
+        )
+        conn.execute(
+            "UPDATE approvals SET status='pending', resolved_at=NULL WHERE short_id='a_pending'"
+        )
+        conn.execute(
+            """
+            INSERT INTO coworker_events(app_id, message_id, chat_id, topic_key, raw_json, status, received_at, updated_at)
+            VALUES ('app', 'om_pending', 'oc_1', 'thread', '{"event":"keep"}', 'queued', ?, ?)
+            """,
+            (OLD, OLD),
+        )
+    service = RetentionService(
+        store=store,
+        config=AppConfig(owner=OwnerConfig(open_id="ou_owner")),
+        base_dir=tmp_path,
+    )
+    service.prune(now=NOW, protect_pending=True)
+    assert (tmp_path / "data/resources/om_pending/image.bin").exists()
+    assert not (tmp_path / "data/resources/om_finished/image.bin").exists()
+    with store.connect() as conn:
+        messages = dict(conn.execute("SELECT message_id, text FROM messages"))
+        tasks = dict(conn.execute("SELECT short_id, task_label FROM tasks"))
+        actions = dict(
+            conn.execute("SELECT idempotency_key, payload_json FROM actions")
+        )
+        event = conn.execute("SELECT status, raw_json FROM coworker_events").fetchone()
+    assert (
+        messages["om_pending"] == "secret pending" and messages["om_finished"] is None
+    )
+    assert tasks["t_pending"] == "secret label pending" and tasks["t_finished"] is None
+    assert "secret action pending" in actions["action_pending"]
+    assert actions["action_finished"] == RAW_JSON_PRUNED_PLACEHOLDER
+    assert tuple(event) == ("queued", '{"event":"keep"}')
+
+
 def test_retention_scrubs_full_chain_except_effective_watch(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     _insert_sensitive_chain(

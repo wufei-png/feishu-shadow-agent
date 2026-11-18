@@ -23,7 +23,7 @@ from .lark_channel_compat import create_channel
 from .operator_commands import CommandResult, OperatorCommandService
 from .store.sqlite_store import SQLiteStore
 from .time_utils import format_instant, utc_now
-from .types import ExecutionMode, FeedbackReason
+from .types import BusinessScope, ExecutionMode, FeedbackReason
 
 CardActionName = Literal[
     "send",
@@ -103,6 +103,7 @@ class CardActionProcessor:
         wake: Callable[[], None],
         execution_mode: ExecutionMode,
         runtime_allows_actions: Callable[[], bool] = lambda: True,
+        approval_scope: BusinessScope = "all",
     ):
         self.config = config
         self.logger = logger
@@ -115,6 +116,7 @@ class CardActionProcessor:
             keep_watching_until_factory=lambda: format_instant(
                 utc_now() + timedelta(minutes=config.lifecycle.watch_minutes)
             ),
+            approval_scope=approval_scope,
         )
         self._channel: ChannelClient | None = None
 
@@ -277,6 +279,9 @@ class FeishuCardActionConnection:
     app_secret: str
     startup_timeout_seconds: int
     logger: JSONLLogger
+    message_handler: Callable[[dict[str, Any], str], None] | None = None
+    register_card_actions: bool = True
+    on_message_reconnect: Callable[[], None] | None = None
     channel_factory: ChannelFactory = field(default=lambda a, s: _create_channel(a, s))
     _status: ConnectionStatus = field(default="disabled", init=False)
     _last_error: str | None = field(default=None, init=False)
@@ -344,9 +349,17 @@ class FeishuCardActionConnection:
                 self._runtime_allows_card_action,
                 blocked_message="守护进程健康检查未通过，请修复后重试。",
             )
-            channel.on("cardAction", self.processor.handle)
+            if self.register_card_actions:
+                channel.on("cardAction", self.processor.handle)
+            if self.message_handler is not None:
+                set_message_handler = getattr(channel, "set_raw_message_handler", None)
+                if not callable(set_message_handler):
+                    raise RuntimeError(
+                        "Feishu channel does not support durable message ingress"
+                    )
+                set_message_handler(self.message_handler)
             channel.on("reconnecting", lambda: self._set_status("unhealthy"))
-            channel.on("reconnected", lambda: self._set_status("healthy"))
+            channel.on("reconnected", self._on_reconnected)
             channel.on("error", self._on_channel_error)
             await channel.connect_until_ready(timeout=self.startup_timeout_seconds)
             self._set_status("healthy")
@@ -367,6 +380,15 @@ class FeishuCardActionConnection:
     def _on_channel_error(self, exc: object) -> None:
         self._set_status("unhealthy", str(exc))
 
+    def _on_reconnected(self) -> None:
+        if self.on_message_reconnect is not None:
+            try:
+                self.on_message_reconnect()
+            except Exception as exc:  # noqa: BLE001
+                self._set_status("unhealthy", str(exc))
+                return
+        self._set_status("healthy")
+
     def _set_status(self, status: ConnectionStatus, error: str | None = None) -> None:
         with self._state_lock:
             self._status = status
@@ -385,6 +407,10 @@ def create_card_action_connection(
     execution_mode: ExecutionMode,
     runtime_allows_actions: Callable[[], bool],
     channel_factory: ChannelFactory | None = None,
+    message_handler: Callable[[dict[str, Any], str], None] | None = None,
+    register_card_actions: bool = True,
+    on_message_reconnect: Callable[[], None] | None = None,
+    approval_scope: BusinessScope = "all",
 ) -> FeishuCardActionConnection:
     cards = config.interactive_cards
     processor = CardActionProcessor(
@@ -394,6 +420,7 @@ def create_card_action_connection(
         wake=wake,
         execution_mode=execution_mode,
         runtime_allows_actions=runtime_allows_actions,
+        approval_scope=approval_scope,
     )
     kwargs: dict[str, Any] = {}
     if channel_factory is not None:
@@ -404,6 +431,9 @@ def create_card_action_connection(
         app_secret=os.environ.get(cards.app_secret_env, ""),
         startup_timeout_seconds=cards.startup_timeout_seconds,
         logger=logger,
+        message_handler=message_handler,
+        register_card_actions=register_card_actions,
+        on_message_reconnect=on_message_reconnect,
         **kwargs,
     )
 

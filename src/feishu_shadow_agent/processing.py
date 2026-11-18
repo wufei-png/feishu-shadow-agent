@@ -45,6 +45,8 @@ from .store.sqlite_store import SQLiteStore
 from .task_session_runner import RevisionReviewContext, TaskSessionRunner
 from .time_utils import shift_instant
 from .types import (
+    BusinessScope,
+    CoworkerDelegationSpec,
     ExecutionMode,
     LifecycleStatePolicy,
     MessageProcessingStatus,
@@ -144,11 +146,14 @@ class ApprovalService:
         store: SQLiteStore,
         config: AppConfig,
         execution_mode: ExecutionMode = "production",
+        approval_scope: BusinessScope = "all",
     ):
         self.store = store
         self.config = config
         self.execution_mode: ExecutionMode = execution_mode
-        self.operator_commands = OperatorCommandService(store)
+        self.operator_commands = OperatorCommandService(
+            store, approval_scope=approval_scope
+        )
 
     def request_send_reply(
         self,
@@ -164,6 +169,7 @@ class ApprovalService:
         approvable: bool = True,
         payload_extra: dict[str, Any] | None = None,
         decision_reason: str | None = None,
+        coworker_delegation: CoworkerDelegationSpec | None = None,
     ) -> int:
         if reply_destination is None and approvable:
             target = self.store.get_message(reply_target_message_id)
@@ -253,6 +259,7 @@ class ApprovalService:
             notify_payload=notify,
             approval_timeout_hours=self.config.lifecycle.approval_timeout_hours,
             execution_mode=self.execution_mode,
+            coworker_delegation=coworker_delegation,
         )
 
     def notify_owner(
@@ -353,6 +360,7 @@ class TaskProcessingService:
         preserve_context_store_path: bool = False,
         sleep_func: Callable[[float], None] = time.sleep,
         dry_run: bool = False,
+        approval_scope: BusinessScope = "all",
     ):
         self.store = store
         self.config = config
@@ -367,7 +375,10 @@ class TaskProcessingService:
         self.collector = CandidateCollector(store)
         self.execution_mode: ExecutionMode = "dry_run" if dry_run else "production"
         self.approvals = ApprovalService(
-            store=store, config=config, execution_mode=self.execution_mode
+            store=store,
+            config=config,
+            execution_mode=self.execution_mode,
+            approval_scope=approval_scope,
         )
         self.composer = SendComposer(owner_open_id=config.owner.open_id)
         self.policy = PolicyResolver(store)
@@ -421,6 +432,10 @@ class TaskProcessingService:
         run_id: str,
         expected_group_activation_id: int | None = None,
     ) -> ProcessingResult | None:
+        if routing.task is not None and self.store.task_is_coworker(routing.task.id):
+            return ProcessingResult(
+                "watch_only", routing.task.id, reason="other_business_mode"
+            )
         access_allowed = self._model_access_guard(
             message, expected_activation_id=expected_group_activation_id
         )

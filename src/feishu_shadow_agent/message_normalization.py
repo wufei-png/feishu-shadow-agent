@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime
@@ -23,6 +24,49 @@ FOLDER_KEY_PATTERN = re.compile(
 AT_USER_ID_PATTERN = re.compile(
     r"<at\s+[^>]*user_id=[\"']([^\"']+)[\"'][^>]*>", re.IGNORECASE
 )
+
+
+def mention_details(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, str]] = []
+    for mention in cast(list[object], value):
+        if not isinstance(mention, dict):
+            continue
+        item = cast(dict[str, Any], mention)
+        identifier = item.get("id")
+        nested = (
+            cast(dict[str, Any], identifier) if isinstance(identifier, dict) else {}
+        )
+        entry = {
+            key: field
+            for key, field in (
+                ("key", item.get("key")),
+                ("name", item.get("name")),
+                ("open_id", nested.get("open_id") or item.get("open_id")),
+            )
+            if isinstance(field, str) and field
+        }
+        if entry:
+            result.append(entry)
+    return result
+
+
+def message_content_fingerprint(raw: dict[str, Any]) -> str | None:
+    """Fingerprint the content returned by the same Feishu read API twice."""
+    content = raw.get("content")
+    if not isinstance(content, (str, dict, list)):
+        content = raw.get("text")
+    if not isinstance(content, (str, dict, list)):
+        return None
+    value: dict[str, Any] = {
+        "content": cast(Any, content),
+        "message_type": first_string(raw, "msg_type", "message_type"),
+    }
+    encoded = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def normalize_message_sent_at(value: str | None) -> str | None:

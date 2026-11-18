@@ -370,6 +370,26 @@ def test_sdk_rejects_unhealthy_click_before_dedup_and_returns_toast(
     asyncio.run(run())
 
 
+def test_card_action_only_processes_current_business_mode(tmp_path: Path) -> None:
+    store, approval_id = _store_with_approval(tmp_path)
+    common = {
+        "store": store,
+        "config": AppConfig(owner=OwnerConfig(open_id="ou_owner")),
+        "logger": JSONLLogger(tmp_path / "agent.jsonl"),
+        "wake": lambda: None,
+        "execution_mode": "production",
+    }
+    other_mode = CardActionProcessor(**common, approval_scope="coworker")  # type: ignore[arg-type]
+    shadow = CardActionProcessor(**common, approval_scope="shadow")  # type: ignore[arg-type]
+    event = _event(approval_id, action="send_suggestion")
+    rejected = other_mode.handle(event)
+    assert rejected.toast_type == "error"
+    with store.connect() as conn:
+        assert conn.execute("SELECT status FROM approvals").fetchone()[0] == "pending"
+        assert conn.execute("SELECT COUNT(*) FROM approval_commands").fetchone()[0] == 0
+    assert shadow.handle(event).status == "applied"
+
+
 def test_card_action_is_owner_only_idempotent_and_wakes_dispatch(
     tmp_path: Path,
 ) -> None:
