@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Callable
 from typing import Any, cast
 
-from ..config import AppConfig, ChatPolicyConfig
+from ..config import AppConfig, ChatPolicyConfig, CoworkerConfig
 from ..policy import (
     PolicyResolver,
     ProductPolicyInvalidError,
     ProductPolicyMissingError,
 )
 from ..settings_catalog import CONFIG_VALUE_PATHS
+from ..store.policy_store import COWORKER_POLICY_KEY
 from ..store.sqlite_store import PRODUCT_POLICY_KEY
 from .common import (
     ReadStoreUnavailable,
@@ -246,19 +248,47 @@ class PolicyQuery:
             elif _chat_policy_from_row(row) != source_chat:
                 changed_chats.append(chat_id)
 
+        coworker_row = conn.execute(
+            "SELECT policy_json FROM product_policies WHERE key = ?",
+            (COWORKER_POLICY_KEY,),
+        ).fetchone()
+        missing_coworker = (
+            coworker_row is None and self.policy_import_source.coworker.enabled
+        )
+        changed_coworker = False
+        if coworker_row is not None:
+            try:
+                value: Any = json.loads(coworker_row["policy_json"])
+                if not isinstance(value, dict):
+                    raise ValueError("coworker policy must be an object")
+                raw = cast(dict[str, Any], value)
+                if "send_mode" not in raw:
+                    raw["send_mode"] = "project"
+                effective = CoworkerConfig.model_validate(raw).model_dump(mode="json")
+                changed_coworker = (
+                    effective
+                    != self.policy_import_source.coworker.model_dump(mode="json")
+                )
+            except (ValueError, TypeError):
+                changed_coworker = True
+
         if (
             not missing_global
             and not changed_global
             and not missing_chats
             and not changed_chats
+            and not missing_coworker
+            and not changed_coworker
         ):
             return {
                 "status": "matches",
-                "message": "Policy Import Source matches Product Policy Store for global policy and config-listed chats.",
+                "message": "Policy Import Source matches Product Policy Store for global, coworker and config-listed chats.",
                 "missing_global": False,
                 "changed_global": False,
                 "missing_chats": [],
                 "changed_chats": [],
+                "missing_coworker": False,
+                "changed_coworker": False,
             }
         return {
             "status": "differs",
@@ -270,6 +300,8 @@ class PolicyQuery:
             "changed_global": changed_global,
             "missing_chats": missing_chats,
             "changed_chats": changed_chats,
+            "missing_coworker": missing_coworker,
+            "changed_coworker": changed_coworker,
         }
 
     def _missing_store_policy_import_diff(self) -> dict[str, Any]:
@@ -288,6 +320,8 @@ class PolicyQuery:
             "changed_global": False,
             "missing_chats": sorted(self.policy_import_source.chats),
             "changed_chats": [],
+            "missing_coworker": self.policy_import_source.coworker.enabled,
+            "changed_coworker": False,
         }
 
 

@@ -24,12 +24,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.base import RequestResponseEndpoint
 
-from .config import LoadedConfig
+from .config import ConfigError, ConfigService, LoadedConfig
 from .console_security import (
     bearer_token_valid,
     host_header_allowed,
     validate_console_bind_host,
 )
+from .coworker_store import CoworkerStore
 from .dispatcher import Dispatcher
 from .feishu.lark_cli import LarkCliClient
 from .jsonl import JSONLLogger
@@ -52,6 +53,7 @@ from .policy_preview import (
     PolicyPreviewValidationError,
 )
 from .replay import replay_message_dry_run
+from .runtime_mode import dry_run_config
 from .settings_catalog import settings_catalog
 from .store.sqlite_store import SQLiteStore
 from .time_utils import shift_instant
@@ -116,6 +118,27 @@ class PolicyImportRequest(BaseModel):
 
     reason: str | None = None
     replace: bool = False
+
+
+class CoworkerPolicyUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
+    chat_id: str | None = None
+    provider: Literal["codex", "hermes"] | None = None
+    send_mode: Literal["agent_direct", "project"] | None = None
+    trigger_mode: Literal["mention", "followups"] | None = None
+    history_source: Literal["live_on_demand", "local_cache"] | None = None
+    memory_maintenance: bool | None = None
+    memory_maintenance_time: str | None = None
+    confirm_stopped: bool = False
+    reason: str | None = None
+
+
+class CoworkerRecoveryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirm_stopped: bool = False
 
 
 class GlobalPolicyUpdateRequest(BaseModel):
@@ -273,10 +296,17 @@ def create_console_app(
         if not bearer_token_valid(authorization, token):
             _raise_api_error(401, "unauthorized", "A valid bearer token is required.")
 
+    def current_import_source() -> LoadedConfig | None:
+        try:
+            return ConfigService().load(loaded_config.path)
+        except ConfigError:
+            return None
+
     def query_service() -> OperatorQueryService:
+        source = current_import_source()
         return OperatorQueryService(
             store,
-            policy_import_source=loaded_config.config,
+            policy_import_source=None if source is None else source.config,
             base_dir=loaded_config.base_dir,
         )
 
@@ -313,6 +343,84 @@ def create_console_app(
     @api.get("/dashboard")
     def dashboard() -> dict[str, Any]:
         return query_service().dashboard_snapshot() | {"runtime_mode": execution_mode}
+
+    @api.get("/coworker")
+    def coworker_status() -> dict[str, Any]:
+        return query_service().coworker_status()
+
+    @api.patch("/coworker/policy")
+    def update_coworker_policy(body: CoworkerPolicyUpdateRequest) -> dict[str, Any]:
+        if not query_service().coworker_status()["available"]:
+            _raise_api_error(409, "store_unavailable", "Policy store is unavailable.")
+        changes = body.model_dump(
+            exclude_none=True, exclude={"reason", "confirm_stopped"}
+        )
+        if set(changes) & {"enabled", "chat_id", "provider", "send_mode"}:
+            require_stopped_coworker(confirm_stopped=body.confirm_stopped)
+        try:
+            return store.update_coworker_policy(
+                changes, actor=LOCAL_CONSOLE_ACTOR, reason=body.reason
+            )
+        except ValueError as exc:
+            _raise_api_error(400, "validation_failed", str(exc))
+
+    def require_stopped_coworker(*, confirm_stopped: bool = False) -> dict[str, Any]:
+        snapshot = query_service().coworker_status()
+        status = snapshot["liveness"].get("status")
+        if not snapshot["available"] or not (
+            status in {"stopped", "not_started"}
+            or (status == "stale" and confirm_stopped)
+        ):
+            _raise_api_error(
+                409,
+                "daemon_not_stopped",
+                "Stop the daemon before resolving coworker state.",
+            )
+        return snapshot
+
+    @api.post("/coworker/events/{event_id}/discard")
+    def discard_coworker_event(
+        event_id: int, body: CoworkerRecoveryRequest | None = None
+    ) -> dict[str, Any]:
+        require_stopped_coworker(
+            confirm_stopped=body.confirm_stopped if body else False
+        )
+        try:
+            CoworkerStore(store).discard_event(event_id, daemon_stopped=True)
+        except ValueError as exc:
+            _raise_api_error(400, "validation_failed", str(exc))
+        return {"changed": True}
+
+    @api.post("/coworker/sessions/{session_id}/reset")
+    def reset_coworker_session(
+        session_id: int, body: CoworkerRecoveryRequest | None = None
+    ) -> dict[str, Any]:
+        require_stopped_coworker(
+            confirm_stopped=body.confirm_stopped if body else False
+        )
+        try:
+            CoworkerStore(store).reset_session(session_id, daemon_stopped=True)
+        except ValueError as exc:
+            _raise_api_error(400, "validation_failed", str(exc))
+        return {"changed": True}
+
+    @api.post("/coworker/memory/reset")
+    def reset_coworker_memory(
+        body: CoworkerRecoveryRequest | None = None,
+    ) -> dict[str, Any]:
+        snapshot = require_stopped_coworker(
+            confirm_stopped=body.confirm_stopped if body else False
+        )
+        checkpoint = cast(dict[str, Any], snapshot.get("memory_maintenance") or {})
+        if checkpoint.get("state") not in {"needs_review", "in_progress", "failed"}:
+            _raise_api_error(
+                400, "validation_failed", "Memory maintenance is not awaiting recovery."
+            )
+        store.set_checkpoint(
+            "coworker.memory_maintenance",
+            checkpoint | {"state": "idle", "error_type": None},
+        )
+        return {"changed": True}
 
     @api.get("/approvals")
     def approvals(
@@ -380,7 +488,10 @@ def create_console_app(
 
     @api.get("/settings/runtime")
     def settings_runtime() -> dict[str, Any]:
-        return query_service().settings_runtime(loaded_config.config)
+        source = current_import_source()
+        return query_service().settings_runtime(
+            loaded_config.config if source is None else source.config
+        )
 
     @api.get("/policy/status")
     def policy_status() -> dict[str, Any]:
@@ -776,12 +887,44 @@ def create_console_app(
         body: Annotated[PolicyImportRequest | None, Body()] = None,
     ) -> dict[str, Any]:
         payload = body or PolicyImportRequest()
+        source = current_import_source()
+        if source is None:
+            return _command_error_result(
+                command="policy.import_config",
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=payload.reason,
+                target={},
+                error="Current config file is unavailable or invalid.",
+            )
+        try:
+            effective_source = (
+                dry_run_config(source) if execution_mode == "dry_run" else source
+            )
+        except ConfigError as exc:
+            return _command_error_result(
+                command="policy.import_config",
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=payload.reason,
+                target={},
+                error=str(exc),
+            )
+        source_store = resolve_relative_path(
+            effective_source.config.storage.sqlite_path, effective_source.base_dir
+        )
+        if source_store.resolve() != store.path.resolve():
+            return _command_error_result(
+                command="policy.import_config",
+                actor=LOCAL_CONSOLE_ACTOR,
+                reason=payload.reason,
+                target={},
+                error="The config database path changed; restart the console before importing.",
+            )
         return (
             command_service()
             .import_policy_config(
-                loaded_config.config,
+                source.config,
                 replace=payload.replace,
-                used_defaults=loaded_config.reply_policy_used_defaults,
+                used_defaults=source.reply_policy_used_defaults,
                 actor=LOCAL_CONSOLE_ACTOR,
                 reason=payload.reason,
             )

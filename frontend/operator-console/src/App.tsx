@@ -2,7 +2,7 @@ import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import { Activity, Bell, ClipboardList, Database, FileText, HeartPulse, Home, MessageSquareDiff, Send, Settings, ShieldCheck, Wrench } from "lucide-react";
+import { Activity, Bell, Bot, ClipboardList, Database, FileText, HeartPulse, Home, MessageSquareDiff, Send, Settings, ShieldCheck, Wrench } from "lucide-react";
 import { LazyMotion, MotionConfig, m } from "motion/react";
 import { getDashboard } from "./api";
 import { Badge, EmptyState, LoadingState } from "./components/Primitives";
@@ -35,6 +35,7 @@ const navSections: Array<{ key: string; labelKey: string; items: NavItem[] }> = 
     labelKey: "navigation.section.duty",
     items: [
       { key: "dashboard", labelKey: "navigation.dashboard", icon: Home },
+      { key: "coworker", labelKey: "navigation.coworker", icon: Bot },
       { key: "approvals", labelKey: "navigation.approvals", icon: Bell },
       { key: "tasks", labelKey: "navigation.tasks", icon: ClipboardList },
       { key: "dispatch", labelKey: "navigation.dispatch", icon: Send },
@@ -68,6 +69,7 @@ const navItems: NavItem[] = navSections.flatMap((section) => section.items);
  */
 const ApprovalsScreen = lazy(() => import("./screens/ApprovalsScreen").then((module) => ({ default: module.ApprovalsScreen })));
 const DashboardScreen = lazy(() => import("./screens/DashboardScreen").then((module) => ({ default: module.DashboardScreen })));
+const CoworkerScreen = lazy(() => import("./screens/CoworkerScreen").then((module) => ({ default: module.CoworkerScreen })));
 const DispatchScreen = lazy(() => import("./screens/DispatchScreen").then((module) => ({ default: module.DispatchScreen })));
 const FeedbackScreen = lazy(() => import("./screens/FeedbackScreen").then((module) => ({ default: module.FeedbackScreen })));
 const HealthScreen = lazy(() => import("./screens/HealthScreen").then((module) => ({ default: module.HealthScreen })));
@@ -201,6 +203,8 @@ function ConsoleShell() {
               <EmptyState title={t("app.missingToken")} detail={t("app.missingTokenDetail")} />
             ) : location.route === "dashboard" ? (
               <DashboardScreen navigate={navigate} token={token} />
+            ) : location.route === "coworker" ? (
+              <CoworkerScreen token={token} />
             ) : location.route === "approvals" ? (
               <ApprovalsScreen selectedId={location.selectedId} token={token} />
             ) : location.route === "tasks" ? (

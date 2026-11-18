@@ -771,6 +771,8 @@ function ImportDiffDetails({ diff }: { diff: SettingsRuntime["policy_status"]["p
       <FieldList>
         <Fact label={t("policy.missingGlobal")} value={diff?.missing_global ? t("common.yes") : t("common.no")} />
         <Fact label={t("policy.changedGlobal")} value={diff?.changed_global ? t("common.yes") : t("common.no")} />
+        <Fact label={t("coworker.missingPolicy")} value={diff?.missing_coworker === undefined ? t("common.unknown") : diff.missing_coworker ? t("common.yes") : t("common.no")} />
+        <Fact label={t("coworker.changedPolicy")} value={diff?.changed_coworker === undefined ? t("common.unknown") : diff.changed_coworker ? t("common.yes") : t("common.no")} />
         <Fact label={t("policy.missingChats")} value={(diff?.missing_chats ?? []).join(", ") || t("common.none")} />
         <Fact label={t("policy.changedChats")} value={(diff?.changed_chats ?? []).join(", ") || t("common.none")} />
       </FieldList>

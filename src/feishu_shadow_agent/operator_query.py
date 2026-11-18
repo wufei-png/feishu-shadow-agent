@@ -7,7 +7,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
 
-from .config import AppConfig
+from .config import AppConfig, CoworkerConfig
 from .membership import effective_membership_status
 from .operator_queries.common import (
     OperatorQueryReadError,
@@ -21,6 +21,7 @@ from .operator_queries.common import (
     coerce_offset,
     dispatch_recommended_actions,
     has_core_schema,
+    loads_json_object,
     message_dto,
     readback_summary,
     task_summary_dto,
@@ -38,6 +39,7 @@ from .operator_queries.health import (
 from .operator_queries.message_detail import MessageDetailQuery
 from .operator_queries.policy import PolicyQuery
 from .operator_queries.storage import StorageQuery
+from .store.policy_store import COWORKER_POLICY_KEY
 from .store.sqlite_store import (
     RUN_HEARTBEAT_STALE_AFTER_SECONDS,
     SQLiteStore,
@@ -87,6 +89,88 @@ class OperatorQueryService:
     def storage_summary(self) -> dict[str, Any] | None:
         """Storage footprint read model; None when no runtime config is bound."""
         return self._storage_query.storage_summary()
+
+    def coworker_status(self, *, limit: int = 50) -> dict[str, Any]:
+        """Read coworker state without initializing or changing the store."""
+        result: dict[str, Any] = {
+            "config": None
+            if self.policy_import_source is None
+            else self.policy_import_source.coworker.model_dump(mode="json"),
+            "policy": None,
+            "runtime": None,
+            "liveness": {"status": "unknown"},
+            "memory_maintenance": None,
+            "sessions": [],
+            "events": [],
+            "subagents": [],
+            "history_gaps": [],
+            "delegations": [],
+            "available": False,
+        }
+        try:
+            with self._connect() as conn:
+                policy = conn.execute(
+                    "SELECT policy_json FROM product_policies WHERE key = ?",
+                    (COWORKER_POLICY_KEY,),
+                ).fetchone()
+                if policy is not None:
+                    try:
+                        value: Any = json.loads(policy["policy_json"])
+                        if not isinstance(value, dict):
+                            raise ValueError("coworker policy must be an object")
+                        raw_policy = cast(dict[str, Any], value)
+                        if "send_mode" not in raw_policy:
+                            raw_policy["send_mode"] = "project"
+                        result["policy"] = CoworkerConfig.model_validate(
+                            raw_policy
+                        ).model_dump(mode="json")
+                    except (ValueError, TypeError):
+                        result["policy_invalid"] = True
+                for key, checkpoint in (
+                    ("runtime", "runtime.business_mode"),
+                    ("memory_maintenance", "coworker.memory_maintenance"),
+                ):
+                    row = conn.execute(
+                        "SELECT value_json FROM checkpoints WHERE key = ?",
+                        (checkpoint,),
+                    ).fetchone()
+                    result[key] = (
+                        None if row is None else loads_json_object(row["value_json"])
+                    )
+                queries = {
+                    "sessions": "SELECT id, chat_id, thread_id, provider, state, updated_at FROM coworker_sessions ORDER BY id DESC LIMIT ?",
+                    "events": "SELECT id, chat_id, topic_key, message_id, status, error, received_at, updated_at FROM coworker_events WHERE status NOT IN ('completed', 'discarded') ORDER BY id DESC LIMIT ?",
+                    "subagents": "SELECT child_thread_id, parent_thread_id, status, outcome, started_at, updated_at FROM coworker_subagents WHERE status != 'completed' ORDER BY updated_at DESC LIMIT ?",
+                    "history_gaps": "SELECT chat_id, topic_key, needs_backfill, has_more, last_error, updated_at FROM coworker_history_state WHERE needs_backfill = 1 OR has_more = 1 ORDER BY updated_at DESC LIMIT ?",
+                    "delegations": "SELECT id, session_id, peer_id, status, deadline, updated_at FROM coworker_delegations WHERE status != 'completed' ORDER BY updated_at DESC LIMIT ?",
+                }
+                for key, sql in queries.items():
+                    result[key] = [
+                        dict(row)
+                        for row in conn.execute(sql, (coerce_limit(limit),)).fetchall()
+                    ]
+                current, _ = daemon_runs(
+                    conn,
+                    now=self._now(),
+                    stale_after_seconds=RUN_HEARTBEAT_STALE_AFTER_SECONDS,
+                )
+                result["liveness"] = daemon_liveness(
+                    run_runtime_summary(current) if current else None,
+                    now=self._now(),
+                    stale_after_seconds=RUN_HEARTBEAT_STALE_AFTER_SECONDS,
+                )
+                runtime = cast(dict[str, Any] | None, result["runtime"])
+                liveness = result["liveness"]
+                if (
+                    runtime is None
+                    or runtime.get("run_id") != liveness.get("run_id")
+                    or liveness.get("status") not in {"live", "starting"}
+                ):
+                    result["runtime"] = None
+                result["available"] = True
+        except ReadStoreUnavailable:
+            pass
+        return result
 
     def dashboard_snapshot(
         self,

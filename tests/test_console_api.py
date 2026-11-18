@@ -76,6 +76,197 @@ def _auth(token: str = "test-token") -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def test_coworker_console_is_read_only_when_store_missing(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    response = client.get("/api/coworker", headers=_auth())
+    assert response.status_code == 200
+    assert response.json()["available"] is False
+    assert not (tmp_path / "agent.sqlite3").exists()
+
+
+def test_coworker_console_policy_updates_and_config_drift(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    path = tmp_path / "config.yaml"
+    with path.open("a", encoding="utf-8") as output:
+        output.write("\ncoworker:\n  enabled: true\n  chat_id: oc_test\n")
+    loaded = ConfigService().load(path)
+    store = _store(tmp_path)
+    store.import_product_policy_from_config(loaded.config)
+
+    before = client.get("/api/policy/status", headers=_auth()).json()
+    assert before["policy_import_diff"]["status"] == "matches"
+    response = client.patch(
+        "/api/coworker/policy",
+        headers=_auth(),
+        json={"memory_maintenance_time": "01:30"},
+    )
+    assert response.status_code == 200 and response.json()["changed"] is True
+    snapshot = client.get("/api/coworker", headers=_auth()).json()
+    assert snapshot["config"]["memory_maintenance_time"] == "00:00"
+    assert snapshot["policy"]["memory_maintenance_time"] == "01:30"
+    after = client.get("/api/policy/status", headers=_auth()).json()
+    assert after["policy_import_diff"]["changed_coworker"] is True
+    assert store.list_policy_audits()[0]["policy_key"] == "ai_coworker"
+    assert (
+        client.patch(
+            "/api/coworker/policy",
+            headers=_auth(),
+            json={"memory_maintenance_time": "25:00"},
+        ).status_code
+        == 400
+    )
+    assert (
+        client.patch(
+            "/api/coworker/policy", headers=_auth(), json={"send_mode": "invalid"}
+        ).status_code
+        == 400
+    )
+
+    with path.open("a", encoding="utf-8") as output:
+        output.write("  memory_maintenance_time: '01:30'\n")
+    refreshed = client.get("/api/coworker", headers=_auth()).json()
+    assert refreshed["config"]["memory_maintenance_time"] == "01:30"
+    assert (
+        client.get("/api/policy/status", headers=_auth()).json()["policy_import_diff"][
+            "status"
+        ]
+        == "matches"
+    )
+    store.record_run_start(run_id="run_fixed", dry_run=False)
+    assert (
+        client.patch(
+            "/api/coworker/policy", headers=_auth(), json={"send_mode": "project"}
+        ).status_code
+        == 409
+    )
+    store.record_run_finish(run_id="run_fixed", status="stopped")
+    assert (
+        client.patch(
+            "/api/coworker/policy", headers=_auth(), json={"send_mode": "project"}
+        ).status_code
+        == 200
+    )
+    assert (
+        client.get("/api/coworker", headers=_auth()).json()["policy"]["send_mode"]
+        == "project"
+    )
+
+
+def test_coworker_memory_recovery_requires_stopped_daemon(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    store = _store(tmp_path)
+    store.initialize()
+    store.set_checkpoint(
+        "coworker.memory_maintenance",
+        {"state": "needs_review", "last_scheduled_date": "2026-11-18"},
+    )
+    store.record_run_start(run_id="run_active", dry_run=False)
+    response = client.post("/api/coworker/memory/reset", headers=_auth())
+    assert response.status_code == 409
+    store.record_run_finish(run_id="run_active", status="stopped")
+    assert client.post("/api/coworker/memory/reset", headers=_auth()).status_code == 200
+    checkpoint = store.get_checkpoint("coworker.memory_maintenance")
+    assert (
+        checkpoint
+        and checkpoint["state"] == "idle"
+        and checkpoint["last_scheduled_date"] == "2026-11-18"
+    )
+
+
+def test_stale_coworker_recovery_requires_operator_to_confirm_process_stopped(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    store = _store(tmp_path)
+    store.record_run_start(run_id="run_lost", dry_run=False)
+    store.set_checkpoint("coworker.memory_maintenance", {"state": "needs_review"})
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE runs SET last_heartbeat_at = '2020-01-01T00:00:00Z' WHERE run_id = 'run_lost'"
+        )
+    assert client.post("/api/coworker/memory/reset", headers=_auth()).status_code == 409
+    assert (
+        client.post(
+            "/api/coworker/memory/reset",
+            headers=_auth(),
+            json={"confirm_stopped": True},
+        ).status_code
+        == 200
+    )
+
+
+def test_coworker_console_only_displays_runtime_for_matching_live_run(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    store = _store(tmp_path)
+    store.record_run_start(run_id="run_live", dry_run=False)
+    store.record_run_tick_started(run_id="run_live", dry_run=False)
+    store.set_checkpoint(
+        "runtime.business_mode",
+        {
+            "run_id": "run_live",
+            "business_mode": "coworker",
+            "send_mode": "agent_direct",
+            "chat_id": "group",
+            "provider": "codex",
+        },
+    )
+    running = client.get("/api/coworker", headers=_auth()).json()
+    assert running["liveness"]["status"] == "live"
+    assert running["runtime"]["business_mode"] == "coworker"
+    store.set_checkpoint(
+        "runtime.business_mode", {"run_id": "run_old", "business_mode": "shadow"}
+    )
+    assert client.get("/api/coworker", headers=_auth()).json()["runtime"] is None
+
+
+def test_coworker_console_shows_legacy_policy_with_runtime_defaults(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    store = _store(tmp_path)
+    store.initialize()
+    with store.connect() as conn:
+        conn.execute(
+            "INSERT INTO product_policies(key, policy_json, updated_at) VALUES (?, ?, ?)",
+            (
+                "ai_coworker",
+                json.dumps(
+                    {
+                        "enabled": True,
+                        "chat_id": "group",
+                        "memory_maintenance_interval_seconds": 21600,
+                    }
+                ),
+                "2026-11-18T00:00:00Z",
+            ),
+        )
+    policy = client.get("/api/coworker", headers=_auth()).json()["policy"]
+    assert policy["send_mode"] == "project"
+    assert policy["memory_maintenance_time"] == "00:00"
+
+
+def test_coworker_console_does_not_treat_invalid_policy_as_matching(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    store = _store(tmp_path)
+    config = ConfigService().load(tmp_path / "config.yaml")
+    store.import_product_policy_from_config(config.config)
+    with store.connect() as conn:
+        conn.execute(
+            "INSERT INTO product_policies(key, policy_json, updated_at) VALUES (?, ?, ?)",
+            ("ai_coworker", "not-json", "2026-11-18T00:00:00Z"),
+        )
+    snapshot = client.get("/api/coworker", headers=_auth()).json()
+    assert snapshot["policy"] is None and snapshot["policy_invalid"] is True
+    diff = client.get("/api/policy/status", headers=_auth()).json()[
+        "policy_import_diff"
+    ]
+    assert diff["status"] == "differs" and diff["changed_coworker"] is True
+
+
 def test_console_help_shows_console_command(capsys) -> None:
     with pytest.raises(SystemExit) as exc:
         main(["console", "--help"])

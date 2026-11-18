@@ -11,6 +11,7 @@
 export type CatalogTranslation = { label: string; description: string; help?: string };
 
 const zhCatalog: Record<string, CatalogTranslation> = {
+  "coworker.memory_maintenance_time": { label: "同事记忆整理时间（配置文件）", description: "配置文件中的每日整理时间；生效策略可在 AI 同事页面查看和调整。" },
   "policy.global.p2p_auto_reply": { label: "私聊自动回复", description: "回复条件满足时，允许在一对一会话中自动回复。" },
   "policy.global.unknown_group_auto_reply": { label: "兼容字段：未配置群聊", description: "保留供旧配置兼容；未配置群不会被采集。", help: "要启用群消息采集，请添加该群的会话策略。" },
   "policy.global.default_bot_joined": { label: "默认机器人可用状态", description: "未单独配置策略的会话默认是否可使用机器人。" },

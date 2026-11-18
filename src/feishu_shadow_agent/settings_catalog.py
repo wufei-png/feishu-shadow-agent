@@ -18,6 +18,7 @@ CONFIG_VALUE_PATHS: dict[str, str] = {
     "storage.max_resource_bytes": "storage.max_resource_bytes",
     "storage.max_resource_dir_bytes": "storage.max_resource_dir_bytes",
     "agent_backend.provider": "agent_backend.provider",
+    "coworker.memory_maintenance_time": "coworker.memory_maintenance_time",
     "agent_backend.max_attempts": "agent_backend.max_attempts",
     "agent_backend.working_dir": "agent_backend.working_dir",
     "agent_backend.config_scope": "agent_backend.config_scope",
@@ -91,6 +92,18 @@ def _entry(
 
 
 _SETTINGS_CATALOG: list[dict[str, Any]] = [
+    _entry(
+        "coworker.memory_maintenance_time",
+        "Coworker memory time in config",
+        "Daily local time from the config import source; the AI coworker page shows and edits the effective policy.",
+        source="config_yaml",
+        scope="coworker",
+        visibility="advanced",
+        editable_v1=False,
+        requires_restart=False,
+        audit_behavior="policy_audits",
+        write_boundary="PATCH /api/coworker/policy",
+    ),
     _entry(
         "policy.global.p2p_auto_reply",
         "P2P auto reply",

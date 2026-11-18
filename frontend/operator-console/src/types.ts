@@ -1,4 +1,30 @@
-export type RouteKey = "dashboard" | "approvals" | "tasks" | "dispatch" | "feedback" | "policy" | "settings" | "health" | "maintenance";
+export type RouteKey = "dashboard" | "coworker" | "approvals" | "tasks" | "dispatch" | "feedback" | "policy" | "settings" | "health" | "maintenance";
+
+export type CoworkerPolicy = {
+  enabled: boolean;
+  chat_id: string | null;
+  provider: string;
+  send_mode: string;
+  trigger_mode: "mention" | "followups";
+  history_source: "live_on_demand" | "local_cache";
+  memory_maintenance: boolean;
+  memory_maintenance_time?: string;
+};
+
+export type CoworkerSnapshot = {
+  available: boolean;
+  config: CoworkerPolicy | null;
+  policy: CoworkerPolicy | null;
+  policy_invalid?: boolean;
+  runtime: { business_mode: string; send_mode: string | null; chat_id: string | null; provider: string | null } | null;
+  liveness: { status: string };
+  memory_maintenance: { state?: string; last_attempt?: string; last_success_at?: string; memory_file_changed?: boolean | null; error_type?: string | null } | null;
+  sessions: Array<{ id: number; thread_id: string; state: string; provider: string }>;
+  events: Array<{ id: number; topic_key: string; message_id: string; status: string; error: string | null }>;
+  subagents: Array<{ child_thread_id: string; status: string; outcome: string | null }>;
+  history_gaps: Array<{ topic_key: string; needs_backfill: number; has_more: number; last_error: string | null }>;
+  delegations: Array<{ id: string; peer_id: string; status: string; deadline: string | null }>;
+};
 
 export type Tone = "neutral" | "success" | "warning" | "danger" | "info" | "muted";
 
@@ -171,6 +197,8 @@ export type PolicyImportDiff = {
   changed_global?: boolean;
   missing_chats?: string[];
   changed_chats?: string[];
+  missing_coworker?: boolean;
+  changed_coworker?: boolean;
 };
 
 export type ReplyIdentity = "bot_preferred" | "bot" | "user";

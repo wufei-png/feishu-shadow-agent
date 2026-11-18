@@ -4,6 +4,8 @@ import type {
   ApprovalSummary,
   CommandResult,
   DashboardSnapshot,
+  CoworkerPolicy,
+  CoworkerSnapshot,
   DispatchActionDetail,
   DispatchActionSummary,
   ActionStatus,
@@ -102,6 +104,18 @@ export class ApiError extends Error {
 
 export function getDashboard(token: string): Promise<DashboardSnapshot> {
   return fetchApi("/api/dashboard", token);
+}
+
+export function getCoworker(token: string): Promise<CoworkerSnapshot> {
+  return fetchApi("/api/coworker", token);
+}
+
+export function updateCoworkerPolicy(token: string, changes: Partial<Pick<CoworkerPolicy, "enabled" | "chat_id" | "provider" | "send_mode" | "trigger_mode" | "history_source" | "memory_maintenance" | "memory_maintenance_time">> & { confirm_stopped?: boolean }): Promise<unknown> {
+  return fetchApi("/api/coworker/policy", token, { method: "PATCH", body: JSON.stringify(changes) });
+}
+
+export function coworkerRecovery(token: string, path: string, confirmStopped: boolean): Promise<unknown> {
+  return fetchApi(`/api/coworker/${path}`, token, { method: "POST", body: JSON.stringify({ confirm_stopped: confirmStopped }) });
 }
 
 export function getHealthIssues(token: string): Promise<HealthIssuesResponse> {
