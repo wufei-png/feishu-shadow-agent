@@ -87,10 +87,11 @@ jobs:
         run: git diff --exit-code -- src/feishu_shadow_agent/console_static
       - name: Audit frontend dependencies
         if: ${{ !cancelled() && steps.install.conclusion == 'success' }}
-        run: >-
-          npm --prefix frontend/operator-console audit
-          --audit-level=high
-          --registry=https://registry.npmjs.org
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          node --test .github/scripts/frontend-audit.test.mjs
+          node .github/scripts/frontend-audit.mjs
 
   package:
     name: Build and inspect package
