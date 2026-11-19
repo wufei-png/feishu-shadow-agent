@@ -1955,6 +1955,9 @@ class NativeCoworkerService(CoworkerService):
 class NativeCoworkerWorker(CoworkerWorker):
     service: NativeCoworkerService
 
+    def _steer_worker_count(self, topic_workers: int) -> int:
+        return topic_workers
+
     def start(self) -> None:
         self.service.deliveries.recover_interrupted(app_id=self.service.app_id)
         self.service.native_state.recover_interrupted_handoffs(

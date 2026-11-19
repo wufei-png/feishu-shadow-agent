@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import threading
 from collections.abc import Callable
 from dataclasses import replace
@@ -17,7 +18,11 @@ from feishu_shadow_agent.config import (
     CoworkerConfig,
     OwnerConfig,
 )
-from feishu_shadow_agent.coworker_native import NativeCoworkerService, SteerDecision
+from feishu_shadow_agent.coworker_native import (
+    NativeCoworkerService,
+    NativeCoworkerWorker,
+    SteerDecision,
+)
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.operator_commands import OperatorCommandService
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
@@ -1724,6 +1729,111 @@ def test_followup_classifier_uses_isolated_notifications_and_closes(
         assert closed[-1] == outcome
     assert len(closed) == 263
     assert not service._child_turns  # pyright: ignore[reportPrivateUsage]
+
+
+def test_slow_classification_does_not_block_another_topic(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    class WorkerServer(FakeServer):
+        def start(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def is_healthy(self) -> bool:
+            return True
+
+    service, _, _ = _service(tmp_path)
+    service.app_server = WorkerServer()  # type: ignore[assignment]
+    pending: queue.Queue[str] = queue.Queue()
+    first_started, release_first, second_finished = (
+        threading.Event(),
+        threading.Event(),
+        threading.Event(),
+    )
+    pending.put("first-topic")
+    pending.put("second-topic")
+
+    def steer() -> bool:
+        try:
+            topic = pending.get_nowait()
+        except queue.Empty:
+            return False
+        if topic == "first-topic":
+            first_started.set()
+            assert release_first.wait(timeout=5)
+        else:
+            second_finished.set()
+        return True
+
+    monkeypatch.setattr(service, "process_next", lambda **_kwargs: False)
+    monkeypatch.setattr(service, "process_next_steer", steer)
+    monkeypatch.setattr(service, "maintain_memory_if_due", lambda: False)
+    worker = NativeCoworkerWorker(
+        service, runtime_allows_processing=lambda: True, wake_daemon=lambda: None
+    )
+    worker.start()
+    try:
+        assert first_started.wait(timeout=3)
+        assert second_finished.wait(timeout=2)
+    finally:
+        release_first.set()
+        worker.stop()
+
+
+def test_supplement_classification_stays_ordered_within_one_topic(
+    tmp_path: Path,
+) -> None:
+    class DelayedServer(BlockingNativeServer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.classifying = threading.Event()
+            self.continue_classification = threading.Event()
+            self.delay_once = True
+
+        def run_turn(self, prompt: str, **kwargs: Any) -> AgentRunResult:
+            if kwargs["output_model"] is SteerDecision and self.delay_once:
+                self.delay_once = False
+                self.classifying.set()
+                assert self.continue_classification.wait(timeout=5)
+            return super().run_turn(prompt, **kwargs)
+
+    service, feishu, _ = _service(tmp_path)
+    server = DelayedServer()
+    service.app_server = server  # type: ignore[assignment]
+    _receive(service, feishu, "request", location="thread")
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    classifier: threading.Thread | None = None
+    try:
+        for message_id in ("first", "second"):
+            _receive(
+                service,
+                feishu,
+                message_id,
+                location="thread",
+                parent="request",
+                mention=False,
+            )
+            assert service.process_next()
+        classifier = threading.Thread(target=service.process_next_steer)
+        classifier.start()
+        assert server.classifying.wait(timeout=3)
+        assert not service.process_next_steer()
+        server.continue_classification.set()
+        classifier.join(timeout=3)
+        assert not classifier.is_alive()
+        assert service.process_next_steer()
+        assert "first" in server.steers[0] and "second" in server.steers[1]
+    finally:
+        server.continue_classification.set()
+        server.release.set()
+        if classifier is not None:
+            classifier.join(timeout=5)
+        worker.join(timeout=5)
+    assert not worker.is_alive()
 
 
 def test_uncertain_steer_blocks_both_outbox_and_approval(tmp_path: Path) -> None:

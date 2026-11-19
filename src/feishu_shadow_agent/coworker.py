@@ -1368,7 +1368,7 @@ class CoworkerWorker:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._threads: list[threading.Thread] = []
-        self._steer_thread: threading.Thread | None = None
+        self._steer_threads: list[threading.Thread] = []
         self._memory_thread: threading.Thread | None = None
         self._server_started = False
         self._server_health_lock = threading.Lock()
@@ -1431,11 +1431,18 @@ class CoworkerWorker:
         self._thread = self._threads[0]
         for thread in self._threads:
             thread.start()
+        self._steer_threads = []
         if server is not None:
-            self._steer_thread = threading.Thread(
-                target=self._run_steering, name="feishu-coworker-steer", daemon=True
-            )
-            self._steer_thread.start()
+            self._steer_threads = [
+                threading.Thread(
+                    target=self._run_steering,
+                    name=f"feishu-coworker-steer-{index}",
+                    daemon=True,
+                )
+                for index in range(self._steer_worker_count(count))
+            ]
+            for thread in self._steer_threads:
+                thread.start()
         self._memory_thread = threading.Thread(
             target=self._run_memory, name="feishu-coworker-memory", daemon=True
         )
@@ -1449,8 +1456,8 @@ class CoworkerWorker:
         self.request_stop()
         for thread in self._threads:
             thread.join()
-        if self._steer_thread is not None:
-            self._steer_thread.join()
+        for thread in self._steer_threads:
+            thread.join()
         if self._memory_thread is not None:
             self._memory_thread.join()
         server = self.service.app_server
@@ -1490,6 +1497,9 @@ class CoworkerWorker:
         return self.service.events.running_subagents(
             app_id=self.service.app_id, chat_id=chat_id
         )
+
+    def _steer_worker_count(self, topic_workers: int) -> int:
+        return 1
 
     def _run(self) -> None:
         while not self._stop.is_set():
