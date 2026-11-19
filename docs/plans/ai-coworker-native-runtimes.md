@@ -37,6 +37,9 @@
 推荐配置片段，合并到 `coworker` profile 的 `config.yaml`，替换工作目录、测试群和当前应用的用户 ID。凭据在同一 profile 通过原生设置工具配置。Feishu 中国站使用 `FEISHU_DOMAIN=feishu`，长连接使用 `FEISHU_CONNECTION_MODE=websocket`。
 
 ```yaml
+model:
+  default: gpt-6-luna
+  provider: openai-codex
 terminal:
   cwd: /path/to/workspace
 group_sessions_per_user: false
