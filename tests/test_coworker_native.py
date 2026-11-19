@@ -585,7 +585,9 @@ def test_changed_source_is_not_sent_and_blocks_only_that_topic(tmp_path: Path) -
         )
 
 
-@pytest.mark.parametrize("change", ["remove-mention", "add-mention", "update-time"])
+@pytest.mark.parametrize(
+    "change", ["remove-mention", "add-mention", "swap-mentions", "update-time"]
+)
 def test_reply_rechecks_mention_and_update_time_with_same_text(
     tmp_path: Path, change: str
 ) -> None:
@@ -593,6 +595,10 @@ def test_reply_rechecks_mention_and_update_time_with_same_text(
     _receive(service, feishu, "request", text="@同事 请现在检查")
     snapshot = feishu.messages["request"]
     snapshot["mentions"] = [{"id": "app", "key": "@_user_1", "name": "同事"}]
+    if change == "swap-mentions":
+        snapshot["mentions"].append(
+            {"id": "other-app", "key": "@_user_2", "name": "同事"}
+        )
     if change != "update-time":
         snapshot["update_time"] = "2026-11-19 17:00"
     assert service.process_next()
@@ -601,6 +607,11 @@ def test_reply_rechecks_mention_and_update_time_with_same_text(
         snapshot.pop("mentions")
     elif change == "add-mention":
         snapshot["mentions"].append({"id": "other-app", "key": "@_user_2"})
+    elif change == "swap-mentions":
+        snapshot["mentions"][0]["id"], snapshot["mentions"][1]["id"] = (
+            snapshot["mentions"][1]["id"],
+            snapshot["mentions"][0]["id"],
+        )
     else:
         snapshot["update_time"] = "2026-11-19 17:00"
     assert service.process_next()
@@ -613,11 +624,16 @@ def test_reply_rechecks_mention_and_update_time_with_same_text(
     assert status == "needs_review"
 
 
-def test_pending_reply_accepts_previous_snapshot_fingerprint(tmp_path: Path) -> None:
+@pytest.mark.parametrize("version", [1, 2])
+def test_pending_reply_accepts_previous_snapshot_fingerprint(
+    tmp_path: Path, version: int
+) -> None:
     service, feishu, _server = _service(tmp_path, dry_run=False)
     _receive(service, feishu, "request")
     assert service.process_next()
-    legacy_fingerprint = message_content_fingerprint(feishu.messages["request"])
+    legacy_fingerprint = message_content_fingerprint(
+        feishu.messages["request"], include_mentions=version == 2, mention_version=2
+    )
     with service.store.connect() as conn:
         conn.execute(
             """UPDATE messages SET raw_json = json_set(raw_json,

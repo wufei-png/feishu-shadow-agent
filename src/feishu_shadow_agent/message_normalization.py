@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
 from .time_utils import format_instant, normalize_instant
@@ -83,7 +83,10 @@ def mention_identifiers(value: object) -> list[str]:
 
 
 def message_content_fingerprint(
-    raw: dict[str, Any], *, include_mentions: bool = False
+    raw: dict[str, Any],
+    *,
+    include_mentions: bool = False,
+    mention_version: Literal[2, 3] = 3,
 ) -> str | None:
     """Fingerprint the content returned by the same Feishu read API twice."""
     content = raw.get("content")
@@ -96,12 +99,23 @@ def message_content_fingerprint(
         "message_type": first_string(raw, "msg_type", "message_type"),
     }
     if include_mentions:
-        value["mentions"] = sorted(mention_identifiers(raw.get("mentions")))
+        mentions = raw.get("mentions")
+        if mention_version == 2:
+            value["mentions"] = sorted(mention_identifiers(mentions))
+        else:
+            items = cast(list[object], mentions) if isinstance(mentions, list) else []
+            value["mentions"] = sorted(
+                (
+                    str(item.get("key") or "") if isinstance(item, dict) else "",
+                    tuple(sorted(mention_identifiers([item]))),
+                )
+                for item in items
+            )
     encoded = json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
     digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-    return f"v2:{digest}" if include_mentions else digest
+    return f"v{mention_version}:{digest}" if include_mentions else digest
 
 
 def message_content_matches(raw: dict[str, Any], expected: object) -> bool:
@@ -109,7 +123,9 @@ def message_content_matches(raw: dict[str, Any], expected: object) -> bool:
         isinstance(expected, str)
         and bool(expected)
         and message_content_fingerprint(
-            raw, include_mentions=expected.startswith("v2:")
+            raw,
+            include_mentions=expected.startswith(("v2:", "v3:")),
+            mention_version=2 if expected.startswith("v2:") else 3,
         )
         == expected
     )
