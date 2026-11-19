@@ -394,6 +394,47 @@ def test_main_and_topic_sessions_and_dry_run_receipts(tmp_path: Path) -> None:
         ] == ["previewed", "previewed", "previewed"]
 
 
+def test_app_server_failure_marks_group_and_private_children_uncertain(
+    tmp_path: Path,
+) -> None:
+    service, feishu, server = _service(tmp_path)
+    _receive(service, feishu, "group-request", location="thread")
+    assert service.process_next() and service.process_next()
+    _private(service, feishu, "private-request")
+    assert service.process_next() and service.process_next()
+    with service.store.connect() as conn:
+        origins = conn.execute(
+            """SELECT e.id, e.chat_id, s.id AS session_id, s.backend_session_id
+               FROM coworker_events e JOIN coworker_sessions s
+                 ON s.app_id = e.app_id AND s.chat_id = e.chat_id AND s.thread_id = e.topic_key
+               WHERE e.message_id IN ('group-request', 'private-request')"""
+        ).fetchall()
+    assert len(origins) == 2
+    for origin in origins:
+        service.events.register_subagent(
+            child_thread_id=f"child-{origin['chat_id']}",
+            parent_thread_id=origin["backend_session_id"],
+            agent_path="child",
+            session_id=origin["session_id"],
+            origin_event_id=origin["id"],
+            bot_open_id="bot",
+        )
+    server.is_healthy = lambda: False  # type: ignore[attr-defined]
+    worker = NativeCoworkerWorker(
+        service, runtime_allows_processing=lambda: True, wake_daemon=lambda: None
+    )
+
+    assert not worker._server_allows_processing()
+    with service.store.connect() as conn:
+        statuses = dict(
+            conn.execute("SELECT child_thread_id, status FROM coworker_subagents")
+        )
+    assert statuses == {
+        "child-group": "needs_review",
+        "child-private-chat": "needs_review",
+    }
+
+
 def test_topic_read_tool_returns_only_current_group_messages(tmp_path: Path) -> None:
     service, feishu, _ = _service(tmp_path, dry_run=False)
     _receive(service, feishu, "request")

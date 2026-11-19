@@ -1574,9 +1574,7 @@ class CoworkerWorker:
                 self._server_failure_reported = True
                 self.wake_daemon()
         if chat_id is not None:
-            for child in self.service.events.running_subagents(
-                app_id=self.service.app_id, chat_id=chat_id
-            ):
+            for child in self._running_subagents(chat_id):
                 self.service.events.mark_subagent_uncertain(
                     str(child["child_thread_id"])
                 )
