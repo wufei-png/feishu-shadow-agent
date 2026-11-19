@@ -106,7 +106,7 @@ def test_schema_initialize_does_not_treat_nonempty_metadata_as_a_blank_database(
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("version", [0, 1, 2, 3, 4, 5, 6, 7, 8, 12])
+@pytest.mark.parametrize("version", [0, 1, 2, 3, 4, 5, 6, 7, 8, 14])
 def test_schema_initialize_rejects_other_versions_without_modifying_database(
     tmp_path: Path, version: int
 ) -> None:
@@ -130,7 +130,7 @@ def test_schema_upgrades_v9_without_losing_existing_data(tmp_path: Path) -> None
     before, after = schema.split("-- coworker schema begin", 1)
     _, after = after.split("-- coworker schema end", 1)
     old_schema = (before + after).replace(
-        "PRAGMA user_version = 11;", "PRAGMA user_version = 9;"
+        "PRAGMA user_version = 13;", "PRAGMA user_version = 9;"
     )
     with sqlite3.connect(path) as conn:
         conn.executescript(old_schema)
@@ -161,8 +161,16 @@ def test_schema_upgrades_v10_with_existing_coworker_sessions(tmp_path: Path) -> 
         "-- coworker background schema begin", 1
     )
     _, after = after.split("-- coworker background schema end", 1)
-    schema = (before + after).replace(
-        "PRAGMA user_version = 11;", "PRAGMA user_version = 10;"
+    schema = before + after
+    before, after = schema.split("-- coworker native schema begin", 1)
+    _, after = after.split("-- coworker native schema end", 1)
+    schema = (
+        (before + after)
+        .replace("PRAGMA user_version = 13;", "PRAGMA user_version = 10;")
+        .replace(
+            "  runtime TEXT NOT NULL DEFAULT 'legacy' CHECK (runtime IN ('legacy', 'native')),\n",
+            "",
+        )
     )
     with sqlite3.connect(path) as conn:
         conn.executescript(schema)
@@ -181,6 +189,105 @@ def test_schema_upgrades_v10_with_existing_coworker_sessions(tmp_path: Path) -> 
         assert (
             conn.execute("SELECT COUNT(*) FROM coworker_subagents").fetchone()[0] == 0
         )
+        assert (
+            conn.execute("SELECT COUNT(*) FROM coworker_native_deliveries").fetchone()[
+                0
+            ]
+            == 0
+        )
+
+
+def test_schema_upgrades_v11_without_changing_existing_rows(tmp_path: Path) -> None:
+    path = tmp_path / "agent.sqlite3"
+    schema_path = Path(__file__).parents[1] / "src/feishu_shadow_agent/store/schema.sql"
+    before, after = schema_path.read_text(encoding="utf-8").split(
+        "-- coworker native schema begin", 1
+    )
+    _, after = after.split("-- coworker native schema end", 1)
+    schema = (
+        (before + after)
+        .replace("PRAGMA user_version = 13;", "PRAGMA user_version = 11;")
+        .replace(
+            "  runtime TEXT NOT NULL DEFAULT 'legacy' CHECK (runtime IN ('legacy', 'native')),\n",
+            "",
+        )
+    )
+    with sqlite3.connect(path) as conn:
+        conn.executescript(schema)
+        conn.execute(
+            "INSERT INTO checkpoints(key, value_json, updated_at) VALUES ('saved', '{\"value\":1}', 'now')"
+        )
+        conn.execute(
+            """INSERT INTO coworker_sessions(app_id, chat_id, thread_id, provider,
+               backend_session_id, agent_working_dir, created_at, updated_at)
+               VALUES ('app', 'chat', 'thread', 'codex', 'uuid', '/tmp', 'now', 'now')"""
+        )
+    store = SQLiteStore(path)
+    store.initialize()
+    with store.connect() as conn:
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0] == SQLITE_SCHEMA_VERSION
+        )
+        assert (
+            conn.execute("SELECT value_json FROM checkpoints").fetchone()[0]
+            == '{"value":1}'
+        )
+        assert (
+            conn.execute("SELECT backend_session_id FROM coworker_sessions").fetchone()[
+                0
+            ]
+            == "uuid"
+        )
+        assert (
+            conn.execute("SELECT COUNT(*) FROM coworker_native_deliveries").fetchone()[
+                0
+            ]
+            == 0
+        )
+
+
+def test_schema_upgrades_v12_with_existing_delivery(tmp_path: Path) -> None:
+    path = tmp_path / "agent.sqlite3"
+    schema_path = Path(__file__).parents[1] / "src/feishu_shadow_agent/store/schema.sql"
+    schema = (
+        schema_path.read_text(encoding="utf-8")
+        .replace("PRAGMA user_version = 13;", "PRAGMA user_version = 12;")
+        .replace("  source_snapshot_json TEXT,\n", "")
+        .replace("  snapshot_json TEXT,\n", "")
+    )
+    with sqlite3.connect(path) as conn:
+        conn.executescript(schema)
+        conn.execute(
+            """INSERT INTO coworker_sessions(app_id, chat_id, thread_id, provider,
+               agent_working_dir, created_at, updated_at) VALUES ('app', 'chat', 'topic',
+               'codex', '/tmp', 'now', 'now')"""
+        )
+        conn.execute(
+            """INSERT INTO coworker_events(app_id, message_id, chat_id, topic_key,
+               raw_json, status, received_at, updated_at)
+               VALUES ('app', 'source', 'chat', 'topic', '{}', 'completed', 'now', 'now')"""
+        )
+        conn.execute(
+            """INSERT INTO coworker_native_deliveries(event_id, session_id, source_revision,
+               source_message_id, target_message_id, text, idempotency_key, created_at, updated_at)
+               VALUES (1, 1, 1, 'source', 'source', 'answer', 'key', 'now', 'now')"""
+        )
+    store = SQLiteStore(path)
+    store.initialize()
+    with store.connect() as conn:
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0] == SQLITE_SCHEMA_VERSION
+        )
+        assert tuple(
+            conn.execute(
+                "SELECT text, source_snapshot_json FROM coworker_native_deliveries"
+            ).fetchone()
+        ) == ("answer", None)
+        for table in ("coworker_native_delivery_context", "coworker_native_steers"):
+            columns = {
+                row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
+            }
+            assert "snapshot_json" in columns
 
 
 def test_schema_upgrade_failure_rolls_back(tmp_path: Path) -> None:

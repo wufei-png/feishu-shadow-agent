@@ -49,6 +49,7 @@ class Daemon:
         business_mode: BusinessMode = "shadow",
         coworker_send_mode: str | None = None,
         coworker_chat_id: str | None = None,
+        native_coworker: bool = False,
     ):
         self.store = store
         self.logger = logger
@@ -76,6 +77,7 @@ class Daemon:
         self.business_mode: BusinessMode = business_mode
         self.coworker_send_mode = coworker_send_mode
         self.coworker_chat_id = coworker_chat_id
+        self.native_coworker = native_coworker
 
     def wake(self) -> None:
         """Wake the daemon loop so queued operator actions dispatch promptly."""
@@ -129,7 +131,9 @@ class Daemon:
         results: list[StageResult] = []
         try:
             dispatch_enabled = (
-                self.business_mode == "shadow" or self.coworker_send_mode == "project"
+                self.business_mode == "shadow"
+                or self.coworker_send_mode == "project"
+                or self.native_coworker
             )
             expired_approvals = (
                 self.store.expire_pending_approvals(scope=self.business_mode)

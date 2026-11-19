@@ -144,8 +144,10 @@ def test_dry_run_preserves_legacy_project_send_mode(tmp_path: Path) -> None:
     _, dry_store, _ = _load_runtime(str(path), mode="dry-run")
     policy = dry_store.get_product_policy("ai_coworker")
     assert policy is not None and policy["send_mode"] == "project"
+    assert policy["memory_maintenance"] is True
     assert sync_production_policy(loaded, dry_store)["chat_count"] == 1
     assert dry_store.get_product_policy("ai_coworker")["send_mode"] == "project"  # type: ignore[index]
+    assert dry_store.get_product_policy("ai_coworker")["memory_maintenance"] is True  # type: ignore[index]
 
 
 def test_dry_run_rejects_overlapping_resource_roots(tmp_path: Path) -> None:

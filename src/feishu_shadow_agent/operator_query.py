@@ -39,7 +39,7 @@ from .operator_queries.health import (
 from .operator_queries.message_detail import MessageDetailQuery
 from .operator_queries.policy import PolicyQuery
 from .operator_queries.storage import StorageQuery
-from .store.policy_store import COWORKER_POLICY_KEY
+from .store.policy_store import COWORKER_POLICY_KEY, stored_coworker_defaults
 from .store.sqlite_store import (
     RUN_HEARTBEAT_STALE_AFTER_SECONDS,
     SQLiteStore,
@@ -119,9 +119,9 @@ class OperatorQueryService:
                         value: Any = json.loads(policy["policy_json"])
                         if not isinstance(value, dict):
                             raise ValueError("coworker policy must be an object")
-                        raw_policy = cast(dict[str, Any], value)
-                        if "send_mode" not in raw_policy:
-                            raw_policy["send_mode"] = "project"
+                        raw_policy = stored_coworker_defaults(
+                            cast(dict[str, Any], value)
+                        )
                         result["policy"] = CoworkerConfig.model_validate(
                             raw_policy
                         ).model_dump(mode="json")

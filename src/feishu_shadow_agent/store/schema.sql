@@ -1,7 +1,7 @@
 BEGIN IMMEDIATE;
 
 PRAGMA application_id = 1179861319;
-PRAGMA user_version = 11;
+PRAGMA user_version = 13;
 
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -445,6 +445,7 @@ CREATE TABLE IF NOT EXISTS coworker_events (
   chat_id TEXT NOT NULL,
   topic_key TEXT NOT NULL,
   group_activation_id INTEGER,
+  runtime TEXT NOT NULL DEFAULT 'legacy' CHECK (runtime IN ('legacy', 'native')),
   revision INTEGER NOT NULL DEFAULT 1,
   raw_json TEXT,
   status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'processing', 'completed', 'needs_review', 'discarded')),
@@ -505,6 +506,91 @@ CREATE TABLE IF NOT EXISTS coworker_subagents (
 CREATE INDEX IF NOT EXISTS idx_coworker_subagents_session_status
 ON coworker_subagents(session_id, status);
 -- coworker background schema end
+-- coworker native schema begin
+CREATE TABLE IF NOT EXISTS coworker_native_deliveries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id INTEGER NOT NULL,
+  session_id INTEGER NOT NULL,
+  purpose TEXT NOT NULL DEFAULT 'reply' CHECK (purpose IN ('reply', 'topic', 'transfer')),
+  source_revision INTEGER NOT NULL,
+  source_message_id TEXT NOT NULL,
+  source_snapshot_json TEXT,
+  target_message_id TEXT NOT NULL,
+  text TEXT NOT NULL,
+  reply_in_thread INTEGER NOT NULL DEFAULT 0,
+  requires_watch INTEGER NOT NULL DEFAULT 0,
+  bot_open_id TEXT,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'sending', 'sent', 'previewed', 'needs_review', 'discarded')),
+  sent_message_id TEXT,
+  thread_id TEXT,
+  bound_topic_key TEXT,
+  error TEXT,
+  owner_pid INTEGER,
+  owner_host TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (event_id, purpose),
+  FOREIGN KEY (event_id) REFERENCES coworker_events(id),
+  FOREIGN KEY (session_id) REFERENCES coworker_sessions(id)
+);
+CREATE INDEX IF NOT EXISTS idx_coworker_native_deliveries_status
+ON coworker_native_deliveries(status, id);
+CREATE TABLE IF NOT EXISTS coworker_native_delivery_context (
+  delivery_id INTEGER NOT NULL,
+  message_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  snapshot_json TEXT,
+  PRIMARY KEY (delivery_id, message_id),
+  FOREIGN KEY (delivery_id) REFERENCES coworker_native_deliveries(id)
+);
+CREATE TABLE IF NOT EXISTS coworker_native_transfers (
+  event_id INTEGER PRIMARY KEY,
+  delivery_id INTEGER NOT NULL,
+  source_event_id INTEGER NOT NULL,
+  reply_target TEXT NOT NULL,
+  FOREIGN KEY (event_id) REFERENCES coworker_events(id),
+  FOREIGN KEY (delivery_id) REFERENCES coworker_native_deliveries(id),
+  FOREIGN KEY (source_event_id) REFERENCES coworker_events(id)
+);
+CREATE TABLE IF NOT EXISTS coworker_native_watches (
+  app_id TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  topic_key TEXT NOT NULL,
+  owner_open_id TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (app_id, chat_id, topic_key)
+);
+CREATE TABLE IF NOT EXISTS coworker_native_handoffs (
+  session_id INTEGER PRIMARY KEY,
+  status TEXT NOT NULL CHECK (status IN ('pause_requested', 'releasing', 'ready', 'resume_requested', 'reloading', 'needs_review')),
+  error TEXT,
+  owner_pid INTEGER,
+  owner_host TEXT,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES coworker_sessions(id)
+);
+CREATE TABLE IF NOT EXISTS coworker_native_dry_run_sessions (
+  session_id INTEGER PRIMARY KEY,
+  backend_session_id TEXT NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES coworker_sessions(id)
+);
+CREATE TABLE IF NOT EXISTS coworker_native_steers (
+  event_id INTEGER PRIMARY KEY,
+  origin_event_id INTEGER NOT NULL,
+  session_id INTEGER NOT NULL,
+  turn_id TEXT NOT NULL,
+  source_revision INTEGER NOT NULL,
+  snapshot_json TEXT,
+  status TEXT NOT NULL CHECK (status IN ('accepted', 'needs_review')),
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (event_id) REFERENCES coworker_events(id),
+  FOREIGN KEY (origin_event_id) REFERENCES coworker_events(id),
+  FOREIGN KEY (session_id) REFERENCES coworker_sessions(id)
+);
+-- coworker native schema end
 -- coworker schema end
 
 COMMIT;

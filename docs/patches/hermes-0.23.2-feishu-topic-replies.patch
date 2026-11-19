@@ -1,0 +1,110 @@
+diff --git a/plugins/platforms/feishu/adapter.py b/plugins/platforms/feishu/adapter.py
+index 06d7bb47..4781b370 100644
+--- a/plugins/platforms/feishu/adapter.py
++++ b/plugins/platforms/feishu/adapter.py
+@@ -3683,12 +3683,14 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
+             return None
+         try:
+             from lark_oapi.api.im.v1 import ListMessageRequest
+-            request = ListMessageRequest.builder().container_id_type("thread").container_id(thread_id).page_size(1).build()
++            request = (ListMessageRequest.builder().container_id_type("thread").container_id(thread_id)
++                       .sort_type("ByCreateTimeDesc").page_size(20).build())
+             response = await self._run_blocking(self._client.im.v1.message.list, request)
+             if self._response_succeeded(response):
+                 items = getattr(getattr(response, "data", None), "items", None)
+-                if items and len(items) > 0:
+-                    return getattr(items[0], "message_id", None)
++                for item in items or []:
++                    if not getattr(item, "deleted", False) and getattr(item, "message_id", None):
++                        return item.message_id
+         except Exception as exc:
+             logger.debug("[Feishu] Failed to fetch last message in thread %s: %s", thread_id, exc)
+         return None
+@@ -3698,16 +3700,17 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
+     ) -> Any:
+         thread_id = (metadata or {}).get("thread_id")
+         effective_reply_to = reply_to or ((metadata or {}).get("reply_to_message_id") if thread_id else None)
++        if thread_id and not effective_reply_to:
++            effective_reply_to = await self._fetch_last_message_in_thread(thread_id)
++            if not effective_reply_to:
++                raise ValueError(f"No reply anchor available for Feishu thread {thread_id}")
+         if effective_reply_to:
+             body = self._build_reply_message_body(
+                 content=payload, msg_type=msg_type, reply_in_thread=bool(thread_id), uuid_value=str(uuid.uuid4()),
+             )
+             request = self._build_reply_message_request(effective_reply_to, body)
+             return await self._run_blocking(self._client.im.v1.message.reply, request)
+-        if thread_id:
+-            # reply→create fallback inside a topic: thread_id as receive_id keeps it in the topic.
+-            receive_id, receive_id_type = thread_id, "thread_id"
+-        elif chat_id.startswith("feishu_user_id:"):
++        if chat_id.startswith("feishu_user_id:"):
+             receive_id, receive_id_type = chat_id.split(":", 1)[1], "user_id"
+         else:
+             receive_id, receive_id_type = chat_id, "open_id" if chat_id.startswith("ou_") else "chat_id"
+diff --git a/tests/gateway/test_feishu.py b/tests/gateway/test_feishu.py
+index 7bb29396..e1ac84e5 100644
+--- a/tests/gateway/test_feishu.py
++++ b/tests/gateway/test_feishu.py
+@@ -1243,6 +1243,60 @@ class TestAdapterBehavior(unittest.TestCase):
+                 second = FeishuAdapter(PlatformConfig())
+                 self.assertTrue(asyncio.run(second._is_duplicate("om_same")))
+-
++
++    @patch.dict(os.environ, {}, clear=True)
++    def test_thread_anchor_skips_deleted_messages(self):
++        from gateway.config import PlatformConfig
++        from plugins.platforms.feishu.adapter import FeishuAdapter
++
++        adapter = FeishuAdapter(PlatformConfig())
++        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=SimpleNamespace(list=Mock()))))
++        response = SimpleNamespace(success=lambda: True, data=SimpleNamespace(items=[
++            SimpleNamespace(message_id="om_deleted", deleted=True),
++            SimpleNamespace(message_id="om_live", deleted=False),
++        ]))
++        with patch.object(adapter, "_run_blocking", new=AsyncMock(return_value=response)):
++            anchor = asyncio.run(adapter._fetch_last_message_in_thread("omt_thread"))
++        self.assertEqual(anchor, "om_live")
++
++    @patch.dict(os.environ, {}, clear=True)
++    def test_background_thread_send_uses_a_message_anchor(self):
++        from gateway.config import PlatformConfig
++        from plugins.platforms.feishu.adapter import FeishuAdapter
++
++        adapter = FeishuAdapter(PlatformConfig())
++        api = SimpleNamespace(reply=Mock(), create=Mock())
++        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=api)))
++        with (
++            patch.object(adapter, "_fetch_last_message_in_thread", new=AsyncMock(return_value="om_anchor")) as fetch,
++            patch.object(adapter, "_run_blocking", new=AsyncMock(return_value=object())) as send,
++        ):
++            asyncio.run(adapter._send_raw_message(
++                chat_id="oc_chat", msg_type="text", payload='{"text":"done"}',
++                reply_to=None, metadata={"thread_id": "omt_thread"},
++            ))
++        fetch.assert_awaited_once_with("omt_thread")
++        func, request = send.await_args.args
++        self.assertIs(func, api.reply)
++        self.assertEqual(request.message_id, "om_anchor")
++        self.assertTrue(request.request_body.reply_in_thread)
++
++    @patch.dict(os.environ, {}, clear=True)
++    def test_background_thread_send_fails_when_no_anchor_is_available(self):
++        from gateway.config import PlatformConfig
++        from plugins.platforms.feishu.adapter import FeishuAdapter
++
++        adapter = FeishuAdapter(PlatformConfig())
++        with (
++            patch.object(adapter, "_fetch_last_message_in_thread", new=AsyncMock(return_value=None)),
++            patch.object(adapter, "_run_blocking", new=AsyncMock()) as send,
++            self.assertRaisesRegex(ValueError, "No reply anchor"),
++        ):
++            asyncio.run(adapter._send_raw_message(
++                chat_id="oc_chat", msg_type="text", payload='{"text":"done"}',
++                reply_to=None, metadata={"thread_id": "omt_thread"},
++            ))
++        send.assert_not_awaited()
++
+     @patch.dict(os.environ, {}, clear=True)
+     def test_send_document_reply_uses_thread_flag(self):
+         from gateway.config import PlatformConfig

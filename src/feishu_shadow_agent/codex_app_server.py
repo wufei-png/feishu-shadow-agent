@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import subprocess
 import threading
 import time
@@ -19,6 +20,32 @@ from .agent_skill_context import (
     append_explicit_context_paths,
 )
 from .config import CodexConfig
+
+_READ_TOPIC_TOOL: dict[str, Any] = {
+    "type": "function",
+    "name": "read_feishu_topic",
+    "description": "Read a page of messages in a topic of the current Feishu group.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "thread": {"type": "string"},
+            "page_token": {"type": ["string", "null"]},
+        },
+        "required": ["thread", "page_token"],
+        "additionalProperties": False,
+    },
+}
+_READ_GROUP_TOOL: dict[str, Any] = {
+    "type": "function",
+    "name": "read_feishu_group_history",
+    "description": "Read a page of recent messages in the current Feishu group.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {"page_token": {"type": ["string", "null"]}},
+        "required": ["page_token"],
+        "additionalProperties": False,
+    },
+}
 
 
 class AppServerError(RuntimeError):
@@ -59,12 +86,18 @@ class CodexAppServer:
         skill_names: list[str],
         explicit_context_paths: list[str],
         on_notification: Callable[[dict[str, Any]], None],
+        on_read_topic: Callable[[str, str, str | None, str, bool], dict[str, Any]]
+        | None = None,
+        on_read_group: Callable[[str, str | None, str, bool], dict[str, Any]]
+        | None = None,
         request_timeout: float = 30,
     ):
         self.config = config
         self.skill_names = skill_names
         self.explicit_context_paths = explicit_context_paths
         self.on_notification = on_notification
+        self.on_read_topic = on_read_topic
+        self.on_read_group = on_read_group
         self.request_timeout = request_timeout
         self._process: subprocess.Popen[str] | None = None
         self._reader: threading.Thread | None = None
@@ -92,10 +125,12 @@ class CodexAppServer:
             )
             self._reader.start()
         try:
-            self._request(
-                "initialize",
-                {"clientInfo": {"name": "feishu_shadow_agent", "version": "0.1.0"}},
-            )
+            initialize: dict[str, Any] = {
+                "clientInfo": {"name": "feishu_shadow_agent", "version": "0.1.0"}
+            }
+            if self.on_read_topic is not None or self.on_read_group is not None:
+                initialize["capabilities"] = {"experimentalApi": True}
+            self._request("initialize", initialize)
             self._write({"method": "initialized", "params": {}})
         except Exception:
             self.close()
@@ -129,13 +164,41 @@ class CodexAppServer:
         cwd: str | Path | None,
         output_model: type[BaseModel] | None,
         on_thread: Callable[[str], None],
+        private: bool = False,
+        unload_delay_seconds: int | None = None,
+        dry_run_safety: bool = False,
+        turn_timeout_seconds: float | None = None,
+        ephemeral: bool = False,
     ) -> AgentRunResult:
         started = time.monotonic()
         thread_id = session_id
         turn: _Turn | None = None
+        thread_config: dict[str, Any] = {}
+        if private:
+            thread_config.update(
+                {"memories.use_memories": False, "memories.generate_memories": False}
+            )
+        if unload_delay_seconds is not None:
+            thread_config["thread_unload_delay_secs"] = unload_delay_seconds
         try:
+            if dry_run_safety:
+                thread_config.update(self._restricted_tool_config(cwd))
             if thread_id is None:
                 params: dict[str, Any] = {}
+                if ephemeral:
+                    params["ephemeral"] = True
+                if dry_run_safety:
+                    params.update({"sandbox": "read-only", "approvalPolicy": "never"})
+                else:
+                    dynamic_tools: list[dict[str, Any]] = []
+                    if self.on_read_topic is not None:
+                        dynamic_tools.append(_READ_TOPIC_TOOL)
+                    if self.on_read_group is not None:
+                        dynamic_tools.append(_READ_GROUP_TOOL)
+                    if dynamic_tools:
+                        params["dynamicTools"] = dynamic_tools
+                if thread_config:
+                    params["config"] = thread_config
                 if cwd is not None:
                     params["cwd"] = str(cwd)
                 if self.config.model:
@@ -147,7 +210,19 @@ class CodexAppServer:
                 )
                 prompt = append_codex_skill_mentions(prompt, self.skill_names)
             else:
-                self._request("thread/resume", {"threadId": thread_id})
+                resume_params: dict[str, Any] = {
+                    "threadId": thread_id,
+                    "excludeTurns": True,
+                }
+                if dry_run_safety:
+                    resume_params.update(
+                        {"sandbox": "read-only", "approvalPolicy": "never"}
+                    )
+                if thread_config:
+                    resume_params["config"] = thread_config
+                self._request("thread/resume", resume_params)
+            if dry_run_safety:
+                self._verify_no_mcp_tools(thread_id)
             on_thread(thread_id)
             turn = _Turn()
             with self._lock:
@@ -166,11 +241,19 @@ class CodexAppServer:
                 params["effort"] = self.config.reasoning_effort
             if output_model is not None:
                 params["outputSchema"] = agent_output_schema(output_model)
+            if dry_run_safety:
+                params["approvalPolicy"] = "never"
+                params["sandboxPolicy"] = {"type": "readOnly", "networkAccess": False}
             response = self._request("turn/start", params)
             with self._lock:
                 if turn.turn_id is None:
                     turn.turn_id = _turn_id(response)
-            if not turn.done.wait(timeout=self.config.timeout_seconds):
+            timeout = (
+                self.config.timeout_seconds
+                if turn_timeout_seconds is None
+                else turn_timeout_seconds
+            )
+            if not turn.done.wait(timeout=timeout):
                 self._interrupt_best_effort(thread_id, turn.turn_id)
                 return AgentRunResult(
                     argv=[],
@@ -227,12 +310,16 @@ class CodexAppServer:
                     if turn is not None and self._turns.get(thread_id) is turn:
                         del self._turns[thread_id]
 
-    def steer(self, thread_id: str, prompt: str) -> None:
+    def steer(
+        self, thread_id: str, prompt: str, *, expected_turn_id: str | None = None
+    ) -> None:
         with self._lock:
             turn = self._turns.get(thread_id)
             turn_id = None if turn is None else turn.turn_id
         if not turn_id or turn is None or turn.done.is_set():
             raise TurnNotActive("no active Codex turn")
+        if expected_turn_id is not None and turn_id != expected_turn_id:
+            raise TurnNotActive("the active Codex turn changed")
         try:
             self._request(
                 "turn/steer",
@@ -260,6 +347,99 @@ class CodexAppServer:
 
     def interrupt(self, thread_id: str, turn_id: str) -> None:
         self._request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
+
+    def release_thread(self, thread_id: str, *, timeout_seconds: float = 75) -> None:
+        if self.active_turn_id(thread_id) is not None:
+            raise AppServerError("cannot release a thread with an active turn")
+        status = self._request("thread/unsubscribe", {"threadId": thread_id}).get(
+            "status"
+        )
+        if status not in {"unsubscribed", "notSubscribed", "notLoaded"}:
+            raise AppServerError("thread unsubscribe returned an unknown status")
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            response = self._request("thread/loaded/list", {})
+            loaded, cursor = response.get("data"), response.get("nextCursor")
+            if not isinstance(loaded, list) or cursor:
+                raise AppServerError("cannot verify the list of loaded threads")
+            if thread_id not in loaded:
+                return
+            if time.monotonic() >= deadline:
+                raise AppServerError("thread did not unload")
+            time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+
+    def reload_thread(
+        self, thread_id: str, *, private: bool, cwd: str, dry_run_safety: bool = False
+    ) -> None:
+        config: dict[str, Any] = {"thread_unload_delay_secs": 1}
+        if private:
+            config.update(
+                {"memories.use_memories": False, "memories.generate_memories": False}
+            )
+        if dry_run_safety:
+            config.update(self._restricted_tool_config(cwd))
+        params: dict[str, Any] = {
+            "threadId": thread_id,
+            "excludeTurns": True,
+            "config": config,
+            "cwd": cwd,
+        }
+        if dry_run_safety:
+            params.update({"sandbox": "read-only", "approvalPolicy": "never"})
+        response = self._request(
+            "thread/resume",
+            params,
+        )
+        if _thread_id(response) != thread_id:
+            raise AppServerError("resumed thread ID did not match")
+        if dry_run_safety:
+            self._verify_no_mcp_tools(thread_id)
+
+    def _restricted_tool_config(self, cwd: str | Path | None) -> dict[str, Any]:
+        response = self._request(
+            "config/read", {"cwd": None if cwd is None else str(cwd)}
+        )
+        config_value = response.get("config")
+        if not isinstance(config_value, dict):
+            raise AppServerError("cannot verify MCP configuration")
+        config = cast(dict[str, Any], config_value)
+        servers_value = config.get("mcp_servers", {})
+        if not isinstance(servers_value, dict):
+            raise AppServerError("cannot verify MCP configuration")
+        servers = cast(dict[str, Any], servers_value)
+        if any(re.fullmatch(r"[A-Za-z0-9_-]+", name) is None for name in servers):
+            raise AppServerError("cannot safely disable a configured MCP server")
+        overrides: dict[str, Any] = {
+            f"features.{name}": False
+            for name in (
+                "apps",
+                "browser_use",
+                "in_app_browser",
+                "computer_use",
+                "code_mode_host",
+                "shell_tool",
+                "unified_exec",
+                "multi_agent",
+                "skill_mcp_dependency_install",
+            )
+        }
+        overrides["web_search"] = "disabled"
+        overrides.update({f"mcp_servers.{name}.enabled": False for name in servers})
+        return overrides
+
+    def _verify_no_mcp_tools(self, thread_id: str) -> None:
+        response = self._request(
+            "mcpServerStatus/list", {"threadId": thread_id, "limit": 1000}
+        )
+        entries = response.get("data")
+        if not isinstance(entries, list) or response.get("nextCursor"):
+            raise AppServerError("cannot verify MCP tools")
+        for entry in cast(list[object], entries):
+            if not isinstance(entry, dict):
+                raise AppServerError("cannot verify MCP tools")
+            item = cast(dict[str, Any], entry)
+            if not isinstance(item.get("tools"), dict) or item["tools"]:
+                raise AppServerError("MCP tools remain enabled")
 
     def _interrupt_best_effort(self, thread_id: str, turn_id: str | None) -> None:
         if turn_id:
@@ -331,6 +511,15 @@ class CodexAppServer:
                     pending.done.set()
             return
         if request_id is not None and isinstance(method, str):
+            if method == "item/tool/call" and (
+                self.on_read_topic is not None or self.on_read_group is not None
+            ):
+                threading.Thread(
+                    target=self._handle_read_tool,
+                    args=(request_id, message.get("params")),
+                    daemon=True,
+                ).start()
+                return
             self._reject_server_request(request_id, method)
             return
         params = message.get("params")
@@ -371,6 +560,62 @@ class CodexAppServer:
         else:
             if completed_turn is not None:
                 completed_turn.done.set()
+
+    def _handle_read_tool(self, request_id: Any, value: Any) -> None:
+        try:
+            params = _mapping(value)
+            arguments = _mapping(params.get("arguments"))
+            thread_id, topic, token = (
+                params.get("threadId"),
+                arguments.get("thread"),
+                arguments.get("page_token"),
+            )
+            if (
+                not isinstance(thread_id, str)
+                or not isinstance(params.get("turnId"), str)
+                or (token is not None and not isinstance(token, str))
+            ):
+                raise ValueError("invalid read request")
+            with self._lock:
+                turn = self._turns.get(thread_id)
+                if turn is not None and (
+                    turn.turn_id != params.get("turnId") or turn.done.is_set()
+                ):
+                    raise ValueError("topic read is not part of an active turn")
+            if (
+                params.get("tool") == "read_feishu_topic"
+                and self.on_read_topic is not None
+                and isinstance(topic, str)
+                and topic
+                and set(arguments) == {"thread", "page_token"}
+            ):
+                result = self.on_read_topic(
+                    thread_id, topic, token, str(params["turnId"]), turn is not None
+                )
+            elif (
+                params.get("tool") == "read_feishu_group_history"
+                and self.on_read_group is not None
+                and set(arguments) == {"page_token"}
+            ):
+                result = self.on_read_group(
+                    thread_id, token, str(params["turnId"]), turn is not None
+                )
+            else:
+                raise ValueError("unknown read tool")
+            text = json.dumps(result, ensure_ascii=False)
+            success = True
+        except Exception:  # noqa: BLE001
+            text, success = "Topic is unavailable in the current group.", False
+        with contextlib.suppress(AppServerError):
+            self._write(
+                {
+                    "id": request_id,
+                    "result": {
+                        "contentItems": [{"type": "inputText", "text": text}],
+                        "success": success,
+                    },
+                }
+            )
 
     def _reject_server_request(self, request_id: Any, method: str) -> None:
         try:

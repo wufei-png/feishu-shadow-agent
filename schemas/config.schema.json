@@ -378,7 +378,7 @@
           "type": "integer"
         },
         "memory_maintenance": {
-          "default": true,
+          "default": false,
           "description": "Allow background maintenance of long-term context.",
           "title": "Memory Maintenance",
           "type": "boolean"
