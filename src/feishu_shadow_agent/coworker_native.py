@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .agent_backend import AgentRunResult
 from .agent_backend_factory import coworker_runtime_config
-from .codex_app_server import CodexAppServer, TurnNotActive
+from .codex_app_server import AppServerError, CodexAppServer, TurnNotActive
 from .config import CoworkerConfig
 from .coworker import (
     CoworkerBackend,
@@ -113,6 +113,43 @@ class NativeCoworkerService(CoworkerService):
     def _session_lock(self, session_id: int) -> RLock:
         with self._app_server_lock:
             return self._session_locks.setdefault(session_id, RLock())
+
+    def _classify_followup(
+        self, policy: CoworkerConfig, prompt: str, cwd: str
+    ) -> Literal["current", "unrelated", "uncertain"]:
+        runtime = coworker_runtime_config(self.config, policy)
+        classifier = CodexAppServer(
+            config=runtime.agent_backend.codex,
+            skill_names=[],
+            explicit_context_paths=[],
+            on_notification=lambda _event: None,
+            request_timeout=10,
+        )
+        try:
+            classifier.start()
+            result = classifier.run_turn(
+                prompt,
+                session_id=None,
+                cwd=cwd,
+                output_model=SteerDecision,
+                on_thread=lambda _thread: None,
+                private=True,
+                unload_delay_seconds=1,
+                dry_run_safety=True,
+                turn_timeout_seconds=30,
+            )
+        except (AppServerError, OSError):
+            return "uncertain"
+        finally:
+            classifier.close()
+        try:
+            return (
+                SteerDecision.model_validate(result.json_data).decision
+                if result.ok
+                else "uncertain"
+            )
+        except ValidationError:
+            return "uncertain"
 
     def on_app_server_notification(self, notification: dict[str, Any]) -> None:
         method = notification.get("method")
@@ -527,7 +564,8 @@ class NativeCoworkerService(CoworkerService):
                        ORDER BY e.received_at, e.id""",
                     (origin_event_id, session_id),
                 ).fetchall()
-            decision = server.run_turn(
+            classification = self._classify_followup(
+                policy,
                 "判断新消息是否明确补充或更正当前任务。属于当前任务返回 current；"
                 "另一个任务返回 unrelated；无法确定返回 uncertain。\n"
                 + _code_block(
@@ -547,23 +585,8 @@ class NativeCoworkerService(CoworkerService):
                     ),
                     "json",
                 ),
-                session_id=None,
-                cwd=str(current["agent_working_dir"]),
-                output_model=SteerDecision,
-                on_thread=lambda _thread: None,
-                private=True,
-                unload_delay_seconds=1,
-                dry_run_safety=True,
-                turn_timeout_seconds=30,
+                str(current["agent_working_dir"]),
             )
-            try:
-                classification = (
-                    SteerDecision.model_validate(decision.json_data).decision
-                    if decision.ok
-                    else "uncertain"
-                )
-            except ValidationError:
-                classification = "uncertain"
             if classification != "current":
                 self.events.skip_native_steer(event.id)
                 return False

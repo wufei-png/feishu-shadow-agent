@@ -5,11 +5,12 @@ import threading
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
 from feishu_shadow_agent.agent_backend import AgentRunResult
+from feishu_shadow_agent.codex_app_server import AppServerError
 from feishu_shadow_agent.config import (
     AppConfig,
     ChatPolicyConfig,
@@ -227,6 +228,32 @@ class BlockingNativeServer(FakeServer):
             raise OSError("steer outcome unknown")
 
 
+class FakeNativeCoworkerService(NativeCoworkerService):
+    def _classify_followup(
+        self, policy: CoworkerConfig, prompt: str, cwd: str
+    ) -> Literal["current", "unrelated", "uncertain"]:
+        assert self.app_server is not None
+        result = self.app_server.run_turn(
+            prompt,
+            session_id=None,
+            cwd=cwd,
+            output_model=SteerDecision,
+            on_thread=lambda _thread: None,
+            private=True,
+            unload_delay_seconds=1,
+            dry_run_safety=True,
+            turn_timeout_seconds=30,
+        )
+        try:
+            return (
+                SteerDecision.model_validate(result.json_data).decision
+                if result.ok
+                else "uncertain"
+            )
+        except ValueError:
+            return "uncertain"
+
+
 def _service(
     tmp_path: Path, *, dry_run: bool = True
 ) -> tuple[NativeCoworkerService, FakeFeishu, FakeServer]:
@@ -245,7 +272,7 @@ def _service(
     store = SQLiteStore(tmp_path / "store.sqlite3")
     store.import_product_policy_from_config(config)
     feishu, server = FakeFeishu(), FakeServer()
-    service = NativeCoworkerService(
+    service = FakeNativeCoworkerService(
         store=store,
         config=config,
         feishu=feishu,
@@ -1527,6 +1554,68 @@ def test_followup_is_processed_if_current_turn_finishes_before_steering(
     while service.process_next():
         pass
     assert any("应该是 2.0" in prompt for prompt in server.prompts)
+
+
+def test_followup_classifier_uses_isolated_notifications_and_closes(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    service, _, _ = _service(tmp_path)
+    policy = service.current_policy()
+    assert policy is not None
+    outcome = "current"
+    closed: list[str] = []
+
+    class IsolatedServer:
+        def __init__(self, *, on_notification: Any, **kwargs: Any) -> None:
+            assert kwargs["skill_names"] == []
+            assert kwargs["explicit_context_paths"] == []
+            self.notify = on_notification
+
+        def start(self) -> None:
+            self.notify(
+                {
+                    "method": "turn/started",
+                    "params": {"threadId": "classifier", "turn": {"id": "turn"}},
+                }
+            )
+            if outcome == "failure":
+                raise AppServerError("start failed")
+
+        def run_turn(self, _prompt: str, **kwargs: Any) -> AgentRunResult:
+            assert kwargs["dry_run_safety"] and kwargs["turn_timeout_seconds"] == 30
+            if outcome == "timeout":
+                return AgentRunResult(argv=[], exit_code=None, timed_out=True)
+            return AgentRunResult(argv=[], exit_code=0, json_data={"decision": outcome})
+
+        def close(self) -> None:
+            self.notify(
+                {
+                    "method": "turn/completed",
+                    "params": {"threadId": "classifier", "turn": {"id": "turn"}},
+                }
+            )
+            closed.append(outcome)
+
+    monkeypatch.setattr(
+        "feishu_shadow_agent.coworker_native.CodexAppServer", IsolatedServer
+    )
+    for _ in range(260):
+        assert (
+            NativeCoworkerService._classify_followup(  # pyright: ignore[reportPrivateUsage]
+                service, policy, "classify", str(tmp_path)
+            )
+            == "current"
+        )
+    for outcome in ("failure", "timeout", "invalid"):
+        assert (
+            NativeCoworkerService._classify_followup(  # pyright: ignore[reportPrivateUsage]
+                service, policy, "classify", str(tmp_path)
+            )
+            == "uncertain"
+        )
+        assert closed[-1] == outcome
+    assert len(closed) == 263
+    assert not service._child_turns  # pyright: ignore[reportPrivateUsage]
 
 
 def test_uncertain_steer_blocks_both_outbox_and_approval(tmp_path: Path) -> None:
