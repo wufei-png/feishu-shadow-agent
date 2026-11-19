@@ -161,6 +161,7 @@ class NativeCoworkerService(CoworkerService):
                 unload_delay_seconds=1,
                 dry_run_safety=True,
                 turn_timeout_seconds=30,
+                ephemeral=True,
             )
         except (AppServerError, OSError):
             return "uncertain"

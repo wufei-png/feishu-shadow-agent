@@ -143,9 +143,10 @@ class FakeServer:
         unload_delay_seconds: int | None = None,
         dry_run_safety: bool = False,
         turn_timeout_seconds: float | None = None,
+        ephemeral: bool = False,
     ) -> AgentRunResult:
         if output_model is SteerDecision:
-            assert session_id is None and private and dry_run_safety
+            assert session_id is None and private and dry_run_safety and ephemeral
             assert turn_timeout_seconds == 30
             self.classification_prompts.append(prompt)
             decision = self.decisions.pop(0) if self.decisions else "current"
@@ -188,6 +189,7 @@ class BlockingNativeServer(FakeServer):
         unload_delay_seconds: int | None = None,
         dry_run_safety: bool = False,
         turn_timeout_seconds: float | None = None,
+        ephemeral: bool = False,
     ) -> AgentRunResult:
         if output_model is SteerDecision:
             return super().run_turn(
@@ -200,6 +202,7 @@ class BlockingNativeServer(FakeServer):
                 unload_delay_seconds=unload_delay_seconds,
                 dry_run_safety=dry_run_safety,
                 turn_timeout_seconds=turn_timeout_seconds,
+                ephemeral=ephemeral,
             )
         self.prompts.append(prompt)
         thread_id = session_id or "active-session"
@@ -248,6 +251,7 @@ class FakeNativeCoworkerService(NativeCoworkerService):
             unload_delay_seconds=1,
             dry_run_safety=True,
             turn_timeout_seconds=30,
+            ephemeral=True,
         )
         try:
             return (
@@ -1309,6 +1313,7 @@ def test_only_explicit_supplement_to_current_request_is_steered(tmp_path: Path) 
             unload_delay_seconds: int | None = None,
             dry_run_safety: bool = False,
             turn_timeout_seconds: float | None = None,
+            ephemeral: bool = False,
         ) -> AgentRunResult:
             if output_model is SteerDecision:
                 return super().run_turn(
@@ -1321,6 +1326,7 @@ def test_only_explicit_supplement_to_current_request_is_steered(tmp_path: Path) 
                     unload_delay_seconds=unload_delay_seconds,
                     dry_run_safety=dry_run_safety,
                     turn_timeout_seconds=turn_timeout_seconds,
+                    ephemeral=ephemeral,
                 )
             if not self.started.is_set():
                 on_thread("active-session")
@@ -2021,6 +2027,7 @@ def test_followup_classifier_uses_isolated_notifications_and_closes(
 
         def run_turn(self, _prompt: str, **kwargs: Any) -> AgentRunResult:
             assert kwargs["dry_run_safety"] and kwargs["turn_timeout_seconds"] == 30
+            assert kwargs["ephemeral"]
             if outcome == "timeout":
                 return AgentRunResult(argv=[], exit_code=None, timed_out=True)
             return AgentRunResult(argv=[], exit_code=0, json_data={"decision": outcome})

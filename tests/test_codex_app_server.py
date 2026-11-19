@@ -252,6 +252,32 @@ def test_turn_can_override_the_configured_timeout(tmp_path: Path) -> None:
     assert result.timed_out and not result.ok
 
 
+def test_ephemeral_turn_is_not_started_as_a_persistent_thread(tmp_path: Path) -> None:
+    server = CodexAppServer(
+        config=CodexConfig(path=str(_server_executable(tmp_path)), timeout_seconds=5),
+        skill_names=[],
+        explicit_context_paths=[],
+        on_notification=lambda _event: None,
+    )
+    server.start()
+    try:
+        result = server.run_turn(
+            "synthetic",
+            session_id=None,
+            cwd=tmp_path,
+            output_model=_Output,
+            on_thread=lambda _: None,
+            ephemeral=True,
+        )
+    finally:
+        server.close()
+    assert result.ok
+    request = json.loads((tmp_path / "requests.jsonl").read_text().splitlines()[0])
+    assert (
+        request["method"] == "thread/start" and request["params"]["ephemeral"] is True
+    )
+
+
 def test_production_inherits_native_tools_on_start_resume_and_reload(
     tmp_path: Path,
 ) -> None:

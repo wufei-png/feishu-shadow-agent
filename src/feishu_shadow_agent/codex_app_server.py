@@ -168,6 +168,7 @@ class CodexAppServer:
         unload_delay_seconds: int | None = None,
         dry_run_safety: bool = False,
         turn_timeout_seconds: float | None = None,
+        ephemeral: bool = False,
     ) -> AgentRunResult:
         started = time.monotonic()
         thread_id = session_id
@@ -184,6 +185,8 @@ class CodexAppServer:
                 thread_config.update(self._restricted_tool_config(cwd))
             if thread_id is None:
                 params: dict[str, Any] = {}
+                if ephemeral:
+                    params["ephemeral"] = True
                 if dry_run_safety:
                     params.update({"sandbox": "read-only", "approvalPolicy": "never"})
                 else:
