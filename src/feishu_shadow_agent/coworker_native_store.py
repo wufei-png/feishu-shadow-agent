@@ -200,8 +200,13 @@ class NativeDeliveryStore:
             context_sources = [
                 (message_id, revision) for _, message_id, revision in batch or []
             ]
-            internal = payload.get("_internal")
-            if isinstance(internal, dict) and internal.get("kind") in {
+            internal_value = payload.get("_internal")
+            internal = (
+                cast(dict[str, Any], internal_value)
+                if isinstance(internal_value, dict)
+                else {}
+            )
+            if internal.get("kind") in {
                 "native_transfer",
                 "subagent_completed",
             }:
