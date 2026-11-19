@@ -116,7 +116,7 @@ chats:
 
 coworker:
   enabled: false
-  memory_maintenance: true
+  memory_maintenance: false
   memory_maintenance_time: "00:00"  # Daily, in the daemon's local timezone.
   partner_bots: {}
   # Replace the empty map with named partners as needed:

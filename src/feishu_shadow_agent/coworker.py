@@ -59,7 +59,13 @@ class CoworkerFeishu(Protocol):
     ) -> MessagePage: ...
 
     def list_thread_messages(
-        self, *, thread_id: str, page_size: int, as_identity: str, order: str
+        self,
+        *,
+        thread_id: str,
+        page_size: int,
+        as_identity: str,
+        order: str,
+        page_token: str | None = None,
     ) -> MessagePage: ...
 
     def list_chat_messages(
@@ -71,6 +77,7 @@ class CoworkerFeishu(Protocol):
         page_size: int,
         as_identity: str,
         order: str,
+        page_token: str | None = None,
     ) -> MessagePage: ...
 
 
@@ -221,6 +228,11 @@ class CoworkerService:
         if self.execution_mode == "dry_run":
             path = path.with_name(path.name + ".dry-run")
         return SharedMemory(path)
+
+    def run_memory_task(
+        self, backend: CoworkerBackend, prompt: str, cwd: Path
+    ) -> AgentRunResult:
+        return backend.natural_task_session(prompt, session_id=None, cwd=cwd)
 
     def receive(self, raw: dict[str, Any], bot_open_id: str) -> None:
         policy = self.current_policy()
@@ -444,10 +456,10 @@ class CoworkerService:
                 )
                 backend = self.backend_factory(self.config, policy, self.base_dir)
                 agent_started = True
-                result = backend.natural_task_session(
+                result = self.run_memory_task(
+                    backend,
                     prompt,
-                    session_id=None,
-                    cwd=resolve_agent_working_dir(
+                    resolve_agent_working_dir(
                         self.config.agent_backend.working_dir, self.base_dir
                     ),
                 )
@@ -1058,7 +1070,11 @@ class CoworkerService:
                     elif isinstance(mention, dict):
                         mention_map = cast(dict[str, Any], mention)
                         identifier = _mapping(mention_map.get("id"))
-                        value = identifier.get("open_id") or mention_map.get("open_id")
+                        value = (
+                            identifier.get("open_id")
+                            or mention_map.get("open_id")
+                            or mention_map.get("id")
+                        )
                         if isinstance(value, str):
                             mentions.append(value)
                         if mention_map.get("key") == "@_all":
@@ -1451,9 +1467,7 @@ class CoworkerWorker:
                     internal_only=True
                 ):
                     continue
-                children = self.service.events.running_subagents(
-                    app_id=self.service.app_id, chat_id=chat_id
-                )
+                children = self._running_subagents(chat_id)
                 if not children:
                     break
                 if time.monotonic() >= deadline or not server.is_healthy():
@@ -1471,6 +1485,11 @@ class CoworkerWorker:
         finally:
             server.close()
             self._server_started = False
+
+    def _running_subagents(self, chat_id: str) -> list[dict[str, Any]]:
+        return self.service.events.running_subagents(
+            app_id=self.service.app_id, chat_id=chat_id
+        )
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -1584,7 +1603,7 @@ def event_message_from_raw(raw: dict[str, Any], *, bot_id: str) -> dict[str, Any
     for mention in mention_items:
         item = _mapping(mention)
         identifier = _mapping(item.get("id"))
-        value = identifier.get("open_id") or item.get("open_id")
+        value = identifier.get("open_id") or item.get("open_id") or item.get("id")
         if isinstance(value, str) and value:
             mentions.append(value)
         if item.get("key") == "@_all":

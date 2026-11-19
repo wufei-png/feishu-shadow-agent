@@ -84,6 +84,24 @@ def test_coworker_console_is_read_only_when_store_missing(tmp_path: Path) -> Non
     assert not (tmp_path / "agent.sqlite3").exists()
 
 
+def test_console_shows_effective_legacy_memory_policy(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    path = tmp_path / "config.yaml"
+    with path.open("a", encoding="utf-8") as output:
+        output.write("\ncoworker:\n  enabled: true\n  chat_id: oc_test\n")
+    store = _store(tmp_path)
+    store.import_product_policy_from_config(ConfigService().load(path).config)
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE product_policies SET policy_json = json_remove(policy_json, '$.memory_maintenance') WHERE key = 'ai_coworker'"
+        )
+    coworker = client.get("/api/coworker", headers=_auth()).json()
+    assert coworker["policy"]["memory_maintenance"] is True
+    assert coworker["config"]["memory_maintenance"] is False
+    policy = client.get("/api/policy/status", headers=_auth()).json()
+    assert policy["policy_import_diff"]["changed_coworker"] is True
+
+
 def test_coworker_console_policy_updates_and_config_drift(tmp_path: Path) -> None:
     client = _client(tmp_path)
     path = tmp_path / "config.yaml"

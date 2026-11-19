@@ -102,7 +102,13 @@ class FakeFeishu:
         return LarkCliResult(argv=[], exit_code=0)
 
     def list_thread_messages(
-        self, *, thread_id: str, page_size: int, as_identity: str, order: str
+        self,
+        *,
+        thread_id: str,
+        page_size: int,
+        as_identity: str,
+        order: str,
+        page_token: str | None = None,
     ) -> MessagePage:
         self.identities.append(as_identity)
         return MessagePage(
@@ -127,6 +133,7 @@ class FakeFeishu:
         page_size: int,
         as_identity: str,
         order: str,
+        page_token: str | None = None,
     ) -> MessagePage:
         self.chat_history_calls += 1
         if self.chat_history_items is not None:
@@ -171,6 +178,17 @@ class FakeCoworkerService(CoworkerService):
         super().receive(raw, bot_open_id)
 
 
+def test_string_mention_id_triggers_coworker(tmp_path: Path) -> None:
+    service, _db, backend, _feishu = _service(tmp_path)
+    event = _event("string-mention", sender="alice", text="处理", mention=True)
+    message = cast(dict[str, Any], cast(dict[str, Any], event["event"])["message"])
+    message["mentions"] = [{"id": "bot", "key": "@_user_1", "name": "机器人"}]
+    service.receive(event, "bot")
+    assert service.process_next()
+    assert len(backend.prompts) == 1
+    assert "机器人" in backend.prompts[0]
+
+
 def _service(
     tmp_path: Path,
     *,
@@ -189,6 +207,7 @@ def _service(
             trigger_mode=trigger_mode,
             partner_bots=partner_bots or {},
             send_mode=send_mode,
+            memory_maintenance=True,
         ),  # type: ignore[arg-type]
         chats={
             "group": ChatPolicyConfig(
@@ -1612,6 +1631,18 @@ def test_daily_memory_timeout_waits_for_review_instead_of_retrying(
     now[0] = datetime(2026, 11, 19, 1).astimezone().isoformat()
     assert not service.maintain_memory_if_due()
     assert calls == ["run"]
+
+
+def test_memory_backend_construction_failure_remains_retryable(tmp_path: Path) -> None:
+    service, db, _backend, _feishu = _service(tmp_path)
+    db.clock = lambda: datetime(2026, 11, 18, 1).astimezone().isoformat()
+
+    def fail_factory(*_args: Any) -> Any:
+        raise ValueError("invalid backend configuration")
+
+    service.backend_factory = fail_factory
+    assert service.maintain_memory_if_due()
+    assert db.get_checkpoint("coworker.memory_maintenance")["state"] == "failed"  # type: ignore[index]
 
 
 def test_dispatch_rechecks_source_edits_and_coworker_policy(tmp_path: Path) -> None:

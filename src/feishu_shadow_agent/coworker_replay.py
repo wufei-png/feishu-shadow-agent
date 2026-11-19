@@ -158,9 +158,15 @@ class _RecordedFeishu:
         )
 
     def list_thread_messages(
-        self, *, thread_id: str, page_size: int, as_identity: str, order: str
+        self,
+        *,
+        thread_id: str,
+        page_size: int,
+        as_identity: str,
+        order: str,
+        page_token: str | None = None,
     ) -> MessagePage:
-        if as_identity != "bot" or order != "desc":
+        if as_identity != "bot" or order != "desc" or page_token is not None:
             raise ValueError("offline replay requires descending bot history")
         items = [
             message
@@ -185,8 +191,9 @@ class _RecordedFeishu:
         page_size: int,
         as_identity: str,
         order: str,
+        page_token: str | None = None,
     ) -> MessagePage:
-        if as_identity != "bot" or order != "desc":
+        if as_identity != "bot" or order != "desc" or page_token is not None:
             raise ValueError("offline replay requires descending bot history")
         items = [item for item in self.messages if item.get("chat_id") == chat_id]
         return MessagePage(

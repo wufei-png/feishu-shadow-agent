@@ -43,7 +43,12 @@ def mention_details(value: object) -> list[dict[str, str]]:
             for key, field in (
                 ("key", item.get("key")),
                 ("name", item.get("name")),
-                ("open_id", nested.get("open_id") or item.get("open_id")),
+                (
+                    "open_id",
+                    nested.get("open_id")
+                    or item.get("open_id")
+                    or (identifier if isinstance(identifier, str) else None),
+                ),
             )
             if isinstance(field, str) and field
         }
