@@ -24,7 +24,10 @@ from feishu_shadow_agent.coworker_native import (
     SteerDecision,
 )
 from feishu_shadow_agent.jsonl import JSONLLogger
-from feishu_shadow_agent.message_normalization import MessageNormalizer
+from feishu_shadow_agent.message_normalization import (
+    MessageNormalizer,
+    message_content_fingerprint,
+)
 from feishu_shadow_agent.operator_commands import OperatorCommandService
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import LarkCliResult, MessagePage
@@ -580,6 +583,50 @@ def test_changed_source_is_not_sent_and_blocks_only_that_topic(tmp_path: Path) -
             ).fetchone()[0]
             == "needs_review"
         )
+
+
+@pytest.mark.parametrize("change", ["remove-mention", "add-mention", "update-time"])
+def test_reply_rechecks_mention_and_update_time_with_same_text(
+    tmp_path: Path, change: str
+) -> None:
+    service, feishu, _server = _service(tmp_path, dry_run=False)
+    _receive(service, feishu, "request", text="@同事 请现在检查")
+    snapshot = feishu.messages["request"]
+    snapshot["mentions"] = [{"id": "app", "key": "@_user_1", "name": "同事"}]
+    if change != "update-time":
+        snapshot["update_time"] = "2026-11-19 17:00"
+    assert service.process_next()
+
+    if change == "remove-mention":
+        snapshot.pop("mentions")
+    elif change == "add-mention":
+        snapshot["mentions"].append({"id": "other-app", "key": "@_user_2"})
+    else:
+        snapshot["update_time"] = "2026-11-19 17:00"
+    assert service.process_next()
+
+    assert feishu.sent == 0
+    with service.store.connect() as conn:
+        status = conn.execute(
+            "SELECT status FROM coworker_native_deliveries"
+        ).fetchone()[0]
+    assert status == "needs_review"
+
+
+def test_pending_reply_accepts_previous_snapshot_fingerprint(tmp_path: Path) -> None:
+    service, feishu, _server = _service(tmp_path, dry_run=False)
+    _receive(service, feishu, "request")
+    assert service.process_next()
+    legacy_fingerprint = message_content_fingerprint(feishu.messages["request"])
+    with service.store.connect() as conn:
+        conn.execute(
+            """UPDATE messages SET raw_json = json_set(raw_json,
+                 '$.coworker_source_content_sha256', ?) WHERE message_id = 'request'""",
+            (legacy_fingerprint,),
+        )
+
+    assert service.process_next()
+    assert feishu.sent == 1
 
 
 def test_existing_topic_alias_resumes_old_session(tmp_path: Path) -> None:

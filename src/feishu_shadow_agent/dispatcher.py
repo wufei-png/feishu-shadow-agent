@@ -18,7 +18,7 @@ from .membership import (
     effective_membership_status,
     record_bot_membership_absence,
 )
-from .message_normalization import MessageNormalizer, message_content_fingerprint
+from .message_normalization import MessageNormalizer, message_content_matches
 from .policy import PolicyResolver
 from .reply_destination import candidate_from_message, message_location
 from .store.policy_store import COWORKER_POLICY_KEY
@@ -809,9 +809,10 @@ class Dispatcher:
                     or source_item.get("deleted")
                     or source_item.get("update_time")
                     != action.payload.get("coworker_source_update_time")
-                    or not action.payload.get("coworker_source_content_sha256")
-                    or message_content_fingerprint(source_item)
-                    != action.payload.get("coworker_source_content_sha256")
+                    or not message_content_matches(
+                        source_item,
+                        action.payload.get("coworker_source_content_sha256"),
+                    )
                 ):
                     return _local_error(action, "coworker_source_changed_or_deleted")
                 if (

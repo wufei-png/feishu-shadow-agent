@@ -35,6 +35,7 @@ from .jsonl import JSONLLogger
 from .message_normalization import (
     MessageNormalizer,
     mention_details,
+    mention_identifiers,
     message_content_fingerprint,
 )
 from .paths import resolve_agent_working_dir, resolve_relative_path
@@ -1047,7 +1048,7 @@ class CoworkerService:
             enriched = dict(raw_message)
             if item.get("is_deleted") or item.get("deleted"):
                 raise ValueError("coworker source message was deleted")
-            fingerprint = message_content_fingerprint(item)
+            fingerprint = message_content_fingerprint(item, include_mentions=True)
             if fingerprint is None:
                 raise ValueError("coworker source message content is unavailable")
             # The event can already be stale. Feed the model the current content
@@ -1067,23 +1068,9 @@ class CoworkerService:
             snapshot_mentions = item.get("mentions", [])
             if not isinstance(snapshot_mentions, list):
                 raise ValueError("coworker source mentions are invalid")
-            mentions: list[str] = []
-            details = mention_details(snapshot_mentions)
-            for mention in cast(list[Any], snapshot_mentions):
-                if isinstance(mention, str):
-                    mentions.append(mention)
-                elif isinstance(mention, dict):
-                    mention_map = cast(dict[str, Any], mention)
-                    identifier = _mapping(mention_map.get("id"))
-                    value = (
-                        identifier.get("open_id")
-                        or mention_map.get("open_id")
-                        or mention_map.get("id")
-                    )
-                    if isinstance(value, str):
-                        mentions.append(value)
-                    if mention_map.get("key") == "@_all":
-                        mentions.append("@_all")
+            mention_items = cast(list[object], snapshot_mentions)
+            mentions = mention_identifiers(mention_items)
+            details = mention_details(mention_items)
             for key in ("ats", "isAtMe", "at_all", "atAll", "mention_details"):
                 enriched.pop(key, None)
             if details:

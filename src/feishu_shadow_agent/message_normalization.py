@@ -57,7 +57,34 @@ def mention_details(value: object) -> list[dict[str, str]]:
     return result
 
 
-def message_content_fingerprint(raw: dict[str, Any]) -> str | None:
+def mention_identifiers(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for mention in cast(list[object], value):
+        if isinstance(mention, str):
+            result.append(mention)
+        elif isinstance(mention, dict):
+            item = cast(dict[str, Any], mention)
+            identifier: object = item.get("id")
+            nested = (
+                cast(dict[str, Any], identifier) if isinstance(identifier, dict) else {}
+            )
+            selected: object = (
+                nested.get("open_id")
+                or item.get("open_id")
+                or (identifier if isinstance(identifier, str) else None)
+            )
+            if isinstance(selected, str):
+                result.append(selected)
+            if item.get("key") == "@_all":
+                result.append("@_all")
+    return list(dict.fromkeys(result))
+
+
+def message_content_fingerprint(
+    raw: dict[str, Any], *, include_mentions: bool = False
+) -> str | None:
     """Fingerprint the content returned by the same Feishu read API twice."""
     content = raw.get("content")
     if not isinstance(content, (str, dict, list)):
@@ -68,10 +95,24 @@ def message_content_fingerprint(raw: dict[str, Any]) -> str | None:
         "content": cast(Any, content),
         "message_type": first_string(raw, "msg_type", "message_type"),
     }
+    if include_mentions:
+        value["mentions"] = sorted(mention_identifiers(raw.get("mentions")))
     encoded = json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return f"v2:{digest}" if include_mentions else digest
+
+
+def message_content_matches(raw: dict[str, Any], expected: object) -> bool:
+    return (
+        isinstance(expected, str)
+        and bool(expected)
+        and message_content_fingerprint(
+            raw, include_mentions=expected.startswith("v2:")
+        )
+        == expected
+    )
 
 
 def normalize_message_sent_at(value: str | None) -> str | None:

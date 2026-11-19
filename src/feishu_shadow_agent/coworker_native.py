@@ -36,7 +36,7 @@ from .coworker_store import (
     CoworkerEvent,
 )
 from .dispatcher import _extract_message_id  # pyright: ignore[reportPrivateUsage]
-from .message_normalization import message_content_fingerprint
+from .message_normalization import message_content_matches
 from .paths import resolve_agent_working_dir, resolve_relative_path
 from .policy import PolicyResolver
 from .processing import ApprovalService, SendComposer
@@ -1951,10 +1951,11 @@ class NativeCoworkerService(CoworkerService):
                 or current.get("chat_id") not in (None, chat_id)
                 or current.get("is_deleted")
                 or current.get("deleted")
-                or message_content_fingerprint(current)
-                != saved.get("coworker_source_content_sha256")
+                or not message_content_matches(
+                    current, saved.get("coworker_source_content_sha256")
+                )
                 or (
-                    saved.get("coworker_source_update_time") is not None
+                    "coworker_source_update_time" in saved
                     and current.get("update_time")
                     != saved.get("coworker_source_update_time")
                 )
