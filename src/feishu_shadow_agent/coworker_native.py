@@ -2020,10 +2020,16 @@ class NativeCoworkerWorker(CoworkerWorker):
     def _steer_worker_count(self, topic_workers: int) -> int:
         return topic_workers
 
-    def start(self) -> None:
-        self.service.wait_for_queued_followups = lambda: (
-            not self._stop.is_set() and self.runtime_allows_processing()
+    def _can_wait_for_followups(self) -> bool:
+        server = self.service.app_server
+        return (
+            not self._stop.is_set()
+            and self.runtime_allows_processing()
+            and (server is None or server.is_healthy())
         )
+
+    def start(self) -> None:
+        self.service.wait_for_queued_followups = self._can_wait_for_followups
         self.service.deliveries.recover_interrupted(app_id=self.service.app_id)
         self.service.native_state.recover_interrupted_handoffs(
             app_id=self.service.app_id

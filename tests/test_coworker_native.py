@@ -2235,10 +2235,15 @@ def test_publication_does_not_wait_on_followup_blocked_by_deferred_event(
     assert not worker.is_alive()
 
 
-def test_worker_stop_releases_waiting_queued_followup(
-    tmp_path: Path, monkeypatch: Any
+@pytest.mark.parametrize("reason", ["stop", "server-unhealthy", "runtime-unhealthy"])
+def test_worker_stop_or_health_change_releases_waiting_followup(
+    tmp_path: Path, monkeypatch: Any, reason: str
 ) -> None:
     class WorkerServer(BlockingNativeServer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.healthy = True
+
         def start(self) -> None:
             pass
 
@@ -2246,7 +2251,7 @@ def test_worker_stop_releases_waiting_queued_followup(
             pass
 
         def is_healthy(self) -> bool:
-            return True
+            return self.healthy
 
     service, feishu, _ = _service(tmp_path)
     server = WorkerServer()
@@ -2262,8 +2267,12 @@ def test_worker_stop_releases_waiting_queued_followup(
         return ready
 
     monkeypatch.setattr(service.events, "try_begin_native_publication", observe_wait)
+    runtime_healthy = threading.Event()
+    runtime_healthy.set()
     worker = NativeCoworkerWorker(
-        service, runtime_allows_processing=lambda: True, wake_daemon=lambda: None
+        service,
+        runtime_allows_processing=runtime_healthy.is_set,
+        wake_daemon=lambda: None,
     )
     worker.start()
     stopper: threading.Thread | None = None
@@ -2291,10 +2300,25 @@ def test_worker_stop_releases_waiting_queued_followup(
         assert followup_id is not None
         server.release.set()
         assert waiting.wait(timeout=3)
-        stopper = threading.Thread(target=worker.stop)
-        stopper.start()
-        stopper.join(timeout=4)
-        assert not stopper.is_alive()
+        if reason == "stop":
+            stopper = threading.Thread(target=worker.stop)
+            stopper.start()
+            stopper.join(timeout=4)
+            assert not stopper.is_alive()
+        else:
+            if reason == "server-unhealthy":
+                server.healthy = False
+            else:
+                runtime_healthy.clear()
+            for _ in range(80):
+                with service.store.connect() as conn:
+                    status = conn.execute(
+                        "SELECT status FROM coworker_events WHERE message_id = 'request'"
+                    ).fetchone()[0]
+                if status != "processing":
+                    break
+                threading.Event().wait(timeout=0.05)
+            assert status == "completed"
     finally:
         server.release.set()
         if stopper is not None and stopper.is_alive() and followup_id is not None:
