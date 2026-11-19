@@ -895,6 +895,9 @@ class CoworkerStore:
                     WHERE earlier.app_id = e.app_id AND earlier.chat_id = e.chat_id
                       AND earlier.topic_key = e.topic_key AND earlier.status = 'queued'
                       AND earlier.message_id NOT LIKE 'internal:subagent:%'
+                      AND (? = 0 OR CASE WHEN json_valid(earlier.raw_json)
+                        THEN COALESCE(json_extract(earlier.raw_json, '$._runtime.steer_checked'), 0) = 0
+                        ELSE 1 END)
                       AND (earlier.received_at < e.received_at OR
                            (earlier.received_at = e.received_at AND earlier.id < e.id)))
                 ORDER BY e.received_at, e.id LIMIT 1
@@ -907,6 +910,7 @@ class CoworkerStore:
                     int(native),
                     int(native),
                     self.store.clock(),
+                    int(native),
                 ),
             ).fetchone()
             if row is None:

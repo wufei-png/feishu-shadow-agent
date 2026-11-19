@@ -1334,6 +1334,48 @@ def test_only_explicit_supplement_to_current_request_is_steered(tmp_path: Path) 
     assert not feishu.replies
 
 
+def test_queued_unrelated_request_does_not_block_later_supplement(
+    tmp_path: Path,
+) -> None:
+    service, feishu, _ = _service(tmp_path)
+    server = BlockingNativeServer()
+    service.app_server = server  # type: ignore[assignment]
+    _receive(service, feishu, "one", location="thread")
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    try:
+        _receive(service, feishu, "unrelated", location="thread", text="另做一个任务")
+        assert service.process_next()
+        assert not service.process_next_steer()
+        _receive(
+            service,
+            feishu,
+            "supplement",
+            location="thread",
+            parent="one",
+            mention=False,
+            text="补充：截止周五",
+        )
+        assert service.process_next()
+        assert service.process_next_steer()
+        assert len(server.steers) == 1 and "截止周五" in server.steers[0]
+        with service.store.connect() as conn:
+            assert (
+                conn.execute(
+                    "SELECT status FROM coworker_events WHERE message_id = 'unrelated'"
+                ).fetchone()[0]
+                == "queued"
+            )
+    finally:
+        server.release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    while service.process_next():
+        pass
+    assert any("另做一个任务" in prompt for prompt in server.prompts)
+
+
 def test_uncertain_steer_blocks_both_outbox_and_approval(tmp_path: Path) -> None:
     for approval in (False, True):
         case = tmp_path / str(approval)
