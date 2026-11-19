@@ -77,11 +77,13 @@ class FakeFeishu:
         self.chat_history_calls = 0
         self.chat_history_items: list[dict[str, Any]] | None = None
         self.sources: dict[str, object] = {}
+        self.source_mentions: dict[str, list[Any]] = {}
 
     def capture(self, raw: dict[str, Any]) -> None:
         message = raw["event"]["message"]
         content = json.loads(message["content"])
         self.sources[message["message_id"]] = content.get("text", content)
+        self.source_mentions[message["message_id"]] = message.get("mentions", [])
 
     def get_messages(self, *, as_identity: str, message_ids: list[str]) -> MessagePage:
         self.identities.append(as_identity)
@@ -95,6 +97,8 @@ class FakeFeishu:
         }
         if self.edited:
             item["update_time"] = "2026-11-18T03:00:00+00:00"
+        if self.source_mentions.get(message_ids[0]):
+            item["mentions"] = self.source_mentions[message_ids[0]]
         return MessagePage(items=[item])
 
     def reply_message(self, **_kwargs: object) -> LarkCliResult:

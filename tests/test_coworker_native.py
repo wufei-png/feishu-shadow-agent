@@ -317,6 +317,8 @@ def _receive(
         "msg_type": "text",
         "message_position" if location == "main" else "thread_message_position": 1,
     }
+    if mention:
+        source["mentions"] = [{"id": "bot", "key": "@_user_1"}]
     feishu.messages[message_id] = source
     message = {
         "message_id": message_id,
@@ -402,16 +404,21 @@ def test_main_and_topic_sessions_and_dry_run_receipts(tmp_path: Path) -> None:
         ([{"id": "bot", "key": "@_user_1"}], True),
         ([{"id": "owner", "key": "@_user_1"}], False),
         ([{"id": "other-app", "key": "@_user_1"}], False),
+        (None, False),
         ([], False),
         ([{"id": "all", "key": "@_all"}], False),
+        ([{"id": "bot"}, {"id": "all", "key": "@_all"}], False),
     ],
 )
 def test_live_snapshot_resolves_bot_app_id_mentions(
-    tmp_path: Path, snapshot_mentions: list[dict[str, str]], starts_agent: bool
+    tmp_path: Path, snapshot_mentions: list[dict[str, str]] | None, starts_agent: bool
 ) -> None:
     service, feishu, server = _service(tmp_path)
     _receive(service, feishu, "request", mention=True, sender="owner")
-    feishu.messages["request"]["mentions"] = snapshot_mentions
+    if snapshot_mentions is None:
+        feishu.messages["request"].pop("mentions")
+    else:
+        feishu.messages["request"]["mentions"] = snapshot_mentions
 
     assert service.process_next()
     assert bool(server.prompts) is starts_agent

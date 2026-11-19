@@ -1064,30 +1064,34 @@ class CoworkerService:
                 enriched["content"] = {"text": item["text"]}
             if item.get("msg_type"):
                 enriched["message_type"] = item["msg_type"]
-            if isinstance(item.get("mentions"), list):
-                mentions: list[str] = []
-                details = mention_details(item["mentions"])
-                if details:
-                    enriched["mention_details"] = details
-                for mention in cast(list[Any], item["mentions"]):
-                    if isinstance(mention, str):
-                        mentions.append(mention)
-                    elif isinstance(mention, dict):
-                        mention_map = cast(dict[str, Any], mention)
-                        identifier = _mapping(mention_map.get("id"))
-                        value = (
-                            identifier.get("open_id")
-                            or mention_map.get("open_id")
-                            or mention_map.get("id")
-                        )
-                        if isinstance(value, str):
-                            mentions.append(value)
-                        if mention_map.get("key") == "@_all":
-                            mentions.append("@_all")
-                enriched["mentions"] = mentions
-                enriched["is_at_me"] = bot_id in mentions or (
-                    bool(self.app_id) and self.app_id in mentions
-                )
+            snapshot_mentions = item.get("mentions", [])
+            if not isinstance(snapshot_mentions, list):
+                raise ValueError("coworker source mentions are invalid")
+            mentions: list[str] = []
+            details = mention_details(snapshot_mentions)
+            for mention in cast(list[Any], snapshot_mentions):
+                if isinstance(mention, str):
+                    mentions.append(mention)
+                elif isinstance(mention, dict):
+                    mention_map = cast(dict[str, Any], mention)
+                    identifier = _mapping(mention_map.get("id"))
+                    value = (
+                        identifier.get("open_id")
+                        or mention_map.get("open_id")
+                        or mention_map.get("id")
+                    )
+                    if isinstance(value, str):
+                        mentions.append(value)
+                    if mention_map.get("key") == "@_all":
+                        mentions.append("@_all")
+            for key in ("ats", "isAtMe", "at_all", "atAll", "mention_details"):
+                enriched.pop(key, None)
+            if details:
+                enriched["mention_details"] = details
+            enriched["mentions"] = mentions
+            enriched["is_at_me"] = bot_id in mentions or (
+                bool(self.app_id) and self.app_id in mentions
+            )
             for key in ("message_position", "thread_message_position", "thread_id"):
                 if item.get(key) is not None:
                     enriched[key] = item[key]
