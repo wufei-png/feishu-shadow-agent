@@ -1080,7 +1080,9 @@ class CoworkerService:
                         if mention_map.get("key") == "@_all":
                             mentions.append("@_all")
                 enriched["mentions"] = mentions
-                enriched["is_at_me"] = bot_id in mentions
+                enriched["is_at_me"] = bot_id in mentions or (
+                    bool(self.app_id) and self.app_id in mentions
+                )
             for key in ("message_position", "thread_message_position", "thread_id"):
                 if item.get(key) is not None:
                     enriched[key] = item[key]

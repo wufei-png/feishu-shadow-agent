@@ -394,6 +394,27 @@ def test_main_and_topic_sessions_and_dry_run_receipts(tmp_path: Path) -> None:
         ] == ["previewed", "previewed", "previewed"]
 
 
+@pytest.mark.parametrize(
+    ("snapshot_mentions", "starts_agent"),
+    [
+        ([{"id": "app", "key": "@_user_1"}], True),
+        ([{"id": "bot", "key": "@_user_1"}], True),
+        ([{"id": "other-app", "key": "@_user_1"}], False),
+        ([], False),
+        ([{"id": "all", "key": "@_all"}], False),
+    ],
+)
+def test_live_snapshot_resolves_bot_app_id_mentions(
+    tmp_path: Path, snapshot_mentions: list[dict[str, str]], starts_agent: bool
+) -> None:
+    service, feishu, server = _service(tmp_path)
+    _receive(service, feishu, "request", mention=True)
+    feishu.messages["request"]["mentions"] = snapshot_mentions
+
+    assert service.process_next()
+    assert bool(server.prompts) is starts_agent
+
+
 def test_app_server_failure_marks_group_and_private_children_uncertain(
     tmp_path: Path,
 ) -> None:
