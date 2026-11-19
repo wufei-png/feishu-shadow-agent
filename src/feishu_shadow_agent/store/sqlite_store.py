@@ -139,12 +139,22 @@ WITH pending_tasks(task_id) AS (
   SELECT t.root_message_id FROM tasks t JOIN pending_tasks p ON p.task_id = t.id WHERE t.root_message_id IS NOT NULL
   UNION SELECT tm.message_id FROM task_messages tm JOIN pending_tasks p ON p.task_id = tm.task_id
   UNION SELECT message_id FROM coworker_events WHERE status IN ('queued', 'processing', 'needs_review')
+  UNION SELECT target_message_id FROM coworker_native_deliveries
+    WHERE status IN ('pending', 'sending', 'needs_review')
+  UNION SELECT source_message_id FROM coworker_native_deliveries
+    WHERE status IN ('pending', 'sending', 'needs_review')
+  UNION SELECT c.message_id FROM coworker_native_delivery_context c
+    JOIN coworker_native_deliveries d ON d.id = c.delivery_id
+    WHERE d.status IN ('pending', 'sending', 'needs_review')
   UNION SELECT source_message_id FROM actions WHERE source_message_id IS NOT NULL AND status IN ('pending', 'sending', 'failed_needs_review')
   UNION SELECT target_message_id FROM actions WHERE target_message_id IS NOT NULL AND status IN ('pending', 'sending', 'failed_needs_review')
   UNION SELECT source_message_id FROM approvals WHERE source_message_id IS NOT NULL AND status = 'pending'
   UNION SELECT message_id FROM processing_retry_attempts WHERE status IN ('queued', 'claimed')
   UNION SELECT e.message_id FROM coworker_subagents s
     JOIN coworker_events e ON e.id = s.origin_event_id WHERE s.status IN ('running', 'needs_review')
+  UNION SELECT source.message_id FROM coworker_subagents s
+    JOIN coworker_native_transfers t ON t.event_id = s.origin_event_id
+    JOIN coworker_events source ON source.id = t.source_event_id WHERE s.status IN ('running', 'needs_review')
   UNION SELECT source.message_id FROM coworker_events e
     JOIN coworker_events source ON source.id = CASE WHEN json_valid(e.raw_json)
       THEN json_extract(e.raw_json, '$._internal.origin_event_id') END
