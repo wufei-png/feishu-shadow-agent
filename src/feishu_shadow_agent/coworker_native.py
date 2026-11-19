@@ -1413,6 +1413,29 @@ class NativeCoworkerService(CoworkerService):
             message.chat_type != "p2p" or message.sender_id != self.config.owner.open_id
         ):
             raise ValueError("private sender is not the owner")
+        with self.store.connect() as conn:
+            context = conn.execute(
+                """SELECT c.message_id, c.revision FROM coworker_native_delivery_context c
+                   JOIN coworker_native_deliveries d ON d.id = c.delivery_id
+                   WHERE (d.event_id = ? AND d.session_id = ?) OR d.id IN (
+                     SELECT t.delivery_id FROM coworker_native_transfers t
+                     WHERE t.event_id = ? AND t.delivery_id = ?)
+                   UNION
+                   SELECT e.message_id, s.source_revision FROM coworker_native_steers s
+                   JOIN coworker_events e ON e.id = s.event_id
+                   WHERE s.origin_event_id = ? AND s.session_id = ? AND s.status = 'accepted'""",
+                (
+                    origin_id,
+                    session.id,
+                    origin_id,
+                    internal.get("delivery_id"),
+                    origin_id,
+                    session.id,
+                ),
+            ).fetchall()
+        self._validate_source_snapshots(
+            event.chat_id, [(str(item[0]), int(item[1])) for item in context]
+        )
         notice = {
             "type": "internal_subagent_completion",
             "source_message_id": source_id,
@@ -1751,39 +1774,13 @@ class NativeCoworkerService(CoworkerService):
         topic_thread: str | None = None
         try:
             self._validate_delivery(delivery)
-            for source_id in [
-                delivery.source_message_id,
-                *(item[0] for item in delivery.context_sources),
-            ]:
-                source = self.store.get_message(source_id)
-                if source is None:
-                    raise ValueError("reply source is unavailable")
-                saved = _mapping(json.loads(str(source["raw_json"])))
-                page = self.feishu.get_messages(
-                    as_identity="bot", message_ids=[source_id]
-                )
-                current = next(
-                    (
-                        item
-                        for item in page.items
-                        if item.get("message_id") == source_id
-                    ),
-                    None,
-                )
-                if (
-                    current is None
-                    or current.get("chat_id") not in (None, delivery.chat_id)
-                    or current.get("is_deleted")
-                    or current.get("deleted")
-                    or message_content_fingerprint(current)
-                    != saved.get("coworker_source_content_sha256")
-                    or (
-                        saved.get("coworker_source_update_time") is not None
-                        and current.get("update_time")
-                        != saved.get("coworker_source_update_time")
-                    )
-                ):
-                    raise ValueError("reply source cannot be verified")
+            self._validate_source_snapshots(
+                delivery.chat_id,
+                [
+                    (delivery.source_message_id, delivery.source_revision),
+                    *delivery.context_sources,
+                ],
+            )
             self._validate_delivery(delivery)
             client = cast(_ReplyClient, self.feishu)
             preview = client.reply_message(
@@ -1857,6 +1854,44 @@ class NativeCoworkerService(CoworkerService):
                 "native_coworker_delivery_needs_review",
                 data={"delivery_id": delivery.id, "error_type": type(exc).__name__},
             )
+
+    def _validate_source_snapshots(
+        self, chat_id: str, sources: list[tuple[str, int]]
+    ) -> None:
+        for source_id, revision in sources:
+            source = self.store.get_message(source_id)
+            if (
+                source is None
+                or source["chat_id"] != chat_id
+                or source["revision"] != revision
+                or source["is_deleted"]
+            ):
+                raise ValueError("reply source revision changed")
+            saved = _mapping(json.loads(str(source["raw_json"])))
+            try:
+                page = self.feishu.get_messages(
+                    as_identity="bot", message_ids=[source_id]
+                )
+            except Exception as exc:
+                raise _SourceUnavailable("reply source snapshot unavailable") from exc
+            current = next(
+                (item for item in page.items if item.get("message_id") == source_id),
+                None,
+            )
+            if (
+                current is None
+                or current.get("chat_id") not in (None, chat_id)
+                or current.get("is_deleted")
+                or current.get("deleted")
+                or message_content_fingerprint(current)
+                != saved.get("coworker_source_content_sha256")
+                or (
+                    saved.get("coworker_source_update_time") is not None
+                    and current.get("update_time")
+                    != saved.get("coworker_source_update_time")
+                )
+            ):
+                raise ValueError("reply source cannot be verified")
 
     def _validate_delivery(self, delivery: NativeDelivery) -> Any:
         policy = self.current_policy()

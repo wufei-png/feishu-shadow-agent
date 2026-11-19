@@ -1810,7 +1810,9 @@ def test_transfer_waits_for_topic_receipt_then_starts_separate_session(
     assert feishu.replies[-1]["message_id"] == "sent-1"
 
 
-@pytest.mark.parametrize("change", ["none", "before-start", "before-reply"])
+@pytest.mark.parametrize(
+    "change", ["none", "before-start", "before-reply", "before-child"]
+)
 def test_transfer_preserves_accepted_supplement_and_checks_its_revision(
     tmp_path: Path, change: str
 ) -> None:
@@ -1870,13 +1872,51 @@ def test_transfer_preserves_accepted_supplement_and_checks_its_revision(
         status = conn.execute(
             "SELECT status FROM coworker_native_deliveries ORDER BY id DESC LIMIT 1"
         ).fetchone()[0]
+        topic_thread = conn.execute(
+            "SELECT backend_session_id FROM coworker_sessions WHERE thread_id = 'opened-thread'"
+        ).fetchone()[0]
     assert status == ("needs_review" if change == "before-reply" else "sent")
     assert feishu.sent == (1 if change == "before-reply" else 2)
+    if change == "before-child":
+        service.on_app_server_notification(
+            {
+                "method": "item/completed",
+                "params": {
+                    "threadId": topic_thread,
+                    "item": {
+                        "type": "subAgentActivity",
+                        "kind": "started",
+                        "agentThreadId": "topic-child",
+                    },
+                },
+            }
+        )
+        feishu.messages["supplement"]["content"] = "补充：检查 3.0"
+        for method in ("turn/started", "turn/completed"):
+            service.on_app_server_notification(
+                {
+                    "method": method,
+                    "params": {
+                        "threadId": "topic-child",
+                        "turn": {"id": "child-turn", "status": "completed"},
+                    },
+                }
+            )
+        model_calls = len(server.prompts)
+        assert service.process_next()
+        assert len(server.prompts) == model_calls and feishu.sent == 2
+        with service.store.connect() as conn:
+            state = conn.execute(
+                "SELECT status FROM coworker_events WHERE message_id LIKE 'internal:subagent:%'"
+            ).fetchone()[0]
+        assert state == "needs_review"
 
 
-@pytest.mark.parametrize("edit_supplement", [False, True])
+@pytest.mark.parametrize(
+    "edit_supplement", ["none", "before-completion", "before-reply"]
+)
 def test_child_reply_inherits_supplement_accepted_inside_new_topic(
-    tmp_path: Path, edit_supplement: bool
+    tmp_path: Path, edit_supplement: str
 ) -> None:
     class TopicServer(BlockingNativeServer):
         def __init__(self) -> None:
@@ -1931,7 +1971,7 @@ def test_child_reply_inherits_supplement_accepted_inside_new_topic(
         worker.join(timeout=5)
     assert not worker.is_alive()
     assert service.process_next() and feishu.sent == 2
-    if edit_supplement:
+    if edit_supplement == "before-completion":
         feishu.messages["supplement"]["content"] = "补充：只检查 3.0"
     for method in ("turn/started", "turn/completed"):
         service.on_app_server_notification(
@@ -1943,7 +1983,20 @@ def test_child_reply_inherits_supplement_accepted_inside_new_topic(
                 },
             }
         )
-    assert service.process_next() and service.process_next()
+    model_calls = len(server.prompts)
+    assert service.process_next()
+    if edit_supplement == "before-completion":
+        assert len(server.prompts) == model_calls and feishu.sent == 2
+        with service.store.connect() as conn:
+            status = conn.execute(
+                "SELECT status FROM coworker_events WHERE message_id LIKE 'internal:subagent:%'"
+            ).fetchone()[0]
+        assert status == "needs_review"
+        return
+    assert len(server.prompts) == model_calls + 1
+    if edit_supplement == "before-reply":
+        feishu.messages["supplement"]["content"] = "补充：只检查 3.0"
+    assert service.process_next()
     with service.store.connect() as conn:
         delivery = conn.execute(
             "SELECT id, status FROM coworker_native_deliveries ORDER BY id DESC LIMIT 1"
@@ -1953,8 +2006,10 @@ def test_child_reply_inherits_supplement_accepted_inside_new_topic(
             (delivery["id"],),
         ).fetchall()
     assert [item[0] for item in context] == ["supplement"]
-    assert delivery["status"] == ("needs_review" if edit_supplement else "sent")
-    assert feishu.sent == (2 if edit_supplement else 3)
+    assert delivery["status"] == (
+        "needs_review" if edit_supplement == "before-reply" else "sent"
+    )
+    assert feishu.sent == (2 if edit_supplement == "before-reply" else 3)
 
 
 def test_transfer_dry_run_never_claims_topic_or_starts_task(tmp_path: Path) -> None:
