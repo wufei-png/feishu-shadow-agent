@@ -1998,6 +1998,52 @@ def test_claimed_followup_blocks_reply_before_the_classifier_takes_the_lock(
     assert [row[0] for row in deliveries] == ["correction"]
 
 
+@pytest.mark.parametrize("first", ["publication", "steer"])
+def test_publication_and_followup_claim_are_transactionally_ordered(
+    tmp_path: Path, first: str
+) -> None:
+    service, feishu, _ = _service(tmp_path)
+    server = BlockingNativeServer()
+    service.app_server = server  # type: ignore[assignment]
+    _receive(service, feishu, "request", location="thread")
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    try:
+        _receive(
+            service,
+            feishu,
+            "followup",
+            location="thread",
+            parent="request",
+            mention=False,
+        )
+        assert service.process_next()
+        with service.store.connect() as conn:
+            origin = conn.execute(
+                "SELECT id FROM coworker_events WHERE message_id = 'request'"
+            ).fetchone()[0]
+        if first == "steer":
+            event = service.events.claim_next_steer(
+                app_id="app", chat_id=None, native=True
+            )
+            assert event is not None
+            assert not service.events.try_begin_native_publication(origin)
+            service.events.finish_steer(event.id, retry=True)
+        assert service.events.try_begin_native_publication(origin)
+        assert (
+            service.events.claim_next_steer(app_id="app", chat_id=None, native=True)
+            is None
+        )
+    finally:
+        server.release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    while service.process_next():
+        pass
+    assert any("followup" in prompt for prompt in server.prompts)
+
+
 @pytest.mark.parametrize("change", ["delete", "edit"])
 def test_changed_late_followup_does_not_suppress_the_original_reply(
     tmp_path: Path, change: str

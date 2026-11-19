@@ -126,7 +126,7 @@ class NativeCoworkerService(CoworkerService):
 
     def _wait_for_inflight_steer(self, session_id: int, event_id: int) -> None:
         condition = self._session_condition(session_id)
-        while self.events.has_inflight_native_steer(event_id):
+        while not self.events.try_begin_native_publication(event_id):
             condition.wait(timeout=1)
 
     def _turn_superseded(self, event_id: int) -> bool:

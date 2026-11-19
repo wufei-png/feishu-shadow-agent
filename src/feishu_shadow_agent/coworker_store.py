@@ -970,7 +970,10 @@ class CoworkerStore:
                        OR julianday(json_extract(e.raw_json, '$._runtime.retry_after')) <= julianday(?))
                   AND EXISTS (SELECT 1 FROM coworker_events current
                     WHERE current.app_id = e.app_id AND current.chat_id = e.chat_id
-                      AND current.topic_key = e.topic_key AND current.status = 'processing')
+                      AND current.topic_key = e.topic_key AND current.status = 'processing'
+                      AND (? = 0 OR CASE WHEN json_valid(current.raw_json) THEN
+                        COALESCE(json_extract(current.raw_json, '$._runtime.publishing'), 0) = 0
+                        ELSE 0 END))
                   AND NOT EXISTS (SELECT 1 FROM coworker_events earlier
                     WHERE earlier.app_id = e.app_id AND earlier.chat_id = e.chat_id
                       AND earlier.topic_key = e.topic_key AND earlier.status = 'queued'
@@ -990,6 +993,7 @@ class CoworkerStore:
                     int(native),
                     int(native),
                     self.store.clock(),
+                    int(native),
                     int(native),
                 ),
             ).fetchone()
@@ -1042,23 +1046,32 @@ class CoworkerStore:
                 (self.store.clock(), event_id),
             )
 
-    def has_inflight_native_steer(self, origin_event_id: int) -> bool:
+    def try_begin_native_publication(self, origin_event_id: int) -> bool:
         self.store.initialize()
         with self.store.connect() as conn:
-            return (
-                conn.execute(
-                    """SELECT 1 FROM coworker_events followup
-                       JOIN coworker_events origin ON origin.id = ?
-                       WHERE followup.app_id = origin.app_id AND followup.chat_id = origin.chat_id
-                         AND followup.topic_key = origin.topic_key AND followup.status = 'queued'
-                         AND json_valid(followup.raw_json)
-                         AND json_extract(followup.raw_json, '$._runtime.followup_origin') = origin.id
-                         AND json_extract(followup.raw_json, '$._runtime.steer_state') IN ('preparing', 'sending')
-                       LIMIT 1""",
-                    (origin_event_id,),
-                ).fetchone()
-                is not None
+            conn.execute("BEGIN IMMEDIATE")
+            pending = conn.execute(
+                """SELECT 1 FROM coworker_events followup
+                   JOIN coworker_events origin ON origin.id = ?
+                   WHERE followup.app_id = origin.app_id AND followup.chat_id = origin.chat_id
+                     AND followup.topic_key = origin.topic_key AND followup.status = 'queued'
+                     AND json_valid(followup.raw_json)
+                     AND json_extract(followup.raw_json, '$._runtime.followup_origin') = origin.id
+                     AND json_extract(followup.raw_json, '$._runtime.steer_state') IN ('preparing', 'sending')
+                   LIMIT 1""",
+                (origin_event_id,),
+            ).fetchone()
+            if pending is not None:
+                return False
+            cursor = conn.execute(
+                """UPDATE coworker_events SET raw_json = json_set(raw_json,
+                     '$._runtime.publishing', json('true'))
+                   WHERE id = ? AND status = 'processing' AND runtime = 'native'""",
+                (origin_event_id,),
             )
+            if cursor.rowcount != 1:
+                raise ValueError("native task is no longer processing")
+            return True
 
     def associate_native_followup(
         self, event_id: int, origin_event_id: int, parent_id: str
