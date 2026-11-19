@@ -35,7 +35,8 @@ def _associate_queued_replies(
              '$._runtime.followup_parent', ?, '$._runtime.followup_candidates',
              json_insert(CASE WHEN json_type(raw_json, '$._runtime.followup_candidates') = 'array'
                THEN json_extract(raw_json, '$._runtime.followup_candidates') ELSE json('[]') END,
-               '$[#]', ?))
+               '$[#]', ?), '$._runtime.followup_generation',
+             COALESCE(json_extract(raw_json, '$._runtime.followup_generation'), 0) + 1)
            WHERE app_id = ? AND chat_id = ? AND runtime = 'native' AND id != ?
              AND status IN ('queued', 'processing') AND json_valid(raw_json)
              AND (substr(topic_key, 1, ?) = ? OR topic_key =
@@ -1061,7 +1062,8 @@ class CoworkerStore:
                 return None
             conn.execute(
                 """UPDATE coworker_events SET raw_json = json_set(raw_json,
-                   '$._runtime.steer_state', 'preparing', '$._runtime.owner_pid', ?,
+                   '$._runtime.steer_state', 'preparing', '$._runtime.steer_generation',
+                   COALESCE(json_extract(raw_json, '$._runtime.followup_generation'), 0), '$._runtime.owner_pid', ?,
                    '$._runtime.owner_host', ?), updated_at = ? WHERE id = ?""",
                 (os.getpid(), socket.gethostname(), self.store.clock(), row["id"]),
             )
@@ -1100,8 +1102,13 @@ class CoworkerStore:
         self.store.initialize()
         with self.store.connect() as conn:
             conn.execute(
-                """UPDATE coworker_events SET raw_json = json_set(
-                     json_remove(raw_json, '$._runtime.steer_state'), '$._runtime.steer_checked', json('true')),
+                """UPDATE coworker_events SET raw_json = CASE WHEN
+                     json_extract(raw_json, '$._runtime.steer_state') = 'preparing' AND
+                     COALESCE(json_extract(raw_json, '$._runtime.followup_generation'), 0) !=
+                       COALESCE(json_extract(raw_json, '$._runtime.steer_generation'), 0)
+                   THEN json_remove(raw_json, '$._runtime.steer_state', '$._runtime.steer_generation')
+                   ELSE json_set(json_remove(raw_json, '$._runtime.steer_state', '$._runtime.steer_generation'),
+                     '$._runtime.steer_checked', json('true')) END,
                      updated_at = ? WHERE id = ? AND status = 'queued'""",
                 (self.store.clock(), event_id),
             )

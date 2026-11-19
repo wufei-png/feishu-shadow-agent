@@ -1830,7 +1830,10 @@ def test_queued_chain_survives_when_only_first_supplement_is_steered(
     assert any("应该检查 3.0" in prompt for prompt in server.prompts)
 
 
-def test_followup_checked_again_when_its_queued_parent_starts(tmp_path: Path) -> None:
+@pytest.mark.parametrize("late_skip", [False, True])
+def test_followup_checked_again_when_its_queued_parent_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, late_skip: bool
+) -> None:
     service, feishu, _ = _service(tmp_path)
     server = BlockingNativeServer()
     server.decisions = ["unrelated", "current"]
@@ -1840,6 +1843,9 @@ def test_followup_checked_again_when_its_queued_parent_starts(tmp_path: Path) ->
     first.start()
     assert server.started.wait(timeout=3)
     second: threading.Thread | None = None
+    stale_check: threading.Thread | None = None
+    skip_entered, release_skip = threading.Event(), threading.Event()
+    skip = service.events.skip_native_steer
     try:
         _receive(
             service,
@@ -1862,7 +1868,24 @@ def test_followup_checked_again_when_its_queued_parent_starts(tmp_path: Path) ->
         assert service.process_next(locating_only=True)
         assert service.process_next(locating_only=True)
         assert not service.process_next_steer()  # New task is unrelated to the first.
-        assert not service.process_next_steer()  # Its correction is not for the first.
+        if late_skip:
+            with service.store.connect() as conn:
+                correction_id = conn.execute(
+                    "SELECT id FROM coworker_events WHERE message_id = 'correction'"
+                ).fetchone()[0]
+
+            def delay_skip(event_id: int) -> None:
+                if event_id == correction_id:
+                    skip_entered.set()
+                    assert release_skip.wait(timeout=5)
+                skip(event_id)
+
+            monkeypatch.setattr(service.events, "skip_native_steer", delay_skip)
+            stale_check = threading.Thread(target=service.process_next_steer)
+            stale_check.start()
+            assert skip_entered.wait(timeout=3)
+        else:
+            assert not service.process_next_steer()  # Correction is not for the first.
         server.release.set()
         first.join(timeout=5)
         assert not first.is_alive()
@@ -1873,11 +1896,19 @@ def test_followup_checked_again_when_its_queued_parent_starts(tmp_path: Path) ->
         second = threading.Thread(target=service.process_next)
         second.start()
         assert server.started.wait(timeout=3)
+        if stale_check is not None:
+            release_skip.set()
+            stale_check.join(timeout=5)
+            assert not stale_check.is_alive()
+            monkeypatch.setattr(service.events, "skip_native_steer", skip)
         assert service.process_next_steer()
         assert "更正为 2.0" in server.steers[-1]
     finally:
+        release_skip.set()
         server.release.set()
         first.join(timeout=5)
+        if stale_check is not None:
+            stale_check.join(timeout=5)
         if second is not None:
             second.join(timeout=5)
     assert second is not None and not second.is_alive()
