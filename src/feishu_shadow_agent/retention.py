@@ -141,6 +141,11 @@ class RetentionService:
         )
         if coworker_candidates:
             content_candidates["coworker_events"] = coworker_candidates
+        delivery_candidates = self._scrub_native_deliveries(
+            cutoff=raw_cutoff, dry_run=True, protect_pending=protect_pending
+        )
+        if delivery_candidates:
+            content_candidates["coworker_native_deliveries"] = delivery_candidates
         resource_rows = self.store.list_prunable_resources(
             cutoff=resource_cutoff, now=now_iso, protect_pending=protect_pending
         )
@@ -198,6 +203,11 @@ class RetentionService:
             )
             if coworker_scrubbed:
                 content_scrubbed["coworker_events"] = coworker_scrubbed
+            delivery_scrubbed = self._scrub_native_deliveries(
+                cutoff=raw_cutoff, dry_run=False, protect_pending=protect_pending
+            )
+            if delivery_scrubbed:
+                content_scrubbed["coworker_native_deliveries"] = delivery_scrubbed
             expired = self.store.mark_resources_expired(expired_resource_ids)
             if self.logger is not None:
                 log_content_scrubbed = self.logger.scrub_before(
@@ -237,6 +247,29 @@ class RetentionService:
                 "info", "retention_pruned", run_id=run_id, data=summary.as_dict()
             )
         return summary
+
+    def _scrub_native_deliveries(
+        self, *, cutoff: str, dry_run: bool, protect_pending: bool
+    ) -> int:
+        self.store.initialize()
+        with self.store.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """SELECT id FROM coworker_native_deliveries
+                   WHERE text != '' AND status != 'sending' AND julianday(created_at) < julianday(?)
+                     AND (? = 0 OR status NOT IN ('pending', 'needs_review'))""",
+                (cutoff, int(protect_pending)),
+            ).fetchall()
+            if not dry_run:
+                for row in rows:
+                    conn.execute(
+                        """UPDATE coworker_native_deliveries SET text = '',
+                           status = CASE WHEN status = 'pending' THEN 'needs_review' ELSE status END,
+                           error = CASE WHEN status = 'pending' THEN 'content_expired' ELSE error END,
+                           updated_at = ? WHERE id = ?""",
+                        (self.store.clock(), row["id"]),
+                    )
+        return len(rows)
 
     def _resolve_resource_path(self, stored_path: Any) -> Path | str:
         if not isinstance(stored_path, str) or not stored_path:

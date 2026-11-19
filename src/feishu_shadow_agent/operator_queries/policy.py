@@ -12,7 +12,7 @@ from ..policy import (
     ProductPolicyMissingError,
 )
 from ..settings_catalog import CONFIG_VALUE_PATHS
-from ..store.policy_store import COWORKER_POLICY_KEY
+from ..store.policy_store import COWORKER_POLICY_KEY, stored_coworker_defaults
 from ..store.sqlite_store import PRODUCT_POLICY_KEY
 from .common import (
     ReadStoreUnavailable,
@@ -261,9 +261,7 @@ class PolicyQuery:
                 value: Any = json.loads(coworker_row["policy_json"])
                 if not isinstance(value, dict):
                     raise ValueError("coworker policy must be an object")
-                raw = cast(dict[str, Any], value)
-                if "send_mode" not in raw:
-                    raw["send_mode"] = "project"
+                raw = stored_coworker_defaults(cast(dict[str, Any], value))
                 effective = CoworkerConfig.model_validate(raw).model_dump(mode="json")
                 changed_coworker = (
                     effective

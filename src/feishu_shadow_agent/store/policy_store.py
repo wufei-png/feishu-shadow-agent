@@ -14,6 +14,10 @@ PRODUCT_POLICY_KEY = "reply_policy"
 COWORKER_POLICY_KEY = "ai_coworker"
 
 
+def stored_coworker_defaults(policy: dict[str, Any]) -> dict[str, Any]:
+    return {"send_mode": "project", "memory_maintenance": True, **policy}
+
+
 class PolicyStore:
     """Policy persistence using the caller's SQLite lifecycle and transactions."""
 
@@ -37,7 +41,12 @@ class PolicyStore:
                 "SELECT policy_json FROM product_policies WHERE key = ?",
                 (key,),
             ).fetchone()
-        return None if row is None else json.loads(row["policy_json"])
+        if row is None:
+            return None
+        policy = json.loads(row["policy_json"])
+        if key == COWORKER_POLICY_KEY:
+            policy = stored_coworker_defaults(policy)
+        return policy
 
     def get_chat_product_policy(self, chat_id: str) -> dict[str, Any] | None:
         self.initialize()
@@ -296,9 +305,7 @@ class PolicyStore:
             ).fetchone()
             if row is None:
                 raise ValueError("coworker policy is not imported")
-            old = json.loads(row["policy_json"])
-            if "send_mode" not in old:
-                old["send_mode"] = "project"
+            old = stored_coworker_defaults(json.loads(row["policy_json"]))
             current = CoworkerConfig.model_validate(old).model_dump(mode="json")
             updated = CoworkerConfig.model_validate(current | changes).model_dump(
                 mode="json"
@@ -505,8 +512,8 @@ class PolicyStore:
         """Atomically replace policy only, retaining and holding other local state."""
         normalized_global = _normalize_global_product_policy(global_policy)
         normalized_chats = [_normalize_chat_product_policy(chat) for chat in chats]
-        if coworker_policy is not None and "send_mode" not in coworker_policy:
-            coworker_policy = {**coworker_policy, "send_mode": "project"}
+        if coworker_policy is not None:
+            coworker_policy = stored_coworker_defaults(coworker_policy)
         normalized_coworker = (
             None
             if coworker_policy is None

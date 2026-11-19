@@ -538,7 +538,7 @@ class CoworkerConfig(StrictModel):
         description="Rate window for partner delegations in a topic.",
     )
     memory_maintenance: StrictBool = Field(
-        default=True, description="Allow background maintenance of long-term context."
+        default=False, description="Allow background maintenance of long-term context."
     )
     shared_memory_path: str = Field(
         default="data/coworker-shared-memory.md",

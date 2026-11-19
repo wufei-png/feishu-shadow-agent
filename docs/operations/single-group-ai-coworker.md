@@ -2,6 +2,8 @@
 
 本功能默认关闭。下面的配置示例使用占位 ID，需先选择独立测试群、配置飞书应用并完成授权；本地测试通过不代表真实飞书权限和机器人互操作已经验证。
 
+Codex 轻量直连见 [Codex 直连 AI 同事](codex-native-coworker.md)，Hermes 原生网关见 [Hermes Gateway AI 同事](hermes-coworker.md)。本文以下描述旧 `daemon` 的 `agent_direct` 和 `project` 模式。
+
 ## 接入准备
 
 1. 准备一个具备机器人能力的飞书自建应用，发布应用并将其加入独立测试群；订阅 `im.message.receive_v1`，使用长连接接收事件。伙伴机器人也需加入群，且其自身配置允许接收并处理委派。
@@ -45,7 +47,7 @@ coworker:
   delegation_timeout_seconds: 900
   delegation_rate_limit: 5
   delegation_rate_window_seconds: 900
-  memory_maintenance: true
+  memory_maintenance: false
   shared_memory_path: data/coworker-shared-memory.md
   memory_maintenance_time: "00:00"
 ```
@@ -93,11 +95,11 @@ dry-run 使用隔离的 SQLite、日志、资源目录和项目共享记忆文�
 - `coworker status` 显示会话、待处理事件、子 Agent、伙伴委派和缓存缺口。确认 daemon 和相关后台进程已停止并检查实际副作用后，可执行 `coworker discard-event --event-id <编号> --daemon-stopped`；这会丢弃该次事件，不会重放它。子 Agent 结果不明时应检查其实际工作，再丢弃对应待核对事件；排队中的子 Agent 完成通知也可显式丢弃。处理完该话题的待审事件、运行中子 Agent 及待完成委派后，可执行 `coworker reset-session --session-id <编号> --daemon-stopped`，普通排队消息会保留并在新会话中处理。`--daemon-stopped` 是操作员声明，不会自动停止或检测进程。上述命令同样支持 `--mode dry-run`。
 - `project` 代发模式由项目构造伙伴 @ 和协作 ID，维护匹配、超时及循环限制。`agent_direct` 由模型直接 @ 配置伙伴，约定携带任务标识并请求伙伴 @ 回本机器人；不会自动生成项目委派记录，也不保证超时跟踪或防循环。两种模式均不能假定伙伴一定收到或回传。
 - 项目在执行模型前用 bot 身份读取触发消息的当前正文；若接口提供最新 @ 信息，也会重新判断是否触发。项目代发在发送前再次核对正文指纹、可用 `update_time` 和删除状态，并重新检查群策略；模型自行发送不经过这些检查。项目自己的历史读取不会悄悄改用用户身份，模型调用原生工具则取决于其权限和指令。平台读取与发送不是同一个事务。当前未订阅编辑和撤回事件，本地缓存可能滞后，此前已进入后端会话的内容也不会自动消失。
-- 明确要求记住时，由主 Agent 直接使用工具维护共享记忆；程序不靠关键词判断是否应记住。后台默认每天本机时间 `00:00` 启动一轮独立 Agent，可通过 `memory_maintenance_time` 调整；错过时下次启动同事模式补跑一次，多个周期合并。旧 `memory_maintenance_interval_seconds` 配置和已导入策略可以读取，但其间隔值不再生效。Agent 依据上次成功运行时间按需跨话题搜索，不受每轮 50 个候选事件的限制；本地历史和接口按页读取，权限、缓存覆盖、模型选择和超时决定实际看到的内容。未送达项目的消息仅在飞书权限允许回查时可能被发现。共享记忆通过路径提供；主 Agent 和后台 Agent 可直接写入，程序记录运行期间文件是否变化，但不能确定写入者或保证每条消息都被阅读。普通失败在下个定时周期重试；异常中断或策略变更导致状态不明时进入 `needs_review`，检查后在 daemon 停止时执行 `coworker reset-memory-review --daemon-stopped`。
+- 明确要求记住时，由主 Agent 直接使用工具维护共享记忆。后台整理默认关闭；设置 `memory_maintenance: true` 后，每天本机时间 `00:00` 启动独立 Agent，可通过 `memory_maintenance_time` 调整。错过时下次启动合并补跑，旧 SQLite 策略保持原值。Agent 可按上次成功时间跨话题搜索并维护共享记忆。普通失败在下个周期重试；异常中断或策略变更导致状态不明时进入 `needs_review`，检查后在 daemon 停止时执行 `coworker reset-memory-review --daemon-stopped`。
 
 现有 Console 的 AI 同事页面区分配置文件、SQLite 生效策略和可确认的运行进程，展示会话、事件、子 Agent、缓存缺口和后台记忆状态。首次使用仍需导入同事策略；页面可调整触发方式、历史来源和整理时间，也可在 daemon 停止后调整模式、目标群、后端和发送方式并重启。修改写入 SQLite 并记录审计，不修改 `config.yaml`，后续 `policy import-config --replace` 会按文件覆盖。恢复待核对事件、会话或记忆状态需先确认 daemon 及相关后台进程已停止；页面展示的进程状态来自项目心跳。模型直发的消息和伙伴委派不保证有项目侧记录。
 - 共享资料是一份通用文件，不为每个群单独建长期记忆；同时保留 Codex/Hermes 的原生记忆。它可能在后续其他会话中被读取，应区分发言者、时间与来源。可通过 `shared_memory_path` 选择文件位置；配置文件路径相对于 `config.yaml` 所在目录。项目保留策略会清理过期队列内容，但不会自动清除后端自己维护的历史或长期记忆。
-- 现有 SQLite v9 和 v10 会在初始化时通过事务升级到 v11，保留原有数据；升级失败会回滚。其他不受支持的版本仍会拒绝打开。对重要运行数据先保留备份。
+- 现有 SQLite v9、v10、v11 和 v12 会在初始化时通过事务升级到 v13，保留原有数据；升级失败会回滚。其他不受支持的版本仍会拒绝打开。对重要运行数据先保留备份。
 - 程序本轮只提供当前消息，不重复注入最近历史或共享记忆正文；恢复的 provider 会话仍可能包含过去的消息、工具调用及原生上下文。图片和文件只提供可识别的资源引用，不会自动下载，模型需要时可使用现有工具读取。直发模式中，Agent 正常结束不证明飞书消息已发送；审计记录标为未验证。
 
 ## 本地事件回放

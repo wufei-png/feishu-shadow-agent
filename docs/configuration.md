@@ -42,7 +42,7 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `coworker` | object | 默认关闭 | 单测试群公开 AI 同事的策略导入来源，参见[运行与验证](operations/single-group-ai-coworker.md)。 |
 | `coworker.send_mode` | `agent_direct`/`project` | `agent_direct` | 启动时确定发送路径；直发使用模型的原生工具权限，代发使用项目的结构化协议和发送策略。修改后需导入策略并重启。 |
 | `coworker.partner_bots` | map | `{}` | 按名称配置飞书伙伴的 `open_id` 和可选 `description`；也接受名称到 open ID 的简写。职责会提供给同事 Agent。 |
-| `coworker.memory_maintenance` | bool | `true` | AI 同事模式中启用独立后台记忆整理。 |
+| `coworker.memory_maintenance` | bool | `false` | 启用独立后台记忆整理。已导入 SQLite 的设置保持原值。 |
 | `coworker.memory_maintenance_time` | `HH:MM` | `00:00` | 每日本机时区的整理时间。错过定时点后，下次启动 AI 同事时合并补跑一次。 |
 | `reply_policy` | object | 见下表 | Policy Import Source 中的全局自动回复策略。 |
 | `reply_postprocess` | object | 见下表 | 可选的一次性回复表达改写；默认关闭，不改变现有回复路径。 |
@@ -227,7 +227,7 @@ hermes chat -q <prompt> -Q --source <source> --toolsets <...> [--yolo] --max-tur
 
 Codex 只按 `agent_backend.codex.skills` 中的名称生成原生显式调用，例如新 Task Session 业务 prompt 最后一行的 `$docmate`。skill 必须由部署环境预先安装到 Codex 原生发现范围；本程序不读取 `SKILL.md`、不注册任意路径，也不模拟 Codex 的仓库根发现算法。完整 skill 是否加载由 Codex 决定，配置只表示 requested/configured。运行中的旧 session 不因配置变化自动增加 skill，需要新建或显式重置 session。生产 prompt、输出 schema 和 audit response 不增加 skill trace 字段。
 
-影子模式 Codex Task Session 通常通过 CLI `-c developer_instructions=...` 传入固定的非交互约束：工具探索保持静默，只返回一个最终 JSON 对象。`tool_permissions: inherit` 且 `config_scope: native` 时不传该覆盖项，以保留用户原有的 `developer_instructions`。结构化输出使用 `--output-schema`、`--output-last-message` 和 Python schema 校验。AI 同事的默认直发模式使用自然输出，不附加强制 JSON；它沿用后端原生配置，详见[同事模式运行说明](operations/single-group-ai-coworker.md)。
+影子模式 Codex Task Session 通常通过 CLI `-c developer_instructions=...` 传入固定的非交互约束：工具探索保持静默，只返回一个最终 JSON 对象。`tool_permissions: inherit` 且 `config_scope: native` 时不传该覆盖项，以保留用户原有的 `developer_instructions`。结构化输出使用 `--output-schema`、`--output-last-message` 和 Python schema 校验。旧 `daemon` 的 AI 同事直发模式使用自然输出；`coworker run --runtime codex` 使用独立的项目发布路径，见 [Codex 直连运行说明](operations/codex-native-coworker.md)。
 
 影子模式的生产 Task Session 输入使用紧凑的 Markdown 混合格式，固定顺序为 Instructions、Reply Context、Messages、非空 Resources、可选 Context Access、Output Contract，Codex 新 session 的显式 skill 引用随后占最后一行。Messages 是飞书正文的唯一嵌入来源；Reply Context 只保留 current/root id、合法回复目标和非空 chat type；Context Access 不复制消息 snapshot；空 Resources section 和 null message 字段完全省略。Output Contract 是模型可见的精简字段约束，最终 JSON 仍由 provider-native schema（支持时）和 Python schema 双重校验。Router、reply postprocess 和 owner style refresh 保持各自现有输入格式。
 

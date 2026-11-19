@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import socket
 import sqlite3
 from dataclasses import dataclass
@@ -12,8 +13,52 @@ from .store.sqlite_store import SQLiteStore
 from .time_utils import shift_instant
 
 GROUP_MAIN_KEY = "__group_main__"
+NATIVE_LOCATING_KEY = "__native_locating__"
 SUBAGENT_EVENT_PREFIX = "internal:subagent:"
 CACHED_HISTORY_EVENT_ID = "internal:history"
+
+
+def _associate_queued_replies(
+    conn: sqlite3.Connection,
+    *,
+    origin_event_id: int,
+    app_id: str,
+    chat_id: str,
+    parent_id: str,
+) -> None:
+    conn.execute(
+        """UPDATE coworker_events SET raw_json = json_set(
+             json_remove(raw_json, '$._runtime.steer_checked'),
+             '$._runtime.followup_origin', CASE WHEN substr(topic_key, 1, ?) = ?
+               THEN COALESCE(json_extract(raw_json, '$._runtime.followup_origin'), ?)
+               ELSE ? END,
+             '$._runtime.followup_parent', ?, '$._runtime.followup_candidates',
+             json_insert(CASE WHEN json_type(raw_json, '$._runtime.followup_candidates') = 'array'
+               THEN json_extract(raw_json, '$._runtime.followup_candidates') ELSE json('[]') END,
+               '$[#]', ?), '$._runtime.followup_generation',
+             COALESCE(json_extract(raw_json, '$._runtime.followup_generation'), 0) + 1)
+           WHERE app_id = ? AND chat_id = ? AND runtime = 'native' AND id != ?
+             AND status IN ('queued', 'processing') AND json_valid(raw_json)
+             AND (substr(topic_key, 1, ?) = ? OR topic_key =
+               (SELECT topic_key FROM coworker_events WHERE id = ?))
+             AND COALESCE(NULLIF(json_extract(raw_json, '$.event.event.message.parent_id'), ''),
+               NULLIF(json_extract(raw_json, '$.event.event.message.reply_to_message_id'), '')) = ?""",
+        (
+            len(NATIVE_LOCATING_KEY) + 1,
+            f"{NATIVE_LOCATING_KEY}:",
+            origin_event_id,
+            origin_event_id,
+            parent_id,
+            origin_event_id,
+            app_id,
+            chat_id,
+            origin_event_id,
+            len(NATIVE_LOCATING_KEY) + 1,
+            f"{NATIVE_LOCATING_KEY}:",
+            origin_event_id,
+            parent_id,
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -40,6 +85,66 @@ class CoworkerStore:
     def __init__(self, store: SQLiteStore):
         self.store = store
 
+    def runtime_conflicts(self, *, app_id: str, chat_id: str, native: bool) -> int:
+        """Require the previous runtime's uncertain work to be resolved before switching."""
+        self.store.initialize()
+        with self.store.connect() as conn:
+            events = conn.execute(
+                """SELECT COUNT(*) FROM coworker_events WHERE app_id = ? AND runtime = ?
+                   AND (? = 1 OR chat_id = ?) AND status IN ('queued', 'processing', 'needs_review')""",
+                (app_id, "legacy" if native else "native", int(not native), chat_id),
+            ).fetchone()[0]
+            other_runtime = "legacy" if native else "native"
+            children = conn.execute(
+                """SELECT COUNT(*) FROM coworker_subagents child
+                   JOIN coworker_sessions s ON s.id = child.session_id
+                   JOIN coworker_events origin ON origin.id = child.origin_event_id
+                   WHERE s.app_id = ? AND (? = 1 OR s.chat_id = ?) AND origin.runtime = ?
+                     AND child.status IN ('running', 'needs_review')""",
+                (app_id, int(not native), chat_id, other_runtime),
+            ).fetchone()[0]
+            pending_actions = conn.execute(
+                """SELECT COUNT(*) FROM actions a JOIN tasks t ON t.id = a.task_id
+                   WHERE a.status IN ('pending', 'sending', 'failed_needs_review')
+                     AND EXISTS (SELECT 1 FROM coworker_events e WHERE e.app_id = ?
+                       AND (? = 1 OR e.chat_id = ?) AND e.runtime = ?
+                       AND (e.message_id = t.root_message_id OR e.message_id = a.source_message_id))""",
+                (app_id, int(not native), chat_id, other_runtime),
+            ).fetchone()[0]
+            pending_approvals = conn.execute(
+                """SELECT COUNT(*) FROM approvals a JOIN tasks t ON t.id = a.task_id
+                   WHERE a.status = 'pending' AND EXISTS (SELECT 1 FROM coworker_events e
+                     WHERE e.app_id = ? AND (? = 1 OR e.chat_id = ?) AND e.runtime = ?
+                       AND (e.message_id = t.root_message_id OR e.message_id = a.source_message_id))""",
+                (app_id, int(not native), chat_id, other_runtime),
+            ).fetchone()[0]
+            if native:
+                return (
+                    int(events)
+                    + int(children)
+                    + int(pending_actions)
+                    + int(pending_approvals)
+                )
+            deliveries = conn.execute(
+                """SELECT COUNT(*) FROM coworker_native_deliveries d
+                   JOIN coworker_events e ON e.id = d.event_id
+                   WHERE e.app_id = ? AND d.status IN ('pending', 'sending', 'needs_review')""",
+                (app_id,),
+            ).fetchone()[0]
+            handoffs = conn.execute(
+                """SELECT COUNT(*) FROM coworker_native_handoffs h
+                   JOIN coworker_sessions s ON s.id = h.session_id WHERE s.app_id = ?""",
+                (app_id,),
+            ).fetchone()[0]
+            return (
+                int(events)
+                + int(children)
+                + int(pending_actions)
+                + int(pending_approvals)
+                + int(deliveries)
+                + int(handoffs)
+            )
+
     def enqueue(
         self,
         *,
@@ -48,6 +153,7 @@ class CoworkerStore:
         raw: dict[str, Any],
         group_activation_id: int | None = None,
         chat_layout: str = "topic",
+        native: bool = False,
     ) -> bool:
         event = _mapping(raw.get("event"))
         message = _mapping(event.get("message"))
@@ -81,7 +187,9 @@ class CoworkerStore:
             )
             if existing is not None and not cache_only:
                 return False
-            if chat_layout == "group" and not message.get("thread_id"):
+            if native:
+                topic_key = f"{NATIVE_LOCATING_KEY}:{message_id}"
+            elif chat_layout == "group" and not message.get("thread_id"):
                 topic_key = GROUP_MAIN_KEY
             elif chat_layout in {"group", "topic"}:
                 topic_key = self._resolve_topic(conn, app_id, chat_id, aliases)
@@ -90,24 +198,72 @@ class CoworkerStore:
             status = "queued" if topic_key else "needs_review"
             error = None if topic_key else "unresolved_or_ambiguous_topic"
             topic_key = topic_key or f"unresolved:{message_id}"
+            runtime: dict[str, Any] = {"agent_started": False, "retry_count": 0}
+            parent = message.get("parent_id") or message.get("reply_to_message_id")
+            if native and isinstance(parent, str) and parent:
+                origins = conn.execute(
+                    """SELECT origin.id FROM coworker_events origin
+                       WHERE origin.app_id = ? AND origin.chat_id = ?
+                         AND origin.runtime = 'native' AND (
+                           origin.status = 'processing' OR (origin.status = 'completed' AND EXISTS (
+                             SELECT 1 FROM coworker_native_deliveries delivery
+                             WHERE delivery.event_id = origin.id
+                               AND delivery.status IN ('pending', 'sending', 'needs_review')))) AND (
+                           origin.message_id = ? OR CASE WHEN json_valid(origin.raw_json) THEN
+                             ? IN (json_extract(origin.raw_json, '$._internal.source_message_id'),
+                                   json_extract(origin.raw_json, '$._internal.reply_target'))
+                             ELSE 0 END OR EXISTS (
+                               SELECT 1 FROM coworker_native_steers steer
+                               JOIN coworker_events supplement ON supplement.id = steer.event_id
+                               WHERE steer.origin_event_id = origin.id AND steer.status = 'accepted'
+                                 AND supplement.message_id = ?) OR EXISTS (
+                               SELECT 1 FROM coworker_native_delivery_context c
+                               WHERE c.delivery_id = CASE WHEN json_valid(origin.raw_json)
+                                 THEN json_extract(origin.raw_json, '$._internal.delivery_id') END
+                                 AND c.message_id = ?) OR EXISTS (
+                               SELECT 1 FROM coworker_native_deliveries delivery
+                               LEFT JOIN coworker_native_delivery_context c ON c.delivery_id = delivery.id
+                               WHERE delivery.event_id = origin.id
+                                 AND delivery.status IN ('pending', 'sending', 'needs_review')
+                                 AND (? IN (delivery.source_message_id, delivery.target_message_id)
+                                   OR c.message_id = ?)))
+                       ORDER BY origin.id""",
+                    (
+                        app_id,
+                        chat_id,
+                        parent,
+                        parent,
+                        parent,
+                        parent,
+                        parent,
+                        parent,
+                    ),
+                ).fetchall()
+                if origins:
+                    runtime.update(
+                        followup_origin=int(origins[0]["id"]),
+                        followup_candidates=[int(origin["id"]) for origin in origins],
+                        followup_parent=parent,
+                    )
             payload = json.dumps(
                 {
                     "event": raw,
                     "bot_open_id": bot_open_id,
-                    "_runtime": {"agent_started": False, "retry_count": 0},
+                    "_runtime": runtime,
                 },
                 ensure_ascii=False,
             )
             event_id = header.get("event_id") or f"internal:live:{message_id}"
             if cache_only and existing is not None:
                 cursor = conn.execute(
-                    """UPDATE coworker_events SET event_id = ?, topic_key = ?, group_activation_id = ?,
+                    """UPDATE coworker_events SET event_id = ?, topic_key = ?, group_activation_id = ?, runtime = ?,
                               raw_json = ?, status = ?, error = ?, received_at = ?, updated_at = ?
                        WHERE id = ?""",
                     (
                         event_id,
                         topic_key,
                         group_activation_id,
+                        "native" if native else "legacy",
                         payload,
                         status,
                         error,
@@ -120,9 +276,9 @@ class CoworkerStore:
             cursor = conn.execute(
                 """
                 INSERT OR IGNORE INTO coworker_events(
-                  app_id, event_id, message_id, chat_id, topic_key, group_activation_id, raw_json,
+                  app_id, event_id, message_id, chat_id, topic_key, group_activation_id, runtime, raw_json,
                   status, error, received_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     app_id,
@@ -131,6 +287,7 @@ class CoworkerStore:
                     chat_id,
                     topic_key,
                     group_activation_id,
+                    "native" if native else "legacy",
                     payload,
                     status,
                     error,
@@ -168,12 +325,55 @@ class CoworkerStore:
                 """,
                 (limit,),
             ).fetchall()
+            deliveries = conn.execute(
+                """SELECT d.id, d.event_id, d.session_id, d.target_message_id,
+                          d.status, d.sent_message_id, d.thread_id, d.error, d.updated_at,
+                          e.app_id, e.chat_id, e.topic_key
+                   FROM coworker_native_deliveries d JOIN coworker_events e ON e.id = d.event_id
+                   ORDER BY d.id DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            handoffs = conn.execute(
+                """SELECT h.session_id, h.status, h.error, h.updated_at, s.app_id, s.chat_id,
+                          s.thread_id AS topic_key, s.backend_session_id, s.agent_working_dir
+                   FROM coworker_native_handoffs h JOIN coworker_sessions s ON s.id = h.session_id
+                   ORDER BY h.updated_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            watches = conn.execute(
+                """SELECT app_id, chat_id, topic_key, owner_open_id, expires_at, updated_at
+                   FROM coworker_native_watches ORDER BY updated_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            steers = conn.execute(
+                """SELECT s.event_id, s.session_id, s.turn_id,
+                          CASE WHEN s.status = 'needs_review' AND e.status = 'discarded'
+                               THEN 'discarded' ELSE s.status END AS status, s.updated_at
+                   FROM coworker_native_steers s JOIN coworker_events e ON e.id = s.event_id
+                   ORDER BY s.updated_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
         return {
             "sessions": [dict(row) for row in sessions],
             "events": [dict(row) for row in events],
             "delegations": [dict(row) for row in delegations],
             "history_gaps": [dict(row) for row in gaps],
             "subagents": [dict(row) for row in subagents],
+            "native_deliveries": [dict(row) for row in deliveries],
+            "native_handoffs": [
+                {
+                    **dict(row),
+                    "operator_command": (
+                        f"cd {shlex.quote(str(row['agent_working_dir']))} && codex --no-daemon resume "
+                        f"{shlex.quote(str(row['backend_session_id']))}"
+                        if row["status"] == "ready"
+                        else None
+                    ),
+                }
+                for row in handoffs
+            ],
+            "native_watches": [dict(row) for row in watches],
+            "native_steers": [dict(row) for row in steers],
             "memory_maintenance": self.store.get_checkpoint(
                 "coworker.memory_maintenance"
             ),
@@ -196,6 +396,12 @@ class CoworkerStore:
             )
             if cursor.rowcount != 1:
                 raise ValueError("event is not awaiting operator review")
+            conn.execute(
+                """UPDATE coworker_events SET raw_json = json_remove(raw_json, '$._runtime.batch_leader')
+                   WHERE status = 'queued' AND json_valid(raw_json)
+                     AND json_extract(raw_json, '$._runtime.batch_leader') = ?""",
+                (event_id,),
+            )
             if row is not None and row["raw_json"]:
                 try:
                     internal = _mapping(
@@ -228,6 +434,7 @@ class CoworkerStore:
                      status IN ('processing', 'needs_review') OR
                      (status = 'queued' AND (
                        message_id LIKE 'internal:subagent:%' OR
+                       message_id LIKE 'internal:transfer:%' OR
                        CASE WHEN json_valid(raw_json)
                             THEN json_extract(raw_json, '$._runtime.steer_state') IS NOT NULL
                             ELSE 1 END
@@ -246,6 +453,17 @@ class CoworkerStore:
                 (session_id,),
             ).fetchone():
                 raise ValueError("wait for running subagents before resetting")
+            if conn.execute(
+                """SELECT 1 FROM coworker_native_deliveries WHERE session_id = ?
+                   AND status IN ('pending', 'sending', 'needs_review')""",
+                (session_id,),
+            ).fetchone():
+                raise ValueError("resolve native deliveries before resetting")
+            if conn.execute(
+                "SELECT 1 FROM coworker_native_handoffs WHERE session_id = ?",
+                (session_id,),
+            ).fetchone():
+                raise ValueError("complete the handoff before resetting")
             conn.execute(
                 "UPDATE coworker_sessions SET state = 'closed', updated_at = ? WHERE id = ?",
                 (self.store.clock(), session_id),
@@ -278,12 +496,25 @@ class CoworkerStore:
             )
         return topic_key
 
+    def resolve_native_topic(
+        self, *, app_id: str, chat_id: str, aliases: list[str]
+    ) -> str:
+        self.store.initialize()
+        with self.store.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            topic = self._resolve_topic(conn, app_id, chat_id, aliases)
+            if topic is None:
+                raise ValueError("topic aliases are missing or ambiguous")
+            return topic
+
     def claim_next(
         self,
         *,
         app_id: str | None = None,
         chat_id: str | None = None,
         internal_only: bool = False,
+        native: bool = False,
+        locating_only: bool = False,
     ) -> CoworkerEvent | None:
         self.store.initialize()
         with self.store.connect() as conn:
@@ -304,10 +535,36 @@ class CoworkerStore:
                 """
                 SELECT e.* FROM coworker_events e
                 WHERE e.status = 'queued'
+                  AND e.runtime = ?
+                  AND (? = 0 OR e.topic_key GLOB '__native_locating__:*')
                   AND (? IS NULL OR e.app_id = ?)
                   AND (? IS NULL OR e.chat_id = ?)
                   AND (? = 0 OR e.message_id LIKE 'internal:subagent:%')
                   AND json_extract(e.raw_json, '$._runtime.steer_state') IS NULL
+                  AND json_extract(e.raw_json, '$._runtime.batch_leader') IS NULL
+                  AND (? = 0 OR NOT EXISTS (
+                    SELECT 1 FROM coworker_native_deliveries d
+                    JOIN coworker_sessions s ON s.id = d.session_id
+                    WHERE s.app_id = e.app_id AND s.chat_id = e.chat_id
+                      AND s.thread_id = e.topic_key
+                      AND d.status IN ('pending', 'sending', 'needs_review')
+                  ))
+                  AND (? = 0 OR NOT EXISTS (
+                    SELECT 1 FROM coworker_native_handoffs h
+                    JOIN coworker_sessions s ON s.id = h.session_id
+                    WHERE s.app_id = e.app_id AND s.chat_id = e.chat_id AND s.thread_id = e.topic_key
+                      AND (h.status != 'pause_requested' OR e.message_id NOT LIKE 'internal:subagent:%')
+                  ))
+                  AND (? = 0 OR e.topic_key = '__group_main__' OR e.topic_key GLOB '__native_locating__:*' OR EXISTS (
+                    SELECT 1 FROM coworker_sessions established WHERE established.app_id = e.app_id
+                      AND established.chat_id = e.chat_id AND established.thread_id = e.topic_key
+                      AND established.provider = 'codex' AND established.state = 'active'
+                  ) OR NOT EXISTS (
+                    SELECT 1 FROM coworker_native_deliveries opening
+                    JOIN coworker_events origin ON origin.id = opening.event_id
+                    WHERE origin.app_id = e.app_id AND origin.chat_id = e.chat_id
+                      AND opening.purpose IN ('topic', 'transfer') AND opening.status IN ('pending', 'sending', 'needs_review')
+                  ))
                   AND (json_extract(e.raw_json, '$._runtime.retry_after') IS NULL
                        OR julianday(json_extract(e.raw_json, '$._runtime.retry_after')) <= julianday(?))
                   AND NOT EXISTS (
@@ -325,18 +582,37 @@ class CoworkerStore:
                     SELECT 1 FROM coworker_events earlier
                     WHERE earlier.app_id = e.app_id AND earlier.chat_id = e.chat_id
                       AND earlier.topic_key = e.topic_key AND earlier.status = 'queued'
-                      AND (earlier.received_at < e.received_at OR
-                           (earlier.received_at = e.received_at AND earlier.id < e.id))
+                      AND (
+                        (e.message_id LIKE 'internal:transfer:%' AND earlier.message_id LIKE 'internal:transfer:%'
+                          AND (earlier.received_at < e.received_at OR
+                            (earlier.received_at = e.received_at AND earlier.id < e.id)))
+                        OR (e.message_id NOT LIKE 'internal:transfer:%' AND (
+                          earlier.message_id LIKE 'internal:transfer:%' OR earlier.received_at < e.received_at OR
+                          (earlier.received_at = e.received_at AND earlier.id < e.id)))
+                      )
+                      AND NOT (? = 1 AND e.message_id LIKE 'internal:subagent:%'
+                        AND earlier.message_id NOT LIKE 'internal:subagent:%' AND EXISTS (
+                          SELECT 1 FROM coworker_native_handoffs h
+                          JOIN coworker_sessions s ON s.id = h.session_id
+                          WHERE s.app_id = e.app_id AND s.chat_id = e.chat_id
+                            AND s.thread_id = e.topic_key AND h.status = 'pause_requested'
+                        ))
                   )
                 ORDER BY e.received_at, e.id LIMIT 1
                 """,
                 (
+                    "native" if native else "legacy",
+                    int(locating_only),
                     app_id,
                     app_id,
                     chat_id,
                     chat_id,
                     int(internal_only),
+                    int(native),
+                    int(native),
+                    int(native),
                     self.store.clock(),
+                    int(native),
                 ),
             ).fetchone()
             if row is None:
@@ -376,6 +652,183 @@ class CoworkerStore:
             )
             if cursor.rowcount != 1:
                 raise ValueError("coworker event is no longer processing")
+            origin = conn.execute(
+                "SELECT app_id, chat_id, message_id, raw_json, runtime FROM coworker_events WHERE id = ?",
+                (event_id,),
+            ).fetchone()
+            if origin is None or origin["runtime"] != "native":
+                return
+            internal = _mapping(
+                _mapping(json.loads(str(origin["raw_json"]))).get("_internal")
+            )
+            parents = {
+                origin["message_id"],
+                internal.get("source_message_id"),
+                internal.get("reply_target"),
+            }
+            for parent in parents:
+                if not isinstance(parent, str) or not parent:
+                    continue
+                _associate_queued_replies(
+                    conn,
+                    origin_event_id=event_id,
+                    app_id=str(origin["app_id"]),
+                    chat_id=str(origin["chat_id"]),
+                    parent_id=parent,
+                )
+
+    def route_native_event(
+        self, event: CoworkerEvent, topic_key: str, *, queue_only: bool = False
+    ) -> bool:
+        """Move a claimed event after its actual Feishu location has been read."""
+        if not topic_key or topic_key.startswith(NATIVE_LOCATING_KEY):
+            raise ValueError("invalid native topic")
+        self.store.initialize()
+        with self.store.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT received_at, raw_json FROM coworker_events WHERE id = ?
+                   AND status = 'processing' AND runtime = 'native' AND topic_key = ?""",
+                (event.id, event.topic_key),
+            ).fetchone()
+            if row is None:
+                raise ValueError("native event is no longer being located")
+            unresolved = conn.execute(
+                """SELECT raw_json FROM coworker_events WHERE app_id = ? AND chat_id = ?
+                   AND runtime = 'native' AND status IN ('queued', 'processing')
+                   AND substr(topic_key, 1, ?) = ? AND id != ? AND (received_at < ? OR
+                     (received_at = ? AND id < ?))""",
+                (
+                    event.app_id,
+                    event.chat_id,
+                    len(NATIVE_LOCATING_KEY) + 1,
+                    f"{NATIVE_LOCATING_KEY}:",
+                    event.id,
+                    row["received_at"],
+                    row["received_at"],
+                    event.id,
+                ),
+            ).fetchall()
+            for earlier in unresolved:
+                try:
+                    payload = _mapping(json.loads(str(earlier["raw_json"])))
+                    envelope = _mapping(_mapping(payload.get("event")).get("event"))
+                    message = _mapping(envelope.get("message"))
+                    aliases = _topic_aliases(message)
+                    hinted_thread = message.get("thread_id")
+                    if (
+                        topic_key.startswith("__private__:")
+                        and not message.get("parent_id")
+                        and not message.get("reply_to_message_id")
+                        and topic_key != f"__private__:{message.get('message_id')}"
+                    ):
+                        continue
+                    matches = any(
+                        alias == topic_key
+                        or conn.execute(
+                            """SELECT 1 FROM coworker_topic_aliases
+                               WHERE app_id = ? AND chat_id = ? AND alias = ? AND topic_key = ?""",
+                            (event.app_id, event.chat_id, alias, topic_key),
+                        ).fetchone()
+                        is not None
+                        for alias in aliases
+                    )
+                    if topic_key != GROUP_MAIN_KEY and hinted_thread and not matches:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+                # Until the earlier message can be located, it may share this topic.
+                conn.execute(
+                    """UPDATE coworker_events SET status = 'queued',
+                       raw_json = json_set(raw_json, '$._runtime.retry_after', ?), updated_at = ?
+                       WHERE id = ?""",
+                    (
+                        shift_instant(self.store.clock(), delta=timedelta(seconds=1)),
+                        self.store.clock(),
+                        event.id,
+                    ),
+                )
+                return False
+            blocked = conn.execute(
+                """SELECT 1 FROM coworker_events WHERE app_id = ? AND chat_id = ?
+                   AND topic_key = ? AND id != ? AND (
+                     status = 'processing' OR
+                     (status = 'needs_review' AND CASE WHEN json_valid(raw_json)
+                       THEN COALESCE(json_extract(raw_json, '$._runtime.agent_started'), 1)
+                       ELSE 1 END = 1) OR
+                     (status = 'queued' AND (message_id LIKE 'internal:transfer:%' OR received_at < ? OR
+                       (received_at = ? AND id < ?)))
+                   ) LIMIT 1""",
+                (
+                    event.app_id,
+                    event.chat_id,
+                    topic_key,
+                    event.id,
+                    row["received_at"],
+                    row["received_at"],
+                    event.id,
+                ),
+            ).fetchone()
+            if blocked is None:
+                blocked = conn.execute(
+                    """SELECT 1 FROM coworker_native_deliveries d
+                       JOIN coworker_sessions s ON s.id = d.session_id
+                       WHERE s.app_id = ? AND s.chat_id = ? AND s.thread_id = ?
+                         AND d.status IN ('pending', 'sending', 'needs_review') LIMIT 1""",
+                    (event.app_id, event.chat_id, topic_key),
+                ).fetchone()
+            established = conn.execute(
+                """SELECT 1 FROM coworker_sessions WHERE app_id = ? AND chat_id = ?
+                   AND thread_id = ? AND provider = 'codex' AND state = 'active'""",
+                (event.app_id, event.chat_id, topic_key),
+            ).fetchone()
+            if blocked is None and topic_key != GROUP_MAIN_KEY and established is None:
+                blocked = conn.execute(
+                    """SELECT 1 FROM coworker_native_deliveries d
+                       JOIN coworker_events e ON e.id = d.event_id
+                       WHERE e.app_id = ? AND e.chat_id = ? AND d.purpose IN ('topic', 'transfer')
+                         AND d.status IN ('pending', 'sending', 'needs_review') LIMIT 1""",
+                    (event.app_id, event.chat_id),
+                ).fetchone()
+            if blocked is None:
+                blocked = conn.execute(
+                    """SELECT 1 FROM coworker_native_handoffs h
+                       JOIN coworker_sessions s ON s.id = h.session_id
+                       WHERE s.app_id = ? AND s.chat_id = ? AND s.thread_id = ? LIMIT 1""",
+                    (event.app_id, event.chat_id, topic_key),
+                ).fetchone()
+            origin = conn.execute(
+                """SELECT id FROM coworker_events origin WHERE origin.app_id = ? AND origin.chat_id = ?
+                   AND origin.runtime = 'native' AND origin.topic_key = ? AND (
+                     origin.id = json_extract(?, '$._runtime.followup_origin') OR origin.id IN
+                       (SELECT value FROM json_each(?, '$._runtime.followup_candidates')))
+                   ORDER BY id LIMIT 1""",
+                (
+                    event.app_id,
+                    event.chat_id,
+                    topic_key,
+                    row["raw_json"],
+                    row["raw_json"],
+                ),
+            ).fetchone()
+            origin_id = None if origin is None else int(origin["id"])
+            conn.execute(
+                """UPDATE coworker_events SET topic_key = ?, status = ?, updated_at = ?,
+                   raw_json = CASE WHEN ? IS NULL THEN json_remove(raw_json,
+                     '$._runtime.followup_origin', '$._runtime.followup_candidates')
+                     ELSE json_set(raw_json, '$._runtime.followup_origin', ?,
+                       '$._runtime.followup_candidates', json_array(?)) END WHERE id = ?""",
+                (
+                    topic_key,
+                    "queued" if blocked or queue_only else "processing",
+                    self.store.clock(),
+                    origin_id,
+                    origin_id,
+                    origin_id,
+                    event.id,
+                ),
+            )
+            return blocked is None and not queue_only
 
     def retry_before_agent(
         self, event_id: int, *, error: str, steer: bool = False
@@ -425,6 +878,15 @@ class CoworkerStore:
         self.store.initialize()
         with self.store.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """UPDATE coworker_events SET raw_json = json_remove(raw_json, '$._runtime.batch_leader')
+                   WHERE app_id = ? AND chat_id = ? AND status = 'queued' AND json_valid(raw_json)
+                     AND json_extract(raw_json, '$._runtime.batch_leader') IS NOT NULL
+                     AND NOT EXISTS (SELECT 1 FROM coworker_events leader
+                       WHERE leader.id = json_extract(coworker_events.raw_json, '$._runtime.batch_leader')
+                         AND leader.status = 'processing')""",
+                (app_id, chat_id),
+            )
             rows = conn.execute(
                 "SELECT id, raw_json FROM coworker_events WHERE app_id = ? AND chat_id = ? AND status = 'processing'",
                 (app_id, chat_id),
@@ -447,6 +909,12 @@ class CoworkerStore:
                 conn.execute(
                     "UPDATE coworker_events SET status = ?, error = ?, updated_at = ? WHERE id = ? AND status = 'processing'",
                     (status, error, self.store.clock(), row["id"]),
+                )
+                conn.execute(
+                    """UPDATE coworker_events SET raw_json = json_remove(raw_json, '$._runtime.batch_leader')
+                       WHERE app_id = ? AND chat_id = ? AND status = 'queued' AND json_valid(raw_json)
+                         AND json_extract(raw_json, '$._runtime.batch_leader') = ?""",
+                    (app_id, chat_id, row["id"]),
                 )
             steers = conn.execute(
                 """SELECT id, raw_json FROM coworker_events
@@ -478,10 +946,16 @@ class CoworkerStore:
                 )
             children = conn.execute(
                 """SELECT s.*, c.app_id, c.chat_id, c.thread_id AS topic_key,
-                          e.message_id AS source_message_id, e.group_activation_id
+                          COALESCE(original.message_id, e.message_id) AS source_message_id,
+                          COALESCE(t.source_event_id, e.id) AS source_event_id,
+                          COALESCE(t.reply_target, e.message_id) AS reply_target,
+                          t.delivery_id AS transfer_delivery_id, e.group_activation_id,
+                          e.runtime AS origin_runtime
                    FROM coworker_subagents s
                    JOIN coworker_sessions c ON c.id = s.session_id
                    JOIN coworker_events e ON e.id = s.origin_event_id
+                   LEFT JOIN coworker_native_transfers t ON t.event_id = e.id
+                   LEFT JOIN coworker_events original ON original.id = t.source_event_id
                    WHERE c.app_id = ? AND c.chat_id = ? AND s.status = 'running'""",
                 (app_id, chat_id),
             ).fetchall()
@@ -499,7 +973,10 @@ class CoworkerStore:
                         "agent_path": row["agent_path"],
                         "child_turn_id": turn_id,
                         "origin_event_id": row["origin_event_id"],
+                        "source_event_id": row["source_event_id"],
                         "source_message_id": row["source_message_id"],
+                        "reply_target": row["reply_target"],
+                        "delivery_id": row["transfer_delivery_id"],
                         "outcome": "interrupted_unknown",
                     },
                     "bot_open_id": row["bot_open_id"],
@@ -512,22 +989,25 @@ class CoworkerStore:
                 )
                 conn.execute(
                     """INSERT OR IGNORE INTO coworker_events(
-                         app_id, message_id, chat_id, topic_key, group_activation_id,
+                         app_id, message_id, chat_id, topic_key, group_activation_id, runtime,
                          raw_json, status, error, received_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, 'needs_review', 'subagent_outcome_unknown', ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, 'needs_review', 'subagent_outcome_unknown', ?, ?)""",
                     (
                         row["app_id"],
                         f"{SUBAGENT_EVENT_PREFIX}{child_id}:{turn_id}",
                         row["chat_id"],
                         row["topic_key"],
                         row["group_activation_id"],
+                        row["origin_runtime"],
                         json.dumps(raw, ensure_ascii=False),
                         now,
                         now,
                     ),
                 )
 
-    def claim_next_steer(self, *, app_id: str, chat_id: str) -> CoworkerEvent | None:
+    def claim_next_steer(
+        self, *, app_id: str, chat_id: str | None, native: bool = False
+    ) -> CoworkerEvent | None:
         """Claim a follow-up without starting a second turn for its topic."""
         self.store.initialize()
         with self.store.connect() as conn:
@@ -535,30 +1015,55 @@ class CoworkerStore:
             row = conn.execute(
                 """
                 SELECT e.* FROM coworker_events e
-                WHERE e.app_id = ? AND e.chat_id = ? AND e.status = 'queued'
+                WHERE e.app_id = ? AND (? IS NULL OR e.chat_id = ?) AND e.status = 'queued'
+                  AND e.runtime = ?
                   AND e.message_id NOT LIKE 'internal:subagent:%'
+                  AND e.message_id NOT LIKE 'internal:transfer:%'
                   AND json_valid(e.raw_json)
                   AND json_extract(e.raw_json, '$._runtime.steer_state') IS NULL
+                  AND json_extract(e.raw_json, '$._runtime.batch_leader') IS NULL
+                  AND (? = 0 OR COALESCE(json_extract(e.raw_json, '$._runtime.steer_checked'), 0) = 0)
+                  AND (? = 0 OR NOT EXISTS (
+                    SELECT 1 FROM coworker_native_handoffs h JOIN coworker_sessions s ON s.id = h.session_id
+                    WHERE s.app_id = e.app_id AND s.chat_id = e.chat_id AND s.thread_id = e.topic_key
+                  ))
                   AND (json_extract(e.raw_json, '$._runtime.retry_after') IS NULL
                        OR julianday(json_extract(e.raw_json, '$._runtime.retry_after')) <= julianday(?))
                   AND EXISTS (SELECT 1 FROM coworker_events current
                     WHERE current.app_id = e.app_id AND current.chat_id = e.chat_id
-                      AND current.topic_key = e.topic_key AND current.status = 'processing')
+                      AND current.topic_key = e.topic_key AND current.status = 'processing'
+                      AND (? = 0 OR CASE WHEN json_valid(current.raw_json) THEN
+                        COALESCE(json_extract(current.raw_json, '$._runtime.publishing'), 0) = 0
+                        ELSE 0 END))
                   AND NOT EXISTS (SELECT 1 FROM coworker_events earlier
                     WHERE earlier.app_id = e.app_id AND earlier.chat_id = e.chat_id
                       AND earlier.topic_key = e.topic_key AND earlier.status = 'queued'
                       AND earlier.message_id NOT LIKE 'internal:subagent:%'
+                      AND (? = 0 OR CASE WHEN json_valid(earlier.raw_json)
+                        THEN COALESCE(json_extract(earlier.raw_json, '$._runtime.steer_checked'), 0) = 0
+                        ELSE 1 END)
                       AND (earlier.received_at < e.received_at OR
                            (earlier.received_at = e.received_at AND earlier.id < e.id)))
                 ORDER BY e.received_at, e.id LIMIT 1
                 """,
-                (app_id, chat_id, self.store.clock()),
+                (
+                    app_id,
+                    chat_id,
+                    chat_id,
+                    "native" if native else "legacy",
+                    int(native),
+                    int(native),
+                    self.store.clock(),
+                    int(native),
+                    int(native),
+                ),
             ).fetchone()
             if row is None:
                 return None
             conn.execute(
                 """UPDATE coworker_events SET raw_json = json_set(raw_json,
-                   '$._runtime.steer_state', 'preparing', '$._runtime.owner_pid', ?,
+                   '$._runtime.steer_state', 'preparing', '$._runtime.steer_generation',
+                   COALESCE(json_extract(raw_json, '$._runtime.followup_generation'), 0), '$._runtime.owner_pid', ?,
                    '$._runtime.owner_host', ?), updated_at = ? WHERE id = ?""",
                 (os.getpid(), socket.gethostname(), self.store.clock(), row["id"]),
             )
@@ -575,18 +1080,153 @@ class CoworkerStore:
             raw=cast(dict[str, Any], raw),
         )
 
-    def mark_steer_sending(self, event_id: int) -> None:
+    def mark_steer_sending(self, event_id: int, *, native: bool = False) -> None:
         self.store.initialize()
         with self.store.connect() as conn:
             cursor = conn.execute(
                 """UPDATE coworker_events SET raw_json = json_set(raw_json,
                    '$._runtime.steer_state', 'sending', '$._runtime.agent_started', json('true')),
                    updated_at = ? WHERE id = ? AND status = 'queued'
-                   AND json_extract(raw_json, '$._runtime.steer_state') = 'preparing'""",
-                (self.store.clock(), event_id),
+                   AND json_extract(raw_json, '$._runtime.steer_state') = 'preparing'
+                   AND (? = 0 OR NOT EXISTS (
+                     SELECT 1 FROM coworker_native_handoffs h JOIN coworker_sessions s ON s.id = h.session_id
+                     WHERE s.app_id = coworker_events.app_id AND s.chat_id = coworker_events.chat_id
+                       AND s.thread_id = coworker_events.topic_key
+                   ))""",
+                (self.store.clock(), event_id, int(native)),
             )
             if cursor.rowcount != 1:
                 raise ValueError("coworker steer is no longer preparing")
+
+    def skip_native_steer(self, event_id: int) -> None:
+        self.store.initialize()
+        with self.store.connect() as conn:
+            conn.execute(
+                """UPDATE coworker_events SET raw_json = CASE WHEN
+                     json_extract(raw_json, '$._runtime.steer_state') = 'preparing' AND
+                     COALESCE(json_extract(raw_json, '$._runtime.followup_generation'), 0) !=
+                       COALESCE(json_extract(raw_json, '$._runtime.steer_generation'), 0)
+                   THEN json_remove(raw_json, '$._runtime.steer_state', '$._runtime.steer_generation')
+                   ELSE json_set(json_remove(raw_json, '$._runtime.steer_state', '$._runtime.steer_generation'),
+                     '$._runtime.steer_checked', json('true')) END,
+                     updated_at = ? WHERE id = ? AND status = 'queued'""",
+                (self.store.clock(), event_id),
+            )
+
+    def try_begin_native_publication(
+        self, origin_event_id: int, *, wait_for_queued: bool = True
+    ) -> bool:
+        self.store.initialize()
+        with self.store.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            origin = conn.execute(
+                """SELECT json_extract(raw_json, '$._runtime.publishing') FROM coworker_events
+                   WHERE id = ? AND status = 'processing' AND runtime = 'native'""",
+                (origin_event_id,),
+            ).fetchone()
+            if origin is None:
+                raise ValueError("native task is no longer processing")
+            if origin[0] == 1:
+                return True
+            pending = conn.execute(
+                """SELECT 1 FROM coworker_events followup
+                   JOIN coworker_events origin ON origin.id = ?
+                   WHERE followup.app_id = origin.app_id AND followup.chat_id = origin.chat_id
+                     AND followup.topic_key = origin.topic_key AND followup.status = 'queued'
+                     AND json_valid(followup.raw_json)
+                     AND json_extract(followup.raw_json, '$._runtime.followup_origin') = origin.id
+                     AND (
+                       json_extract(followup.raw_json, '$._runtime.steer_state') IN ('preparing', 'sending')
+                       OR (? = 1 AND json_extract(followup.raw_json, '$._runtime.steer_state') IS NULL
+                         AND COALESCE(json_extract(followup.raw_json, '$._runtime.steer_checked'), 0) = 0
+                         AND json_extract(followup.raw_json, '$._runtime.batch_leader') IS NULL
+                         AND (json_extract(followup.raw_json, '$._runtime.retry_after') IS NULL
+                           OR julianday(json_extract(followup.raw_json, '$._runtime.retry_after')) <= julianday(?))
+                         AND NOT EXISTS (SELECT 1 FROM coworker_native_handoffs h
+                           JOIN coworker_sessions s ON s.id = h.session_id
+                           WHERE s.app_id = origin.app_id AND s.chat_id = origin.chat_id
+                             AND s.thread_id = origin.topic_key)
+                         AND NOT EXISTS (SELECT 1 FROM coworker_events earlier
+                           WHERE earlier.app_id = followup.app_id AND earlier.chat_id = followup.chat_id
+                             AND earlier.topic_key = followup.topic_key AND earlier.status = 'queued'
+                             AND earlier.message_id NOT LIKE 'internal:subagent:%'
+                             AND (earlier.received_at < followup.received_at OR
+                               (earlier.received_at = followup.received_at AND earlier.id < followup.id))
+                             AND json_valid(earlier.raw_json)
+                             AND COALESCE(json_extract(earlier.raw_json, '$._runtime.steer_checked'), 0) = 0
+                             AND (json_extract(earlier.raw_json, '$._runtime.batch_leader') IS NOT NULL
+                               OR (json_extract(earlier.raw_json, '$._runtime.retry_after') IS NOT NULL
+                                 AND (julianday(json_extract(earlier.raw_json, '$._runtime.retry_after')) IS NULL
+                                   OR julianday(json_extract(earlier.raw_json, '$._runtime.retry_after')) > julianday(?)))))))
+                   LIMIT 1""",
+                (
+                    origin_event_id,
+                    int(wait_for_queued),
+                    self.store.clock(),
+                    self.store.clock(),
+                ),
+            ).fetchone()
+            if pending is not None:
+                return False
+            cursor = conn.execute(
+                """UPDATE coworker_events SET raw_json = json_set(raw_json,
+                     '$._runtime.publishing', json('true'))
+                   WHERE id = ? AND status = 'processing' AND runtime = 'native'""",
+                (origin_event_id,),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("native task is no longer processing")
+            return True
+
+    def associate_native_followup(
+        self, event_id: int, origin_event_id: int, parent_id: str
+    ) -> None:
+        self.store.initialize()
+        with self.store.connect() as conn:
+            cursor = conn.execute(
+                """UPDATE coworker_events SET raw_json = json_set(raw_json,
+                     '$._runtime.followup_origin', ?, '$._runtime.followup_parent', ?), updated_at = ?
+                   WHERE id = ? AND status = 'queued' AND EXISTS (
+                     SELECT 1 FROM coworker_events origin WHERE origin.id = ?
+                       AND origin.runtime = 'native'
+                       AND origin.app_id = coworker_events.app_id
+                       AND origin.chat_id = coworker_events.chat_id
+                       AND origin.topic_key = coworker_events.topic_key)""",
+                (
+                    origin_event_id,
+                    parent_id,
+                    self.store.clock(),
+                    event_id,
+                    origin_event_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("follow-up no longer belongs to the active task")
+
+    def defer_late_native_steer(self, event_id: int, origin_event_id: int) -> None:
+        self.store.initialize()
+        with self.store.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            now = self.store.clock()
+            origin = conn.execute(
+                """UPDATE coworker_events SET raw_json = json_set(raw_json,
+                     '$._runtime.superseded', json('true')), updated_at = ?
+                   WHERE id = ? AND status = 'processing' AND runtime = 'native'
+                     AND EXISTS (SELECT 1 FROM coworker_events followup WHERE followup.id = ?
+                       AND followup.status = 'queued' AND followup.app_id = coworker_events.app_id
+                       AND followup.chat_id = coworker_events.chat_id
+                       AND followup.topic_key = coworker_events.topic_key)""",
+                (now, origin_event_id, event_id),
+            )
+            conn.execute(
+                """UPDATE coworker_events SET raw_json = json_set(
+                     json_remove(raw_json, '$._runtime.steer_state'),
+                     '$._runtime.steer_checked', json('true'),
+                     '$._runtime.agent_started', json('false'),
+                     '$._runtime.previous_unpublished', json(?)), updated_at = ?
+                   WHERE id = ? AND status = 'queued'""",
+                ("true" if origin.rowcount == 1 else "false", now, event_id),
+            )
 
     def finish_steer(
         self, event_id: int, *, retry: bool = False, error: str | None = None
@@ -658,6 +1298,61 @@ class CoworkerStore:
             ).fetchone()
         return None if row is None else dict(row)
 
+    def rebind_completed_subagent(
+        self,
+        *,
+        child_thread_id: str,
+        parent_thread_id: str,
+        session_id: int,
+        origin_event_id: int,
+        bot_open_id: str,
+    ) -> bool:
+        self.store.initialize()
+        with self.store.connect() as conn:
+            cursor = conn.execute(
+                """UPDATE coworker_subagents SET session_id = ?, origin_event_id = ?,
+                   bot_open_id = ?, child_turn_id = NULL, outcome = NULL, status = 'running',
+                   owner_pid = ?, owner_host = ?, started_at = ?, updated_at = ?
+                   WHERE child_thread_id = ? AND parent_thread_id = ? AND status = 'completed'""",
+                (
+                    session_id,
+                    origin_event_id,
+                    bot_open_id,
+                    os.getpid(),
+                    socket.gethostname(),
+                    self.store.clock(),
+                    self.store.clock(),
+                    child_thread_id,
+                    parent_thread_id,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def rebind_running_subagent(
+        self,
+        *,
+        child_thread_id: str,
+        parent_thread_id: str,
+        session_id: int,
+        origin_event_id: int,
+        bot_open_id: str,
+    ) -> bool:
+        self.store.initialize()
+        with self.store.connect() as conn:
+            cursor = conn.execute(
+                """UPDATE coworker_subagents SET origin_event_id = ?, bot_open_id = ?, updated_at = ?
+                   WHERE child_thread_id = ? AND parent_thread_id = ? AND session_id = ? AND status = 'running'""",
+                (
+                    origin_event_id,
+                    bot_open_id,
+                    self.store.clock(),
+                    child_thread_id,
+                    parent_thread_id,
+                    session_id,
+                ),
+            )
+            return cursor.rowcount == 1
+
     def record_subagent_turn(
         self, child_thread_id: str, turn_id: str, *, outcome: str | None = None
     ) -> bool:
@@ -686,11 +1381,15 @@ class CoworkerStore:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """SELECT s.*, c.app_id, c.chat_id, c.thread_id AS topic_key,
-                          c.backend_session_id, e.message_id AS source_message_id,
-                          e.group_activation_id
+                          c.backend_session_id, COALESCE(original.message_id, e.message_id) AS source_message_id,
+                          COALESCE(t.source_event_id, e.id) AS source_event_id,
+                          COALESCE(t.reply_target, e.message_id) AS reply_target,
+                          t.delivery_id AS transfer_delivery_id, e.group_activation_id, e.runtime AS origin_runtime
                    FROM coworker_subagents s
                    JOIN coworker_sessions c ON c.id = s.session_id
                    JOIN coworker_events e ON e.id = s.origin_event_id
+                   LEFT JOIN coworker_native_transfers t ON t.event_id = e.id
+                   LEFT JOIN coworker_events original ON original.id = t.source_event_id
                    WHERE s.child_thread_id = ?""",
                 (child_thread_id,),
             ).fetchone()
@@ -713,7 +1412,10 @@ class CoworkerStore:
                     "agent_path": row["agent_path"],
                     "child_turn_id": turn_id,
                     "origin_event_id": int(row["origin_event_id"]),
+                    "source_event_id": int(row["source_event_id"]),
                     "source_message_id": row["source_message_id"],
+                    "reply_target": row["reply_target"],
+                    "delivery_id": row["transfer_delivery_id"],
                     "outcome": row["outcome"] or "unknown",
                 },
                 "bot_open_id": row["bot_open_id"],
@@ -721,15 +1423,16 @@ class CoworkerStore:
             }
             cursor = conn.execute(
                 """INSERT OR IGNORE INTO coworker_events(
-                     app_id, message_id, chat_id, topic_key, group_activation_id,
+                     app_id, message_id, chat_id, topic_key, group_activation_id, runtime,
                      raw_json, status, received_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)""",
                 (
                     row["app_id"],
                     message_id,
                     row["chat_id"],
                     row["topic_key"],
                     row["group_activation_id"],
+                    row["origin_runtime"],
                     json.dumps(raw, ensure_ascii=False),
                     now,
                     now,
@@ -737,14 +1440,16 @@ class CoworkerStore:
             )
             return cursor.rowcount == 1
 
-    def running_subagents(self, *, app_id: str, chat_id: str) -> list[dict[str, Any]]:
+    def running_subagents(
+        self, *, app_id: str, chat_id: str | None
+    ) -> list[dict[str, Any]]:
         self.store.initialize()
         with self.store.connect() as conn:
             rows = conn.execute(
                 """SELECT s.* FROM coworker_subagents s
                    JOIN coworker_sessions c ON c.id = s.session_id
-                   WHERE c.app_id = ? AND c.chat_id = ? AND s.status = 'running'""",
-                (app_id, chat_id),
+                   WHERE c.app_id = ? AND (? IS NULL OR c.chat_id = ?) AND s.status = 'running'""",
+                (app_id, chat_id, chat_id),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -756,9 +1461,14 @@ class CoworkerStore:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """SELECT s.*, c.app_id, c.chat_id, c.thread_id AS topic_key,
-                          e.message_id AS source_message_id, e.group_activation_id
+                          COALESCE(original.message_id, e.message_id) AS source_message_id,
+                          COALESCE(t.source_event_id, e.id) AS source_event_id,
+                          COALESCE(t.reply_target, e.message_id) AS reply_target,
+                          t.delivery_id AS transfer_delivery_id, e.group_activation_id, e.runtime AS origin_runtime
                    FROM coworker_subagents s JOIN coworker_sessions c ON c.id = s.session_id
                    JOIN coworker_events e ON e.id = s.origin_event_id
+                   LEFT JOIN coworker_native_transfers t ON t.event_id = e.id
+                   LEFT JOIN coworker_events original ON original.id = t.source_event_id
                    WHERE s.child_thread_id = ? AND s.status = 'running'""",
                 (child_thread_id,),
             ).fetchone()
@@ -772,7 +1482,10 @@ class CoworkerStore:
                     "agent_path": row["agent_path"],
                     "child_turn_id": turn_id,
                     "origin_event_id": row["origin_event_id"],
+                    "source_event_id": row["source_event_id"],
                     "source_message_id": row["source_message_id"],
+                    "reply_target": row["reply_target"],
+                    "delivery_id": row["transfer_delivery_id"],
                     "outcome": "interrupted_unknown",
                 },
                 "bot_open_id": row["bot_open_id"],
@@ -785,15 +1498,16 @@ class CoworkerStore:
             )
             conn.execute(
                 """INSERT OR IGNORE INTO coworker_events(
-                     app_id, message_id, chat_id, topic_key, group_activation_id,
+                     app_id, message_id, chat_id, topic_key, group_activation_id, runtime,
                      raw_json, status, error, received_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, 'needs_review', 'subagent_outcome_unknown', ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'needs_review', 'subagent_outcome_unknown', ?, ?)""",
                 (
                     row["app_id"],
                     f"{SUBAGENT_EVENT_PREFIX}{child_thread_id}:{turn_id}",
                     row["chat_id"],
                     row["topic_key"],
                     row["group_activation_id"],
+                    row["origin_runtime"],
                     json.dumps(raw, ensure_ascii=False),
                     now,
                     now,
@@ -827,22 +1541,60 @@ class CoworkerStore:
                 (self.store.clock(), event_id),
             )
 
+    def defer_event_until(self, event_id: int, retry_after: str) -> None:
+        self.store.initialize()
+        with self.store.connect() as conn:
+            cursor = conn.execute(
+                """UPDATE coworker_events SET status = 'queued',
+                   raw_json = json_set(raw_json, '$._runtime.retry_after', ?), updated_at = ?
+                   WHERE id = ? AND status = 'processing'""",
+                (retry_after, self.store.clock(), event_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("event is no longer processing")
+
     def scrub_expired_payloads(
         self, *, cutoff: str, dry_run: bool, protect_pending: bool = False
     ) -> int:
         self.store.initialize()
         with self.store.connect() as conn:
+            conn.execute("BEGIN" if dry_run else "BEGIN IMMEDIATE")
             rows = conn.execute(
-                "SELECT id FROM coworker_events WHERE raw_json IS NOT NULL AND status != 'processing' AND julianday(received_at) < julianday(?) AND (? = 0 OR status NOT IN ('queued', 'needs_review'))",
+                """SELECT id, status, CASE WHEN json_valid(raw_json)
+                     THEN json_type(raw_json, '$._runtime.batch_context') = 'array' ELSE 0 END AS batch_context
+                   FROM coworker_events WHERE raw_json IS NOT NULL AND status != 'processing'
+                     AND julianday(received_at) < julianday(?)
+                     AND (? = 0 OR status NOT IN ('queued', 'needs_review'))""",
                 (cutoff, int(protect_pending)),
             ).fetchall()
+            candidates: list[sqlite3.Row] = []
+            for row in rows:
+                if row["status"] == "completed" and row["batch_context"]:
+                    pending = conn.execute(
+                        """SELECT EXISTS(SELECT 1 FROM coworker_subagents
+                               WHERE origin_event_id = ? AND status IN ('running', 'needs_review'))
+                           OR EXISTS(SELECT 1 FROM coworker_events
+                               WHERE status IN ('queued', 'processing', 'needs_review')
+                                 AND CASE WHEN json_valid(raw_json)
+                                     THEN json_extract(raw_json, '$._internal.origin_event_id') END = ?)""",
+                        (row["id"], row["id"]),
+                    ).fetchone()[0]
+                    if pending:
+                        continue
+                candidates.append(row)
             if not dry_run:
-                for row in rows:
-                    conn.execute(
-                        "UPDATE coworker_events SET raw_json = NULL, status = 'needs_review', error = 'content_expired', updated_at = ? WHERE id = ?",
-                        (self.store.clock(), row["id"]),
-                    )
-        return len(rows)
+                for row in candidates:
+                    if row["status"] == "completed" and row["batch_context"]:
+                        conn.execute(
+                            "UPDATE coworker_events SET raw_json = NULL, updated_at = ? WHERE id = ?",
+                            (self.store.clock(), row["id"]),
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE coworker_events SET raw_json = NULL, status = 'needs_review', error = 'content_expired', updated_at = ? WHERE id = ?",
+                            (self.store.clock(), row["id"]),
+                        )
+        return len(candidates)
 
     def match_delegation(
         self,

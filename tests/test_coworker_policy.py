@@ -47,6 +47,26 @@ def test_coworker_requires_a_single_explicit_chat() -> None:
         CoworkerConfig(enabled=True)
 
 
+def test_new_memory_default_preserves_existing_sqlite_policy(tmp_path: Path) -> None:
+    assert CoworkerConfig().memory_maintenance is False
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    config = AppConfig(
+        owner=OwnerConfig(open_id="owner"),
+        coworker=CoworkerConfig(enabled=True, chat_id="group"),
+    )
+    store.import_product_policy_from_config(config)
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE product_policies SET policy_json = json_remove(policy_json, '$.memory_maintenance') WHERE key = ?",
+            (COWORKER_POLICY_KEY,),
+        )
+    assert store.get_product_policy(COWORKER_POLICY_KEY)["memory_maintenance"] is True  # type: ignore[index]
+    updated = store.update_coworker_policy(
+        {"history_source": "local_cache"}, actor="test"
+    )
+    assert updated["policy"]["memory_maintenance"] is True
+
+
 def test_daily_schedule_accepts_legacy_interval_but_does_not_reuse_it() -> None:
     legacy = CoworkerConfig.model_validate(
         {"memory_maintenance_interval_seconds": 21600}

@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
 from .time_utils import format_instant, normalize_instant
@@ -43,7 +43,12 @@ def mention_details(value: object) -> list[dict[str, str]]:
             for key, field in (
                 ("key", item.get("key")),
                 ("name", item.get("name")),
-                ("open_id", nested.get("open_id") or item.get("open_id")),
+                (
+                    "open_id",
+                    nested.get("open_id")
+                    or item.get("open_id")
+                    or (identifier if isinstance(identifier, str) else None),
+                ),
             )
             if isinstance(field, str) and field
         }
@@ -52,7 +57,37 @@ def mention_details(value: object) -> list[dict[str, str]]:
     return result
 
 
-def message_content_fingerprint(raw: dict[str, Any]) -> str | None:
+def mention_identifiers(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for mention in cast(list[object], value):
+        if isinstance(mention, str):
+            result.append(mention)
+        elif isinstance(mention, dict):
+            item = cast(dict[str, Any], mention)
+            identifier: object = item.get("id")
+            nested = (
+                cast(dict[str, Any], identifier) if isinstance(identifier, dict) else {}
+            )
+            selected: object = (
+                nested.get("open_id")
+                or item.get("open_id")
+                or (identifier if isinstance(identifier, str) else None)
+            )
+            if isinstance(selected, str):
+                result.append(selected)
+            if item.get("key") == "@_all":
+                result.append("@_all")
+    return list(dict.fromkeys(result))
+
+
+def message_content_fingerprint(
+    raw: dict[str, Any],
+    *,
+    include_mentions: bool = False,
+    mention_version: Literal[2, 3] = 3,
+) -> str | None:
     """Fingerprint the content returned by the same Feishu read API twice."""
     content = raw.get("content")
     if not isinstance(content, (str, dict, list)):
@@ -63,10 +98,50 @@ def message_content_fingerprint(raw: dict[str, Any]) -> str | None:
         "content": cast(Any, content),
         "message_type": first_string(raw, "msg_type", "message_type"),
     }
+    if include_mentions:
+        mentions = raw.get("mentions")
+        if mention_version == 2:
+            value["mentions"] = sorted(mention_identifiers(mentions))
+        else:
+            items = cast(list[object], mentions) if isinstance(mentions, list) else []
+            bindings: list[tuple[str, tuple[str, ...]]] = []
+            for item in items:
+                entry = cast(dict[str, Any], item) if isinstance(item, dict) else {}
+                key = entry.get("key")
+                bindings.append(
+                    (
+                        key if isinstance(key, str) else "",
+                        tuple(sorted(mention_identifiers([cast(object, item)]))),
+                    )
+                )
+            value["mentions"] = sorted(bindings)
     encoded = json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return f"v{mention_version}:{digest}" if include_mentions else digest
+
+
+def message_content_matches(raw: dict[str, Any], expected: object) -> bool:
+    return (
+        isinstance(expected, str)
+        and bool(expected)
+        and message_content_fingerprint(
+            raw,
+            include_mentions=expected.startswith(("v2:", "v3:")),
+            mention_version=2 if expected.startswith("v2:") else 3,
+        )
+        == expected
+    )
+
+
+def message_snapshot_matches(raw: dict[str, Any], saved: dict[str, Any]) -> bool:
+    return message_content_matches(
+        raw, saved.get("coworker_source_content_sha256")
+    ) and (
+        "coworker_source_update_time" not in saved
+        or raw.get("update_time") == saved.get("coworker_source_update_time")
+    )
 
 
 def normalize_message_sent_at(value: str | None) -> str | None:
@@ -88,8 +163,13 @@ def normalize_message_sent_at(value: str | None) -> str | None:
 
 
 class MessageNormalizer:
-    def __init__(self, *, owner_open_id: str):
+    def __init__(
+        self, *, owner_open_id: str, mention_target_open_id: str | None = None
+    ):
         self.owner_open_id = owner_open_id
+        self.mention_target_open_id = (
+            owner_open_id if mention_target_open_id is None else mention_target_open_id
+        )
 
     def normalize(
         self, raw: dict[str, Any], *, default_chat_type: str | None = None
@@ -167,7 +247,9 @@ class MessageNormalizer:
         mentions = _mentions(raw, content)
         at_all = _is_at_all(raw, text, mentions)
         direct_mention = bool(
-            raw.get("is_at_me") or raw.get("isAtMe") or self.owner_open_id in mentions
+            raw.get("is_at_me")
+            or raw.get("isAtMe")
+            or self.mention_target_open_id in mentions
         )
         if at_all:
             direct_mention = False

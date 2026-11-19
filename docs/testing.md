@@ -61,13 +61,16 @@ uv run --locked pytest -q tests/test_reply_style.py
 Operator Console 前端验证：
 
 ```bash
-npm --prefix frontend/operator-console install
+npm --prefix frontend/operator-console ci
 npm --prefix frontend/operator-console run lint
 npm --prefix frontend/operator-console test
 npm --prefix frontend/operator-console run typecheck
 npm --prefix frontend/operator-console run build
-npm --prefix frontend/operator-console audit --audit-level=high --registry=https://registry.npmjs.org
+node --test .github/scripts/frontend-audit.test.mjs
+node .github/scripts/frontend-audit.mjs
 ```
+
+前端审计使用 npm 的高危门禁；若 npm 仍报告已撤回的 `GHSA-fc5q-39xc-vjpf`，会向 GitHub 核实撤回状态，仅排除这条公告。查询失败或发现其他高危问题时审计失败。GitHub 匿名查询被限流时可设置 `GITHUB_TOKEN`。
 
 Operator Console 发布产物验证：
 

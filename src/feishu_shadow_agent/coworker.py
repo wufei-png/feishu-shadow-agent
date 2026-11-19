@@ -35,7 +35,9 @@ from .jsonl import JSONLLogger
 from .message_normalization import (
     MessageNormalizer,
     mention_details,
+    mention_identifiers,
     message_content_fingerprint,
+    message_snapshot_matches,
 )
 from .paths import resolve_agent_working_dir, resolve_relative_path
 from .policy import PolicyResolver
@@ -59,7 +61,13 @@ class CoworkerFeishu(Protocol):
     ) -> MessagePage: ...
 
     def list_thread_messages(
-        self, *, thread_id: str, page_size: int, as_identity: str, order: str
+        self,
+        *,
+        thread_id: str,
+        page_size: int,
+        as_identity: str,
+        order: str,
+        page_token: str | None = None,
     ) -> MessagePage: ...
 
     def list_chat_messages(
@@ -71,6 +79,7 @@ class CoworkerFeishu(Protocol):
         page_size: int,
         as_identity: str,
         order: str,
+        page_token: str | None = None,
     ) -> MessagePage: ...
 
 
@@ -188,6 +197,11 @@ class CoworkerService:
         policy = CoworkerConfig.model_validate(raw)
         return policy if policy.enabled else None
 
+    def _message_normalizer(self, bot_id: str) -> MessageNormalizer:
+        return MessageNormalizer(
+            owner_open_id=self.config.owner.open_id, mention_target_open_id=bot_id
+        )
+
     def _matches_startup_policy(self, policy: CoworkerConfig | None) -> bool:
         return (
             policy is not None
@@ -221,6 +235,11 @@ class CoworkerService:
         if self.execution_mode == "dry_run":
             path = path.with_name(path.name + ".dry-run")
         return SharedMemory(path)
+
+    def run_memory_task(
+        self, backend: CoworkerBackend, prompt: str, cwd: Path
+    ) -> AgentRunResult:
+        return backend.natural_task_session(prompt, session_id=None, cwd=cwd)
 
     def receive(self, raw: dict[str, Any], bot_open_id: str) -> None:
         policy = self.current_policy()
@@ -444,10 +463,10 @@ class CoworkerService:
                 )
                 backend = self.backend_factory(self.config, policy, self.base_dir)
                 agent_started = True
-                result = backend.natural_task_session(
+                result = self.run_memory_task(
+                    backend,
                     prompt,
-                    session_id=None,
-                    cwd=resolve_agent_working_dir(
+                    resolve_agent_working_dir(
                         self.config.agent_backend.working_dir, self.base_dir
                     ),
                 )
@@ -541,7 +560,7 @@ class CoworkerService:
         bot_id = event.raw.get("bot_open_id")
         if not isinstance(bot_id, str) or not bot_id:
             raise ValueError("coworker bot identity is missing")
-        normalizer = MessageNormalizer(owner_open_id=bot_id)
+        normalizer = self._message_normalizer(bot_id)
         raw_message = event_message_from_raw(raw_event, bot_id=bot_id)
         message = normalizer.normalize(raw_message, default_chat_type="group")
         if message.sender_id == bot_id:
@@ -798,7 +817,7 @@ class CoworkerService:
         except _SourceUnavailable as exc:
             # The model has already run; replaying it could duplicate tool calls.
             raise RuntimeError("coworker reply target snapshot unavailable") from exc
-        message = MessageNormalizer(owner_open_id=bot_id).normalize(
+        message = self._message_normalizer(bot_id).normalize(
             raw, default_chat_type="group"
         )
         upsert = self.store.upsert_message_with_revision(message)
@@ -1015,7 +1034,13 @@ class CoworkerService:
                 self.wake()
 
     def _enrich_message(
-        self, raw_message: dict[str, Any], message_id: str, chat_id: str, bot_id: str
+        self,
+        raw_message: dict[str, Any],
+        message_id: str,
+        chat_id: str,
+        bot_id: str,
+        *,
+        expected_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:
             page = self.feishu.get_messages(as_identity="bot", message_ids=[message_id])
@@ -1030,7 +1055,11 @@ class CoworkerService:
             enriched = dict(raw_message)
             if item.get("is_deleted") or item.get("deleted"):
                 raise ValueError("coworker source message was deleted")
-            fingerprint = message_content_fingerprint(item)
+            if expected_snapshot is not None and not message_snapshot_matches(
+                item, expected_snapshot
+            ):
+                raise ValueError("coworker source snapshot changed")
+            fingerprint = message_content_fingerprint(item, include_mentions=True)
             if fingerprint is None:
                 raise ValueError("coworker source message content is unavailable")
             # The event can already be stale. Feed the model the current content
@@ -1047,24 +1076,20 @@ class CoworkerService:
                 enriched["content"] = {"text": item["text"]}
             if item.get("msg_type"):
                 enriched["message_type"] = item["msg_type"]
-            if isinstance(item.get("mentions"), list):
-                mentions: list[str] = []
-                details = mention_details(item["mentions"])
-                if details:
-                    enriched["mention_details"] = details
-                for mention in cast(list[Any], item["mentions"]):
-                    if isinstance(mention, str):
-                        mentions.append(mention)
-                    elif isinstance(mention, dict):
-                        mention_map = cast(dict[str, Any], mention)
-                        identifier = _mapping(mention_map.get("id"))
-                        value = identifier.get("open_id") or mention_map.get("open_id")
-                        if isinstance(value, str):
-                            mentions.append(value)
-                        if mention_map.get("key") == "@_all":
-                            mentions.append("@_all")
-                enriched["mentions"] = mentions
-                enriched["is_at_me"] = bot_id in mentions
+            snapshot_mentions = item.get("mentions", [])
+            if not isinstance(snapshot_mentions, list):
+                raise ValueError("coworker source mentions are invalid")
+            mention_items = cast(list[object], snapshot_mentions)
+            mentions = mention_identifiers(mention_items)
+            details = mention_details(mention_items)
+            for key in ("ats", "isAtMe", "at_all", "atAll", "mention_details"):
+                enriched.pop(key, None)
+            if details:
+                enriched["mention_details"] = details
+            enriched["mentions"] = mentions
+            enriched["is_at_me"] = bot_id in mentions or (
+                bool(self.app_id) and self.app_id in mentions
+            )
             for key in ("message_position", "thread_message_position", "thread_id"):
                 if item.get(key) is not None:
                     enriched[key] = item[key]
@@ -1352,7 +1377,7 @@ class CoworkerWorker:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._threads: list[threading.Thread] = []
-        self._steer_thread: threading.Thread | None = None
+        self._steer_threads: list[threading.Thread] = []
         self._memory_thread: threading.Thread | None = None
         self._server_started = False
         self._server_health_lock = threading.Lock()
@@ -1415,11 +1440,18 @@ class CoworkerWorker:
         self._thread = self._threads[0]
         for thread in self._threads:
             thread.start()
+        self._steer_threads = []
         if server is not None:
-            self._steer_thread = threading.Thread(
-                target=self._run_steering, name="feishu-coworker-steer", daemon=True
-            )
-            self._steer_thread.start()
+            self._steer_threads = [
+                threading.Thread(
+                    target=self._run_steering,
+                    name=f"feishu-coworker-steer-{index}",
+                    daemon=True,
+                )
+                for index in range(self._steer_worker_count(count))
+            ]
+            for thread in self._steer_threads:
+                thread.start()
         self._memory_thread = threading.Thread(
             target=self._run_memory, name="feishu-coworker-memory", daemon=True
         )
@@ -1433,8 +1465,8 @@ class CoworkerWorker:
         self.request_stop()
         for thread in self._threads:
             thread.join()
-        if self._steer_thread is not None:
-            self._steer_thread.join()
+        for thread in self._steer_threads:
+            thread.join()
         if self._memory_thread is not None:
             self._memory_thread.join()
         server = self.service.app_server
@@ -1451,9 +1483,7 @@ class CoworkerWorker:
                     internal_only=True
                 ):
                     continue
-                children = self.service.events.running_subagents(
-                    app_id=self.service.app_id, chat_id=chat_id
-                )
+                children = self._running_subagents(chat_id)
                 if not children:
                     break
                 if time.monotonic() >= deadline or not server.is_healthy():
@@ -1471,6 +1501,14 @@ class CoworkerWorker:
         finally:
             server.close()
             self._server_started = False
+
+    def _running_subagents(self, chat_id: str) -> list[dict[str, Any]]:
+        return self.service.events.running_subagents(
+            app_id=self.service.app_id, chat_id=chat_id
+        )
+
+    def _steer_worker_count(self, topic_workers: int) -> int:
+        return 1
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -1511,7 +1549,7 @@ class CoworkerWorker:
                 if (
                     self._server_allows_processing()
                     and self.runtime_allows_processing()
-                    and self.service.process_next_steer()
+                    and self._process_steering()
                 ):
                     continue
             except Exception as exc:  # noqa: BLE001
@@ -1520,6 +1558,9 @@ class CoworkerWorker:
                     data={"error_type": type(exc).__name__},
                 )
             self._stop.wait(timeout=0.25)
+
+    def _process_steering(self) -> bool:
+        return self.service.process_next_steer()
 
     def _server_allows_processing(self) -> bool:
         server, chat_id = self.service.app_server, self.service.startup_chat_id
@@ -1542,9 +1583,7 @@ class CoworkerWorker:
                 self._server_failure_reported = True
                 self.wake_daemon()
         if chat_id is not None:
-            for child in self.service.events.running_subagents(
-                app_id=self.service.app_id, chat_id=chat_id
-            ):
+            for child in self._running_subagents(chat_id):
                 self.service.events.mark_subagent_uncertain(
                     str(child["child_thread_id"])
                 )
@@ -1584,7 +1623,7 @@ def event_message_from_raw(raw: dict[str, Any], *, bot_id: str) -> dict[str, Any
     for mention in mention_items:
         item = _mapping(mention)
         identifier = _mapping(item.get("id"))
-        value = identifier.get("open_id") or item.get("open_id")
+        value = identifier.get("open_id") or item.get("open_id") or item.get("id")
         if isinstance(value, str) and value:
             mentions.append(value)
         if item.get("key") == "@_all":

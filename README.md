@@ -47,6 +47,8 @@ uv sync --locked --extra cards
 
 单测试群还可启用公开的 AI 同事模式：普通群按群共享、话题按话题共享会话，默认由 @ 触发并按需回看；Codex 主 Agent 可自主委派后台子 Agent，不同话题可并行。支持模型直发或项目代发、伙伴机器人协作和后台记忆整理。每次 daemon 启动只运行 AI 同事或原影子模式之一，切换需停止、更新生效策略并重启。该模式默认关闭，配置和真实联调前提见 [AI 同事运行与验证](docs/operations/single-group-ai-coworker.md)。
 
+原生运行时入口和推荐配置见 [Codex 直连](docs/operations/codex-native-coworker.md)与 [Hermes Gateway](docs/operations/hermes-coworker.md)。
+
 启动前先把 `config.yaml` 中的策略字段显式导入 Product Policy Store；daemon 运行时只读取 SQLite 中的 Product Policy，未初始化时会 fail closed：
 
 ```bash
@@ -100,7 +102,7 @@ python -m feishu_shadow_agent console --config config.yaml
 
 每次 owner 处理审批都会写一条不可变反馈，区分建议直接发送、编辑后发送、不发送继续关注和不发送结束任务。反馈不会自动修改 Product Policy。默认保留敏感文本 30 天；到期只清空原记录中的敏感字段，保留最小审计元数据，不级联删除任务链记录。仍处于有效 `watch_until` 的 watching task 暂缓清理，具体可通过 `retention` 配置。
 
-从源码修改 `frontend/operator-console/` 后，需要依次运行 `lint`、`test` 和 `build`；build 会把 renderer 重新写入 Python 包内的 bundled static assets。
+从源码修改 `frontend/operator-console/` 后，先运行 `npm --prefix frontend/operator-console ci` 安装锁定依赖，再依次运行 `lint`、`test` 和 `build`；build 会把 renderer 重新写入 Python 包内的 bundled static assets。
 
 ## 测试
 
