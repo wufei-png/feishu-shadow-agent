@@ -1517,6 +1517,36 @@ def test_queued_request_and_its_followup_both_reach_the_model(tmp_path: Path) ->
     assert len(server.prompts) == 2 and "应该检查 2.0" in server.prompts[1]
 
 
+def test_followup_arriving_before_reply_receipt_is_not_lost(tmp_path: Path) -> None:
+    service, feishu, server = _service(tmp_path)
+    _receive(service, feishu, "request", location="thread", text="检查 1.0")
+    assert service.process_next()
+    _receive(
+        service,
+        feishu,
+        "followup",
+        location="thread",
+        parent="request",
+        mention=False,
+        text="更正：应该检查 2.0",
+    )
+    while service.process_next():
+        pass
+    assert len(server.prompts) == 2 and "应该检查 2.0" in server.prompts[1]
+
+
+def test_reply_to_old_user_request_after_delivery_stays_silent(tmp_path: Path) -> None:
+    service, feishu, server = _service(tmp_path)
+    _receive(service, feishu, "request", location="thread")
+    assert service.process_next() and service.process_next()
+    _receive(
+        service, feishu, "later", location="thread", parent="request", mention=False
+    )
+    while service.process_next():
+        pass
+    assert len(server.prompts) == 1
+
+
 def test_reply_to_an_unaddressed_group_message_stays_silent(tmp_path: Path) -> None:
     service, feishu, server = _service(tmp_path)
     _receive(service, feishu, "ordinary", location="thread", mention=False)

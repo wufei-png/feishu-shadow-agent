@@ -181,7 +181,11 @@ class CoworkerStore:
                 origin = conn.execute(
                     """SELECT origin.id FROM coworker_events origin
                        WHERE origin.app_id = ? AND origin.chat_id = ?
-                         AND origin.runtime = 'native' AND origin.status = 'processing' AND (
+                         AND origin.runtime = 'native' AND (
+                           origin.status = 'processing' OR (origin.status = 'completed' AND EXISTS (
+                             SELECT 1 FROM coworker_native_deliveries delivery
+                             WHERE delivery.event_id = origin.id
+                               AND delivery.status IN ('pending', 'sending', 'needs_review')))) AND (
                            origin.message_id = ? OR CASE WHEN json_valid(origin.raw_json) THEN
                              ? IN (json_extract(origin.raw_json, '$._internal.source_message_id'),
                                    json_extract(origin.raw_json, '$._internal.reply_target'))
