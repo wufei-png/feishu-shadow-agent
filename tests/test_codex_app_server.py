@@ -45,12 +45,8 @@ for line in sys.stdin:
         if params['input'][0]['text'] == 'dry-run-safety':
             assert params.get('approvalPolicy') == 'never'
             assert params.get('sandboxPolicy') == {'type': 'readOnly', 'networkAccess': False}
-        if params['input'][0]['text'] == 'production-safety':
-            assert params.get('approvalPolicy') == 'never'
-            policy = params['sandboxPolicy']
-            assert policy['type'] == 'workspaceWrite' and policy['networkAccess'] is False
-            assert policy['excludeSlashTmp'] and policy['excludeTmpdirEnvVar']
-            assert len(policy.get('writableRoots', [])) == 1
+        if params['input'][0]['text'] == 'production-native-tools':
+            assert 'approvalPolicy' not in params and 'sandboxPolicy' not in params
         thread = params['threadId']
         emit({'id': ident, 'result': {'turn': {'id': 'turn-1'}}})
         emit({'method': 'turn/started', 'params': {'threadId': thread, 'turn': {'id': 'turn-1'}}})
@@ -196,6 +192,7 @@ def test_dry_run_disables_native_tools_on_start_and_resume(tmp_path: Path) -> No
         skill_names=[],
         explicit_context_paths=[],
         on_notification=lambda _event: None,
+        on_read_topic=lambda _thread, _topic, _token, _turn, _active: {},
     )
     server.start()
     try:
@@ -230,9 +227,10 @@ def test_dry_run_disables_native_tools_on_start_and_resume(tmp_path: Path) -> No
         assert config["features.shell_tool"] is False
         assert config["features.unified_exec"] is False
         assert config["features.apps"] is False
+        assert "dynamicTools" not in request["params"]
 
 
-def test_production_sandbox_keeps_local_tools_but_disables_network_and_mcp(
+def test_production_inherits_native_tools_on_start_resume_and_reload(
     tmp_path: Path,
 ) -> None:
     server = CodexAppServer(
@@ -240,15 +238,13 @@ def test_production_sandbox_keeps_local_tools_but_disables_network_and_mcp(
         skill_names=[],
         explicit_context_paths=[],
         on_notification=lambda _event: None,
-        confine_production=True,
         on_read_topic=lambda _thread, _topic, _token, _turn, _active: {},
-        writable_roots=[tmp_path / "memory"],
     )
     server.start()
     try:
         for session_id in (None, "thread-1"):
             result = server.run_turn(
-                "production-safety",
+                "production-native-tools",
                 session_id=session_id,
                 cwd=tmp_path,
                 output_model=_Output,
@@ -264,16 +260,10 @@ def test_production_sandbox_keeps_local_tools_but_disables_network_and_mcp(
     ]
     for request in requests:
         params = request["params"]
-        assert (
-            params["sandbox"] == "workspace-write"
-            and params["approvalPolicy"] == "never"
-        )
-        config = params["config"]
-        assert config["mcp_servers.example.enabled"] is False
-        assert config["features.apps"] is False
-        assert (
-            "features.shell_tool" not in config and "features.multi_agent" not in config
-        )
+        assert "sandbox" not in params and "approvalPolicy" not in params
+        config = params.get("config", {})
+        assert not any(key.startswith(("mcp_servers.", "features.")) for key in config)
+        assert "web_search" not in config
     assert requests[0]["params"]["dynamicTools"][0]["name"] == "read_feishu_topic"
 
 
@@ -293,7 +283,6 @@ def test_production_topic_tool_is_dispatched_to_controlled_reader(
         skill_names=[],
         explicit_context_paths=[],
         on_notification=lambda _: None,
-        confine_production=True,
         on_read_topic=read_topic,
     )
     server.start()
@@ -324,7 +313,6 @@ def test_production_group_history_tool_dispatches_active_turn(tmp_path: Path) ->
         skill_names=[],
         explicit_context_paths=[],
         on_notification=lambda _: None,
-        confine_production=True,
         on_read_group=read_group,
     )
     server.start()

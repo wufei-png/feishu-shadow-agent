@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
-import sys
 from _thread import RLock
 from dataclasses import replace
 from datetime import timedelta
@@ -105,62 +103,10 @@ class NativeCoworkerService(CoworkerService):
         self._pending_collab: dict[str, set[str]] = {}
         self._held_completions: dict[str, tuple[str, str]] = {}
         self._session_locks: dict[int, RLock] = {}
-        policy = self.current_policy()
-        self.memory_root = (
-            None
-            if policy is None
-            else resolve_relative_path(
-                policy.shared_memory_path, self.base_dir
-            ).parent.resolve()
-        )
 
     def _session_lock(self, session_id: int) -> RLock:
         with self._app_server_lock:
             return self._session_locks.setdefault(session_id, RLock())
-
-    def validate_workspace(self, cwd: str | Path) -> None:
-        if self.execution_mode == "dry_run":
-            return
-        workspace = Path(cwd).expanduser().resolve()
-        policy = self.current_policy()
-        memory_root = (
-            None
-            if policy is None
-            else resolve_relative_path(
-                policy.shared_memory_path, self.base_dir
-            ).parent.resolve()
-        )
-        if memory_root is None or memory_root != self.memory_root:
-            raise ValueError("coworker memory path changed; restart the native runtime")
-        protected = [
-            self.base_dir,
-            self.store.path,
-            Path(__file__),
-            Path(sys.executable),
-        ]
-        for command, command_base in (
-            (self.config.lark_cli.path or "lark-cli", self.base_dir),
-            (self.config.agent_backend.codex.path or "codex", Path.cwd()),
-            ("node", Path.cwd()),
-        ):
-            if "/" in command:
-                executable = Path(command).expanduser()
-                protected.append(
-                    executable
-                    if executable.is_absolute()
-                    else command_base / executable
-                )
-            elif found := shutil.which(command):
-                protected.append(Path(found))
-        if any(
-            path.absolute().is_relative_to(root) or path.resolve().is_relative_to(root)
-            for path in protected
-            for root in (workspace, memory_root)
-        ):
-            raise ValueError(
-                "Codex working directory and memory directory must not contain the project configuration, database, runtime code, or executables"
-            )
-        memory_root.mkdir(parents=True, exist_ok=True)
 
     def on_app_server_notification(self, notification: dict[str, Any]) -> None:
         method = notification.get("method")
@@ -368,11 +314,8 @@ class NativeCoworkerService(CoworkerService):
             skill_names=runtime.agent_backend.codex.skills,
             explicit_context_paths=runtime.agent_backend.explicit_context.paths,
             on_notification=lambda _event: None,
-            confine_production=True,
-            writable_roots=[] if self.memory_root is None else [self.memory_root],
             on_read_group=self.read_memory_history,
         )
-        self.validate_workspace(cwd)
         server.start()
         try:
             return server.run_turn(
@@ -463,7 +406,6 @@ class NativeCoworkerService(CoworkerService):
             if operation == "releasing":
                 self.app_server.release_thread(thread_id)
             else:
-                self.validate_workspace(str(handoff["agent_working_dir"]))
                 self.app_server.reload_thread(
                     thread_id,
                     private=True,
@@ -792,7 +734,6 @@ class NativeCoworkerService(CoworkerService):
             provider="codex",
             working_dir=working_dir,
         )
-        self.validate_workspace(session.agent_working_dir)
         if self.execution_mode == "dry_run":
             self.native_state.require_dry_run_session(
                 session.id, session.backend_session_id
@@ -1058,7 +999,6 @@ class NativeCoworkerService(CoworkerService):
                 )
             ),
         )
-        self.validate_workspace(session.agent_working_dir)
         if session.backend_session_id:
             raise ValueError("new topic already has a Codex session")
         if self.app_server is None:
@@ -1250,7 +1190,6 @@ class NativeCoworkerService(CoworkerService):
             provider="codex",
             working_dir=str(self.base_dir),
         )
-        self.validate_workspace(session.agent_working_dir)
         server = self.app_server
         if server is None or not session.backend_session_id:
             raise ValueError("subagent parent session is unavailable")

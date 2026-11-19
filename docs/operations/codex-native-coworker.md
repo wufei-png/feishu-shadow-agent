@@ -27,7 +27,7 @@ coworker:
   shared_memory_path: /path/to/coworker-workspace/coworker-memory.md
 ```
 
-首次测试可使用新建的 SQLite 文件。生产工作目录及群记忆所在目录须与项目配置、SQLite、运行代码及飞书 CLI 等可执行文件分开；启动器会检查，新建或恢复每个会话前也会检查其原工作目录。旧策略默认的 `data/coworker-shared-memory.md` 往往和 SQLite 同目录，须先把原记忆文件复制到独立目录，再更新 `coworker.shared_memory_path` 并导入策略；私聊笔记的 `.private` 文件也要一并复制。更新已有策略时，导入命令须加 `--replace`；记忆路径变化后重启运行时。旧会话工作目录不满足条件时，需要先调整配置或数据位置，再恢复该会话。
+首次测试可使用新建的 SQLite 文件。更新已有策略时，导入命令须加 `--replace`。旧会话继续使用原工作目录，群记忆路径由策略中的 `coworker.shared_memory_path` 决定。
 
 导入策略并先运行 dry-run：
 
@@ -43,7 +43,7 @@ uv run --locked python -m feishu_shadow_agent coworker status --config config.ya
 
 dry-run 对 Codex 使用只读、禁网络的 sandbox，关闭 shell、MCP、应用和多 Agent 等工具，并核查 MCP 工具列表；只恢复由此隔离方式创建的 dry-run 会话。
 
-生产会话使用工作目录和独立记忆目录可写、禁网络的 Codex sandbox，关闭外部 MCP、应用和浏览器工具；本地 shell 与原生子 Agent 保留。工作目录以外的 `/tmp` 和 `TMPDIR` 不作为额外可写目录。本群话题和历史分别通过项目提供的 `read_feishu_topic`、`read_feishu_group_history` 只读工具访问，返回内容须属于当前授权群。这些工具在新建直连线程时注册；旧 UUID 如果没有这些工具，保留会话时不能按需调用。真实飞书、子 Agent 和实际部署平台的 sandbox 行为需要独立验收。生产启动去掉 `--dry-run`，仅在上述检查通过且明确准备实发后使用。
+生产会话沿用 Codex 的原生 sandbox、网络、MCP、应用和工具配置。本群话题和历史还可通过项目提供的 `read_feishu_topic`、`read_feishu_group_history` 只读工具访问，返回内容须属于当前授权群。这些工具在新建直连线程时注册；旧 UUID 如果没有这些工具，保留会话时不能按需调用。项目登记自己发布的回复和回执；原生业务工具的副作用受 Codex 自身权限和配置约束。生产启动去掉 `--dry-run`，仅在检查通过且明确准备实发后使用。
 
 ## 消息、关注和记忆
 

@@ -698,12 +698,6 @@ def _handle_daemon(args: argparse.Namespace) -> int:
             chat_layout=chat_layout,
             **service_options,
         )
-        if isinstance(service, NativeCoworkerService):
-            try:
-                service.validate_workspace(agent_working_dir)
-            except ValueError as exc:
-                print(f"coworker error: {exc}", file=sys.stderr)
-                return 2
         if coworker_policy.provider == "codex":
             runtime = coworker_runtime_config(loaded.config, coworker_policy)
             service.app_server = CodexAppServer(
@@ -711,10 +705,6 @@ def _handle_daemon(args: argparse.Namespace) -> int:
                 skill_names=runtime.agent_backend.codex.skills,
                 explicit_context_paths=runtime.agent_backend.explicit_context.paths,
                 on_notification=service.on_app_server_notification,
-                confine_production=native,
-                writable_roots=[service.memory_root]
-                if isinstance(service, NativeCoworkerService) and service.memory_root
-                else None,
                 on_read_topic=service.read_topic
                 if isinstance(service, NativeCoworkerService)
                 else None,

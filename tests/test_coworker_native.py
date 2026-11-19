@@ -397,28 +397,17 @@ def test_topic_read_tool_returns_only_current_group_messages(tmp_path: Path) -> 
         service.read_memory_history("maintenance", None, "turn", True)
 
 
-def test_production_workspace_must_not_contain_runtime_state(
-    tmp_path: Path, monkeypatch: Any
+def test_production_can_use_existing_workspace_containing_runtime_state(
+    tmp_path: Path,
 ) -> None:
-    service, _, _ = _service(tmp_path, dry_run=False)
-    service.validate_workspace(tmp_path / "workspace")
-    with pytest.raises(ValueError, match="must not contain"):
-        service.validate_workspace(tmp_path)
-    service.config.lark_cli.path = str(tmp_path / "workspace" / "lark-cli")
-    with pytest.raises(ValueError, match="executables"):
-        service.validate_workspace(tmp_path / "workspace")
-    service.config.lark_cli.path = None
-    monkeypatch.chdir(tmp_path / "workspace")
-    service.config.agent_backend.codex.path = "bin/codex"
-    with pytest.raises(ValueError, match="executables"):
-        service.validate_workspace(tmp_path / "workspace")
-    service.config.agent_backend.codex.path = None
-    assert service.memory_root is not None
-    service.store.path = service.store.path.replace(
-        service.memory_root / "agent.sqlite3"
-    )
-    with pytest.raises(ValueError, match="memory directory"):
-        service.validate_workspace(tmp_path / "workspace")
+    service, feishu, server = _service(tmp_path, dry_run=False)
+    service.config.agent_backend.working_dir = str(tmp_path)
+    _receive(service, feishu, "request")
+    assert service.process_next()
+    assert server.sessions == [None]
+    with service.store.connect() as conn:
+        row = conn.execute("SELECT agent_working_dir FROM coworker_sessions").fetchone()
+    assert row[0] == str(tmp_path)
 
 
 def test_quote_of_confirmed_reply_triggers_once_and_unmentioned_does_not(

@@ -86,22 +86,18 @@ class CodexAppServer:
         skill_names: list[str],
         explicit_context_paths: list[str],
         on_notification: Callable[[dict[str, Any]], None],
-        confine_production: bool = False,
         on_read_topic: Callable[[str, str, str | None, str, bool], dict[str, Any]]
         | None = None,
         on_read_group: Callable[[str, str | None, str, bool], dict[str, Any]]
         | None = None,
-        writable_roots: list[Path] | None = None,
         request_timeout: float = 30,
     ):
         self.config = config
         self.skill_names = skill_names
         self.explicit_context_paths = explicit_context_paths
         self.on_notification = on_notification
-        self.confine_production = confine_production
         self.on_read_topic = on_read_topic
         self.on_read_group = on_read_group
-        self.writable_roots = writable_roots or []
         self.request_timeout = request_timeout
         self._process: subprocess.Popen[str] | None = None
         self._reader: threading.Thread | None = None
@@ -175,7 +171,6 @@ class CodexAppServer:
         started = time.monotonic()
         thread_id = session_id
         turn: _Turn | None = None
-        confined = self.confine_production and not dry_run_safety
         thread_config: dict[str, Any] = {}
         if private:
             thread_config.update(
@@ -186,16 +181,11 @@ class CodexAppServer:
         try:
             if dry_run_safety:
                 thread_config.update(self._restricted_tool_config(cwd))
-            elif confined:
-                thread_config.update(self._production_config(cwd))
             if thread_id is None:
                 params: dict[str, Any] = {}
                 if dry_run_safety:
                     params.update({"sandbox": "read-only", "approvalPolicy": "never"})
-                elif confined:
-                    params.update(
-                        {"sandbox": "workspace-write", "approvalPolicy": "never"}
-                    )
+                else:
                     dynamic_tools: list[dict[str, Any]] = []
                     if self.on_read_topic is not None:
                         dynamic_tools.append(_READ_TOPIC_TOOL)
@@ -224,14 +214,10 @@ class CodexAppServer:
                     resume_params.update(
                         {"sandbox": "read-only", "approvalPolicy": "never"}
                     )
-                elif confined:
-                    resume_params.update(
-                        {"sandbox": "workspace-write", "approvalPolicy": "never"}
-                    )
                 if thread_config:
                     resume_params["config"] = thread_config
                 self._request("thread/resume", resume_params)
-            if dry_run_safety or confined:
+            if dry_run_safety:
                 self._verify_no_mcp_tools(thread_id)
             on_thread(thread_id)
             turn = _Turn()
@@ -254,19 +240,6 @@ class CodexAppServer:
             if dry_run_safety:
                 params["approvalPolicy"] = "never"
                 params["sandboxPolicy"] = {"type": "readOnly", "networkAccess": False}
-            elif confined:
-                params["approvalPolicy"] = "never"
-                sandbox_policy: dict[str, Any] = {
-                    "type": "workspaceWrite",
-                    "networkAccess": False,
-                    "excludeSlashTmp": True,
-                    "excludeTmpdirEnvVar": True,
-                }
-                if self.writable_roots:
-                    sandbox_policy["writableRoots"] = [
-                        str(root) for root in self.writable_roots
-                    ]
-                params["sandboxPolicy"] = sandbox_policy
             response = self._request("turn/start", params)
             with self._lock:
                 if turn.turn_id is None:
@@ -394,11 +367,8 @@ class CodexAppServer:
             config.update(
                 {"memories.use_memories": False, "memories.generate_memories": False}
             )
-        confined = self.confine_production and not dry_run_safety
         if dry_run_safety:
             config.update(self._restricted_tool_config(cwd))
-        elif confined:
-            config.update(self._production_config(cwd))
         params: dict[str, Any] = {
             "threadId": thread_id,
             "excludeTurns": True,
@@ -407,22 +377,14 @@ class CodexAppServer:
         }
         if dry_run_safety:
             params.update({"sandbox": "read-only", "approvalPolicy": "never"})
-        elif confined:
-            params.update({"sandbox": "workspace-write", "approvalPolicy": "never"})
         response = self._request(
             "thread/resume",
             params,
         )
         if _thread_id(response) != thread_id:
             raise AppServerError("resumed thread ID did not match")
-        if dry_run_safety or confined:
+        if dry_run_safety:
             self._verify_no_mcp_tools(thread_id)
-
-    def _production_config(self, cwd: str | Path | None) -> dict[str, Any]:
-        config = self._restricted_tool_config(cwd)
-        for name in ("shell_tool", "unified_exec", "multi_agent"):
-            config.pop(f"features.{name}")
-        return config
 
     def _restricted_tool_config(self, cwd: str | Path | None) -> dict[str, Any]:
         response = self._request(
