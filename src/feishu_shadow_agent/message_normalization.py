@@ -135,6 +135,15 @@ def message_content_matches(raw: dict[str, Any], expected: object) -> bool:
     )
 
 
+def message_snapshot_matches(raw: dict[str, Any], saved: dict[str, Any]) -> bool:
+    return message_content_matches(
+        raw, saved.get("coworker_source_content_sha256")
+    ) and (
+        "coworker_source_update_time" not in saved
+        or raw.get("update_time") == saved.get("coworker_source_update_time")
+    )
+
+
 def normalize_message_sent_at(value: str | None) -> str | None:
     if value is None:
         return None

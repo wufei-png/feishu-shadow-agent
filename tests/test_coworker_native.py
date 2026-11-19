@@ -570,7 +570,7 @@ def test_changed_source_is_not_sent_and_blocks_only_that_topic(tmp_path: Path) -
     assert service.process_next()
     feishu.messages["first"]["content"] = "edited"
     assert service.process_next()
-    assert not feishu.replies
+    assert len(feishu.replies) == 1 and feishu.replies[0]["dry_run"]
     _receive(service, feishu, "later")
     assert service.process_next()
     _receive(service, feishu, "other-topic", location="thread")
@@ -782,7 +782,7 @@ def test_thread_root_alone_does_not_trigger_reply(tmp_path: Path) -> None:
     assert feishu.sent == 1
 
 
-def test_policy_revocation_during_source_read_blocks_preview_and_send(
+def test_policy_revocation_during_source_read_blocks_send(
     tmp_path: Path,
 ) -> None:
     service, feishu, _server = _service(tmp_path, dry_run=False)
@@ -795,7 +795,8 @@ def test_policy_revocation_during_source_read_blocks_preview_and_send(
 
     feishu.on_get = revoke
     assert service.process_next()
-    assert feishu.replies == []
+    assert len(feishu.replies) == 1 and feishu.replies[0]["dry_run"]
+    assert feishu.sent == 0
 
 
 def test_source_deleted_during_preview_blocks_send(tmp_path: Path) -> None:
@@ -1208,7 +1209,7 @@ def test_changed_watched_context_blocks_batch_delivery(tmp_path: Path) -> None:
     assert service.process_next()
     feishu.messages["update-two"]["content"] = "changed"
     assert service.process_next()
-    assert len(feishu.replies) == 1
+    assert len(feishu.replies) == 2 and all(r["dry_run"] for r in feishu.replies)
     with service.store.connect() as conn:
         assert (
             conn.execute(
@@ -1265,6 +1266,64 @@ def test_native_reply_requiring_owner_uses_existing_approval_queue(
         row["short_id"], actor="owner", execution_mode="dry_run"
     )
     assert result.status == "applied"
+
+
+def test_child_approval_with_supplement_requires_manual_send(tmp_path: Path) -> None:
+    service, feishu, _ = _service(tmp_path, dry_run=False)
+    server = BlockingNativeServer()
+    service.app_server = server  # type: ignore[assignment]
+    _receive(service, feishu, "request", location="main")
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    try:
+        service.on_app_server_notification(
+            {
+                "method": "item/completed",
+                "params": {
+                    "threadId": "active-session",
+                    "item": {
+                        "type": "subAgentActivity",
+                        "kind": "started",
+                        "agentThreadId": "child",
+                    },
+                },
+            }
+        )
+        _receive(
+            service,
+            feishu,
+            "supplement",
+            location="main",
+            parent="request",
+            mention=False,
+            text="补充：只检查 2.0",
+        )
+        assert service.process_next(locating_only=True) and service.process_next_steer()
+    finally:
+        server.release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert service.process_next()
+    server.approval = True
+    for method in ("turn/started", "turn/completed"):
+        service.on_app_server_notification(
+            {
+                "method": method,
+                "params": {
+                    "threadId": "child",
+                    "turn": {"id": "turn", "status": "completed"},
+                },
+            }
+        )
+    assert service.process_next()
+    with service.store.connect() as conn:
+        payload = json.loads(
+            conn.execute(
+                "SELECT payload_json FROM approvals WHERE status = 'pending'"
+            ).fetchone()[0]
+        )
+    assert payload["approvable"] is False
 
 
 def test_disabled_group_auto_reply_requests_approval(tmp_path: Path) -> None:
@@ -1852,8 +1911,9 @@ def test_reply_to_an_unaddressed_group_message_stays_silent(tmp_path: Path) -> N
     assert not server.prompts
 
 
+@pytest.mark.parametrize("change", ["text", "mentions"])
 def test_followup_changed_during_classification_is_not_steered_from_old_text(
-    tmp_path: Path,
+    tmp_path: Path, change: str
 ) -> None:
     service, feishu, _ = _service(tmp_path)
 
@@ -1861,7 +1921,14 @@ def test_followup_changed_during_classification_is_not_steered_from_old_text(
         def run_turn(self, prompt: str, **kwargs: Any) -> AgentRunResult:
             result = super().run_turn(prompt, **kwargs)
             if kwargs["output_model"] is SteerDecision:
-                feishu.messages["followup"]["content"] = "版本应为 3.0"
+                if change == "text":
+                    feishu.messages["followup"]["content"] = "版本应为 3.0"
+                else:
+                    mentions = feishu.messages["followup"]["mentions"]
+                    mentions[0]["id"], mentions[1]["id"] = (
+                        mentions[1]["id"],
+                        mentions[0]["id"],
+                    )
             return result
 
     server = EditingServer()
@@ -1880,6 +1947,11 @@ def test_followup_changed_during_classification_is_not_steered_from_old_text(
             mention=False,
             text="版本应为 2.0",
         )
+        if change == "mentions":
+            feishu.messages["followup"]["mentions"] = [
+                {"id": "u1", "key": "@_user_1", "name": "同事"},
+                {"id": "u2", "key": "@_user_2", "name": "同事"},
+            ]
         assert service.process_next()
         assert not service.process_next_steer()
         assert not server.steers
@@ -1894,7 +1966,8 @@ def test_followup_changed_during_classification_is_not_steered_from_old_text(
             "SELECT status FROM coworker_events WHERE message_id = 'followup'"
         ).fetchone()[0]
     assert state == "completed"
-    assert any("版本应为 3.0" in prompt for prompt in server.prompts)
+    if change == "text":
+        assert any("版本应为 3.0" in prompt for prompt in server.prompts)
 
 
 @pytest.mark.parametrize("finish_before_steer", [False, True])
@@ -3467,7 +3540,8 @@ def test_followup_candidates_include_origin_that_starts_after_ingress(
 
 
 @pytest.mark.parametrize(
-    "change", ["none", "before-start", "before-reply", "before-child"]
+    "change",
+    ["none", "before-start", "before-start-mention", "before-reply", "before-child"],
 )
 def test_transfer_preserves_accepted_supplement_and_checks_its_revision(
     tmp_path: Path, change: str
@@ -3497,6 +3571,11 @@ def test_transfer_preserves_accepted_supplement_and_checks_its_revision(
             parent="request",
             text="补充：只检查 2.0",
         )
+        if change == "before-start-mention":
+            feishu.messages["supplement"]["mentions"] = [
+                {"id": "u1", "key": "@_user_1", "name": "同事"},
+                {"id": "u2", "key": "@_user_2", "name": "同事"},
+            ]
         assert service.process_next() and service.process_next_steer()
     finally:
         server.release.set()
@@ -3506,8 +3585,11 @@ def test_transfer_preserves_accepted_supplement_and_checks_its_revision(
     assert feishu.sent == 1
     if change == "before-start":
         feishu.messages["supplement"]["content"] = "补充：检查 3.0"
+    elif change == "before-start-mention":
+        mentions = feishu.messages["supplement"]["mentions"]
+        mentions[0]["id"], mentions[1]["id"] = mentions[1]["id"], mentions[0]["id"]
     assert service.process_next()
-    if change == "before-start":
+    if change in {"before-start", "before-start-mention"}:
         assert len(server.prompts) == 1
         with service.store.connect() as conn:
             status = conn.execute(

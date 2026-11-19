@@ -37,6 +37,7 @@ from .message_normalization import (
     mention_details,
     mention_identifiers,
     message_content_fingerprint,
+    message_snapshot_matches,
 )
 from .paths import resolve_agent_working_dir, resolve_relative_path
 from .policy import PolicyResolver
@@ -1033,7 +1034,13 @@ class CoworkerService:
                 self.wake()
 
     def _enrich_message(
-        self, raw_message: dict[str, Any], message_id: str, chat_id: str, bot_id: str
+        self,
+        raw_message: dict[str, Any],
+        message_id: str,
+        chat_id: str,
+        bot_id: str,
+        *,
+        expected_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:
             page = self.feishu.get_messages(as_identity="bot", message_ids=[message_id])
@@ -1048,6 +1055,10 @@ class CoworkerService:
             enriched = dict(raw_message)
             if item.get("is_deleted") or item.get("deleted"):
                 raise ValueError("coworker source message was deleted")
+            if expected_snapshot is not None and not message_snapshot_matches(
+                item, expected_snapshot
+            ):
+                raise ValueError("coworker source snapshot changed")
             fingerprint = message_content_fingerprint(item, include_mentions=True)
             if fingerprint is None:
                 raise ValueError("coworker source message content is unavailable")

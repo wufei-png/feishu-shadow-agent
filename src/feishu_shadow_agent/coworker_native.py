@@ -40,7 +40,7 @@ from .coworker_store import (
     CoworkerEvent,
 )
 from .dispatcher import _extract_message_id  # pyright: ignore[reportPrivateUsage]
-from .message_normalization import message_content_matches
+from .message_normalization import message_snapshot_matches
 from .paths import resolve_agent_working_dir, resolve_relative_path
 from .policy import PolicyResolver
 from .processing import ApprovalService, SendComposer
@@ -608,6 +608,7 @@ class NativeCoworkerService(CoworkerService):
             if saved.requires_confirmation or saved.is_deleted:
                 raise ValueError("steer source revision cannot be verified")
             source_revision = saved.revision
+            classified_snapshot = snapshot_evidence(message.raw)
             origin_message_id = (
                 active_internal.get("source_message_id") or current["message_id"]
             )
@@ -656,6 +657,7 @@ class NativeCoworkerService(CoworkerService):
                 verified.requires_confirmation
                 or verified.is_deleted
                 or verified.revision != source_revision
+                or snapshot_evidence(message.raw) != classified_snapshot
             ):
                 self.events.skip_native_steer(event.id)
                 return False
@@ -1176,7 +1178,7 @@ class NativeCoworkerService(CoworkerService):
                 ),
             ).fetchone()
             context = conn.execute(
-                """SELECT c.message_id, c.revision, m.raw_json, m.revision AS current_revision,
+                """SELECT c.message_id, c.revision, c.snapshot_json, m.raw_json, m.revision AS current_revision,
                           m.is_deleted, m.chat_id
                    FROM coworker_native_transfers t
                    JOIN coworker_native_delivery_context c ON c.delivery_id = t.delivery_id
@@ -1206,8 +1208,17 @@ class NativeCoworkerService(CoworkerService):
             ):
                 raise ValueError("topic transfer context changed")
             supplement_raw = _mapping(json.loads(str(item["raw_json"])))
+            expected_snapshot = (
+                _mapping(json.loads(str(item["snapshot_json"])))
+                if item["snapshot_json"]
+                else supplement_raw
+            )
             supplement_raw = self._enrich_message(
-                supplement_raw, str(item["message_id"]), event.chat_id, str(bot)
+                supplement_raw,
+                str(item["message_id"]),
+                event.chat_id,
+                str(bot),
+                expected_snapshot=expected_snapshot,
             )
             supplement = self._message_normalizer(str(bot)).normalize(
                 supplement_raw, default_chat_type="group"
@@ -1583,7 +1594,9 @@ class NativeCoworkerService(CoworkerService):
                     target_message_id=reply_target,
                     text=composed.text,
                     reason=output.approval_reason or disabled_reason,
-                    manual_only=private or reply_target != message.message_id,
+                    manual_only=private
+                    or reply_target != message.message_id
+                    or bool(context),
                 )
             return
         self._queue_native_reply(
@@ -1874,8 +1887,6 @@ class NativeCoworkerService(CoworkerService):
                 ),
                 *delivery.context_sources,
             ]
-            self._validate_source_snapshots(delivery.chat_id, sources)
-            self._validate_delivery(delivery)
             client = cast(_ReplyClient, self.feishu)
             preview = client.reply_message(
                 as_identity="bot",
@@ -1887,11 +1898,11 @@ class NativeCoworkerService(CoworkerService):
             )
             if not preview.ok:
                 raise RuntimeError("reply dry-run validation failed")
+            self._validate_source_snapshots(delivery.chat_id, sources)
+            self._validate_delivery(delivery)
             if self.execution_mode == "dry_run":
                 self.deliveries.finish(delivery.id, status="previewed")
                 return
-            self._validate_source_snapshots(delivery.chat_id, sources)
-            self._validate_delivery(delivery)
             result = client.reply_message(
                 as_identity="bot",
                 message_id=delivery.target_message_id,
@@ -1984,14 +1995,7 @@ class NativeCoworkerService(CoworkerService):
                 or current.get("chat_id") not in (None, chat_id)
                 or current.get("is_deleted")
                 or current.get("deleted")
-                or not message_content_matches(
-                    current, saved.get("coworker_source_content_sha256")
-                )
-                or (
-                    "coworker_source_update_time" in saved
-                    and current.get("update_time")
-                    != saved.get("coworker_source_update_time")
-                )
+                or not message_snapshot_matches(current, saved)
             ):
                 raise ValueError("reply source cannot be verified")
 
