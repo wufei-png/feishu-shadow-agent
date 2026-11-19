@@ -31,11 +31,22 @@ coworker:
 
 首次测试可使用新建的 SQLite 文件。示例选择 `gpt-6-luna`；将 `agent_backend.codex.model` 设为 `null` 可沿用 Codex 自身默认模型。子 Agent 使用 Codex 原生模型配置。更新已有策略时，导入命令须加 `--replace`。旧会话继续使用原工作目录，群记忆路径由策略中的 `coworker.shared_memory_path` 决定。
 
-导入策略并先运行 dry-run：
+安装依赖并导入生产策略：
 
 ```bash
 uv sync --locked --extra cards
 uv run --locked python -m feishu_shadow_agent policy import-config --config config.yaml
+```
+
+已存在的 dry-run 库不会自动跟随生产策略变化。更新生产策略后，如需覆盖预演策略，执行：
+
+```bash
+uv run --locked python -m feishu_shadow_agent policy sync-production --config config.yaml --mode dry-run
+```
+
+检查并启动预演：
+
+```bash
 uv run --locked python -m feishu_shadow_agent doctor --config config.yaml --mode dry-run
 uv run --locked python -m feishu_shadow_agent coworker run --runtime codex --config config.yaml --reply-mode quote --dry-run
 uv run --locked python -m feishu_shadow_agent coworker status --config config.yaml --mode dry-run
@@ -45,7 +56,14 @@ uv run --locked python -m feishu_shadow_agent coworker status --config config.ya
 
 dry-run 对 Codex 使用只读、禁网络的 sandbox，关闭 shell、MCP、应用和多 Agent 等工具，并核查 MCP 工具列表；只恢复由此隔离方式创建的 dry-run 会话。
 
-生产会话沿用 Codex 的原生 sandbox、网络、MCP、应用和工具配置。本群话题和历史还可通过项目提供的 `read_feishu_topic`、`read_feishu_group_history` 只读工具访问，返回内容须属于当前授权群。这些工具在新建直连线程时注册；旧 UUID 如果没有这些工具，保留会话时不能按需调用。项目登记自己发布的回复和回执；原生业务工具的副作用受 Codex 自身权限和配置约束。生产启动去掉 `--dry-run`，仅在检查通过且明确准备实发后使用。
+生产会话沿用 Codex 的原生 sandbox、网络、MCP、应用和工具配置。本群话题和历史还可通过项目提供的 `read_feishu_topic`、`read_feishu_group_history` 只读工具访问，返回内容须属于当前授权群。这些工具在新建直连线程时注册；旧 UUID 如果没有这些工具，保留会话时不能按需调用。项目登记自己发布的回复和回执；原生业务工具的副作用受 Codex 自身权限和配置约束。
+
+预演通过并准备真实发送时，先检查生产配置，再启动：
+
+```bash
+uv run --locked python -m feishu_shadow_agent doctor --config config.yaml
+uv run --locked python -m feishu_shadow_agent coworker run --runtime codex --config config.yaml --reply-mode quote
+```
 
 ## 消息、关注和记忆
 
@@ -79,5 +97,7 @@ uv run --locked python -m feishu_shadow_agent coworker resolve-delivery --config
 ```
 
 两个命令二选一。`--daemon-stopped` 是操作员声明；确认消息和话题 ID 属于该次发送后再记录。`coworker discard-event` 用于处置执行结果不明的入站事件。切换新旧运行时时，先处理对方运行时的排队、执行中和待核对工作；启动器发现冲突会拒绝启动，不会丢弃旧工作。
+
+关注请求被修改后的状态更新，以及发送前读取暂时失败的恢复，仍有[已复现的问题](native-runtime-architecture-review-2026-11-19.md)。
 
 SQLite v9、v10、v11、v12 会事务升级到 v13。升级前备份数据；v8 及其他不支持的版本不会自动修改。完整业务和真实飞书联调状态见 [验证记录](native-runtime-acceptance-2026-11-19.md)。

@@ -1,14 +1,14 @@
 # 配置参考
 
-Feishu Shadow Agent 的 `config.yaml` 结构真相来源是 `src/feishu_shadow_agent/config.py` 中的 Pydantic 模型。`config.yaml` 启动时由 `ConfigService.load()` 校验；`schemas/config.schema.json` 是从同一模型生成的 JSON Schema，主要给编辑器、CI 和文档引用使用。
+本文描述影子助手和项目接入的 AI 同事使用的 `config.yaml`。配置模型位于 `src/feishu_shadow_agent/config.py`；`schemas/config.schema.json` 由模型生成，可供编辑器和 CI 使用。Hermes Gateway 不读取此文件，见 [Hermes Gateway 配置](operations/hermes-coworker.md)。
 
-`reply_policy` 和 `chats` 是 Product Policy Store 的 Policy Import Source：operator 必须显式运行 `policy import-config` 才会把这些字段写入 SQLite。daemon、资源下载 preflight 和回复 gate 的运行时 Product Policy 只从 SQLite Product Policy Store 读取；DB 全局策略未初始化时，`doctor` 和 daemon runtime health 会 critical fail closed。
+`reply_policy`、`chats` 和 `coworker` 是 Product Policy Store 的策略导入来源。运行 `policy import-config` 后，项目运行时从 SQLite 读取生效策略；全局策略未初始化时，`doctor` 和 daemon 的健康检查会失败。
 
-未配置群不会被查询或交给 Agent；设置群策略后仅处理启用时刻之后的新消息，正常运行中的重叠轮询和断线恢复仍会保留。删除群策略会暂停该群的未完成任务、重试和待发送动作；重新添加后不会自动恢复，需要在 Console 或 CLI 中显式处理。
+影子助手只查询已配置的群；设置群策略后仅处理启用时刻之后的新消息，正常运行中的重叠轮询和断线恢复仍会保留。删除群策略会暂停该群的未完成任务、重试和待发送动作；重新添加后需要在 Console 或 CLI 中显式恢复。
 
 生产和 dry-run 使用独立的数据库、资源和日志路径。dry-run 初次创建时仅复制生产库中的当前策略，此后独立修改；`policy sync-production --config config.yaml --mode dry-run` 显式覆盖预演策略，并对被移除群的预演任务执行暂停。生产策略未初始化时，可用 `policy import-config --config config.yaml --mode dry-run` 导入 YAML。
 
-dry-run 在查询私聊前完整枚举并排除机器人会话；枚举失败或超时时跳过本轮私聊。枚举单独使用最多约 10 秒的时间预算（最少 1 秒，实际子进程超时按整秒计算），不占用群消息采集预算，因此本轮总耗时可能增加。
+影子助手 dry-run 在查询私聊前枚举并排除机器人会话；枚举失败或超时时跳过本轮私聊。枚举单独使用最多约 10 秒的时间预算，不占用群消息采集预算。
 
 常用命令：
 
@@ -37,17 +37,17 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `storage` | object | 见下表 | 本地 SQLite 和资源下载目录。 |
 | `logging` | object | 见下表 | 本地 JSONL 日志路径。 |
 | `lark_cli` | object | 见下表 | `lark-cli` 可执行文件和超时。 |
-| `interactive_cards` | object | 见下表 | 可选的审批卡片回调长连接；默认关闭，消息获取仍走 user 轮询。 |
+| `interactive_cards` | object | 见下表 | 审批卡片回调及飞书长连接凭据环境变量。影子助手轮询消息；项目 AI 同事使用长连接接收消息。 |
 | `agent_backend` | object | 见下表 | Agent backend 选择、上下文隔离策略和 provider 专属参数。 |
-| `coworker` | object | 默认关闭 | 单测试群公开 AI 同事的策略导入来源，参见[运行与验证](operations/single-group-ai-coworker.md)。 |
-| `coworker.send_mode` | `agent_direct`/`project` | `agent_direct` | 启动时确定发送路径；直发使用模型的原生工具权限，代发使用项目的结构化协议和发送策略。修改后需导入策略并重启。 |
-| `coworker.partner_bots` | map | `{}` | 按名称配置飞书伙伴的 `open_id` 和可选 `description`；也接受名称到 open ID 的简写。职责会提供给同事 Agent。 |
+| `coworker` | object | 默认关闭 | 项目 AI 同事的策略导入来源；包括 Codex 直连和兼容 `daemon` 路径。 |
+| `coworker.send_mode` | `agent_direct`/`project` | `agent_direct` | 兼容 `daemon` 路径的发送方式。Codex 直连使用自己的项目发布路径；该字段仍参与启动策略一致性检查。修改后需导入策略并重启。 |
+| `coworker.partner_bots` | map | `{}` | 兼容 `daemon` 路径中按名称配置飞书伙伴的 `open_id` 和可选 `description`。 |
 | `coworker.memory_maintenance` | bool | `false` | 启用独立后台记忆整理。已导入 SQLite 的设置保持原值。 |
 | `coworker.memory_maintenance_time` | `HH:MM` | `00:00` | 每日本机时区的整理时间。错过定时点后，下次启动 AI 同事时合并补跑一次。 |
 | `reply_policy` | object | 见下表 | Policy Import Source 中的全局自动回复策略。 |
 | `reply_postprocess` | object | 见下表 | 可选的一次性回复表达改写；默认关闭，不改变现有回复路径。 |
 | `chats` | map | `{}` | Policy Import Source 中按 Feishu `chat_id` 声明的群级策略，例如 `oc_xxx`。 |
-| `tool_permissions` | enum | `read_only` | Agent backend 工具权限档位：`read_only`、`full_access` 或 `inherit`。Hermes、Codex 和 Claude Code backend 都会映射到各自 CLI 的权限边界。 |
+| `tool_permissions` | enum | `read_only` | 影子助手 Agent backend 的工具权限档位：`read_only`、`full_access` 或 `inherit`。项目 AI 同事使用其原生运行时权限设置。 |
 | `retention` | object | 见下表 | 本地数据保留时间。 |
 | `lifecycle` | object | 见下表 | 全局任务生命周期和审批过期设置。 |
 | `debug` | object | 见下表 | 调试用持久化开关。 |
@@ -76,8 +76,8 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `lark_cli.path` | string/null | `null` | 指定 `lark-cli` 路径；`null` 使用当前 `PATH`。 |
 | `lark_cli.timeout_seconds` | int `> 0` | `30` | `lark-cli` 子进程调用超时。 |
 | `interactive_cards.enabled` | bool | `false` | 是否启用审批卡片与官方 SDK 的 `card.action.trigger` 长连接。关闭或连接不健康时，owner notification 使用文本兜底。 |
-| `interactive_cards.app_id_env` | string | `FEISHU_APP_ID` | 保存飞书应用 ID 的环境变量名。这里只能配置环境变量名，不能写真实凭证。 |
-| `interactive_cards.app_secret_env` | string | `FEISHU_APP_SECRET` | 保存飞书应用密钥的环境变量名；必须与 `app_id_env` 不同。 |
+| `interactive_cards.app_id_env` | string | `FEISHU_APP_ID` | 飞书长连接应用 ID 的环境变量名；项目 AI 同事接收消息时也使用它。 |
+| `interactive_cards.app_secret_env` | string | `FEISHU_APP_SECRET` | 飞书长连接应用密钥的环境变量名；必须与 `app_id_env` 不同。 |
 | `interactive_cards.startup_timeout_seconds` | int `> 0` | `10` | daemon 启动时等待卡片回调长连接变为健康的最长秒数；超时后继续以文本兜底运行。 |
 | `agent_backend.provider` | `hermes`/`codex`/`claude_code` | `hermes` | Agent backend provider。被选中的 provider 必须覆盖 task router、task session、reply postprocess 和 owner style refresh。 |
 | `agent_backend.max_attempts` | int `>= 1` | `3` | 单次 Agent 调用的最大尝试次数。各权限档位共用；`full_access` 和 `inherit` 重试可能重复 Agent 工具副作用，系统不提供额外的副作用幂等兼容层。 |
@@ -97,7 +97,7 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `agent_backend.hermes.health_url` | string/null | `null` | `agent_backend.hermes.mode: http` 时追加使用；必须以 `http://` 或 `https://` 开头，HTTP 模式下必填。典型值为 `http://127.0.0.1:8642/health`。**不用于 chat/路由/会话调用**。 |
 | `agent_backend.hermes.api_key_env` | string/null | `HERMES_API_KEY` | `agent_backend.hermes.mode: http` 时可选 Bearer token 环境变量名。Hermes 官方 API server 常用 `API_SERVER_KEY`；`/health` 端点通常无需认证，此字段主要留给需要鉴权的 health URL。 |
 | `agent_backend.codex.path` | string/null | `null` | 指定 Codex CLI 路径；`null` 使用当前 `PATH`。 |
-| `agent_backend.codex.model` | string/null | `null` | 可选 Codex model 覆盖；`null` 时由 Codex CLI 决定。 |
+| `agent_backend.codex.model` | string/null | `null` | 可选 Codex model 覆盖；`null` 时由 Codex CLI 决定。示例配置选择 `gpt-6-luna`。 |
 | `agent_backend.codex.reasoning_effort` | `minimal`/`low`/`medium`/`high`/`xhigh`/null | `null` | 可选 Codex reasoning effort 覆盖；配置后通过 `model_reasoning_effort` 传给 Codex CLI。Hermes 不读取此字段。 |
 | `agent_backend.codex.timeout_seconds` | int `> 0`/null | `null` | Codex Agent 子进程超时；`null` 不设置 wall-clock 截止时间。readiness 探测使用 `health.timeout_seconds`。 |
 | `agent_backend.codex.skills` | list[string] | `[]` | 已由部署环境安装到 Codex 原生发现范围的 skill 名称。名称只能使用小写字母、数字和内部连字符，最长 64 字符；新建 Task Session prompt 最后一行追加 `$name`。配置表示 requested/configured，不代表 runtime loaded。 |
@@ -173,6 +173,29 @@ Console 覆盖 Dashboard、Approvals、Tasks、Dispatch、Feedback、Policy、Se
 资源下载先通过 chat policy，再受本地限额保护。单文件超过 `storage.max_resource_bytes` 时，刚下载的文件会被删除，`resources.download_status` 置为 `too_large`，`path` 置空，并把尝试路径和大小写入 `raw_json`。`resource_dir` 用量超过 `storage.max_resource_dir_bytes` 时，刚下载文件会被删除，当前和后续资源标记为 `quota_exceeded` 且 `path` 置空。`too_large` / `quota_exceeded` 会阻塞 task session agent，并创建 owner notification；第一版不让 agent 在缺少资源的情况下语义降级回答。
 
 影子模式的 Agent backend 默认 `timeout_seconds: null`，不会在固定 60 秒截断；该模式按消息串行执行，一次无限时调用未返回前，本 tick 的后续消息和 dispatch 会暂停。需要故障隔离上限的部署可显式配置正整数。AI 同事模式使用独立的超时和话题并发设置，见[运行说明](operations/single-group-ai-coworker.md)。startup/runtime health 与 doctor 仍由 `health.timeout_seconds` 限时。
+
+## AI 同事的配置作用域
+
+`daemon` 启动的兼容路径使用 `coworker.send_mode` 选择模型直发或项目代发，并使用 `trigger_mode`、`history_source` 和 `partner_bots` 配置触发、历史与伙伴协作。具体行为见[兼容路径手册](operations/single-group-ai-coworker.md)。
+
+`coworker run --runtime codex` 要求 SQLite 生效策略启用 `coworker` 且 `provider: codex`。该路径由项目发布回复，主区回复位置由 `--reply-mode` 控制；关注由 owner 在话题中明确开启，不由兼容路径的 `trigger_mode` 开启。`send_mode` 仍参与启动策略一致性检查，但不选择直连路径的发布方式。生产会话继承 Codex 原生权限，dry-run 使用隔离工具配置；详见 [Codex 直连手册](operations/codex-native-coworker.md)。
+
+`coworker run --runtime hermes` 启动 Hermes 自己的 `coworker` profile，不使用项目 `coworker` 策略或项目数据库。[Hermes Gateway 手册](operations/hermes-coworker.md)列出了该 profile 的配置。
+
+以下字段的默认值来自项目配置模型，导入后的生效值以 SQLite 为准：
+
+| 字段 | 默认值 | 作用 |
+| --- | --- | --- |
+| `coworker.enabled` | `false` | 启用项目 AI 同事；启用时需要配置群。 |
+| `coworker.chat_id` | `null` | 项目 AI 同事接收事件的单个群 ID。 |
+| `coworker.provider` | `codex` | 项目 AI 同事的后端；兼容路径可选 `codex` 或 `hermes`，Codex 直连要求 `codex`。 |
+| `coworker.max_concurrent_topics` | `3` | Codex 同事可并行处理的主会话数。 |
+| `coworker.agent_timeout_seconds` | `600` | 同事单轮 Agent 调用的超时秒数。 |
+| `coworker.subagent_timeout_seconds` | `3600` | 正常关闭时等待后台子 Agent 的最长秒数。 |
+| `coworker.shared_memory_path` | `data/coworker-shared-memory.md` | 项目同事群记忆文件；相对配置文件目录解析。Codex 直连私聊笔记使用独立后缀。 |
+| `coworker.trigger_mode` | `mention` | 兼容路径的触发方式，可选 `mention` 或 `followups`。 |
+| `coworker.history_source` | `live_on_demand` | 兼容路径的历史来源，可选 `live_on_demand` 或 `local_cache`。 |
+| `coworker.history_limit` | `30` | 兼容路径的本地缓存查询和补拉默认页大小，范围为 1 至 50。 |
 
 ## Agent Backend 上下文语义
 

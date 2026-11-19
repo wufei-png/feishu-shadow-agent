@@ -1,9 +1,18 @@
 # Feishu Shadow Agent 测试方式
 
-本文说明当前项目的本地测试、分层验证和真实飞书端到端测试方式。默认测试应保持无副作用，不访问真实飞书，也不真实发送消息。
+本文说明本地测试及影子助手的真实飞书端到端测试。默认测试使用 fake 客户端和临时数据，不访问真实飞书。
 
 模型、router、task-session、full-chain 和 ingress 的评测工作流见
 [`docs/evals.md`](evals.md)。
+
+| 运行方式 | 预演与真实联调 |
+| --- | --- |
+| 影子助手 | 按本文第 3 至 6 节准备、预演和测试发送。 |
+| Codex 直连 AI 同事 | 按 [Codex 直连手册](operations/codex-native-coworker.md)启用策略并使用 `coworker run --runtime codex --dry-run`；话题回执和真实投递另需实测。 |
+| Hermes Gateway AI 同事 | 按 [Hermes Gateway 手册](operations/hermes-coworker.md)检查 profile 和网关。Hermes Gateway 没有项目级 dry-run。 |
+| 兼容 AI 同事 | 按[兼容路径手册](operations/single-group-ai-coworker.md)验证 `daemon` 的直发或代发。 |
+
+各模式的历史验收结果见[原生运行时验证记录](operations/native-runtime-acceptance-2026-11-19.md)和[影子运行时验收记录](operations/runtime-acceptance.md)。
 
 ## 1. 本地测试
 
@@ -56,9 +65,11 @@ uv run --locked pytest -q tests/test_operator_query.py tests/test_operator_comma
 uv run --locked pytest -q tests/test_console_api.py tests/test_operator_query.py
 uv run --locked pytest -q tests/test_prompt.py tests/test_processing_collaborators.py
 uv run --locked pytest -q tests/test_reply_style.py
+uv run --locked pytest -q tests/test_coworker_native.py tests/test_coworker_native_store.py tests/test_coworker_native_retention.py tests/test_codex_app_server.py
+uv run --locked pytest -q tests/test_cli.py tests/test_business_modes.py
 ```
 
-Operator Console 前端验证：
+Operator Console 前端验证需要 Node.js `^20.19.0 || >=22.12.0`：
 
 ```bash
 npm --prefix frontend/operator-console ci
@@ -130,13 +141,15 @@ git diff --check
 - `tests/test_lark_channel_compat.py`：官方 Channel SDK 的隔离 event loop、交互回调帧分发兼容层；只使用本地 fake frame，不访问飞书。
 - `tests/test_daemon.py`：tick 顺序、heartbeat、运行中 health fail-closed、approval inbox 失败保护、dispatch 行为。
 - `tests/test_dispatcher.py`：dry-run、真实发送、dispatch attempt、读回验证、stale sending 恢复。
-- `tests/test_store_schema.py`：SQLite current schema bootstrap、非当前 schema 的无修改拒绝、busy timeout、约束、状态 enum 契约、幂等动作。
+- `tests/test_store_schema.py`：SQLite 当前 schema 初始化、受支持版本升级、不兼容版本拒绝、busy timeout 和约束。
 - `tests/test_product_policy_store.py`：Product Policy Store 初始化探针、config import/replace、chat policy skip、audit old/new。
 - `tests/test_policy_runtime.py`：runtime resolver 从 Product Policy Store 读取、缺失全局策略 fail closed、DB policy 覆盖 YAML import source。
 - `tests/test_operator_query.py`：OperatorQueryService 只读 dashboard/detail DTO、overdue 派生、effective policy、Policy Import Diff 和 audit history。
 - `tests/test_operator_commands.py`：OperatorCommandService 审批/dispatch/maintenance/policy mutation 结果 shape、policy 直接写入、任务背景版本与 audit actor/reason。
 - `tests/test_console_api.py`：本地 Operator Console 的 token/Host 校验、dashboard/queue/detail/policy/settings/health API、静态资源 serving 和 `console` CLI 启动输出。
 - `tests/test_retention.py`：有效 watch 延迟、全链路字段级 scrub、最小审计保留、资源删除和 JSONL/text 日志原子脱敏。
+- `tests/test_coworker_native*.py` 和 `tests/test_codex_app_server.py`：Codex 直连的事件、发布、保留期、会话和 App Server 协议。
+- `tests/test_cli.py`：包含 Hermes Gateway 启动入口和对项目级 dry-run 的拒绝；Hermes 自身的适配器测试在 Hermes 仓库运行。
 
 这些测试验证代码契约，不证明当前机器的 `lark-cli` 授权、飞书权限或所选 Agent CLI 可用；真实环境要跑下面的端到端流程。
 

@@ -1,8 +1,8 @@
-# 单测试群 AI 同事：运行与验证
+# 兼容 AI 同事：运行与验证
 
 本功能默认关闭。下面的配置示例使用占位 ID，需先选择独立测试群、配置飞书应用并完成授权；本地测试通过不代表真实飞书权限和机器人互操作已经验证。
 
-Codex 轻量直连见 [Codex 直连 AI 同事](codex-native-coworker.md)，Hermes 原生网关见 [Hermes Gateway AI 同事](hermes-coworker.md)。本文以下描述旧 `daemon` 的 `agent_direct` 和 `project` 模式。
+本文描述 `daemon` 启动的兼容路径，其中 `send_mode` 可选 `agent_direct` 或 `project`。Codex 轻量直连见 [Codex 直连 AI 同事](codex-native-coworker.md)，Hermes 原生网关见 [Hermes Gateway AI 同事](hermes-coworker.md)。
 
 ## 接入准备
 
