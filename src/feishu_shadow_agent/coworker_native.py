@@ -36,7 +36,7 @@ from .coworker_store import (
     CoworkerEvent,
 )
 from .dispatcher import _extract_message_id  # pyright: ignore[reportPrivateUsage]
-from .message_normalization import MessageNormalizer, message_content_fingerprint
+from .message_normalization import message_content_fingerprint
 from .paths import resolve_agent_working_dir, resolve_relative_path
 from .policy import PolicyResolver
 from .processing import ApprovalService, SendComposer
@@ -585,7 +585,7 @@ class NativeCoworkerService(CoworkerService):
             if self._topic_for_message(raw, event.message_id) != event.topic_key:
                 raise ValueError("steer source changed location")
             private = event.topic_key.startswith(PRIVATE_TOPIC_PREFIX)
-            message = MessageNormalizer(owner_open_id=bot).normalize(
+            message = self._message_normalizer(bot).normalize(
                 raw, default_chat_type="p2p" if private else "group"
             )
             if message.at_all:
@@ -643,7 +643,7 @@ class NativeCoworkerService(CoworkerService):
             ):
                 raise _StartupPolicyChanged
             raw = self._enrich_message(raw, event.message_id, event.chat_id, bot)
-            message = MessageNormalizer(owner_open_id=bot).normalize(
+            message = self._message_normalizer(bot).normalize(
                 raw, default_chat_type="p2p" if private else "group"
             )
             verified = self.store.upsert_message_with_revision(message)
@@ -864,7 +864,7 @@ class NativeCoworkerService(CoworkerService):
         raw = self._enrich_message(raw, event.message_id, event.chat_id, bot)
         if self._topic_for_message(raw, event.message_id) != event.topic_key:
             raise ValueError("message location changed after routing")
-        message = MessageNormalizer(owner_open_id=bot).normalize(
+        message = self._message_normalizer(bot).normalize(
             raw, default_chat_type="p2p" if private else "group"
         )
         parent_id = raw.get("parent_id") or raw.get("reply_to_message_id")
@@ -1179,7 +1179,7 @@ class NativeCoworkerService(CoworkerService):
         source_raw = self._enrich_message(
             source_raw, str(source_id), event.chat_id, str(bot)
         )
-        message = MessageNormalizer(owner_open_id=str(bot)).normalize(
+        message = self._message_normalizer(str(bot)).normalize(
             source_raw, default_chat_type="group"
         )
         upsert = self.store.upsert_message_with_revision(message)
@@ -1197,7 +1197,7 @@ class NativeCoworkerService(CoworkerService):
             supplement_raw = self._enrich_message(
                 supplement_raw, str(item["message_id"]), event.chat_id, str(bot)
             )
-            supplement = MessageNormalizer(owner_open_id=str(bot)).normalize(
+            supplement = self._message_normalizer(str(bot)).normalize(
                 supplement_raw, default_chat_type="group"
             )
             saved = self.store.upsert_message_with_revision(supplement)
@@ -1320,7 +1320,7 @@ class NativeCoworkerService(CoworkerService):
                 payload = _mapping(json.loads(str(row["raw_json"])))
                 envelope = _mapping(_mapping(payload.get("event")).get("event"))
                 raw = event_message_from_raw(envelope, bot_id=bot)
-                preliminary = MessageNormalizer(owner_open_id=bot).normalize(
+                preliminary = self._message_normalizer(bot).normalize(
                     raw, default_chat_type="group"
                 )
             except (TypeError, ValueError):
@@ -1364,7 +1364,7 @@ class NativeCoworkerService(CoworkerService):
                 != event.topic_key
             ):
                 break
-            message = MessageNormalizer(owner_open_id=bot).normalize(
+            message = self._message_normalizer(bot).normalize(
                 enriched, default_chat_type="group"
             )
             parent = enriched.get("parent_id") or enriched.get("reply_to_message_id")
@@ -1465,7 +1465,7 @@ class NativeCoworkerService(CoworkerService):
             raise ValueError("subagent source is unavailable")
         raw = _mapping(json.loads(str(source["raw_json"])))
         raw = self._enrich_message(raw, source_id, event.chat_id, bot)
-        message = MessageNormalizer(owner_open_id=bot).normalize(
+        message = self._message_normalizer(bot).normalize(
             raw, default_chat_type="p2p" if private else "group"
         )
         upsert = self.store.upsert_message_with_revision(message)

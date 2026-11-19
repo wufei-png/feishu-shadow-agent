@@ -93,8 +93,13 @@ def normalize_message_sent_at(value: str | None) -> str | None:
 
 
 class MessageNormalizer:
-    def __init__(self, *, owner_open_id: str):
+    def __init__(
+        self, *, owner_open_id: str, mention_target_open_id: str | None = None
+    ):
         self.owner_open_id = owner_open_id
+        self.mention_target_open_id = (
+            owner_open_id if mention_target_open_id is None else mention_target_open_id
+        )
 
     def normalize(
         self, raw: dict[str, Any], *, default_chat_type: str | None = None
@@ -172,7 +177,9 @@ class MessageNormalizer:
         mentions = _mentions(raw, content)
         at_all = _is_at_all(raw, text, mentions)
         direct_mention = bool(
-            raw.get("is_at_me") or raw.get("isAtMe") or self.owner_open_id in mentions
+            raw.get("is_at_me")
+            or raw.get("isAtMe")
+            or self.mention_target_open_id in mentions
         )
         if at_all:
             direct_mention = False

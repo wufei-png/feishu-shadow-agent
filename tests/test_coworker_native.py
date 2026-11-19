@@ -24,6 +24,7 @@ from feishu_shadow_agent.coworker_native import (
     SteerDecision,
 )
 from feishu_shadow_agent.jsonl import JSONLLogger
+from feishu_shadow_agent.message_normalization import MessageNormalizer
 from feishu_shadow_agent.operator_commands import OperatorCommandService
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import LarkCliResult, MessagePage
@@ -399,6 +400,7 @@ def test_main_and_topic_sessions_and_dry_run_receipts(tmp_path: Path) -> None:
     [
         ([{"id": "app", "key": "@_user_1"}], True),
         ([{"id": "bot", "key": "@_user_1"}], True),
+        ([{"id": "owner", "key": "@_user_1"}], False),
         ([{"id": "other-app", "key": "@_user_1"}], False),
         ([], False),
         ([{"id": "all", "key": "@_all"}], False),
@@ -408,11 +410,13 @@ def test_live_snapshot_resolves_bot_app_id_mentions(
     tmp_path: Path, snapshot_mentions: list[dict[str, str]], starts_agent: bool
 ) -> None:
     service, feishu, server = _service(tmp_path)
-    _receive(service, feishu, "request", mention=True)
+    _receive(service, feishu, "request", mention=True, sender="owner")
     feishu.messages["request"]["mentions"] = snapshot_mentions
 
     assert service.process_next()
     assert bool(server.prompts) is starts_agent
+    if starts_agent:
+        assert service.store.get_message("request")["sender_role"] == "owner_message"  # type: ignore[index]
 
 
 def test_app_server_failure_marks_group_and_private_children_uncertain(
@@ -874,6 +878,29 @@ def test_owner_private_forwards_start_separate_sessions_and_quote_resumes(
     assert "forwarded content forward-one" in server.prompts[2]
     assert ".private.dry-run" in server.prompts[0]
     assert all(call["dry_run"] for call in feishu.replies)
+
+
+def test_private_reply_survives_approval_inbox_reading_same_message(
+    tmp_path: Path,
+) -> None:
+    service, feishu, _server = _service(tmp_path, dry_run=False)
+    _private(service, feishu, "request")
+    snapshot = feishu.messages["request"]
+    snapshot["sender"] = {"id": "owner", "sender_type": "user"}
+    approval_message = MessageNormalizer(owner_open_id="owner").normalize(
+        snapshot, default_chat_type="p2p"
+    )
+    assert service.store.upsert_message_with_revision(approval_message).revision == 1
+    assert service.process_next()
+    service.store.upsert_message_with_revision(approval_message, confirmed_current=True)
+    assert service.process_next()
+
+    assert feishu.sent == 1
+    with service.store.connect() as conn:
+        delivery = conn.execute(
+            "SELECT source_revision, status FROM coworker_native_deliveries"
+        ).fetchone()
+    assert tuple(delivery) == (1, "sent")
 
 
 def test_private_quote_waits_for_uncertain_receipt_without_exhausting_retries(

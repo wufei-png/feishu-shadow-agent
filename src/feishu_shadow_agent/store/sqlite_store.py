@@ -5484,6 +5484,19 @@ class SQLiteStore:
                         stored_raw[key] = raw[key]
                     else:
                         stored_raw.pop(key, None)
+                if (
+                    semantic_hash == previous_hash
+                    and not position_conflict
+                    and message.raw.get("coworker_snapshot_verified") is True
+                    and not previous_raw.get("coworker_source_content_sha256")
+                ):
+                    # Keep verified reply evidence when a poll stored the same message first.
+                    for key in (
+                        "coworker_snapshot_verified",
+                        "coworker_source_update_time",
+                        "coworker_source_content_sha256",
+                    ):
+                        stored_raw[key] = message.raw.get(key)
                 if stored_raw != previous_raw:
                     conn.execute(
                         "UPDATE messages SET raw_json = ? WHERE message_id = ?",

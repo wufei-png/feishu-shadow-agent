@@ -195,6 +195,11 @@ class CoworkerService:
         policy = CoworkerConfig.model_validate(raw)
         return policy if policy.enabled else None
 
+    def _message_normalizer(self, bot_id: str) -> MessageNormalizer:
+        return MessageNormalizer(
+            owner_open_id=self.config.owner.open_id, mention_target_open_id=bot_id
+        )
+
     def _matches_startup_policy(self, policy: CoworkerConfig | None) -> bool:
         return (
             policy is not None
@@ -553,7 +558,7 @@ class CoworkerService:
         bot_id = event.raw.get("bot_open_id")
         if not isinstance(bot_id, str) or not bot_id:
             raise ValueError("coworker bot identity is missing")
-        normalizer = MessageNormalizer(owner_open_id=bot_id)
+        normalizer = self._message_normalizer(bot_id)
         raw_message = event_message_from_raw(raw_event, bot_id=bot_id)
         message = normalizer.normalize(raw_message, default_chat_type="group")
         if message.sender_id == bot_id:
@@ -810,7 +815,7 @@ class CoworkerService:
         except _SourceUnavailable as exc:
             # The model has already run; replaying it could duplicate tool calls.
             raise RuntimeError("coworker reply target snapshot unavailable") from exc
-        message = MessageNormalizer(owner_open_id=bot_id).normalize(
+        message = self._message_normalizer(bot_id).normalize(
             raw, default_chat_type="group"
         )
         upsert = self.store.upsert_message_with_revision(message)
