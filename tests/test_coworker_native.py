@@ -1643,6 +1643,9 @@ def test_reply_to_an_accepted_supplement_continues_the_same_task(
         if not finish_before_steer:
             assert service.process_next_steer()
             assert "只检查 2.0" in server.classification_prompts[-1]
+        else:
+            server.release.set()
+            assert not service.process_next_steer()
     finally:
         server.release.set()
         worker.join(timeout=5)
@@ -1700,6 +1703,11 @@ def test_reply_to_supplement_waiting_for_steer_receipt_is_not_lost(
             text="刚才更正为 3.0",
         )
         assert service.process_next()
+        server.release.set()
+        server.confirm.set()
+        steer_worker.join(timeout=5)
+        assert not steer_worker.is_alive()
+        assert not service.process_next_steer()
     finally:
         server.release.set()
         server.confirm.set()
@@ -1747,6 +1755,8 @@ def test_queued_chain_survives_when_only_first_supplement_is_steered(
     try:
         assert service.process_next() and service.process_next()
         assert service.process_next_steer()
+        server.release.set()
+        assert not service.process_next_steer()
     finally:
         server.release.set()
         worker.join(timeout=5)
@@ -1777,6 +1787,8 @@ def test_followup_is_processed_if_current_turn_finishes_before_steering(
             text="刚才版本说错了，应该是 2.0",
         )
         assert service.process_next()
+        server.release.set()
+        assert not service.process_next_steer()
     finally:
         server.release.set()
         worker.join(timeout=5)
@@ -2010,6 +2022,12 @@ def test_publication_and_followup_claim_are_transactionally_ordered(
     worker.start()
     assert server.started.wait(timeout=3)
     try:
+        with service.store.connect() as conn:
+            origin = conn.execute(
+                "SELECT id FROM coworker_events WHERE message_id = 'request'"
+            ).fetchone()[0]
+        if first == "publication":
+            assert service.events.try_begin_native_publication(origin)
         _receive(
             service,
             feishu,
@@ -2019,10 +2037,6 @@ def test_publication_and_followup_claim_are_transactionally_ordered(
             mention=False,
         )
         assert service.process_next()
-        with service.store.connect() as conn:
-            origin = conn.execute(
-                "SELECT id FROM coworker_events WHERE message_id = 'request'"
-            ).fetchone()[0]
         if first == "steer":
             event = service.events.claim_next_steer(
                 app_id="app", chat_id=None, native=True
@@ -2030,6 +2044,8 @@ def test_publication_and_followup_claim_are_transactionally_ordered(
             assert event is not None
             assert not service.events.try_begin_native_publication(origin)
             service.events.finish_steer(event.id, retry=True)
+            assert not service.events.try_begin_native_publication(origin)
+            service.events.skip_native_steer(event.id)
         assert service.events.try_begin_native_publication(origin)
         assert (
             service.events.claim_next_steer(app_id="app", chat_id=None, native=True)
@@ -2042,6 +2058,250 @@ def test_publication_and_followup_claim_are_transactionally_ordered(
     while service.process_next():
         pass
     assert any("followup" in prompt for prompt in server.prompts)
+
+
+def test_unrelated_request_does_not_release_a_waiting_correction(
+    tmp_path: Path,
+) -> None:
+    class SlowDecisionServer(BlockingNativeServer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.decisions = ["unrelated", "current"]
+            self.classifying = threading.Event()
+            self.finish_classifying = threading.Event()
+            self.original_returned = threading.Event()
+
+        def run_turn(self, prompt: str, **kwargs: Any) -> AgentRunResult:
+            if (
+                kwargs["output_model"] is SteerDecision
+                and not self.classifying.is_set()
+            ):
+                self.classifying.set()
+                assert self.finish_classifying.wait(timeout=5)
+            result = super().run_turn(prompt, **kwargs)
+            if kwargs["output_model"] is not SteerDecision:
+                self.original_returned.set()
+            return result
+
+    service, feishu, _ = _service(tmp_path)
+    server = SlowDecisionServer()
+    service.app_server = server  # type: ignore[assignment]
+    _receive(service, feishu, "request", location="thread")
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    classifier: threading.Thread | None = None
+    correction_id: int | None = None
+    try:
+        _receive(service, feishu, "unrelated", location="thread", parent="request")
+        assert service.process_next()
+        classifier = threading.Thread(target=service.process_next_steer)
+        classifier.start()
+        assert server.classifying.wait(timeout=3)
+        _receive(
+            service,
+            feishu,
+            "correction",
+            location="thread",
+            parent="request",
+            mention=False,
+            text="更正：应该检查 2.0",
+        )
+        assert service.process_next()
+        with service.store.connect() as conn:
+            correction_id = conn.execute(
+                "SELECT id FROM coworker_events WHERE message_id = 'correction'"
+            ).fetchone()[0]
+        server.release.set()
+        assert server.original_returned.wait(timeout=3)
+        server.finish_classifying.set()
+        classifier.join(timeout=5)
+        assert not classifier.is_alive()
+        worker.join(timeout=0.5)
+        assert worker.is_alive()
+        assert not service.process_next_steer()
+    finally:
+        server.finish_classifying.set()
+        server.release.set()
+        if classifier is not None:
+            classifier.join(timeout=5)
+        if correction_id is not None:
+            service.events.skip_native_steer(correction_id)
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    while service.process_next():
+        pass
+    with service.store.connect() as conn:
+        deliveries = conn.execute(
+            """SELECT e.message_id FROM coworker_native_deliveries d
+               JOIN coworker_events e ON e.id = d.event_id ORDER BY d.id"""
+        ).fetchall()
+    assert [row[0] for row in deliveries] == ["unrelated", "correction"]
+    assert any("应该检查 2.0" in prompt for prompt in server.prompts)
+
+
+@pytest.mark.parametrize("blocker", ["handoff", "retry"])
+def test_publication_does_not_wait_for_paused_or_deferred_followup(
+    tmp_path: Path, blocker: str
+) -> None:
+    service, feishu, _ = _service(tmp_path)
+    server = BlockingNativeServer()
+    service.app_server = server  # type: ignore[assignment]
+    _receive(service, feishu, "request", location="thread")
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    followup_id: int | None = None
+    try:
+        _receive(
+            service,
+            feishu,
+            "followup",
+            location="thread",
+            parent="request",
+            mention=False,
+        )
+        assert service.process_next()
+        with service.store.connect() as conn:
+            followup_id = conn.execute(
+                "SELECT id FROM coworker_events WHERE message_id = 'followup'"
+            ).fetchone()[0]
+            session_id = conn.execute("SELECT id FROM coworker_sessions").fetchone()[0]
+            if blocker == "retry":
+                conn.execute(
+                    """UPDATE coworker_events SET raw_json = json_set(raw_json,
+                       '$._runtime.retry_after', '2999-01-01T00:00:00Z') WHERE id = ?""",
+                    (followup_id,),
+                )
+        if blocker == "handoff":
+            service.native_state.request_handoff(session_id)
+        server.release.set()
+        worker.join(timeout=3)
+        assert not worker.is_alive()
+    finally:
+        server.release.set()
+        if followup_id is not None:
+            service.events.skip_native_steer(followup_id)
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+
+
+@pytest.mark.parametrize("blocker", ["earlier-retry", "earlier-batch"])
+def test_publication_does_not_wait_on_followup_blocked_by_deferred_event(
+    tmp_path: Path, blocker: str
+) -> None:
+    service, feishu, _ = _service(tmp_path)
+    server = BlockingNativeServer()
+    service.app_server = server  # type: ignore[assignment]
+    _receive(service, feishu, "request", location="thread")
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    followup_id: int | None = None
+    try:
+        _receive(service, feishu, "earlier", location="thread")
+        assert service.process_next()
+        _receive(
+            service,
+            feishu,
+            "followup",
+            location="thread",
+            parent="request",
+            mention=False,
+        )
+        assert service.process_next()
+        with service.store.connect() as conn:
+            followup_id = conn.execute(
+                "SELECT id FROM coworker_events WHERE message_id = 'followup'"
+            ).fetchone()[0]
+            if blocker == "earlier-retry":
+                conn.execute(
+                    """UPDATE coworker_events SET raw_json = json_set(raw_json,
+                       '$._runtime.retry_after', '2999-01-01T00:00:00Z') WHERE message_id = 'earlier'"""
+                )
+            else:
+                conn.execute(
+                    """UPDATE coworker_events SET raw_json = json_set(raw_json,
+                       '$._runtime.batch_leader', 999) WHERE message_id = 'earlier'"""
+                )
+        server.release.set()
+        worker.join(timeout=3)
+        assert not worker.is_alive()
+    finally:
+        server.release.set()
+        if followup_id is not None:
+            service.events.skip_native_steer(followup_id)
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+
+
+def test_worker_stop_releases_waiting_queued_followup(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    class WorkerServer(BlockingNativeServer):
+        def start(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def is_healthy(self) -> bool:
+            return True
+
+    service, feishu, _ = _service(tmp_path)
+    server = WorkerServer()
+    service.app_server = server  # type: ignore[assignment]
+    monkeypatch.setattr(service, "process_next_steer", lambda: False)
+    waiting = threading.Event()
+    begin_publication = service.events.try_begin_native_publication
+
+    def observe_wait(event_id: int, **kwargs: Any) -> bool:
+        ready = begin_publication(event_id, **kwargs)
+        if not ready:
+            waiting.set()
+        return ready
+
+    monkeypatch.setattr(service.events, "try_begin_native_publication", observe_wait)
+    worker = NativeCoworkerWorker(
+        service, runtime_allows_processing=lambda: True, wake_daemon=lambda: None
+    )
+    worker.start()
+    stopper: threading.Thread | None = None
+    followup_id: int | None = None
+    try:
+        _receive(service, feishu, "request", location="thread")
+        assert server.started.wait(timeout=3)
+        _receive(
+            service,
+            feishu,
+            "followup",
+            location="thread",
+            parent="request",
+            mention=False,
+        )
+        for _ in range(60):
+            with service.store.connect() as conn:
+                row = conn.execute(
+                    "SELECT id, topic_key FROM coworker_events WHERE message_id = 'followup'"
+                ).fetchone()
+            if row is not None and row["topic_key"] == "thread":
+                followup_id = int(row["id"])
+                break
+            threading.Event().wait(timeout=0.05)
+        assert followup_id is not None
+        server.release.set()
+        assert waiting.wait(timeout=3)
+        stopper = threading.Thread(target=worker.stop)
+        stopper.start()
+        stopper.join(timeout=4)
+        assert not stopper.is_alive()
+    finally:
+        server.release.set()
+        if stopper is not None and stopper.is_alive() and followup_id is not None:
+            service.events.skip_native_steer(followup_id)
+            stopper.join(timeout=5)
+        elif stopper is None:
+            worker.stop()
 
 
 @pytest.mark.parametrize("change", ["delete", "edit"])

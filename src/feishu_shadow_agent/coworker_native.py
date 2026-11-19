@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from _thread import RLock
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -111,6 +112,7 @@ class NativeCoworkerService(CoworkerService):
         self._held_completions: dict[str, tuple[str, str]] = {}
         self._session_locks: dict[int, RLock] = {}
         self._session_conditions: dict[int, Condition] = {}
+        self.wait_for_queued_followups: Callable[[], bool] = lambda: True
 
     def _session_lock(self, session_id: int) -> RLock:
         with self._app_server_lock:
@@ -124,9 +126,11 @@ class NativeCoworkerService(CoworkerService):
                 self._session_conditions[session_id] = condition
             return condition
 
-    def _wait_for_inflight_steer(self, session_id: int, event_id: int) -> None:
+    def _reserve_publication(self, session_id: int, event_id: int) -> None:
         condition = self._session_condition(session_id)
-        while not self.events.try_begin_native_publication(event_id):
+        while not self.events.try_begin_native_publication(
+            event_id, wait_for_queued=self.wait_for_queued_followups()
+        ):
             condition.wait(timeout=1)
 
     def _turn_superseded(self, event_id: int) -> bool:
@@ -643,7 +647,7 @@ class NativeCoworkerService(CoworkerService):
                 or verified.is_deleted
                 or verified.revision != source_revision
             ):
-                self.events.finish_steer(event.id, retry=True)
+                self.events.skip_native_steer(event.id)
                 return False
             if turn_id is None or server.active_turn_id(thread_id) != turn_id:
                 self.events.defer_late_native_steer(event.id, origin_event_id)
@@ -681,7 +685,7 @@ class NativeCoworkerService(CoworkerService):
                     error=f"{type(exc).__name__}: {exc}"[:500],
                 )
             else:
-                self.events.finish_steer(event.id, retry=True)
+                self.events.skip_native_steer(event.id)
             return False
         else:
             self.native_state.record_steer(
@@ -1012,7 +1016,7 @@ class NativeCoworkerService(CoworkerService):
             self._check_current_policy(policy, event.chat_id, activation)
         output = NativeOutput.model_validate(result.json_data)
         with self._session_lock(session.id):
-            self._wait_for_inflight_steer(session.id, event.id)
+            self._reserve_publication(session.id, event.id)
             if self._turn_superseded(event.id):
                 if batch:
                     self.deliveries.finish_silent_batch(event.id, batch)
@@ -1574,7 +1578,7 @@ class NativeCoworkerService(CoworkerService):
 
     def _queue_native_reply(self, *, session_id: int, **kwargs: Any) -> None:
         with self._session_lock(session_id):
-            self._wait_for_inflight_steer(session_id, int(kwargs["event_id"]))
+            self._reserve_publication(session_id, int(kwargs["event_id"]))
             if self._turn_superseded(int(kwargs["event_id"])):
                 return
             self._require_certain_steers(int(kwargs["event_id"]), session_id)
@@ -1764,7 +1768,7 @@ class NativeCoworkerService(CoworkerService):
         reason: str | None,
         manual_only: bool,
     ) -> None:
-        self._wait_for_inflight_steer(session_id, event.id)
+        self._reserve_publication(session_id, event.id)
         if self._turn_superseded(event.id):
             return
         self._require_certain_steers(event.id, session_id)
@@ -2017,6 +2021,9 @@ class NativeCoworkerWorker(CoworkerWorker):
         return topic_workers
 
     def start(self) -> None:
+        self.service.wait_for_queued_followups = lambda: (
+            not self._stop.is_set() and self.runtime_allows_processing()
+        )
         self.service.deliveries.recover_interrupted(app_id=self.service.app_id)
         self.service.native_state.recover_interrupted_handoffs(
             app_id=self.service.app_id

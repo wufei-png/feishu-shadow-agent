@@ -1046,10 +1046,21 @@ class CoworkerStore:
                 (self.store.clock(), event_id),
             )
 
-    def try_begin_native_publication(self, origin_event_id: int) -> bool:
+    def try_begin_native_publication(
+        self, origin_event_id: int, *, wait_for_queued: bool = True
+    ) -> bool:
         self.store.initialize()
         with self.store.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            origin = conn.execute(
+                """SELECT json_extract(raw_json, '$._runtime.publishing') FROM coworker_events
+                   WHERE id = ? AND status = 'processing' AND runtime = 'native'""",
+                (origin_event_id,),
+            ).fetchone()
+            if origin is None:
+                raise ValueError("native task is no longer processing")
+            if origin[0] == 1:
+                return True
             pending = conn.execute(
                 """SELECT 1 FROM coworker_events followup
                    JOIN coworker_events origin ON origin.id = ?
@@ -1057,9 +1068,36 @@ class CoworkerStore:
                      AND followup.topic_key = origin.topic_key AND followup.status = 'queued'
                      AND json_valid(followup.raw_json)
                      AND json_extract(followup.raw_json, '$._runtime.followup_origin') = origin.id
-                     AND json_extract(followup.raw_json, '$._runtime.steer_state') IN ('preparing', 'sending')
+                     AND (
+                       json_extract(followup.raw_json, '$._runtime.steer_state') IN ('preparing', 'sending')
+                       OR (? = 1 AND json_extract(followup.raw_json, '$._runtime.steer_state') IS NULL
+                         AND COALESCE(json_extract(followup.raw_json, '$._runtime.steer_checked'), 0) = 0
+                         AND json_extract(followup.raw_json, '$._runtime.batch_leader') IS NULL
+                         AND (json_extract(followup.raw_json, '$._runtime.retry_after') IS NULL
+                           OR julianday(json_extract(followup.raw_json, '$._runtime.retry_after')) <= julianday(?))
+                         AND NOT EXISTS (SELECT 1 FROM coworker_native_handoffs h
+                           JOIN coworker_sessions s ON s.id = h.session_id
+                           WHERE s.app_id = origin.app_id AND s.chat_id = origin.chat_id
+                             AND s.thread_id = origin.topic_key)
+                         AND NOT EXISTS (SELECT 1 FROM coworker_events earlier
+                           WHERE earlier.app_id = followup.app_id AND earlier.chat_id = followup.chat_id
+                             AND earlier.topic_key = followup.topic_key AND earlier.status = 'queued'
+                             AND earlier.message_id NOT LIKE 'internal:subagent:%'
+                             AND (earlier.received_at < followup.received_at OR
+                               (earlier.received_at = followup.received_at AND earlier.id < followup.id))
+                             AND json_valid(earlier.raw_json)
+                             AND COALESCE(json_extract(earlier.raw_json, '$._runtime.steer_checked'), 0) = 0
+                             AND (json_extract(earlier.raw_json, '$._runtime.batch_leader') IS NOT NULL
+                               OR (json_extract(earlier.raw_json, '$._runtime.retry_after') IS NOT NULL
+                                 AND (julianday(json_extract(earlier.raw_json, '$._runtime.retry_after')) IS NULL
+                                   OR julianday(json_extract(earlier.raw_json, '$._runtime.retry_after')) > julianday(?)))))))
                    LIMIT 1""",
-                (origin_event_id,),
+                (
+                    origin_event_id,
+                    int(wait_for_queued),
+                    self.store.clock(),
+                    self.store.clock(),
+                ),
             ).fetchone()
             if pending is not None:
                 return False
