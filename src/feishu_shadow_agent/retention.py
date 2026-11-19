@@ -255,9 +255,14 @@ class RetentionService:
         with self.store.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
-                """SELECT id FROM coworker_native_deliveries
-                   WHERE text != '' AND status != 'sending' AND julianday(created_at) < julianday(?)
-                     AND (? = 0 OR status NOT IN ('pending', 'needs_review'))""",
+                """SELECT d.id FROM coworker_native_deliveries d
+                   WHERE d.text != '' AND d.status != 'sending'
+                     AND julianday(d.created_at) < julianday(?)
+                     AND (? = 0 OR (d.status NOT IN ('pending', 'needs_review') AND NOT EXISTS (
+                       SELECT 1 FROM coworker_native_transfers t
+                       JOIN coworker_events e ON e.id = t.event_id
+                       WHERE t.delivery_id = d.id AND e.status IN ('queued', 'processing', 'needs_review')
+                     )))""",
                 (cutoff, int(protect_pending)),
             ).fetchall()
             if not dry_run:

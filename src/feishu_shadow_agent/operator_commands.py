@@ -82,6 +82,13 @@ class CommandResult:
 
 
 class ApprovalCommandService:
+    _TEXT_COMMAND = re.compile(r"^/(\S+)(?:\s+(\S+))?(?:\s+([\s\S]*))?$")
+
+    @classmethod
+    def is_approval_command(cls, text: str) -> bool:
+        match = cls._TEXT_COMMAND.match(text.strip())
+        return match is not None and match.group(1) in {"approve", "reject", "send"}
+
     def __init__(
         self,
         store: SQLiteStore,
@@ -193,7 +200,7 @@ class ApprovalCommandService:
         normalized = command.strip()
         if not normalized.startswith("/"):
             return None
-        match = re.match(r"^/(\S+)(?:\s+(\S+))?(?:\s+([\s\S]*))?$", normalized)
+        match = self._TEXT_COMMAND.match(normalized)
         if match is None:
             return None
         verb = match.group(1)

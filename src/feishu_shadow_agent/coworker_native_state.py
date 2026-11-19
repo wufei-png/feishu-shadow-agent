@@ -135,7 +135,7 @@ class NativeCoworkerState:
             if cursor.rowcount != 1:
                 raise ValueError("session is not in the expected handoff state")
 
-    def claim_handoff(self, *, app_id: str) -> dict[str, Any] | None:
+    def claim_handoff(self, *, app_id: str, chat_id: str) -> dict[str, Any] | None:
         self.store.initialize()
         with self.store.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -143,6 +143,7 @@ class NativeCoworkerState:
                 """SELECT h.session_id, h.status, s.backend_session_id, s.thread_id, s.agent_working_dir
                    FROM coworker_native_handoffs h JOIN coworker_sessions s ON s.id = h.session_id
                    WHERE s.app_id = ? AND s.state = 'active' AND s.backend_session_id IS NOT NULL
+                     AND (s.chat_id = ? OR s.thread_id GLOB '__private__:*')
                      AND (h.status = 'resume_requested' OR (h.status = 'pause_requested'
                        AND NOT EXISTS (SELECT 1 FROM coworker_events e
                          WHERE e.app_id = s.app_id AND e.chat_id = s.chat_id AND e.topic_key = s.thread_id
@@ -155,7 +156,7 @@ class NativeCoworkerState:
                        AND NOT EXISTS (SELECT 1 FROM coworker_native_deliveries d
                          WHERE d.session_id = s.id AND d.status IN ('pending', 'sending', 'needs_review'))))
                    ORDER BY h.updated_at, h.session_id LIMIT 1""",
-                (app_id,),
+                (app_id, chat_id),
             ).fetchone()
             if row is None:
                 return None

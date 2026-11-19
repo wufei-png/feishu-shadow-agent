@@ -109,6 +109,12 @@ ACTION_COWORKER_SQL = """(CASE json_extract(a.payload_json, '$.business_mode')
     WHERE r.target_task_id = a.task_id AND r.route_reason = 'coworker_turn'
   )
 ) END)"""
+_COWORKER_ACTION_CHAT = """
+  AND (? IS NULL OR a.kind != 'send_reply' OR NOT EXISTS (
+    SELECT 1 FROM tasks t
+    WHERE t.id = a.task_id AND t.chat_type = 'group' AND t.chat_id != ?
+  ))
+"""
 APPROVAL_COWORKER_SQL = """(CASE json_extract(p.payload_json, '$.business_mode')
   WHEN 'coworker' THEN 1 WHEN 'shadow' THEN 0 ELSE (
   COALESCE(json_extract(p.payload_json, '$.source'), '') LIKE 'coworker%'
@@ -160,12 +166,20 @@ WITH pending_native_origins(event_id, delivery_id) AS (
   UNION SELECT c.message_id FROM pending_native_origins p
     JOIN coworker_native_deliveries d ON d.event_id = p.event_id OR d.id = p.delivery_id
     JOIN coworker_native_delivery_context c ON c.delivery_id = d.id
+  UNION SELECT json_extract(e.raw_json, '$._runtime.quote.message_id') FROM pending_native_origins p
+    JOIN coworker_events e ON e.id = p.event_id WHERE json_valid(e.raw_json)
   UNION SELECT e.message_id FROM pending_native_origins p
     JOIN coworker_native_steers s ON s.origin_event_id = p.event_id AND s.status = 'accepted'
     JOIN coworker_events e ON e.id = s.event_id
   UNION SELECT source_message_id FROM actions WHERE source_message_id IS NOT NULL AND status IN ('pending', 'sending', 'failed_needs_review')
   UNION SELECT target_message_id FROM actions WHERE target_message_id IS NOT NULL AND status IN ('pending', 'sending', 'failed_needs_review')
   UNION SELECT source_message_id FROM approvals WHERE source_message_id IS NOT NULL AND status = 'pending'
+  UNION SELECT json_extract(payload_json, '$.coworker_quote.message_id') FROM approvals
+    WHERE status = 'pending' AND json_valid(payload_json)
+  UNION SELECT json_extract(payload_json, '$.reply_target_message_id') FROM approvals
+    WHERE status = 'pending' AND json_valid(payload_json)
+  UNION SELECT json_extract(payload_json, '$.coworker_quote.message_id') FROM actions
+    WHERE status IN ('pending', 'sending', 'failed_needs_review') AND json_valid(payload_json)
   UNION SELECT message_id FROM processing_retry_attempts WHERE status IN ('queued', 'claimed')
   UNION SELECT e.message_id FROM coworker_subagents s
     JOIN coworker_events e ON e.id = s.origin_event_id WHERE s.status IN ('running', 'needs_review')
@@ -2354,7 +2368,12 @@ class SQLiteStore:
         return int(row["count"])
 
     def list_dispatchable_actions(
-        self, *, limit: int = 50, kind: str | None = None, scope: BusinessScope = "all"
+        self,
+        *,
+        limit: int = 50,
+        kind: str | None = None,
+        scope: BusinessScope = "all",
+        coworker_chat_id: str | None = None,
     ) -> list[ActionRecord]:
         self.initialize()
         if scope not in {"all", "shadow", "coworker"}:
@@ -2372,6 +2391,7 @@ class SQLiteStore:
                 SELECT 1 FROM tasks t WHERE t.id = a.task_id AND t.chat_type = 'group'
                   AND NOT EXISTS (SELECT 1 FROM chat_policies cp WHERE cp.chat_id = t.chat_id)
               ))
+            {_COWORKER_ACTION_CHAT}
             {_scope_condition(scope, ACTION_COWORKER_SQL)}
             ORDER BY CASE WHEN a.execution_mode = 'production' THEN 0 ELSE 1 END,
                      a.created_at, a.id
@@ -2379,7 +2399,7 @@ class SQLiteStore:
             """  # noqa: S608
             rows = conn.execute(
                 query,
-                (kind, kind, limit),
+                (kind, kind, coworker_chat_id, coworker_chat_id, limit),
             ).fetchall()
         return [_action_from_row(row) for row in rows]
 
@@ -2638,6 +2658,7 @@ class SQLiteStore:
         stale_after_seconds: int = 900,
         now: str | None = None,
         scope: BusinessScope = "all",
+        coworker_chat_id: str | None = None,
     ) -> list[dict[str, Any]]:
         self.initialize()
         effective_now = now or self.clock()
@@ -2646,10 +2667,13 @@ class SQLiteStore:
         with self.connect() as conn:
             query = (
                 STALE_SENDING_ACTIONS_SQL
+                + _COWORKER_ACTION_CHAT
                 + _scope_condition(scope, ACTION_COWORKER_SQL)
                 + " ORDER BY a.updated_at, a.id"
             )
-            rows = conn.execute(query, (cutoff,)).fetchall()
+            rows = conn.execute(
+                query, (cutoff, coworker_chat_id, coworker_chat_id)
+            ).fetchall()
             for row in rows:
                 action_id = int(row["id"])
                 latest = _latest_dispatch_attempt_locked(conn, action_id=action_id)
@@ -4426,6 +4450,7 @@ class SQLiteStore:
                     "coworker_snapshot_verified",
                     "coworker_source_update_time",
                     "coworker_source_content_sha256",
+                    "coworker_quote",
                     "coworker_peer_id",
                     "coworker_peer_name",
                     "coworker_delegation_id",

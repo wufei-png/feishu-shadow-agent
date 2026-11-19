@@ -112,8 +112,10 @@ def test_dry_run_rejects_incompatible_production_policy_without_modifying_it(
     assert dry_store.get_product_policy() is None
 
 
-def test_dry_run_copies_coworker_policy_without_upgrading_v9_source(
+@pytest.mark.parametrize("version", [9, 12])
+def test_dry_run_copies_coworker_policy_without_upgrading_source(
     tmp_path: Path,
+    version: int,
 ) -> None:
     path = _config(tmp_path)
     with path.open("a", encoding="utf-8") as output:
@@ -122,7 +124,7 @@ def test_dry_run_copies_coworker_policy_without_upgrading_v9_source(
     prod_store = SQLiteStore(tmp_path / "data/agent.sqlite3")
     prod_store.import_product_policy_from_config(loaded.config)
     with prod_store.connect() as conn:
-        conn.execute("PRAGMA user_version = 9")
+        conn.execute(f"PRAGMA user_version = {version:d}")
     before = prod_store.path.read_bytes()
     _, dry_store, _ = _load_runtime(str(path), mode="dry-run")
     coworker = dry_store.get_product_policy("ai_coworker")

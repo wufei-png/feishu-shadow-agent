@@ -19,6 +19,33 @@ def snapshot_evidence(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _accepted_steer_sources(
+    conn: sqlite3.Connection,
+    event_id: int,
+    session_id: int,
+    origin_event_id: int | None = None,
+) -> list[tuple[str, int, dict[str, Any] | None]]:
+    steers = conn.execute(
+        """SELECT e.message_id, s.source_revision, s.snapshot_json, m.revision, m.is_deleted
+           FROM coworker_native_steers s JOIN coworker_events e ON e.id = s.event_id
+           LEFT JOIN messages m ON m.message_id = e.message_id
+           WHERE s.origin_event_id IN (?, ?) AND s.session_id = ? AND s.status = 'accepted'""",
+        (event_id, origin_event_id, session_id),
+    ).fetchall()
+    sources: list[tuple[str, int, dict[str, Any] | None]] = []
+    for steer in steers:
+        if steer["revision"] != steer["source_revision"] or steer["is_deleted"]:
+            raise ValueError("accepted steer source revision changed")
+        sources.append(
+            (
+                str(steer["message_id"]),
+                int(steer["source_revision"]),
+                json.loads(steer["snapshot_json"]) if steer["snapshot_json"] else None,
+            )
+        )
+    return sources
+
+
 @dataclass(frozen=True)
 class NativeDelivery:
     id: int
@@ -45,6 +72,12 @@ class NativeDeliveryStore:
 
     def __init__(self, store: SQLiteStore):
         self.store = store
+
+    def accepted_steer_sources(
+        self, event_id: int, session_id: int
+    ) -> list[tuple[str, int, dict[str, Any] | None]]:
+        with self.store.connect() as conn:
+            return _accepted_steer_sources(conn, event_id, session_id)
 
     def reserve_watch_batch(
         self, event_id: int, batch: list[tuple[int, str, int]]
@@ -251,32 +284,17 @@ class NativeDeliveryStore:
                             ),
                         )
                     )
-            steers = conn.execute(
-                """SELECT e.message_id, s.source_revision, s.snapshot_json, m.revision, m.is_deleted
-                   FROM coworker_native_steers s JOIN coworker_events e ON e.id = s.event_id
-                   LEFT JOIN messages m ON m.message_id = e.message_id
-                   WHERE s.origin_event_id IN (?, ?) AND s.session_id = ? AND s.status = 'accepted'""",
-                (
+            context_sources.extend(
+                _accepted_steer_sources(
+                    conn,
                     event_id,
+                    session_id,
                     internal.get("origin_event_id")
                     if internal.get("kind") == "subagent_completed"
                     and inherited_context is None
                     else None,
-                    session_id,
-                ),
-            ).fetchall()
-            for steer in steers:
-                if steer["revision"] != steer["source_revision"] or steer["is_deleted"]:
-                    raise ValueError("accepted steer source revision changed")
-                context_sources.append(
-                    (
-                        str(steer["message_id"]),
-                        int(steer["source_revision"]),
-                        json.loads(steer["snapshot_json"])
-                        if steer["snapshot_json"]
-                        else None,
-                    )
                 )
+            )
             for message_id, revision, snapshot in context_sources:
                 conn.execute(
                     "INSERT INTO coworker_native_delivery_context(delivery_id, message_id, revision, snapshot_json) VALUES (?, ?, ?, ?)",
@@ -327,9 +345,13 @@ class NativeDeliveryStore:
                 else None
             )
             cursor = conn.execute(
-                """UPDATE coworker_events SET status = 'completed', raw_json = ?,
+                """UPDATE coworker_events SET status = 'completed',
+                   raw_json = CASE WHEN json_type(raw_json, '$._runtime.quote') = 'object'
+                     THEN json_set(COALESCE(?, '{"_runtime":{}}'),
+                                  '$._runtime.quote', json_extract(raw_json, '$._runtime.quote'))
+                     ELSE ? END,
                    error = NULL, updated_at = ? WHERE id = ? AND status = 'processing'""",
-                (context, now, event_id),
+                (context, context, now, event_id),
             )
             if cursor.rowcount != 1:
                 raise ValueError("batch event is no longer processing")
@@ -369,7 +391,8 @@ class NativeDeliveryStore:
                 """SELECT d.*, e.app_id, e.chat_id, e.topic_key, e.group_activation_id
                    FROM coworker_native_deliveries d
                    JOIN coworker_events e ON e.id = d.event_id
-                   WHERE d.status = 'pending' AND e.app_id = ? AND (? IS NULL OR e.chat_id = ?)
+                   WHERE d.status = 'pending' AND e.app_id = ?
+                     AND (? IS NULL OR e.chat_id = ? OR e.topic_key GLOB '__private__:*')
                      AND NOT EXISTS (
                        SELECT 1 FROM coworker_native_deliveries previous
                        WHERE previous.session_id = d.session_id

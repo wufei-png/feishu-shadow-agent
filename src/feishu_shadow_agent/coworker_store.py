@@ -17,6 +17,28 @@ NATIVE_LOCATING_KEY = "__native_locating__"
 SUBAGENT_EVENT_PREFIX = "internal:subagent:"
 CACHED_HISTORY_EVENT_ID = "internal:history"
 
+_UNCONFIRMED_TOPIC_OPENING = """
+    SELECT 1 FROM coworker_native_deliveries opening
+    JOIN coworker_events origin ON origin.id = opening.event_id
+    WHERE origin.app_id = e.app_id AND origin.chat_id = e.chat_id
+      AND opening.purpose IN ('topic', 'transfer')
+      AND (
+        opening.status IN ('pending', 'sending')
+        OR (opening.status = 'needs_review' AND (
+          e.topic_key IN (opening.bound_topic_key, opening.thread_id)
+          OR EXISTS (
+            SELECT 1 FROM coworker_topic_aliases alias
+            WHERE alias.app_id = e.app_id AND alias.chat_id = e.chat_id
+              AND alias.topic_key = e.topic_key
+              AND alias.alias IN (opening.target_message_id, opening.sent_message_id, opening.thread_id)
+          )
+          OR COALESCE(NULLIF(json_extract(e.raw_json, '$.event.event.message.parent_id'), ''),
+                      json_extract(e.raw_json, '$.event.event.message.reply_to_message_id'))
+               IN (opening.target_message_id, opening.sent_message_id)
+        ))
+      )
+"""
+
 
 def _associate_queued_replies(
     conn: sqlite3.Connection,
@@ -526,19 +548,28 @@ class CoworkerStore:
                 UPDATE coworker_events SET status = 'needs_review',
                   error = 'invalid_event_payload', updated_at = ?
                 WHERE status = 'queued' AND (? IS NULL OR app_id = ?)
-                  AND (? IS NULL OR chat_id = ?)
+                  AND (? IS NULL OR chat_id = ? OR (? = 1 AND group_activation_id IS NULL))
+                  AND runtime = ?
                   AND CASE WHEN json_valid(raw_json) THEN json_type(raw_json) != 'object' ELSE 1 END
                 """,
-                (self.store.clock(), app_id, app_id, chat_id, chat_id),
+                (
+                    self.store.clock(),
+                    app_id,
+                    app_id,
+                    chat_id,
+                    chat_id,
+                    int(native),
+                    "native" if native else "legacy",
+                ),
             )
             row = conn.execute(
-                """
+                f"""
                 SELECT e.* FROM coworker_events e
                 WHERE e.status = 'queued'
                   AND e.runtime = ?
                   AND (? = 0 OR e.topic_key GLOB '__native_locating__:*')
                   AND (? IS NULL OR e.app_id = ?)
-                  AND (? IS NULL OR e.chat_id = ?)
+                  AND (? IS NULL OR e.chat_id = ? OR (? = 1 AND e.group_activation_id IS NULL))
                   AND (? = 0 OR e.message_id LIKE 'internal:subagent:%')
                   AND json_extract(e.raw_json, '$._runtime.steer_state') IS NULL
                   AND json_extract(e.raw_json, '$._runtime.batch_leader') IS NULL
@@ -559,12 +590,7 @@ class CoworkerStore:
                     SELECT 1 FROM coworker_sessions established WHERE established.app_id = e.app_id
                       AND established.chat_id = e.chat_id AND established.thread_id = e.topic_key
                       AND established.provider = 'codex' AND established.state = 'active'
-                  ) OR NOT EXISTS (
-                    SELECT 1 FROM coworker_native_deliveries opening
-                    JOIN coworker_events origin ON origin.id = opening.event_id
-                    WHERE origin.app_id = e.app_id AND origin.chat_id = e.chat_id
-                      AND opening.purpose IN ('topic', 'transfer') AND opening.status IN ('pending', 'sending', 'needs_review')
-                  ))
+                  ) OR NOT EXISTS ({_UNCONFIRMED_TOPIC_OPENING}))
                   AND (json_extract(e.raw_json, '$._runtime.retry_after') IS NULL
                        OR julianday(json_extract(e.raw_json, '$._runtime.retry_after')) <= julianday(?))
                   AND NOT EXISTS (
@@ -599,7 +625,7 @@ class CoworkerStore:
                         ))
                   )
                 ORDER BY e.received_at, e.id LIMIT 1
-                """,
+                """,  # noqa: S608
                 (
                     "native" if native else "legacy",
                     int(locating_only),
@@ -607,6 +633,7 @@ class CoworkerStore:
                     app_id,
                     chat_id,
                     chat_id,
+                    int(native),
                     int(internal_only),
                     int(native),
                     int(native),
@@ -643,12 +670,25 @@ class CoworkerStore:
             raw=cast(dict[str, Any], raw),
         )
 
-    def mark_agent_started(self, event_id: int) -> None:
+    def mark_agent_started(
+        self, event_id: int, *, quote: tuple[str, int, dict[str, Any]] | None = None
+    ) -> None:
         self.store.initialize()
         with self.store.connect() as conn:
+            quote_context = (
+                json.dumps(
+                    {"message_id": quote[0], "revision": quote[1], "snapshot": quote[2]}
+                )
+                if quote is not None
+                else None
+            )
             cursor = conn.execute(
-                "UPDATE coworker_events SET raw_json = json_set(raw_json, '$._runtime.agent_started', json('true')), updated_at = ? WHERE id = ? AND status = 'processing'",
-                (self.store.clock(), event_id),
+                """UPDATE coworker_events SET raw_json = json_set(
+                       CASE WHEN ? IS NULL THEN raw_json
+                            ELSE json_set(raw_json, '$._runtime.quote', json(?)) END,
+                       '$._runtime.agent_started', json('true')), updated_at = ?
+                   WHERE id = ? AND status = 'processing'""",
+                (quote_context, quote_context, self.store.clock(), event_id),
             )
             if cursor.rowcount != 1:
                 raise ValueError("coworker event is no longer processing")
@@ -716,11 +756,20 @@ class CoworkerStore:
                     message = _mapping(envelope.get("message"))
                     aliases = _topic_aliases(message)
                     hinted_thread = message.get("thread_id")
-                    if (
-                        topic_key.startswith("__private__:")
-                        and not message.get("parent_id")
-                        and not message.get("reply_to_message_id")
-                        and topic_key != f"__private__:{message.get('message_id')}"
+                    receipt_topics = _mapping(payload.get("_runtime")).get(
+                        "private_receipt_topics"
+                    )
+                    if topic_key.startswith("__private__:") and (
+                        topic_key == f"__private__:{event.message_id}"
+                        or (
+                            isinstance(receipt_topics, list)
+                            and topic_key not in receipt_topics
+                        )
+                        or (
+                            not message.get("parent_id")
+                            and not message.get("reply_to_message_id")
+                            and topic_key != f"__private__:{message.get('message_id')}"
+                        )
                     ):
                         continue
                     matches = any(
@@ -784,11 +833,11 @@ class CoworkerStore:
             ).fetchone()
             if blocked is None and topic_key != GROUP_MAIN_KEY and established is None:
                 blocked = conn.execute(
-                    """SELECT 1 FROM coworker_native_deliveries d
-                       JOIN coworker_events e ON e.id = d.event_id
-                       WHERE e.app_id = ? AND e.chat_id = ? AND d.purpose IN ('topic', 'transfer')
-                         AND d.status IN ('pending', 'sending', 'needs_review') LIMIT 1""",
-                    (event.app_id, event.chat_id),
+                    f"""SELECT 1
+                        FROM (SELECT app_id, chat_id, raw_json, ? AS topic_key
+                              FROM coworker_events WHERE id = ?) e
+                        WHERE EXISTS ({_UNCONFIRMED_TOPIC_OPENING})""",  # noqa: S608
+                    (topic_key, event.id),
                 ).fetchone()
             if blocked is None:
                 blocked = conn.execute(
@@ -1015,7 +1064,8 @@ class CoworkerStore:
             row = conn.execute(
                 """
                 SELECT e.* FROM coworker_events e
-                WHERE e.app_id = ? AND (? IS NULL OR e.chat_id = ?) AND e.status = 'queued'
+                WHERE e.app_id = ? AND e.status = 'queued'
+                  AND (? IS NULL OR e.chat_id = ? OR (? = 1 AND e.group_activation_id IS NULL))
                   AND e.runtime = ?
                   AND e.message_id NOT LIKE 'internal:subagent:%'
                   AND e.message_id NOT LIKE 'internal:transfer:%'
@@ -1050,6 +1100,7 @@ class CoworkerStore:
                     app_id,
                     chat_id,
                     chat_id,
+                    int(native),
                     "native" if native else "legacy",
                     int(native),
                     int(native),
@@ -1521,7 +1572,11 @@ class CoworkerStore:
             conn.execute(
                 """
                 UPDATE coworker_events SET status = ?, error = ?,
-                  raw_json = CASE WHEN ? IS NULL THEN NULL ELSE raw_json END, updated_at = ?
+                  raw_json = CASE WHEN ? IS NOT NULL THEN raw_json
+                    WHEN json_type(raw_json, '$._runtime.quote') = 'object' THEN
+                      json_object('_runtime', json_object('quote', json_extract(raw_json, '$._runtime.quote')))
+                    ELSE NULL END,
+                  updated_at = ?
                 WHERE id = ? AND status = 'processing'
                 """,
                 (
@@ -1541,14 +1596,27 @@ class CoworkerStore:
                 (self.store.clock(), event_id),
             )
 
-    def defer_event_until(self, event_id: int, retry_after: str) -> None:
+    def defer_event_until(
+        self,
+        event_id: int,
+        retry_after: str,
+        *,
+        private_receipt_topics: tuple[str, ...] | None = None,
+    ) -> None:
         self.store.initialize()
         with self.store.connect() as conn:
             cursor = conn.execute(
                 """UPDATE coworker_events SET status = 'queued',
-                   raw_json = json_set(raw_json, '$._runtime.retry_after', ?), updated_at = ?
+                   raw_json = json_set(raw_json, '$._runtime.retry_after', ?,
+                                      '$._runtime.private_receipt_topics', json(?)),
+                   updated_at = ?
                    WHERE id = ? AND status = 'processing'""",
-                (retry_after, self.store.clock(), event_id),
+                (
+                    retry_after,
+                    json.dumps(private_receipt_topics),
+                    self.store.clock(),
+                    event_id,
+                ),
             )
             if cursor.rowcount != 1:
                 raise ValueError("event is no longer processing")
@@ -1561,7 +1629,8 @@ class CoworkerStore:
             conn.execute("BEGIN" if dry_run else "BEGIN IMMEDIATE")
             rows = conn.execute(
                 """SELECT id, status, CASE WHEN json_valid(raw_json)
-                     THEN json_type(raw_json, '$._runtime.batch_context') = 'array' ELSE 0 END AS batch_context
+                     THEN json_type(raw_json, '$._runtime.batch_context') = 'array'
+                       OR json_type(raw_json, '$._runtime.quote') = 'object' ELSE 0 END AS retained_context
                    FROM coworker_events WHERE raw_json IS NOT NULL AND status != 'processing'
                      AND julianday(received_at) < julianday(?)
                      AND (? = 0 OR status NOT IN ('queued', 'needs_review'))""",
@@ -1569,7 +1638,7 @@ class CoworkerStore:
             ).fetchall()
             candidates: list[sqlite3.Row] = []
             for row in rows:
-                if row["status"] == "completed" and row["batch_context"]:
+                if row["status"] == "completed" and row["retained_context"]:
                     pending = conn.execute(
                         """SELECT EXISTS(SELECT 1 FROM coworker_subagents
                                WHERE origin_event_id = ? AND status IN ('running', 'needs_review'))
@@ -1584,7 +1653,7 @@ class CoworkerStore:
                 candidates.append(row)
             if not dry_run:
                 for row in candidates:
-                    if row["status"] == "completed" and row["batch_context"]:
+                    if row["status"] == "completed" and row["retained_context"]:
                         conn.execute(
                             "UPDATE coworker_events SET raw_json = NULL, updated_at = ? WHERE id = ?",
                             (self.store.clock(), row["id"]),

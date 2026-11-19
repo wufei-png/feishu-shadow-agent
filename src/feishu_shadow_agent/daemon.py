@@ -344,6 +344,9 @@ class Daemon:
                     else None,
                     can_start_action=self._dispatch_health_cache_is_current,
                     scope=self.business_mode,
+                    coworker_chat_id=self.coworker_chat_id
+                    if self.native_coworker
+                    else None,
                 )
                 if dispatch_enabled
                 else DispatchSummary()

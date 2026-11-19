@@ -134,7 +134,7 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 
 ## 运行时存储安全
 
-当前 `store/schema.sql` 的 SQLite schema 为 v11；空库会初始化为当前 schema，已标记的 v9 和 v10 数据库会事务式升级，其他版本或未标记的已有数据库会被拒绝。预演的只读生产策略快照可读取 v9、v10 或 v11，其他只读评估入口以各自说明为准。
+当前 `store/schema.sql` 的 SQLite schema 为 v13。空库初始化为 v13，已标记的 v9 至 v12 数据库会事务式升级。项目会拒绝打开其他版本或未标记的已有数据库。预演可从已标记的 v9 至 v13 库只读提取生产策略，其他只读入口以各自说明为准。
 
 每个 SQLite 连接都会启用 `PRAGMA foreign_keys = ON` 和 `PRAGMA busy_timeout = 5000`，避免 daemon、status、replay 或本地审批命令短暂并发时立即报 `database is locked`。
 

@@ -18,7 +18,11 @@ from .membership import (
     effective_membership_status,
     record_bot_membership_absence,
 )
-from .message_normalization import MessageNormalizer, message_content_matches
+from .message_normalization import (
+    MessageNormalizer,
+    message_content_matches,
+    message_snapshot_matches,
+)
 from .policy import PolicyResolver
 from .reply_destination import candidate_from_message, message_location
 from .store.policy_store import COWORKER_POLICY_KEY
@@ -98,10 +102,11 @@ class Dispatcher:
         can_start_action: Callable[[], bool] | None = None,
         limit: int = 50,
         scope: BusinessScope = "all",
+        coworker_chat_id: str | None = None,
     ) -> DispatchSummary:
         summary = DispatchSummary()
         recovered = self.store.mark_stale_sending_actions_failed_needs_review(
-            scope=scope
+            scope=scope, coworker_chat_id=coworker_chat_id
         )
         if recovered:
             self.logger.warning(
@@ -125,6 +130,7 @@ class Dispatcher:
             limit=limit,
             kind=None if include_owner_notifications else "send_reply",
             scope=scope,
+            coworker_chat_id=coworker_chat_id,
         )
         if allow_owner_notification_actual:
             seen_action_ids = {action.id for action in actions}
@@ -760,11 +766,23 @@ class Dispatcher:
                 if (
                     coworker is None
                     or not coworker.enabled
-                    or coworker.chat_id != task.chat_id
+                    or (task.chat_type != "p2p" and coworker.chat_id != task.chat_id)
                 ):
                     return _local_error(action, "coworker_policy_disabled_or_changed")
                 if identity != "bot":
                     return _local_error(action, "coworker_requires_bot_identity")
+                source_id = action.source_message_id or target_message_id
+                if task.chat_type == "p2p":
+                    request = self.store.get_message(source_id)
+                    if (
+                        source != "coworker_approval"
+                        or source_id != target_message_id
+                        or request is None
+                        or request["chat_id"] != task.chat_id
+                        or request["chat_type"] != "p2p"
+                        or request["sender_id"] != self.config.owner.open_id
+                    ):
+                        return _local_error(action, "coworker_private_owner_required")
                 if (
                     source in {"coworker_delegate", "coworker_delegate_approval"}
                     and action.payload.get("coworker_peer_id")
@@ -785,9 +803,29 @@ class Dispatcher:
                         )
                 if action.payload.get("coworker_snapshot_verified") is not True:
                     return _local_error(action, "coworker_source_snapshot_unverified")
+                quote = action.payload.get("coworker_quote")
+                quote_id = None
+                if isinstance(quote, dict):
+                    quote = cast(dict[str, Any], quote)
+                    quote_id = quote.get("message_id")
+                    stored = (
+                        self.store.get_message(quote_id)
+                        if isinstance(quote_id, str)
+                        else None
+                    )
+                    if (
+                        stored is None
+                        or stored["chat_id"] != task.chat_id
+                        or stored["is_deleted"]
+                        or stored["revision"] != quote.get("revision")
+                    ):
+                        return _local_error(action, "coworker_quote_changed_or_deleted")
+                message_ids = [source_id]
+                if isinstance(quote_id, str) and quote_id != source_id:
+                    message_ids.append(quote_id)
                 try:
                     source_page = self.feishu.get_messages(
-                        as_identity="bot", message_ids=[target_message_id]
+                        as_identity="bot", message_ids=message_ids
                     )
                 except Exception:  # noqa: BLE001
                     return _local_error(action, "coworker_source_refresh_failed")
@@ -795,7 +833,7 @@ class Dispatcher:
                     (
                         item
                         for item in source_page.items
-                        if item.get("message_id") == target_message_id
+                        if item.get("message_id") == source_id
                     ),
                     None,
                 )
@@ -815,6 +853,25 @@ class Dispatcher:
                     )
                 ):
                     return _local_error(action, "coworker_source_changed_or_deleted")
+                if isinstance(quote, dict):
+                    quoted = next(
+                        (
+                            item
+                            for item in source_page.items
+                            if item.get("message_id") == quote_id
+                        ),
+                        None,
+                    )
+                    if (
+                        quoted is None
+                        or quoted.get("chat_id") != task.chat_id
+                        or quoted.get("is_deleted")
+                        or quoted.get("deleted")
+                        or not message_snapshot_matches(
+                            quoted, cast(dict[str, Any], quote)
+                        )
+                    ):
+                        return _local_error(action, "coworker_quote_changed_or_deleted")
                 if (
                     source not in {"coworker_approval", "coworker_delegate_approval"}
                     and not PolicyResolver(self.store)

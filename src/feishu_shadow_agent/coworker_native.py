@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import time
 from _thread import RLock
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path
 from threading import Condition
@@ -40,7 +42,8 @@ from .coworker_store import (
     CoworkerEvent,
 )
 from .dispatcher import _extract_message_id  # pyright: ignore[reportPrivateUsage]
-from .message_normalization import message_snapshot_matches
+from .message_normalization import message_content_fingerprint, message_snapshot_matches
+from .operator_commands import ApprovalCommandService
 from .paths import resolve_agent_working_dir, resolve_relative_path
 from .policy import PolicyResolver
 from .processing import ApprovalService, SendComposer
@@ -64,7 +67,9 @@ class _WatchDeferred(Exception):
 
 
 class _ReceiptPending(Exception):
-    pass
+    def __init__(self, message: str, *, private_topics: tuple[str, ...] | None = None):
+        super().__init__(message)
+        self.private_topics = private_topics
 
 
 class _WatchExpired(ValueError):
@@ -100,6 +105,14 @@ class SteerDecision(BaseModel):
     decision: Literal["current", "unrelated", "uncertain"]
 
 
+@dataclass
+class _RootTurn:
+    origin: tuple[int, int, str]
+    pending_items: set[str] = field(default_factory=set[str])
+    completed_items: set[str] = field(default_factory=set[str])
+    finished: bool = False
+
+
 class NativeCoworkerService(CoworkerService):
     """Codex execution with project-owned, receipt-backed replies."""
 
@@ -110,8 +123,7 @@ class NativeCoworkerService(CoworkerService):
         self.reply_mode = reply_mode
         self.deliveries = NativeDeliveryStore(self.store)
         self.native_state = NativeCoworkerState(self.store)
-        self._root_turn_origins: dict[tuple[str, str], tuple[int, int, str]] = {}
-        self._collab_items: set[str] = set()
+        self._root_turns: dict[tuple[str, str], _RootTurn] = {}
         self._pending_collab: dict[str, set[str]] = {}
         self._held_completions: dict[str, tuple[str, str]] = {}
         self._session_locks: dict[int, RLock] = {}
@@ -121,6 +133,11 @@ class NativeCoworkerService(CoworkerService):
     def _session_lock(self, session_id: int) -> RLock:
         with self._app_server_lock:
             return self._session_locks.setdefault(session_id, RLock())
+
+    def _group_activation_id(self, chat_id: str) -> int | None:
+        if chat_id != self.startup_chat_id:
+            return None
+        return super()._group_activation_id(chat_id)
 
     def _session_condition(self, session_id: int) -> Condition:
         with self._app_server_lock:
@@ -132,10 +149,19 @@ class NativeCoworkerService(CoworkerService):
 
     def _reserve_publication(self, session_id: int, event_id: int) -> None:
         condition = self._session_condition(session_id)
-        while not self.events.try_begin_native_publication(
-            event_id, wait_for_queued=self.wait_for_queued_followups()
-        ):
-            condition.wait(timeout=1)
+        deadline = time.monotonic() + 120 + 2 * self.config.lark_cli.timeout_seconds
+        while True:
+            can_wait = self.wait_for_queued_followups()
+            if self.events.try_begin_native_publication(
+                event_id, wait_for_queued=can_wait
+            ):
+                return
+            remaining = deadline - time.monotonic()
+            if not can_wait or remaining <= 0:
+                raise ValueError(
+                    "supplement outcome is uncertain; review before publishing"
+                )
+            condition.wait(timeout=min(1, remaining))
 
     def _turn_superseded(self, event_id: int) -> bool:
         with self.store.connect() as conn:
@@ -191,14 +217,35 @@ class NativeCoworkerService(CoworkerService):
         if not isinstance(thread, str):
             return
         with self._app_server_lock:
+            if method == "thread/closed":
+                self._root_origins.pop(thread, None)
+                unfinished: set[str] = set()
+                for key in [key for key in self._root_turns if key[0] == thread]:
+                    unfinished.update(self._root_turns.pop(key).pending_items)
+                if unfinished:
+                    for child_id, items in list(self._pending_collab.items()):
+                        if items.isdisjoint(unfinished):
+                            continue
+                        items.difference_update(unfinished)
+                        if not items:
+                            self._pending_collab.pop(child_id)
+                            self._held_completions.pop(child_id, None)
+                            if self.events.mark_subagent_uncertain(child_id):
+                                self.wake()
+                return
             if method in {"turn/started", "turn/completed"}:
                 turn = _mapping(params.get("turn"))
                 turn_id = turn.get("id")
                 if isinstance(turn_id, str) and thread in self._root_origins:
+                    key = (thread, turn_id)
                     if method == "turn/started":
-                        self._root_turn_origins[(thread, turn_id)] = self._root_origins[
-                            thread
-                        ]
+                        self._root_turns.setdefault(
+                            key, _RootTurn(self._root_origins[thread])
+                        )
+                    elif (root := self._root_turns.get(key)) is not None:
+                        root.finished = True
+                        if not root.pending_items:
+                            del self._root_turns[key]
                     return
                 child = self.events.subagent_context(thread)
                 if (
@@ -253,18 +300,17 @@ class NativeCoworkerService(CoworkerService):
         if item.get("senderThreadId") != parent_thread:
             return
         item_id, turn_id = item.get("id"), params.get("turnId")
-        if (
-            not isinstance(item_id, str)
-            or item_id in self._collab_items
-            or not isinstance(turn_id, str)
-        ):
+        if not isinstance(item_id, str) or not isinstance(turn_id, str):
             return
-        origin = self._root_turn_origins.get((parent_thread, turn_id))
+        key = (parent_thread, turn_id)
+        root = self._root_turns.get(key)
+        if root is None or item_id in root.completed_items:
+            return
+        origin = root.origin
         receivers = item.get("receiverThreadIds")
-        if origin is None or not isinstance(receivers, list) or not receivers:
-            return
-        receivers = cast(list[Any], receivers)
+        receivers = cast(list[Any], receivers) if isinstance(receivers, list) else []
         if method == "item/started":
+            root.pending_items.add(item_id)
             for child_id in receivers:
                 if isinstance(child_id, str):
                     child = self.events.subagent_context(child_id)
@@ -275,7 +321,10 @@ class NativeCoworkerService(CoworkerService):
                     ):
                         self._pending_collab.setdefault(child_id, set()).add(item_id)
             return
-        self._collab_items.add(item_id)
+        root.pending_items.discard(item_id)
+        root.completed_items.add(item_id)
+        if root.finished and not root.pending_items:
+            del self._root_turns[key]
         for child_id in receivers:
             if not isinstance(child_id, str) or not child_id:
                 continue
@@ -418,16 +467,19 @@ class NativeCoworkerService(CoworkerService):
         ):
             return False
         if not internal_only and not locating_only:
-            handoff = self.native_state.claim_handoff(app_id=self.app_id)
+            handoff = self.native_state.claim_handoff(
+                app_id=self.app_id, chat_id=policy.chat_id
+            )
             if handoff is not None:
                 self._process_handoff(handoff)
                 return True
-            delivery = self.deliveries.claim(app_id=self.app_id)
+            delivery = self.deliveries.claim(app_id=self.app_id, chat_id=policy.chat_id)
             if delivery is not None:
                 self._deliver(delivery)
                 return True
         event = self.events.claim_next(
             app_id=self.app_id,
+            chat_id=policy.chat_id,
             internal_only=internal_only,
             native=True,
             locating_only=locating_only,
@@ -440,7 +492,9 @@ class NativeCoworkerService(CoworkerService):
                 bot = str(event.raw.get("bot_open_id") or "")
                 raw = event_message_from_raw(envelope, bot_id=bot)
                 raw = self._enrich_message(raw, event.message_id, event.chat_id, bot)
-                topic = self._topic_for_message(raw, event.message_id)
+                topic = self._topic_for_message(
+                    raw, event.message_id, bot=bot, locating=True
+                )
                 if not self.events.route_native_event(
                     event, topic, queue_only=locating_only
                 ):
@@ -452,9 +506,11 @@ class NativeCoworkerService(CoworkerService):
             return False
         except _WatchDeferred:
             return True
-        except _ReceiptPending:
+        except _ReceiptPending as exc:
             self.events.defer_event_until(
-                event.id, shift_instant(self.store.clock(), delta=timedelta(seconds=2))
+                event.id,
+                shift_instant(self.store.clock(), delta=timedelta(seconds=2)),
+                private_receipt_topics=exc.private_topics,
             )
             return True
         except _SourceUnavailable as exc:
@@ -512,10 +568,15 @@ class NativeCoworkerService(CoworkerService):
 
     def process_next_steer(self) -> bool:
         policy, server = self.current_policy(), self.app_server
-        if policy is None or server is None or not self._matches_startup_policy(policy):
+        if (
+            policy is None
+            or not policy.chat_id
+            or server is None
+            or not self._matches_startup_policy(policy)
+        ):
             return False
         event = self.events.claim_next_steer(
-            app_id=self.app_id, chat_id=None, native=True
+            app_id=self.app_id, chat_id=policy.chat_id, native=True
         )
         if event is None:
             return False
@@ -587,7 +648,10 @@ class NativeCoworkerService(CoworkerService):
                 self.events.finish_steer(event.id, retry=True)
                 return False
             raw = self._enrich_message(raw, event.message_id, event.chat_id, bot)
-            if self._topic_for_message(raw, event.message_id) != event.topic_key:
+            if (
+                self._topic_for_message(raw, event.message_id, bot=bot)
+                != event.topic_key
+            ):
                 raise ValueError("steer source changed location")
             private = event.topic_key.startswith(PRIVATE_TOPIC_PREFIX)
             message = self._message_normalizer(bot).normalize(
@@ -598,10 +662,12 @@ class NativeCoworkerService(CoworkerService):
                 return False
             if private and message.sender_id != self.config.owner.open_id:
                 raise ValueError("private sender is not the owner")
-            if (
-                not private
-                and self._group_activation_id(event.chat_id)
-                != event.group_activation_id
+            if private and ApprovalCommandService.is_approval_command(message.text):
+                self.events.skip_native_steer(event.id)
+                return False
+            activation = None if private else self._group_activation_id(event.chat_id)
+            if not private and (
+                activation is None or activation != event.group_activation_id
             ):
                 raise ValueError("group policy changed before steer")
             saved = self.store.upsert_message_with_revision(message)
@@ -689,7 +755,7 @@ class NativeCoworkerService(CoworkerService):
                 and origin_event_id is not None
                 and source_revision is not None
             ):
-                self.native_state.record_steer(
+                self._record_steer(
                     event_id=event.id,
                     origin_event_id=origin_event_id,
                     session_id=session_id,
@@ -702,7 +768,7 @@ class NativeCoworkerService(CoworkerService):
                 self.events.skip_native_steer(event.id)
             return False
         else:
-            self.native_state.record_steer(
+            self._record_steer(
                 event_id=event.id,
                 origin_event_id=origin_event_id,
                 session_id=session_id,
@@ -721,51 +787,38 @@ class NativeCoworkerService(CoworkerService):
                 session_lock.release()
         return True
 
-    def _topic_for_message(self, raw: dict[str, Any], message_id: str) -> str:
+    def _record_steer(
+        self,
+        *,
+        event_id: int,
+        origin_event_id: int,
+        session_id: int,
+        turn_id: str,
+        source_revision: int,
+        error: str | None,
+        snapshot: dict[str, Any] | None,
+    ) -> None:
+        for attempt in range(2):
+            try:
+                self.native_state.record_steer(
+                    event_id=event_id,
+                    origin_event_id=origin_event_id,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    source_revision=source_revision,
+                    error=error,
+                    snapshot=snapshot,
+                )
+                return
+            except sqlite3.OperationalError:
+                if attempt:
+                    raise
+
+    def _topic_for_message(
+        self, raw: dict[str, Any], message_id: str, *, bot: str, locating: bool = False
+    ) -> str:
         if raw.get("chat_type") == "p2p":
-            parent = raw.get("parent_id") or raw.get("reply_to_message_id")
-            if isinstance(parent, str) and parent:
-                with self.store.connect() as conn:
-                    row = conn.execute(
-                        """SELECT e.topic_key FROM coworker_events e
-                           WHERE e.app_id = ? AND e.chat_id = ? AND e.message_id = ?
-                             AND e.runtime = 'native'
-                           UNION ALL
-                           SELECT e.topic_key FROM coworker_native_deliveries d
-                           JOIN coworker_events e ON e.id = d.event_id
-                           WHERE e.app_id = ? AND e.chat_id = ? AND d.sent_message_id = ?
-                             AND d.status = 'sent' LIMIT 1""",
-                        (
-                            self.app_id,
-                            raw.get("chat_id"),
-                            parent,
-                            self.app_id,
-                            raw.get("chat_id"),
-                            parent,
-                        ),
-                    ).fetchone()
-                if row is not None:
-                    topic = str(row["topic_key"])
-                    if topic.startswith(f"{NATIVE_LOCATING_KEY}:"):
-                        raise _ReceiptPending(
-                            "quoted private request is still being located"
-                        )
-                    if topic.startswith(PRIVATE_TOPIC_PREFIX):
-                        return topic
-                else:
-                    with self.store.connect() as conn:
-                        pending = conn.execute(
-                            """SELECT 1 FROM coworker_native_deliveries d
-                               JOIN coworker_events e ON e.id = d.event_id
-                               WHERE e.app_id = ? AND e.chat_id = ?
-                                 AND d.status IN ('sending', 'needs_review') LIMIT 1""",
-                            (self.app_id, raw.get("chat_id")),
-                        ).fetchone()
-                    if pending is not None:
-                        raise _ReceiptPending(
-                            "private reply receipt is not yet confirmed"
-                        )
-            return f"{PRIVATE_TOPIC_PREFIX}{message_id}"
+            return self._private_topic_for_message(raw, message_id, bot)
         thread = raw.get("thread_id")
         root = raw.get("root_id")
         aliases = [
@@ -783,9 +836,157 @@ class NativeCoworkerService(CoworkerService):
         chat_id = raw.get("chat_id")
         if not isinstance(chat_id, str) or not chat_id:
             raise ValueError("message chat is unavailable")
+        if locating:
+            self._hold_for_unconfirmed_opening(raw, chat_id, bot)
         return self.events.resolve_native_topic(
             app_id=self.app_id, chat_id=chat_id, aliases=aliases
         )
+
+    def _private_topic_for_message(
+        self, raw: dict[str, Any], message_id: str, bot: str
+    ) -> str:
+        independent = f"{PRIVATE_TOPIC_PREFIX}{message_id}"
+        parent = raw.get("parent_id") or raw.get("reply_to_message_id")
+        chat_id = raw.get("chat_id")
+        if not isinstance(parent, str) or not parent or not isinstance(chat_id, str):
+            return independent
+        with self.store.connect() as conn:
+            row = conn.execute(
+                """SELECT e.topic_key FROM coworker_events e
+                   WHERE e.app_id = ? AND e.chat_id = ? AND e.message_id = ?
+                     AND e.runtime = 'native'
+                   UNION ALL
+                   SELECT e.topic_key FROM coworker_native_deliveries d
+                   JOIN coworker_events e ON e.id = d.event_id
+                   WHERE e.app_id = ? AND e.chat_id = ? AND d.sent_message_id = ?
+                     AND d.status = 'sent'
+                   UNION ALL
+                   SELECT e.topic_key FROM dispatch_attempts attempt
+                   JOIN actions a ON a.id = attempt.action_id
+                   JOIN coworker_events e ON e.message_id = a.source_message_id
+                   WHERE e.app_id = ? AND e.chat_id = ? AND e.runtime = 'native'
+                     AND attempt.sent_message_id = ? AND attempt.status IN ('send_ok', 'readback_ok')
+                     AND a.kind = 'send_reply' AND a.status = 'sent' AND a.execution_mode = 'production'
+                     AND json_extract(a.payload_json, '$.identity') = 'bot'
+                     AND json_extract(a.payload_json, '$.source') = 'coworker_approval'
+                     AND json_extract(a.payload_json, '$.reply_destination.chat_id') = e.chat_id
+                     AND json_extract(a.payload_json, '$.reply_destination.location') = 'main'
+                   UNION ALL
+                   SELECT NULL FROM dispatch_attempts attempt
+                   JOIN actions a ON a.id = attempt.action_id
+                   WHERE attempt.sent_message_id = ? AND attempt.status IN ('send_ok', 'readback_ok')
+                     AND a.kind = 'owner_notification' AND a.execution_mode = 'production'
+                   LIMIT 1""",
+                (self.app_id, chat_id, parent) * 3 + (parent,),
+            ).fetchone()
+            if row is not None:
+                if row["topic_key"] is None:
+                    return independent  # an owner notification is a new message
+                topic = str(row["topic_key"])
+                if topic.startswith(f"{NATIVE_LOCATING_KEY}:"):
+                    raise _ReceiptPending(
+                        "quoted private request is still being located"
+                    )
+                return topic if topic.startswith(PRIVATE_TOPIC_PREFIX) else independent
+            pending = conn.execute(
+                """SELECT e.topic_key, d.sent_message_id, d.target_message_id
+                   FROM coworker_native_deliveries d
+                   JOIN coworker_events e ON e.id = d.event_id
+                   WHERE e.app_id = ? AND e.chat_id = ?
+                     AND d.status IN ('sending', 'needs_review')
+                     AND (d.sent_message_id IS NULL OR d.sent_message_id = ?)""",
+                (self.app_id, chat_id, parent),
+            ).fetchall()
+        topics = {str(item["topic_key"]) for item in pending if item["sent_message_id"]}
+        unknown = [item for item in pending if not item["sent_message_id"]]
+        if unknown and not topics:
+            try:
+                quoted = next(
+                    iter(self._read_chat_messages(chat_id, [parent])), dict[str, Any]()
+                )
+            except _SourceUnavailable:
+                quoted = {}
+            sender = self._message_normalizer(bot).normalize(
+                {**quoted, "message_id": parent}, default_chat_type="p2p"
+            )
+            target = (
+                quoted.get("parent_id")
+                or quoted.get("reply_to_message_id")
+                or quoted.get("root_id")
+            )
+            if sender.sender_type != "user" and sender.sender_role != "owner_message":
+                topics.update(
+                    str(item["topic_key"])
+                    for item in unknown
+                    if not target or target == item["target_message_id"]
+                )
+        if topics:
+            raise _ReceiptPending(
+                "private reply receipt is not yet confirmed",
+                private_topics=tuple(sorted(topics)),
+            )
+        return independent
+
+    def _read_chat_messages(
+        self, chat_id: str, message_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        try:
+            page = self.feishu.get_messages(as_identity="bot", message_ids=message_ids)
+        except Exception as exc:
+            raise _SourceUnavailable("referenced message unavailable") from exc
+        return [
+            item
+            for item in page.items
+            if item.get("message_id") in message_ids and item.get("chat_id") == chat_id
+        ]
+
+    def _hold_for_unconfirmed_opening(
+        self, raw: dict[str, Any], chat_id: str, bot: str
+    ) -> None:
+        candidate_ids = list(
+            dict.fromkeys(
+                value
+                for value in (
+                    raw.get("parent_id") or raw.get("reply_to_message_id"),
+                    raw.get("root_id"),
+                )
+                if isinstance(value, str) and value
+            )
+        )
+        if not candidate_ids:
+            return
+        with self.store.connect() as conn:
+            targets = {
+                str(row[0])
+                for row in conn.execute(
+                    """SELECT d.target_message_id FROM coworker_native_deliveries d
+                   JOIN coworker_events e ON e.id = d.event_id
+                   WHERE e.app_id = ? AND e.chat_id = ?
+                     AND d.purpose IN ('topic', 'transfer')
+                     AND d.status = 'needs_review' AND d.sent_message_id IS NULL""",
+                    (self.app_id, chat_id),
+                )
+            }
+        if not targets or any(candidate in targets for candidate in candidate_ids):
+            return  # the routing store handles known opening targets directly
+        for item in self._read_chat_messages(chat_id, candidate_ids):
+            if (
+                item.get("thread_id") == raw.get("thread_id")
+                and (
+                    item.get("parent_id")
+                    or item.get("reply_to_message_id")
+                    or item.get("root_id")
+                )
+                in targets
+            ):
+                sender = self._message_normalizer(bot).normalize(
+                    item, default_chat_type="group"
+                )
+                if (
+                    sender.sender_id in (self.app_id, bot)
+                    and sender.sender_role == "bot_message"
+                ):
+                    raise _ReceiptPending("topic opening receipt is not yet confirmed")
 
     def _is_own_reply(self, event: CoworkerEvent, parent_id: str | None) -> bool:
         if not parent_id:
@@ -872,7 +1073,7 @@ class NativeCoworkerService(CoworkerService):
         bot = str(event.raw.get("bot_open_id") or "")
         raw = event_message_from_raw(envelope, bot_id=bot)
         raw = self._enrich_message(raw, event.message_id, event.chat_id, bot)
-        if self._topic_for_message(raw, event.message_id) != event.topic_key:
+        if self._topic_for_message(raw, event.message_id, bot=bot) != event.topic_key:
             raise ValueError("message location changed after routing")
         message = self._message_normalizer(bot).normalize(
             raw, default_chat_type="p2p" if private else "group"
@@ -886,6 +1087,8 @@ class NativeCoworkerService(CoworkerService):
                 or message.sender_id != self.config.owner.open_id
             ):
                 raise ValueError("private sender is not the owner")
+            if ApprovalCommandService.is_approval_command(message.text):
+                return
         else:
             direct = (
                 message.direct_mention
@@ -961,12 +1164,19 @@ class NativeCoworkerService(CoworkerService):
             "你是飞书 AI 同事。使用原生工具和子 Agent 完成请求；项目负责发布最终答复。"
             "飞书消息只能由项目发布，不要使用工具自行发送或回复。"
             "返回 action=reply 和自然文本，或 action=silent。"
-            "owner 明确要求关注或取消关注本话题时，返回 watch 或 unwatch；"
-            "watch_duration_seconds 可指定秒数，默认 24 小时。"
             "需要 owner 判断、授权或替其承诺时，设置 approval_required=true 并写明 approval_reason。"
             "对关注产生的普通发言，只在相关时回复。\n"
             + _code_block(json.dumps(details, ensure_ascii=False), "json")
         )
+        if (
+            not private
+            and event.topic_key != GROUP_MAIN_KEY
+            and message.sender_id == self.config.owner.open_id
+        ):
+            prompt += (
+                "\nowner 明确要求关注或取消关注本话题时，返回 watch 或 unwatch，并填写确认正文。"
+                "关注默认 24 小时，指定 watch_duration_seconds 时须为正数。"
+            )
         if _mapping(event.raw.get("_runtime")).get("previous_unpublished") is True:
             prompt += "\n上一轮答复尚未发布，请结合补充重新完成并答复当前任务。"
         if not private and event.topic_key == GROUP_MAIN_KEY:
@@ -1000,13 +1210,15 @@ class NativeCoworkerService(CoworkerService):
             )
             if self.execution_mode != "dry_run":
                 prompt += "按需使用 read_feishu_topic 读取本群话题，或使用 read_feishu_group_history 读取本群历史。"
+        quote_source = None
         if parent_id:
-            quote = self._quoted_message(parent_id)
+            quote = self._read_quote(parent_id, event.chat_id, bot, private=private)
             if quote is not None:
+                quoted_message, quote_source = quote
                 prompt += "\n引用内容：\n" + _code_block(
-                    json.dumps(quote, ensure_ascii=False), "json"
+                    json.dumps(quoted_message, ensure_ascii=False), "json"
                 )
-        self.events.mark_agent_started(event.id)
+        self.events.mark_agent_started(event.id, quote=quote_source)
         result = server.run_turn(
             prompt,
             session_id=session.backend_session_id,
@@ -1093,6 +1305,25 @@ class NativeCoworkerService(CoworkerService):
             ):
                 purpose = "topic"
             if output.action in {"watch", "unwatch"}:
+                sources = [
+                    (
+                        message.message_id,
+                        upsert.revision,
+                        snapshot_evidence(message.raw),
+                    ),
+                    *self.deliveries.accepted_steer_sources(event.id, session.id),
+                    *[
+                        (message_id, rev, batch_snapshots[message_id])
+                        for _, message_id, rev in batch
+                    ],
+                ]
+                if quote_source:
+                    sources.append(quote_source)
+                try:
+                    self._validate_source_snapshots(event.chat_id, sources)
+                except _SourceUnavailable as exc:
+                    raise ValueError("watch source cannot be verified") from exc
+                self._check_current_policy(policy, event.chat_id, cast(int, activation))
                 if output.action == "watch":
                     self.native_state.set_watch(
                         app_id=event.app_id,
@@ -1124,6 +1355,7 @@ class NativeCoworkerService(CoworkerService):
                         target_message_id=message.message_id,
                         text=composed.text,
                         reason=output.approval_reason or disabled_reason,
+                        quote_source=quote_source,
                         manual_only=private
                         or bool(batch)
                         or purpose in {"topic", "transfer"},
@@ -1144,6 +1376,7 @@ class NativeCoworkerService(CoworkerService):
                 batch=batch,
                 source_snapshot=snapshot_evidence(message.raw),
                 context_snapshots=batch_snapshots,
+                inherited_context=[quote_source] if quote_source else None,
                 requires_watch=watch_trigger and output.action == "reply",
                 purpose=purpose,
             )
@@ -1208,6 +1441,8 @@ class NativeCoworkerService(CoworkerService):
             raise ValueError("topic transfer source cannot be verified")
         supplements: list[dict[str, Any]] = []
         context_snapshots: dict[str, dict[str, Any]] = {}
+        parent = source_raw.get("parent_id") or source_raw.get("reply_to_message_id")
+        quote_source = quoted_message = None
         for item in context:
             if (
                 item["current_revision"] != item["revision"]
@@ -1238,8 +1473,13 @@ class NativeCoworkerService(CoworkerService):
                 or saved.revision != item["revision"]
             ):
                 raise ValueError("topic transfer context changed")
-            supplements.append(_prompt_message(supplement))
-            context_snapshots[supplement.message_id] = snapshot_evidence(supplement.raw)
+            evidence = snapshot_evidence(supplement.raw)
+            context_snapshots[supplement.message_id] = evidence
+            if supplement.message_id == parent:
+                quoted_message = supplement.raw
+                quote_source = (supplement.message_id, saved.revision, evidence)
+            else:
+                supplements.append(_prompt_message(supplement))
         session = self.events.get_or_create_session(
             app_id=event.app_id,
             chat_id=event.chat_id,
@@ -1270,14 +1510,15 @@ class NativeCoworkerService(CoworkerService):
             prompt += "\n本任务已接收的补充：\n" + _code_block(
                 json.dumps(supplements, ensure_ascii=False), "json"
             )
-        parent = source_raw.get("parent_id") or source_raw.get("reply_to_message_id")
-        if isinstance(parent, str) and parent:
-            quote = self._quoted_message(parent)
+        if quote_source is None and isinstance(parent, str) and parent:
+            quote = self._read_quote(parent, event.chat_id, str(bot), private=False)
             if quote is not None:
-                prompt += "\n直接引用：\n" + _code_block(
-                    json.dumps(quote, ensure_ascii=False), "json"
-                )
-        self.events.mark_agent_started(event.id)
+                quoted_message, quote_source = quote
+        if quoted_message is not None:
+            prompt += "\n直接引用：\n" + _code_block(
+                json.dumps(quoted_message, ensure_ascii=False), "json"
+            )
+        self.events.mark_agent_started(event.id, quote=quote_source)
         result = self.app_server.run_turn(
             prompt,
             session_id=None,
@@ -1317,6 +1558,7 @@ class NativeCoworkerService(CoworkerService):
                     text=composed.text,
                     reason=output.approval_reason or disabled_reason,
                     manual_only=True,
+                    quote_source=quote_source,
                 )
             return
         self._queue_native_reply(
@@ -1327,6 +1569,9 @@ class NativeCoworkerService(CoworkerService):
             source_message_id=str(source_id),
             source_snapshot=snapshot_evidence(message.raw),
             context_snapshots=context_snapshots,
+            inherited_context=[quote_source]
+            if quote_source and quote_source[0] not in context_snapshots
+            else None,
             target_message_id=str(target),
             text=composed.text,
             reply_in_thread=True,
@@ -1397,7 +1642,7 @@ class NativeCoworkerService(CoworkerService):
                 raw, str(row["message_id"]), event.chat_id, bot
             )
             if (
-                self._topic_for_message(enriched, str(row["message_id"]))
+                self._topic_for_message(enriched, str(row["message_id"]), bot=bot)
                 != event.topic_key
             ):
                 break
@@ -1530,7 +1775,12 @@ class NativeCoworkerService(CoworkerService):
                    FROM coworker_events origin,
                         json_each(CASE WHEN json_valid(origin.raw_json) THEN origin.raw_json ELSE '{}' END,
                                   '$._runtime.batch_context') item
-                   WHERE origin.id = ?""",
+                   WHERE origin.id = ?
+                   UNION
+                   SELECT json_extract(raw_json, '$._runtime.quote.message_id'),
+                          json_extract(raw_json, '$._runtime.quote.revision'),
+                          json_extract(raw_json, '$._runtime.quote.snapshot')
+                   FROM coworker_events WHERE id = ? AND json_type(raw_json, '$._runtime.quote') = 'object'""",
                 (
                     origin_id,
                     session.id,
@@ -1538,6 +1788,7 @@ class NativeCoworkerService(CoworkerService):
                     internal.get("delivery_id"),
                     origin_id,
                     session.id,
+                    origin_id,
                     origin_id,
                 ),
             ).fetchall()
@@ -1617,6 +1868,15 @@ class NativeCoworkerService(CoworkerService):
             raise ValueError("reply is empty or contains an unauthorized mention")
         disabled_reason = self._disabled_reply_reason(event.chat_id, private=private)
         if output.approval_required or disabled_reason:
+            parent = raw.get("parent_id") or raw.get("reply_to_message_id")
+            quote_source = next(
+                (
+                    (message_id, revision, snapshot)
+                    for message_id, revision, snapshot in inherited_context
+                    if message_id == parent and snapshot is not None
+                ),
+                None,
+            )
             with self._session_lock(session.id):
                 self._queue_native_approval(
                     event=event,
@@ -1628,6 +1888,7 @@ class NativeCoworkerService(CoworkerService):
                     target_message_id=reply_target,
                     text=composed.text,
                     reason=output.approval_reason or disabled_reason,
+                    quote_source=quote_source,
                     manual_only=private
                     or reply_target != message.message_id
                     or bool(context),
@@ -1672,13 +1933,35 @@ class NativeCoworkerService(CoworkerService):
                 "supplement outcome is uncertain; review before publishing"
             )
 
-    def _quoted_message(self, message_id: str) -> dict[str, Any] | None:
-        try:
-            page = self.feishu.get_messages(as_identity="bot", message_ids=[message_id])
-        except Exception as exc:
-            raise _SourceUnavailable("quoted message unavailable") from exc
-        return next(
-            (item for item in page.items if item.get("message_id") == message_id), None
+    def _read_quote(
+        self, message_id: str, chat_id: str, bot: str, *, private: bool
+    ) -> tuple[dict[str, Any], tuple[str, int, dict[str, Any]]] | None:
+        item = next(iter(self._read_chat_messages(chat_id, [message_id])), None)
+        if item is None:
+            return None
+        message = self._message_normalizer(bot).normalize(
+            item, default_chat_type="p2p" if private else "group"
+        )
+        fingerprint = message_content_fingerprint(item, include_mentions=True)
+        if message.is_deleted or fingerprint is None:
+            return None
+        stored = self.store.get_message(message_id)
+        if stored is None:
+            saved = self.store.upsert_message_with_revision(message)
+            if saved.is_deleted or saved.requires_confirmation:
+                return None
+            revision = saved.revision
+        elif stored["chat_id"] == chat_id and not stored["is_deleted"]:
+            revision = int(stored["revision"])
+        else:
+            return None
+        return item, (
+            message_id,
+            revision,
+            {
+                "coworker_source_content_sha256": fingerprint,
+                "coworker_source_update_time": item.get("update_time"),
+            },
         )
 
     def _authorized_group_reader(
@@ -1844,6 +2127,7 @@ class NativeCoworkerService(CoworkerService):
         text: str,
         reason: str | None,
         manual_only: bool,
+        quote_source: tuple[str, int, dict[str, Any]] | None = None,
     ) -> None:
         self._reserve_publication(session_id, event.id)
         if self._turn_superseded(event.id):
@@ -1855,6 +2139,55 @@ class NativeCoworkerService(CoworkerService):
                 (event.id, session_id),
             ).fetchone()
         manual_only = manual_only or steered is not None
+        if target_message_id != message.message_id:
+            internal = _mapping(event.raw.get("_internal"))
+            with self.store.connect() as conn:
+                anchor = conn.execute(
+                    """SELECT d.thread_id FROM coworker_native_deliveries d
+                       JOIN coworker_events origin ON origin.id = d.event_id
+                       WHERE d.id = ? AND d.purpose = 'transfer' AND d.status = 'sent'
+                         AND d.sent_message_id = ? AND d.bound_topic_key = ?
+                         AND d.source_message_id = ? AND origin.chat_id = ?
+                         AND origin.app_id = ?""",
+                    (
+                        internal.get("delivery_id"),
+                        target_message_id,
+                        event.topic_key,
+                        message.message_id,
+                        event.chat_id,
+                        event.app_id,
+                    ),
+                ).fetchone()
+            if anchor is None:
+                raise ValueError(
+                    "approval target is not bound to the transferred topic"
+                )
+            page = self.feishu.get_messages(
+                as_identity="bot", message_ids=[target_message_id]
+            )
+            item = next(
+                (
+                    item
+                    for item in page.items
+                    if item.get("message_id") == target_message_id
+                ),
+                None,
+            )
+            if (
+                item is None
+                or item.get("chat_id") not in (None, event.chat_id)
+                or item.get("thread_id") != anchor["thread_id"]
+                or message_location(item, chat_type="group") != "thread"
+            ):
+                raise ValueError(
+                    "approval target is unavailable in the transferred topic"
+                )
+            normalized = self._message_normalizer("").normalize(
+                {**item, "chat_id": event.chat_id}, default_chat_type="group"
+            )
+            saved = self.store.upsert_message_with_revision(normalized)
+            if saved.requires_confirmation or saved.is_deleted:
+                raise ValueError("approval target is no longer available")
         target = self.store.get_message(target_message_id)
         candidate = (
             None
@@ -1905,6 +2238,17 @@ class NativeCoworkerService(CoworkerService):
                 "coworker_source_content_sha256": message.raw.get(
                     "coworker_source_content_sha256"
                 ),
+                **(
+                    {
+                        "coworker_quote": {
+                            "message_id": quote_source[0],
+                            "revision": quote_source[1],
+                            **quote_source[2],
+                        }
+                    }
+                    if quote_source
+                    else {}
+                ),
             },
         )
         self.wake()
@@ -1933,7 +2277,14 @@ class NativeCoworkerService(CoworkerService):
             )
             if not preview.ok:
                 raise RuntimeError("reply dry-run validation failed")
-            self._validate_source_snapshots(delivery.chat_id, sources)
+            for attempt in range(3):
+                try:
+                    self._validate_source_snapshots(delivery.chat_id, sources)
+                    break
+                except _SourceUnavailable:
+                    if attempt == 2:
+                        raise
+                    time.sleep(0.25 * (attempt + 1))
             self._validate_delivery(delivery)
             if self.execution_mode == "dry_run":
                 self.deliveries.finish(delivery.id, status="previewed")
@@ -2047,7 +2398,8 @@ class NativeCoworkerService(CoworkerService):
             ):
                 raise ValueError("private auto reply is disabled")
         else:
-            if self._group_activation_id(delivery.chat_id) != delivery.activation_id:
+            activation = self._group_activation_id(delivery.chat_id)
+            if activation is None or activation != delivery.activation_id:
                 raise ValueError("group policy was reactivated before delivery")
             chat = PolicyResolver(self.store).resolve_chat_policy(
                 delivery.chat_id, "group"

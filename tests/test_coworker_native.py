@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import queue
+import sqlite3
 import threading
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import pytest
 
@@ -23,6 +24,8 @@ from feishu_shadow_agent.coworker_native import (
     NativeCoworkerWorker,
     SteerDecision,
 )
+from feishu_shadow_agent.dispatcher import Dispatcher, DispatchSummary
+from feishu_shadow_agent.feishu.client import FeishuClient
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.message_normalization import (
     MessageNormalizer,
@@ -312,10 +315,11 @@ def _receive(
     root: str = "root",
     sender: str = "person",
     text: str | None = None,
+    chat_id: str = "group",
 ) -> None:
     source: dict[str, Any] = {
         "message_id": message_id,
-        "chat_id": "group",
+        "chat_id": chat_id,
         "thread_id": thread,
         "content": text or f"request {message_id}",
         "msg_type": "text",
@@ -326,7 +330,7 @@ def _receive(
     feishu.messages[message_id] = source
     message = {
         "message_id": message_id,
-        "chat_id": "group",
+        "chat_id": chat_id,
         "chat_type": "group",
         "thread_id": thread,
         "root_id": root,
@@ -355,8 +359,9 @@ def _private(
     parent: str | None = None,
     sender: str = "owner",
     kind: str = "text",
+    text: str | None = None,
 ) -> None:
-    content = f"forwarded content {message_id}"
+    content = text or f"forwarded content {message_id}"
     feishu.messages[message_id] = {
         "message_id": message_id,
         "chat_id": "private-chat",
@@ -380,6 +385,125 @@ def _private(
         },
         "bot",
     )
+
+
+def _apply_manual_reply(service: NativeCoworkerService) -> None:
+    with service.store.connect() as conn:
+        approval = conn.execute(
+            "SELECT short_id FROM approvals WHERE status='pending'"
+        ).fetchone()
+    assert approval is not None
+    result = OperatorCommandService(service.store).send(
+        approval["short_id"], "approved answer", actor="owner"
+    )
+    assert result.status == "applied", result.as_dict()
+
+
+def _dispatch_manual_reply(
+    service: NativeCoworkerService, feishu: FakeFeishu
+) -> DispatchSummary:
+    _apply_manual_reply(service)
+
+    def confirm_receipt() -> None:
+        target = feishu.replies[-1]["message_id"]
+        receipt = feishu.messages[f"sent-{feishu.sent}"]
+        receipt["parent_id"] = target
+        if feishu.messages[target]["chat_id"] == "private-chat":
+            receipt.pop("thread_id")
+            receipt.pop("thread_message_position")
+
+    feishu.on_actual = confirm_receipt
+    dispatcher = Dispatcher(
+        store=service.store,
+        feishu_client=cast(FeishuClient, feishu),
+        config=service.config,
+        logger=service.logger,
+    )
+    return dispatcher.dispatch(
+        run_id="test",
+        allow_send_reply_actual=True,
+        allow_owner_notification_actual=False,
+        include_owner_notifications=False,
+        scope="coworker",
+    )
+
+
+def test_new_group_worker_leaves_old_group_backlog_and_deliveries_untouched(
+    tmp_path: Path,
+) -> None:
+    before, feishu, server = _service(tmp_path, dry_run=False)
+    server.outputs.append(
+        {"action": "reply", "text": "draft", "approval_required": True}
+    )
+    _receive(before, feishu, "old-approved", location="thread")
+    assert before.process_next()
+    _apply_manual_reply(before)
+    _receive(before, feishu, "old-pending", location="thread")
+    assert before.process_next()
+    _receive(before, feishu, "old-queued", location="thread")
+    before.store.upsert_chat_product_policy(
+        {
+            "chat_id": "new-group",
+            "auto_reply": True,
+            "bot_joined": True,
+            "reply_identity": "bot",
+        },
+        actor="test",
+    )
+    before.store.update_coworker_policy({"chat_id": "new-group"}, actor="test")
+    after = FakeNativeCoworkerService(
+        store=before.store,
+        config=before.config,
+        feishu=feishu,
+        logger=before.logger,
+        base_dir=tmp_path,
+        app_id="app",
+        dry_run=False,
+        chat_layout="group",
+    )
+    after.app_server = server  # type: ignore[assignment]
+    _receive(after, feishu, "new-request", chat_id="new-group", location="thread")
+    _private(after, feishu, "private-request")
+    for _ in range(4):
+        assert after.process_next()
+    assert not after.process_next()
+    dispatch = Dispatcher(
+        store=after.store,
+        feishu_client=cast(FeishuClient, feishu),
+        config=after.config,
+        logger=after.logger,
+    ).dispatch(
+        run_id="test",
+        allow_send_reply_actual=True,
+        allow_owner_notification_actual=False,
+        include_owner_notifications=False,
+        scope="coworker",
+        coworker_chat_id="new-group",
+    )
+    assert dispatch.processed == 0
+    assert {r["message_id"] for r in feishu.replies} == {
+        "new-request",
+        "private-request",
+    }
+    with after.store.connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT status FROM coworker_events WHERE message_id='old-queued'"
+            ).fetchone()[0]
+            == "queued"
+        )
+        assert (
+            conn.execute(
+                "SELECT status FROM coworker_native_deliveries WHERE source_message_id='old-pending'"
+            ).fetchone()[0]
+            == "pending"
+        )
+        assert (
+            conn.execute(
+                "SELECT status FROM actions WHERE kind='send_reply' AND source_message_id='old-approved'"
+            ).fetchone()[0]
+            == "pending"
+        )
 
 
 def test_main_and_topic_sessions_and_dry_run_receipts(tmp_path: Path) -> None:
@@ -966,8 +1090,9 @@ def test_reused_child_turn_reports_to_the_new_origin(tmp_path: Path) -> None:
     assert feishu.replies[-1]["message_id"] == "second"
 
 
+@pytest.mark.parametrize("parent_closed", [False, True])
 def test_running_child_supplement_uses_new_origin_even_if_it_finishes_during_call(
-    tmp_path: Path,
+    tmp_path: Path, parent_closed: bool
 ) -> None:
     service, feishu, _server = _service(tmp_path)
     _receive(service, feishu, "first", location="thread")
@@ -1020,22 +1145,40 @@ def test_running_child_supplement_uses_new_origin_even_if_it_finishes_during_cal
         {
             "method": "turn/completed",
             "params": {
+                "threadId": "session-1",
+                "turn": {"id": "root-turn-2", "status": "completed"},
+            },
+        }
+    )
+    service.on_app_server_notification(
+        {
+            "method": "turn/completed",
+            "params": {
                 "threadId": "child",
                 "turn": {"id": "child-turn", "status": "completed"},
             },
         }
     )
     assert not service.process_next()
-    service.on_app_server_notification(
-        {
-            "method": "item/completed",
-            "params": {
-                "threadId": "session-1",
-                "turnId": "root-turn-2",
-                "item": {**item, "status": "completed"},
-            },
-        }
-    )
+    if parent_closed:
+        service.on_app_server_notification(
+            {"method": "thread/closed", "params": {"threadId": "session-1"}}
+        )
+        child = service.events.subagent_context("child")
+        assert child is not None and child["status"] == "needs_review"
+        assert not service.process_next()
+        return
+    completion = {
+        "method": "item/completed",
+        "params": {
+            "threadId": "session-1",
+            "turnId": "root-turn-2",
+            "item": {**item, "status": "completed"},
+        },
+    }
+    service.on_app_server_notification(completion)
+    service.on_app_server_notification(completion)
+    assert ("session-1", "root-turn-2") not in service._root_turns  # pyright: ignore[reportPrivateUsage]
     assert service.process_next() and service.process_next()
     assert feishu.replies[-1]["message_id"] == "second"
 
@@ -1082,8 +1225,10 @@ def test_private_reply_survives_approval_inbox_reading_same_message(
     assert tuple(delivery) == (1, "sent")
 
 
+@pytest.mark.parametrize("previous_bot_notification", [False, True])
 def test_private_quote_waits_for_uncertain_receipt_without_exhausting_retries(
     tmp_path: Path,
+    previous_bot_notification: bool,
 ) -> None:
     service, feishu, server = _service(tmp_path, dry_run=False)
     _private(service, feishu, "first")
@@ -1114,15 +1259,170 @@ def test_private_quote_waits_for_uncertain_receipt_without_exhausting_retries(
             "SELECT id, status FROM coworker_native_deliveries"
         ).fetchone()
         assert delivery["status"] == "needs_review"
+    feishu.fail_actual = False
+    feishu.messages["history"] = {
+        "message_id": "history",
+        "chat_id": "private-chat",
+        "content": "old request",
+        "sender": {"id": "owner", "sender_type": "user"},
+    }
+    if previous_bot_notification:
+        feishu.messages["history"]["sender"] = {"id": "app", "sender_type": "app"}
+        action_id = service.store.create_owner_notification_action(
+            task_id=None, payload={"type": "notification"}
+        )
+        with service.store.connect() as conn:
+            conn.execute("UPDATE actions SET status='sent' WHERE id=?", (action_id,))
+            conn.execute(
+                """INSERT INTO dispatch_attempts(action_id, claim_token, status, sent_message_id, started_at)
+                   VALUES (?, 'notice-claim', 'send_ok', 'history', 'now')""",
+                (action_id,),
+            )
+    _private(service, feishu, "independent", parent="history")
+    assert service.process_next() and service.process_next()
+    assert server.sessions == [None, None]
+    assert feishu.replies[-1]["message_id"] == "independent"
+    _private(service, feishu, "continue-independent", parent="independent")
+    assert service.process_next() and service.process_next()
+    assert server.sessions == [None, None, "session-2"]
     service.deliveries.resolve_uncertain(
         delivery["id"], sent_message_id="sent-1", daemon_stopped=True
     )
-    feishu.fail_actual = False
     with service.store.connect() as conn:
         conn.execute("""UPDATE coworker_events SET raw_json=json_remove(raw_json, '$._runtime.retry_after')
                         WHERE message_id='follow'""")
     assert service.process_next()
-    assert server.sessions == [None, "session-1"]
+    assert server.sessions == [None, None, "session-2", "session-1"]
+
+
+def test_owner_approval_command_is_not_given_to_private_codex(tmp_path: Path) -> None:
+    service, feishu, server = _service(tmp_path, dry_run=False)
+    _private(service, feishu, "approval-command", text="/send abc confirmed")
+    assert service.process_next()
+    assert not service.process_next()
+    assert not server.prompts and not feishu.replies
+
+
+@pytest.mark.parametrize("changed_quote", [False, True])
+def test_private_manual_send_verifies_quoted_context(
+    tmp_path: Path, changed_quote: bool
+) -> None:
+    service, feishu, server = _service(tmp_path, dry_run=False)
+    _private(service, feishu, "quoted")
+    assert service.process_next() and service.process_next()
+    server.outputs.append(
+        {"action": "reply", "text": "draft", "approval_required": True}
+    )
+    _private(service, feishu, "request", parent="quoted")
+    assert service.process_next()
+    assert "forwarded content quoted" in server.prompts[-1]
+    if changed_quote:
+        feishu.messages["quoted"]["is_deleted"] = True
+    summary = _dispatch_manual_reply(service, feishu)
+    assert summary.sent == (0 if changed_quote else 1)
+    assert feishu.sent == (1 if changed_quote else 2)
+    if not changed_quote:
+        assert feishu.replies[-1]["message_id"] == "request"
+        assert feishu.replies[-1]["as_identity"] == "bot"
+        _private(service, feishu, "continued", parent="sent-2")
+        assert service.process_next()
+        assert server.sessions == [None, "session-1", "session-1"]
+
+
+@pytest.mark.parametrize("changed_quote", [False, True])
+def test_group_quote_is_scoped_and_checked_before_delivery(
+    tmp_path: Path, changed_quote: bool
+) -> None:
+    service, feishu, server = _service(tmp_path, dry_run=False)
+    feishu.messages["quoted"] = {
+        "message_id": "quoted",
+        "chat_id": "group" if changed_quote else "other-group",
+        "content": "unique quote text",
+        "msg_type": "text",
+    }
+    _receive(service, feishu, "request", location="thread", parent="quoted")
+    assert service.process_next()
+    assert ("unique quote text" in server.prompts[-1]) == changed_quote
+    if changed_quote:
+        feishu.messages["quoted"]["content"] = "edited quote"
+    assert service.process_next()
+    assert feishu.sent == (0 if changed_quote else 1)
+
+
+@pytest.mark.parametrize("root_silent", [False, True])
+def test_child_result_keeps_root_quote_snapshot(
+    tmp_path: Path, root_silent: bool
+) -> None:
+    service, feishu, server = _service(tmp_path, dry_run=False)
+    feishu.messages["quoted"] = {
+        "message_id": "quoted",
+        "chat_id": "group",
+        "content": "source to verify",
+        "msg_type": "text",
+    }
+    server.outputs.append(
+        {"action": "silent" if root_silent else "reply", "text": "root result"}
+    )
+    _receive(service, feishu, "request", location="thread", parent="quoted")
+    assert service.process_next()
+    if not root_silent:
+        assert service.process_next() and feishu.sent == 1
+    service.on_app_server_notification(
+        {
+            "method": "item/completed",
+            "params": {
+                "threadId": "session-1",
+                "item": {
+                    "type": "subAgentActivity",
+                    "kind": "started",
+                    "agentThreadId": "child",
+                },
+            },
+        }
+    )
+    for method in ("turn/started", "turn/completed"):
+        service.on_app_server_notification(
+            {
+                "method": method,
+                "params": {
+                    "threadId": "child",
+                    "turn": {"id": "child-turn", "status": "completed"},
+                },
+            }
+        )
+    if root_silent:
+        feishu.messages["quoted"]["is_deleted"] = True
+        assert service.process_next()
+        assert len(server.prompts) == 1 and not feishu.replies
+        return
+    server.outputs.append(
+        {"action": "reply", "text": "child result", "approval_required": True}
+    )
+    assert service.process_next()
+    assert len(server.prompts) == 2
+    feishu.messages["quoted"]["content"] = "edited quote"
+    summary = _dispatch_manual_reply(service, feishu)
+    assert summary.sent == 0 and feishu.sent == 1
+
+
+def test_delivery_retries_temporary_source_read_before_actual_reply(
+    tmp_path: Path,
+) -> None:
+    service, feishu, server = _service(tmp_path, dry_run=False)
+    _receive(service, feishu, "request", location="thread")
+    assert service.process_next()
+
+    def fail_first_read(message_id: str) -> None:
+        assert message_id == "request"
+        feishu.on_get = None
+        raise TimeoutError("first source read timed out")
+
+    feishu.on_get = fail_first_read
+    assert service.process_next()
+    assert len(server.prompts) == 1 and feishu.sent == 1
+    preview, actual = feishu.replies
+    assert preview["dry_run"] and not actual["dry_run"]
+    assert preview["idempotency_key"] == actual["idempotency_key"]
 
 
 def test_owner_can_watch_real_topic_and_expiry_stops_unmentioned_messages(
@@ -1152,6 +1452,39 @@ def test_owner_can_watch_real_topic_and_expiry_stops_unmentioned_messages(
     _receive(service, feishu, "mentioned", location="thread")
     assert service.process_next() and service.process_next()
     assert len(server.prompts) == 3
+
+
+@pytest.mark.parametrize("action", ["watch", "unwatch"])
+def test_changed_owner_message_cannot_change_watch(
+    tmp_path: Path, action: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, feishu, server = _service(tmp_path, dry_run=False)
+    if action == "unwatch":
+        server.outputs.append(
+            {"action": "watch", "text": "watching", "watch_duration_seconds": 3600}
+        )
+        _receive(service, feishu, "first", location="thread", sender="owner")
+        assert service.process_next() and service.process_next()
+        feishu.replies.clear()
+    server.outputs.append(
+        {"action": action, "text": "confirmed", "watch_duration_seconds": 3600}
+    )
+    original = server.run_turn
+
+    def edit_after_turn(*args: Any, **kwargs: Any) -> AgentRunResult:
+        result = original(*args, **kwargs)
+        feishu.messages["watch-request"]["is_deleted"] = True
+        return result
+
+    monkeypatch.setattr(server, "run_turn", edit_after_turn)
+    _receive(service, feishu, "watch-request", location="thread", sender="owner")
+    assert service.process_next()
+    assert not service.process_next()
+    with service.store.connect() as conn:
+        assert conn.execute("SELECT count(*) FROM coworker_native_watches").fetchone()[
+            0
+        ] == (1 if action == "unwatch" else 0)
+    assert not feishu.replies
 
 
 def test_watched_message_burst_is_judged_in_one_turn(tmp_path: Path) -> None:
@@ -3349,6 +3682,54 @@ def test_uncertain_steer_blocks_both_outbox_and_approval(tmp_path: Path) -> None
         assert service.events.status()["native_steers"][0]["status"] == "discarded"
 
 
+@pytest.mark.parametrize("recovers", [True, False])
+def test_steer_receipt_write_failure_does_not_resend_or_block_worker_stop(
+    tmp_path: Path, recovers: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, feishu, _ = _service(tmp_path)
+    server = BlockingNativeServer()
+    service.app_server = server  # type: ignore[assignment]
+    record = service.native_state.record_steer
+    writes = 0
+
+    def write_receipt(**kwargs: Any) -> None:
+        nonlocal writes
+        writes += 1
+        if writes == 1 or not recovers:
+            raise sqlite3.OperationalError("receipt store unavailable")
+        record(**kwargs)
+
+    monkeypatch.setattr(service.native_state, "record_steer", write_receipt)
+    _receive(service, feishu, "origin", location="thread")
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    try:
+        _receive(service, feishu, "followup", location="thread", parent="origin")
+        assert service.process_next()
+        if recovers:
+            assert service.process_next_steer()
+        else:
+            with pytest.raises(sqlite3.OperationalError):
+                service.process_next_steer()
+            service.wait_for_queued_followups = lambda: False
+    finally:
+        server.release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert writes == 2 and len(server.steers) == 1
+    with service.store.connect() as conn:
+        status = conn.execute(
+            "SELECT status FROM coworker_events WHERE message_id='origin'"
+        ).fetchone()[0]
+    assert status == ("completed" if recovers else "needs_review")
+    if recovers:
+        assert service.process_next()
+        assert len(feishu.replies) == 1
+    else:
+        assert not feishu.replies
+
+
 @pytest.mark.parametrize("edit_before_turn", [False, True])
 def test_watch_batch_excludes_followup_steered_during_turn(
     tmp_path: Path, edit_before_turn: bool
@@ -3483,6 +3864,44 @@ def test_transfer_waits_for_topic_receipt_then_starts_separate_session(
         )
     assert service.process_next() and service.process_next()
     assert feishu.replies[-1]["message_id"] == "sent-1"
+
+
+def test_transfer_approval_uses_confirmed_topic_and_keeps_pending_acknowledgement(
+    tmp_path: Path,
+) -> None:
+    service, feishu, server = _service(tmp_path, dry_run=False)
+    server.outputs.extend(
+        [
+            {"action": "transfer", "text": "acknowledged task"},
+            {"action": "reply", "text": "draft", "approval_required": True},
+        ]
+    )
+    _receive(service, feishu, "request")
+    assert service.process_next() and service.process_next()
+    assert feishu.sent == 1
+    with service.store.connect() as conn:
+        conn.execute(
+            "UPDATE coworker_native_deliveries SET created_at='2000-01-01T00:00:00Z'"
+        )
+    retention = RetentionService(
+        store=service.store, config=service.config, base_dir=tmp_path
+    )
+    retention.prune(protect_pending=True)
+    assert service.process_next()
+    assert "acknowledged task" in server.prompts[-1]
+    assert feishu.sent == 1
+    result = _dispatch_manual_reply(service, feishu)
+    assert result.sent == 1 and feishu.sent == 2
+    assert feishu.replies[-1]["message_id"] == "sent-1"
+    assert feishu.replies[-1]["reply_in_thread"] is True
+    retention.prune(protect_pending=True)
+    with service.store.connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT text FROM coworker_native_deliveries WHERE purpose='transfer'"
+            ).fetchone()[0]
+            == ""
+        )
 
 
 @pytest.mark.parametrize("location", ["topic", "main", "other"])
@@ -4034,6 +4453,9 @@ def test_missing_topic_receipt_needs_review_without_repeating_model_or_send(
         ).fetchone()
         assert tuple(row)[1:] == ("needs_review", "sent-1")
         delivery_id = row[0]
+    _receive(service, feishu, "unrelated", location="thread", thread="unrelated-thread")
+    assert service.process_next() and service.process_next()
+    assert feishu.replies[-1]["message_id"] == "unrelated"
     service.deliveries.resolve_uncertain(
         delivery_id,
         sent_message_id="sent-1",
@@ -4041,7 +4463,56 @@ def test_missing_topic_receipt_needs_review_without_repeating_model_or_send(
         daemon_stopped=True,
     )
     assert service.process_next() and service.process_next()
-    assert server.sessions == [None, None] and feishu.sent == 2
+    assert server.sessions == [None, None, None] and feishu.sent == 3
+
+
+def test_topic_with_lost_reply_receipt_waits_by_actual_bot_anchor(
+    tmp_path: Path,
+) -> None:
+    service, feishu, server = _service(tmp_path, dry_run=False)
+    server.outputs.append({"action": "transfer", "text": "acknowledged"})
+    _receive(service, feishu, "request")
+    assert service.process_next()
+    feishu.fail_actual = True
+    assert service.process_next()
+    feishu.fail_actual = False
+    feishu.messages["sent-1"].update(
+        sender={"id": "app", "sender_type": "app"}, parent_id="request"
+    )
+    _receive(
+        service,
+        feishu,
+        "related",
+        location="thread",
+        parent="sent-1",
+        thread="opened-thread",
+        root="sent-1",
+        mention=False,
+    )
+    assert service.process_next()
+    with service.store.connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT sent_message_id FROM coworker_native_deliveries WHERE status='needs_review'"
+            ).fetchone()[0]
+            is None
+        )
+        assert (
+            conn.execute(
+                "SELECT status FROM coworker_events WHERE message_id='related'"
+            ).fetchone()[0]
+            == "queued"
+        )
+    _receive(
+        service,
+        feishu,
+        "other",
+        location="thread",
+        thread="other-thread",
+        root="other-root",
+    )
+    assert service.process_next() and service.process_next()
+    assert len(server.prompts) == 2 and feishu.replies[-1]["message_id"] == "other"
 
 
 def test_native_memory_maintenance_disables_shared_native_memory(

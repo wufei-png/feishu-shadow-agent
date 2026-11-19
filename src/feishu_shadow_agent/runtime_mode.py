@@ -142,7 +142,7 @@ def _read_production_policy(
                 return None
             app_id = connection.execute("PRAGMA application_id").fetchone()[0]
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if app_id != SQLITE_APPLICATION_ID or version not in (9, 10, 11):
+            if app_id != SQLITE_APPLICATION_ID or version not in (9, 10, 11, 12):
                 require_current_schema(connection)
             tables = {
                 row[0]
