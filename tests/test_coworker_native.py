@@ -1535,6 +1535,29 @@ def test_followup_arriving_before_reply_receipt_is_not_lost(tmp_path: Path) -> N
     assert len(server.prompts) == 2 and "应该检查 2.0" in server.prompts[1]
 
 
+@pytest.mark.parametrize("same_topic", [True, False])
+def test_pending_transferred_reply_retains_source_for_followups(
+    tmp_path: Path, same_topic: bool
+) -> None:
+    service, feishu, server = _service(tmp_path, dry_run=False)
+    server.outputs.append({"action": "transfer", "text": "已接单"})
+    _receive(service, feishu, "request", location="main", text="检查 1.0")
+    assert service.process_next() and service.process_next() and service.process_next()
+    _receive(
+        service,
+        feishu,
+        "followup",
+        location="thread",
+        thread="opened-thread" if same_topic else "other-thread",
+        parent="request",
+        mention=False,
+        text="更正：应该检查 2.0",
+    )
+    while service.process_next():
+        pass
+    assert any("应该检查 2.0" in prompt for prompt in server.prompts) is same_topic
+
+
 def test_reply_to_old_user_request_after_delivery_stays_silent(tmp_path: Path) -> None:
     service, feishu, server = _service(tmp_path)
     _receive(service, feishu, "request", location="thread")

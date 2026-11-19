@@ -203,9 +203,25 @@ class CoworkerStore:
                                SELECT 1 FROM coworker_native_delivery_context c
                                WHERE c.delivery_id = CASE WHEN json_valid(origin.raw_json)
                                  THEN json_extract(origin.raw_json, '$._internal.delivery_id') END
-                                 AND c.message_id = ?))
+                                 AND c.message_id = ?) OR EXISTS (
+                               SELECT 1 FROM coworker_native_deliveries delivery
+                               LEFT JOIN coworker_native_delivery_context c ON c.delivery_id = delivery.id
+                               WHERE delivery.event_id = origin.id
+                                 AND delivery.status IN ('pending', 'sending', 'needs_review')
+                                 AND (? IN (delivery.source_message_id, delivery.target_message_id)
+                                   OR c.message_id = ?)))
                        ORDER BY origin.id LIMIT 1""",
-                    (app_id, chat_id, parent, parent, parent, parent, parent),
+                    (
+                        app_id,
+                        chat_id,
+                        parent,
+                        parent,
+                        parent,
+                        parent,
+                        parent,
+                        parent,
+                        parent,
+                    ),
                 ).fetchone()
                 if origin is not None:
                     runtime.update(
