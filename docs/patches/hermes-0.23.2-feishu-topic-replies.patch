@@ -1,8 +1,446 @@
+diff --git a/gateway/delivery_ledger.py b/gateway/delivery_ledger.py
+index 7f65570..7922b54 100644
+--- a/gateway/delivery_ledger.py
++++ b/gateway/delivery_ledger.py
+@@ -319,6 +319,18 @@ def mark_failed(obligation_id: str, error: str = "") -> None:
+     _update_state(obligation_id, "failed", error=error)
+
+
++def needs_delivery_review(platform: Any, result: Any) -> bool:
++    raw = getattr(result, "raw_response", None)
++    return (getattr(platform, "value", platform) == "feishu"
++            and isinstance(raw, dict)
++            and (raw.get("delivery_uncertain") is True or raw.get("partial_overflow") is True))
++
++
++def mark_delivery_uncertain(obligation_id: str) -> None:
++    _update_state(obligation_id, "abandoned", error="Feishu delivery uncertain; verify before resending")
++    logger.warning("Feishu delivery obligation %s requires manual verification", obligation_id)
++
++
+ def release_runtime_claim(obligation_id: str, error: str = "") -> bool:
+     """Return an unsent runtime claim to ``failed`` without spending an attempt.
+
+@@ -443,6 +455,9 @@ def sweep_recoverable(now: Optional[float] = None, *, deliverable_platforms: Opt
+                 claimed.append(_claimed_row(oid, session_key, platform, chat_id, thread_id, content, attempts,
+                                             adapter_profile or "default",
+                                             needs_marker=state != "pending" or attempts > 0, flood=flood_row))
++                if platform == "feishu" and state == "attempting":
++                    # The runner still clears the resume flag before settling this row.
++                    claimed[-1]["delivery_uncertain"] = True
+     return claimed
+
+
+diff --git a/gateway/platforms/base_delivery_ledger.py b/gateway/platforms/base_delivery_ledger.py
+index 52a0ff4..66c5308 100644
+--- a/gateway/platforms/base_delivery_ledger.py
++++ b/gateway/platforms/base_delivery_ledger.py
+@@ -34,11 +34,14 @@ async def ledger_attempted(adapter: Any, event: Any, session_key: str, text: str
+
+     async def _attempted(_delivery_adapter: Any, obligation_id: Optional[str]) -> Any:
+         from gateway.platforms.base import SendResult
++        from gateway.delivery_ledger import needs_delivery_review
++        result = SendResult(success=False, error=error, raw_response={"delivery_uncertain": True})
+         if obligation_id:
+             saved.append(obligation_id)
+-            logger.warning("Final for session %s may not have landed; the delivery ledger "
+-                           "redelivers it with the duplicate marker", session_key)
+-        return SendResult(success=False, error=error)
++            if not needs_delivery_review(event.source.platform, result):
++                logger.warning("Final for session %s may not have landed; the delivery ledger "
++                               "redelivers it with the duplicate marker", session_key)
++        return result
+     await ledger_bracket(adapter, event, session_key, text, _attempted)
+     return bool(saved)
+
+@@ -86,10 +89,15 @@ async def finalize_final_obligation(adapter: Any, obligation_id: str, result: An
+     backoff has passed instead of waiting for the next restart (#91653)."""
+     try:
+         from gateway.dead_targets import classify_dead_error
+-        from gateway.delivery_ledger import is_reconnect_only, mark_delivered, mark_failed
++        from gateway.delivery_ledger import (
++            is_reconnect_only, mark_delivered, mark_failed, mark_delivery_uncertain, needs_delivery_review,
++        )
+         if getattr(result, "success", False):
+             await asyncio.to_thread(mark_delivered, obligation_id)
+             return
++        if needs_delivery_review(event.source.platform, result):
++            await asyncio.to_thread(mark_delivery_uncertain, obligation_id)
++            return
+         error = str(getattr(result, "error", "") or "")
+         await asyncio.to_thread(mark_failed, obligation_id, error)
+         if is_reconnect_only(error):
+diff --git a/gateway/platforms/event.py b/gateway/platforms/event.py
+index e6aaff3..415728a 100644
+--- a/gateway/platforms/event.py
++++ b/gateway/platforms/event.py
+@@ -9,7 +9,7 @@ import unicodedata
+ from dataclasses import dataclass, field
+ from datetime import datetime
+ from enum import Enum
+-from typing import Any, Dict, List, Optional
++from typing import Any, Callable, Dict, List, Optional
+
+ from gateway.session import SessionSource
+
+@@ -137,6 +137,8 @@ class MessageEvent:
+     # unknown). For adapters whose ``media_urls`` are random cache names (relay); the name is
+     # display data only, never a path. Appended for positional compat.
+     media_filenames: list[str] = field(default_factory=list)
++    # Process-local work to run after native admission. Rewrites and bursts keep it with the input.
++    _on_commit: Optional[Callable[[], None]] = field(default=None, repr=False, compare=False)
+
+     # Process-local admission receipt, never routing metadata or execution acknowledgement.
+     _gateway_accepted: bool = field(default=False, init=False, repr=False, compare=False)
+@@ -168,6 +170,25 @@ class MessageEvent:
+         self.absorb_reply_expected(other)
+         if self.sender_id() != other.sender_id():
+             self.user_id = self.user_name = ""
++        if other._on_commit is not None:
++            self.add_commit_callback(other._on_commit)
++
++    def add_commit_callback(self, callback: Callable[[], None]) -> None:
++        previous = self._on_commit
++        if previous is None:
++            self._on_commit = callback
++            return
++
++        def commit() -> None:
++            previous()
++            callback()
++
++        self._on_commit = commit
++
++    def commit_input(self) -> None:
++        callback, self._on_commit = self._on_commit, None
++        if callback is not None:
++            callback()
+
+     def sender_id(self) -> Optional[str]:
+         """Who sent this input: ``user_id``, else the source's (a shared observed-group source has
+diff --git a/gateway/run_busy.py b/gateway/run_busy.py
+index e7137ea..4527153 100644
+--- a/gateway/run_busy.py
++++ b/gateway/run_busy.py
+@@ -1124,7 +1124,9 @@ class GatewayBusySessionMixin:
+         if kind == "plain":
+             await _busy_accepted()
+             async with self._async_profile_scope_for_source(source):
+-                return await target(event)
++                reply = await target(event)
++                event.commit_input()
++                return reply
+         return t(target) if target else t("gateway.busy.slash_rejected", command=cmd_def.name)
+
+     def _busy_slash_route(self, cmd_def):
+@@ -1280,6 +1282,7 @@ class GatewayBusySessionMixin:
+             return t("gateway.steer.failed", error=exc)
+         if not accepted:
+             return t("gateway.steer.rejected_empty")
++        event.commit_input()
+         self._fold_into_running_turn(running_agent, quick_key, event)
+         # A pending clarify owns the turn: the agent is parked inside that tool, so no iteration
+         # prep runs and the accepted steer cannot arrive until the prompt times out (#145161).
+@@ -1347,7 +1350,7 @@ class GatewayBusySessionMixin:
+         carry_callback(command, event)  # the native or relay callback authenticated the command's event
+         epoch = self._route_stop_epoch(session_key) if stop_epoch is None else stop_epoch
+         if ack:
+-            event._on_commit = functools.partial(self._send_after_commit, adapter, event, ack)
++            event.add_commit_callback(functools.partial(self._send_after_commit, adapter, event, ack))
+         await dispatch_shared_busy(adapter, self._as_fifo_turn(event, epoch), session_key)
+         return True
+
+diff --git a/gateway/run_inbound.py b/gateway/run_inbound.py
+index 4bd5f80..76fbf49 100644
+--- a/gateway/run_inbound.py
++++ b/gateway/run_inbound.py
+@@ -1324,9 +1324,11 @@ class GatewayInboundMixin(
+         # A turn a slash command produced (``/queue yes``) is never live typing.
+         if busy and (await self._route_plaintext_approval_while_busy(event, _quick_key)
+                      or await self._hm_busy_preempt(event, source, _quick_key)):
++            event.commit_input()
+             return True, None
+         _consumed, _consumer_reply = await self._hm_post_admission_consume(event, source, _quick_key)
+         if _consumed:
++            event.commit_input()
+             return True, _consumer_reply
+         if getattr(event, "_fifo_only", False) and event._stop_epoch != self._route_stop_epoch(_quick_key):
+             return True, None  # a /stop or /new came after its command, as it clears the slot
+@@ -1369,6 +1371,7 @@ class GatewayInboundMixin(
+         _quick_key = self._session_key_for_source(source)
+         _reply = None if is_internal else await self._hm_pending_reply_intercepts(event, source, _quick_key)
+         if _reply is not None:
++            event.commit_input()
+             return _reply
+
+         _owned, _authority_reply = await self._hm_authority_admission(event, source, _quick_key, is_internal)
+diff --git a/gateway/run_startup.py b/gateway/run_startup.py
+index bbc8e28..bc235b3 100644
+--- a/gateway/run_startup.py
++++ b/gateway/run_startup.py
+@@ -479,7 +479,9 @@ class GatewayStartupMixin:
+         # No early return on an empty claim: the boot sweep may have ADOPTED flood-refused rows that are
+         # not due yet, and those still need their timer armed below.
+         try:
+-            from gateway.delivery_ledger import RECOVERED_MARKER, mark_delivered, mark_failed
++            from gateway.delivery_ledger import (
++                RECOVERED_MARKER, mark_delivered, mark_failed, mark_delivery_uncertain, needs_delivery_review,
++            )
+         except Exception:
+             logger.debug("delivery ledger import failed", exc_info=True)
+             return 0
+@@ -489,6 +491,10 @@ class GatewayStartupMixin:
+                 # Adopted at boot inside its flood wait: its resume flag is cleared with the others, and
+                 # the timer armed below sends it once the platform's deadline has passed.
+                 continue
++            if row.get("delivery_uncertain"):
++                with _log_suppressed(logging.DEBUG, "delivery ledger update failed", exc_info=True):
++                    await asyncio.to_thread(mark_delivery_uncertain, row["obligation_id"])
++                continue
+             adapter = await self._obligation_adapter(row)
+             if adapter is None:
+                 continue
+@@ -509,6 +515,8 @@ class GatewayStartupMixin:
+                         "Redelivered recovered final response to %s:%s (obligation %s, attempt %d)",
+                         row["platform"], row["chat_id"], row["obligation_id"], row["attempts"],
+                     )
++                elif needs_delivery_review(row["platform"], result):
++                    await asyncio.to_thread(mark_delivery_uncertain, row["obligation_id"])
+                 else:
+                     await asyncio.to_thread(
+                         mark_failed, row["obligation_id"], str(getattr(result, "error", "") or "send failed")
+diff --git a/gateway/session_authority.py b/gateway/session_authority.py
+index 400b906..7a98c8c 100644
+--- a/gateway/session_authority.py
++++ b/gateway/session_authority.py
+@@ -651,8 +651,8 @@ class SessionAuthority:
+     def _admitted(self, ref, event, row):
+         if event is not None:
+             event._gateway_accepted = True
+-            if row['status'] == 'queued' and (committed := getattr(event, '_on_commit', None)) is not None:
+-                committed()  # a queued slash command's ack follows its commit (``_queue_command_turn``)
++            if row['status'] == 'queued':
++                event.commit_input()  # a queued slash command's ack follows its commit
+             mark_producer_admission(self, event, row)
+         self._publish_pending(ref)
+         return self._receipt(row)
+diff --git a/gateway/session_ingress_context.py b/gateway/session_ingress_context.py
+index 7b5caf9..cd38648 100644
+--- a/gateway/session_ingress_context.py
++++ b/gateway/session_ingress_context.py
+@@ -97,6 +97,8 @@ def carry_callback(event, rewritten):
+         bound = bound_var.get()
+         if bound is not None and bound[1] is event and rewritten.source is event.source:
+             bound_var.set((bound[0], rewritten, *bound[2:]))
++            if rewritten._on_commit is None:
++                rewritten._on_commit = event._on_commit
+
+
+ _PREFIX_PRODUCERS = ('webhook', 'api_server', 'msgraph_webhook')
+diff --git a/gateway/slash_commands.py b/gateway/slash_commands.py
+index 106d364..5f4a227 100644
+--- a/gateway/slash_commands.py
++++ b/gateway/slash_commands.py
+@@ -1239,6 +1239,8 @@ class GatewaySlashCommandsMixin(
+         choice = "always" if "always" in choices else "session" if "session" in choices else "once"
+         # Exactly the approvals the sender was checked against, never "the oldest" again.
+         count = sum(resolve_gateway_approval(session_key, choice, request_id=rid) for rid in request_ids)
++        if count:
++            event.commit_input()
+         if not count:
+             return t("gateway.approve.no_pending")
+         confirmation_text = t(f"gateway.approve.{choice}_{'plural' if count > 1 else 'singular'}", count=count)
+@@ -1265,6 +1267,8 @@ class GatewaySlashCommandsMixin(
+         reason = (raw_args[len(tokens[0]):].strip() if resolve_all else raw_args)[:280].strip()
+         count = sum(resolve_gateway_approval(session_key, "deny", reason=reason or None, request_id=rid)
+                     for rid in request_ids)
++        if count:
++            event.commit_input()
+         if not count:
+             return t("gateway.deny.no_pending")
+         logger.info("User denied %d dangerous command(s) via /deny%s", count,
 diff --git a/plugins/platforms/feishu/adapter.py b/plugins/platforms/feishu/adapter.py
-index 06d7bb47..4781b370 100644
+index 06d7bb4..7d5b1b0 100644
 --- a/plugins/platforms/feishu/adapter.py
 +++ b/plugins/platforms/feishu/adapter.py
-@@ -3683,12 +3683,14 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
+@@ -37,6 +37,7 @@ import uuid
+ from collections import OrderedDict
+ from dataclasses import dataclass, field
+ from datetime import datetime
++from functools import partial
+ from pathlib import Path
+ from types import SimpleNamespace
+ from typing import Any, Dict, List, Literal, Optional, Sequence
+@@ -191,6 +192,7 @@ async def _read_limited_feishu_webhook_body(request: Any, max_bytes: int) -> byt
+
+
+ _FEISHU_REPLY_FALLBACK_CODES = frozenset({230011, 231003})  # reply target withdrawn/missing → create fallback
++_FEISHU_RATE_LIMIT_CODES = frozenset({230020, 99991400})
+
+ # Feishu reactions render as prominent badges, unlike Discord/Telegram's
+ # small footer emoji — a success badge on every message would add noise, so
+@@ -1317,11 +1319,14 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
+         self._webhook_runner = self._webhook_site = self._event_handler = None
+         self._seen_message_ids: dict[str, float] = {}  # message_id → seen_at (time.time())
+         self._seen_message_order: list[str] = []
++        self._uncommitted_message_ids: set[str] = set()
+         self._dedup_state_path = get_hermes_home() / "feishu_seen_message_ids.json"
+         self._dedup_lock = threading.Lock()
+         # Serializes the offloaded dedup-state flushes so two concurrent
+         # inbound messages cannot land their writes out of order.
+         self._dedup_persist_lock = asyncio.Lock()
++        self._dedup_flush_task: Optional[asyncio.Task] = None
++        self._dedup_dirty = False
+         self._sender_name_cache: dict[str, tuple[str, float]] = {}  # sender_id → (name, expire_at)
+         self._webhook_rate_counts: dict[str, tuple[int, float]] = {}  # rate_key → (count, window_start)
+         self._webhook_anomaly_counts: dict[str, tuple[int, str, float]] = {}  # ip → (count, last_status, first_seen)
+@@ -1571,8 +1576,16 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
+         self._ws_thread_loop = None
+         self._loop = None
+         self._event_handler = None
++        if self._dedup_flush_task is not None:
++            await asyncio.gather(self._dedup_flush_task, return_exceptions=True)
+         self._shutdown_sdk_executor()
+-        self._persist_seen_message_ids()
++        with self._dedup_lock:
++            self._seen_message_order = [
++                key for key in self._seen_message_order if key not in self._uncommitted_message_ids
++            ]
++            for key in self._uncommitted_message_ids:
++                self._seen_message_ids.pop(key, None)
++            self._uncommitted_message_ids.clear()
+         await self._release_app_lock()
+         self._mark_disconnected()
+         logger.info("[Feishu] Disconnected")
+@@ -2126,7 +2139,7 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
+             logger.debug("[Feishu] Dropping malformed inbound event: missing message/sender")
+             return
+         message_id = getattr(message, "message_id", None)
+-        if not message_id or await self._is_duplicate(message_id):
++        if not message_id or await self._is_duplicate(message_id, pending_admission=True):
+             logger.debug("[Feishu] Dropping duplicate/missing message_id: %s", message_id)
+             return
+         reason = self._admit(sender, message)
+@@ -2462,6 +2475,8 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
+         chat_lock = self._get_chat_lock(chat_id)
+         async with chat_lock:
+             await self.handle_message(event)
++            if getattr(event, "_interrupt_accepted", False):
++                event.commit_input()
+
+     # --- Processing status reactions ---
+     def _reactions_enabled(self) -> bool:
+@@ -2518,6 +2533,10 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
+                 cache.popitem(last=False)
+
+     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
++        # Inline controls and gateways without a session authority have no FIFO commit.
++        if (event._on_commit is not None and outcome is ProcessingOutcome.SUCCESS
++                and not self._shared_runtime_owns_input(event)):
++            event.commit_input()
+         message_id = event.message_id
+         if not self._reactions_enabled() or not message_id:
+             return
+@@ -2615,6 +2634,7 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
+             channel_prompt=self._resolve_channel_prompt(chat_id, thread_id or None),
+             timestamp=datetime.now(),
+         )
++        normalized.add_commit_callback(partial(self._commit_seen_message, message_id))
+         await self._dispatch_inbound_event(normalized)
+
+     async def _dispatch_inbound_event(self, event: MessageEvent) -> None:
+@@ -3534,29 +3554,53 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
+             with self._dedup_lock:
+                 recent = self._seen_message_order[-self._dedup_cache_size:]
+                 # Save as {msg_id: timestamp} so TTL filtering works across restarts.
+-                payload = {"message_ids": {k: self._seen_message_ids[k] for k in recent if k in self._seen_message_ids}}
++                payload = {"message_ids": {
++                    k: self._seen_message_ids[k] for k in recent
++                    if k in self._seen_message_ids and k not in self._uncommitted_message_ids
++                }}
+             atomic_json_write(self._dedup_state_path, payload, indent=None)
+         except OSError:
+             logger.warning("[Feishu] Failed to persist dedup state to %s", self._dedup_state_path, exc_info=True)
+
+-    async def _is_duplicate(self, message_id: str) -> bool:
++    async def _is_duplicate(self, message_id: str, *, pending_admission: bool = False) -> bool:
+         now, ttl = time.time(), _FEISHU_DEDUP_TTL_SECONDS
+         with self._dedup_lock:
+             seen_at = self._seen_message_ids.get(message_id)
+             if seen_at is not None and (ttl <= 0 or now - seen_at < ttl):
+                 return True
++            if seen_at is not None:
++                self._seen_message_order.remove(message_id)
+             self._seen_message_ids[message_id] = now  # wall-clock so TTL survives restarts
+             self._seen_message_order.append(message_id)
++            if pending_admission:
++                self._uncommitted_message_ids.add(message_id)
+             while len(self._seen_message_order) > self._dedup_cache_size:
+-                self._seen_message_ids.pop(self._seen_message_order.pop(0), None)
+-        # atomic_json_write() fsyncs; this runs on the event loop for every inbound message, so
+-        # offload the flush onto the adapter-owned pool: the loop's default executor may already
+-        # be torn down by a dead background loop, which used to wedge every inbound message in
+-        # the dedup gate (#111020). The lock keeps flushes in mutation order (the snapshot
+-        # inside the worker is taken under _dedup_lock, but the write itself is not).
++                evicted = self._seen_message_order.pop(0)
++                self._seen_message_ids.pop(evicted, None)
++                self._uncommitted_message_ids.discard(evicted)
++        if not pending_admission:
++            await self._flush_seen_messages()
++        return False
++
++    def _commit_seen_message(self, message_id: str) -> None:
++        with self._dedup_lock:
++            if message_id not in self._uncommitted_message_ids:
++                return
++            self._uncommitted_message_ids.remove(message_id)
++        self._dedup_dirty = True
++        if self._dedup_flush_task is None or self._dedup_flush_task.done():
++            self._dedup_flush_task = asyncio.create_task(self._flush_committed_messages())
++
++    async def _flush_committed_messages(self) -> None:
++        # All callbacks of a burst run together. Flush the resulting cache once off-loop.
++        while self._dedup_dirty:
++            self._dedup_dirty = False
++            await self._flush_seen_messages()
++
++    async def _flush_seen_messages(self) -> None:
++        # The adapter-owned pool keeps fsync off-loop, with ordered snapshots.
+         async with self._dedup_persist_lock_or_create():
+             await self._run_blocking(self._persist_seen_message_ids)
+-        return False
+
+     def _dedup_persist_lock_or_create(self) -> asyncio.Lock:
+         # Tests build bare adapters via object.__new__ and install dedup state
+@@ -3636,27 +3680,6 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
+                 key_msg_type=resolved_message_type, key_payload=key_payload,
+                 media_tag={"tag": "media", "file_key": file_key, "file_name": display_name},
+             )
+-            # Audio may fail with 99992402 under thread_id routing: retry as a reply to the
+-            # thread's last message, then fall back to a plain chat_id send.
+-            if (not caption
+-                    and not self._response_succeeded(message_response)
+-                    and getattr(message_response, "code", None) == 99992402
+-                    and resolved_message_type == "audio"
+-                    and (metadata or {}).get("thread_id")):
+-                payload = json.dumps(key_payload, ensure_ascii=False)
+-                thread_msg_id = (metadata or {}).get("reply_to_message_id")
+-                if not thread_msg_id:
+-                    thread_msg_id = await self._fetch_last_message_in_thread((metadata or {}).get("thread_id"))
+-                if thread_msg_id:
+-                    logger.info("[Feishu] Audio: retrying via reply API in thread")
+-                    message_response = await self._feishu_send_with_retry(
+-                        chat_id=chat_id, msg_type="audio", payload=payload, reply_to=thread_msg_id, metadata=metadata,
+-                    )
+-                if not self._response_succeeded(message_response):
+-                    logger.warning("[Feishu] Audio send failed in thread, retrying with chat_id")
+-                    message_response = await self._feishu_send_with_retry(
+-                        chat_id=chat_id, msg_type="audio", payload=payload, reply_to=None, metadata=None,
+-                    )
+             return self._finalize_send_result(message_response, "file send failed")
+         except Exception as exc:
+             logger.error("[Feishu] Failed to send file %s: %s", file_path, (shown := describe_proxy_error(exc, env_proxy_for_redaction(_onboard_open_base_url(self._domain_name)))) or exc, exc_info=not shown)
+@@ -3683,42 +3706,42 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
              return None
          try:
              from lark_oapi.api.im.v1 import ListMessageRequest
@@ -20,19 +458,22 @@ index 06d7bb47..4781b370 100644
          except Exception as exc:
              logger.debug("[Feishu] Failed to fetch last message in thread %s: %s", thread_id, exc)
          return None
-@@ -3698,16 +3700,17 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
+
+     async def _send_raw_message(
+-        self, *, chat_id: str, msg_type: str, payload: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]],
++        self, *, chat_id: str, msg_type: str, payload: str, reply_to: Optional[str],
++        in_thread: bool, uuid_value: str,
      ) -> Any:
-         thread_id = (metadata or {}).get("thread_id")
-         effective_reply_to = reply_to or ((metadata or {}).get("reply_to_message_id") if thread_id else None)
-+        if thread_id and not effective_reply_to:
-+            effective_reply_to = await self._fetch_last_message_in_thread(thread_id)
-+            if not effective_reply_to:
-+                raise ValueError(f"No reply anchor available for Feishu thread {thread_id}")
-         if effective_reply_to:
+-        thread_id = (metadata or {}).get("thread_id")
+-        effective_reply_to = reply_to or ((metadata or {}).get("reply_to_message_id") if thread_id else None)
+-        if effective_reply_to:
++        if reply_to:
              body = self._build_reply_message_body(
-                 content=payload, msg_type=msg_type, reply_in_thread=bool(thread_id), uuid_value=str(uuid.uuid4()),
+-                content=payload, msg_type=msg_type, reply_in_thread=bool(thread_id), uuid_value=str(uuid.uuid4()),
++                content=payload, msg_type=msg_type, reply_in_thread=in_thread, uuid_value=uuid_value,
              )
-             request = self._build_reply_message_request(effective_reply_to, body)
+-            request = self._build_reply_message_request(effective_reply_to, body)
++            request = self._build_reply_message_request(reply_to, body)
              return await self._run_blocking(self._client.im.v1.message.reply, request)
 -        if thread_id:
 -            # reply→create fallback inside a topic: thread_id as receive_id keeps it in the topic.
@@ -42,14 +483,264 @@ index 06d7bb47..4781b370 100644
              receive_id, receive_id_type = chat_id.split(":", 1)[1], "user_id"
          else:
              receive_id, receive_id_type = chat_id, "open_id" if chat_id.startswith("ou_") else "chat_id"
+         body = self._build_create_message_body(
+-            receive_id=receive_id, msg_type=msg_type, content=payload, uuid_value=str(uuid.uuid4()),
++            receive_id=receive_id, msg_type=msg_type, content=payload, uuid_value=uuid_value,
+         )
+         request = self._build_create_message_request(receive_id_type, body)
+         return await self._run_blocking(self._client.im.v1.message.create, request)
+
+     @staticmethod
+     def _response_succeeded(response: Any) -> bool:
++        if isinstance(response, SendResult):
++            return response.success
+         return bool(response and getattr(response, "success", lambda: False)())
+
+     @staticmethod
+@@ -3736,6 +3759,8 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
+         return SendResult(success=False, error=f"[{code}] {msg}", raw_response=response)
+
+     def _finalize_send_result(self, response: Any, default_message: str) -> SendResult:
++        if isinstance(response, SendResult):
++            return response
+         if not self._response_succeeded(response):
+             return self._response_error_result(response, default_message=default_message)
+         return SendResult(
+@@ -3874,49 +3899,73 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
+     async def _feishu_send_with_retry(
+         self, *, chat_id: str, msg_type: str, payload: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]],
+     ) -> Any:
+-        last_error: Optional[Exception] = None
+-        active_reply_to = reply_to
+-
+-        async def _raw(reply_target: Optional[str]) -> Any:
+-            return await self._send_raw_message(
+-                chat_id=chat_id, msg_type=msg_type, payload=payload, reply_to=reply_target, metadata=metadata,
+-            )
++        thread_id = (metadata or {}).get("thread_id")
++        target = reply_to or ((metadata or {}).get("reply_to_message_id") if thread_id else None)
++        if thread_id and not target:
++            target = await self._fetch_last_message_in_thread(thread_id)
++            if not target:
++                return SendResult(
++                    success=False, error=f"No reply anchor available for Feishu thread {thread_id}",
++                    raw_response={"feishu_final": True},
++                )
+
+-        for attempt in range(_FEISHU_SEND_ATTEMPTS):
+-            try:
+-                response = await _raw(active_reply_to)
+-                # Reply target withdrawn/missing → post a new message to the chat instead.
+-                if active_reply_to and not self._response_succeeded(response):
+-                    code = getattr(response, "code", None)
+-                    if code in _FEISHU_REPLY_FALLBACK_CODES:
+-                        if (metadata or {}).get("thread_id"):
+-                            logger.warning(
+-                                "[Feishu] Reply to %s failed in thread %s (code %s — message withdrawn/missing); "
+-                                "skipping top-level fallback to avoid creating a new topic",
+-                                active_reply_to, (metadata or {}).get("thread_id"), code,
+-                            )
+-                            return response
++        async def send_to(reply_target: Optional[str]) -> Any:
++            uuid_value = str(uuid.uuid4())
++            uncertain = False
++            for attempt in range(_FEISHU_SEND_ATTEMPTS):
++                last_attempt = attempt + 1 == _FEISHU_SEND_ATTEMPTS
++                wait_seconds = 2 ** attempt
++                try:
++                    response = await self._send_raw_message(
++                        chat_id=chat_id, msg_type=msg_type, payload=payload, reply_to=reply_target,
++                        in_thread=bool(thread_id), uuid_value=uuid_value,
++                    )
++                except Exception as exc:
++                    if not uncertain and msg_type == "post" and _POST_CONTENT_INVALID_RE.search(str(exc)):
++                        raise
++                    uncertain = True
++                    if not last_attempt:
+                         logger.warning(
+-                            "[Feishu] Reply to %s failed (code %s — message withdrawn/missing); "
+-                            "falling back to new message in chat %s",
+-                            active_reply_to, code, chat_id,
++                            "[Feishu] Send attempt %d/%d failed; retrying in %ds: %s",
++                            attempt + 1, _FEISHU_SEND_ATTEMPTS, wait_seconds,
++                            describe_proxy_error(exc, env_proxy_for_redaction(_onboard_open_base_url(self._domain_name))) or exc,
+                         )
+-                        active_reply_to = None
+-                        response = await _raw(None)
+-                return response
+-            except Exception as exc:
+-                last_error = exc
+-                if msg_type == "post" and _POST_CONTENT_INVALID_RE.search(str(exc)):
+-                    raise
+-                if attempt >= _FEISHU_SEND_ATTEMPTS - 1:
+-                    raise
+-                wait_seconds = 2 ** attempt
+-                logger.warning(
+-                    "[Feishu] Send attempt %d/%d failed for chat %s; retrying in %ds: %s",
+-                    attempt + 1, _FEISHU_SEND_ATTEMPTS, chat_id, wait_seconds, describe_proxy_error(exc, env_proxy_for_redaction(_onboard_open_base_url(self._domain_name))) or exc,
+-                )
+-                await asyncio.sleep(wait_seconds)
+-        raise last_error or RuntimeError("Feishu send failed")
++                else:
++                    if self._response_succeeded(response):
++                        return response
++                    error = str(getattr(response, "msg", "") or "")
++                    limited = (getattr(response, "code", None) in _FEISHU_RATE_LIMIT_CODES
++                               or self._is_rate_limited_error(error))
++                    if limited:
++                        if last_attempt and not uncertain:
++                            result = self._finalize_send_result(response, "Feishu rate limit")
++                            result.raw_response = {"feishu_final": True}
++                            return result
++                    elif response is None or self._is_retryable_error(error):
++                        uncertain = True
++                    elif not uncertain:
++                        return response
++                    else:
++                        break  # a later refusal cannot establish whether the earlier attempt landed
++                if not last_attempt:
++                    await asyncio.sleep(wait_seconds)
++            return SendResult(
++                success=False, error="Feishu delivery uncertain",
++                raw_response={"feishu_final": True, "delivery_uncertain": True},
++            )
++
++        response = await send_to(target)
++        if target and getattr(response, "code", None) in _FEISHU_REPLY_FALLBACK_CODES:
++            if thread_id:
++                result = self._finalize_send_result(response, "reply target unavailable")
++                result.raw_response = {"feishu_final": True}
++                return result
++            # A definite refusal permits a new send to the chat with its own idempotency key.
++            return await send_to(None)
++        return response
++
++    def _send_retry_is_final(self, result: SendResult) -> bool:
++        return isinstance(result.raw_response, dict) and result.raw_response.get("feishu_final") is True
+
+     async def _release_app_lock(self) -> None:
+         if not self._app_lock_identity:
+diff --git a/tests/gateway/feishu_helpers.py b/tests/gateway/feishu_helpers.py
+index f9b7822..42a1c59 100644
+--- a/tests/gateway/feishu_helpers.py
++++ b/tests/gateway/feishu_helpers.py
+@@ -58,6 +58,7 @@ def make_adapter_skeleton(
+ def install_dedup_state(adapter: Any, seen: Optional[dict] = None) -> None:
+     adapter._seen_message_ids = dict(seen) if seen else {}
+     adapter._seen_message_order = list((seen or {}).keys())
++    adapter._uncommitted_message_ids = set()
+     adapter._dedup_cache_size = 100
+     adapter._dedup_lock = threading.Lock()
+     adapter._dedup_persist_lock = asyncio.Lock()
+diff --git a/tests/gateway/test_delivery_ledger.py b/tests/gateway/test_delivery_ledger.py
+index 37a2adb..adb569a 100644
+--- a/tests/gateway/test_delivery_ledger.py
++++ b/tests/gateway/test_delivery_ledger.py
+@@ -411,6 +411,45 @@ class TestGatewayRedeliverySweep:
+         )
+         return adapter
+
++    @pytest.mark.asyncio
++    @pytest.mark.parametrize("lane", ["final", "partial", "stream", "crashed"])
++    async def test_feishu_uncertain_replies_are_not_redelivered(self, lane):
++        from gateway.config import Platform, PlatformConfig
++        from gateway.platforms.base import SendResult
++        from gateway.platforms.event import MessageEvent
++        from plugins.platforms.feishu.adapter import FeishuAdapter
++
++        key = "agent:main:feishu:group:oc_test"
++        transport = self._adapter()
++        runner = self._runner()
++        runner.adapters = {Platform.FEISHU: transport}
++        if lane == "crashed":
++            _record(session_key=key, platform="feishu")
++            dl.mark_attempting("ob-1")
++            _orphan("ob-1")
++            oid = "ob-1"
++        else:
++            adapter = FeishuAdapter(PlatformConfig())
++            source = adapter.build_source(chat_id="oc_test", chat_type="group", user_id="ou_user")
++            event = MessageEvent(text="request", message_id="om_in", source=source)
++            oid = dl.compute_obligation_id(key, "om_in", "answer")
++            if lane in {"final", "partial"}:
++                flag = "delivery_uncertain" if lane == "final" else "partial_overflow"
++                adapter._send_with_retry = AsyncMock(return_value=SendResult(
++                    success=False, error="send failed", raw_response={flag: True},
++                ))
++                await adapter.send_final_ledgered(event, key, "answer", {}, reply_to="om_in")
++            else:
++                assert await adapter.ledger_attempted_final(event, key, "answer", error="uncertain")
++            assert _row(oid)["state"] == "abandoned"
++            assert not dl.pending_retries()
++            _orphan(oid)
++        assert await runner._redeliver_pending_obligations() == 0
++        transport.send.assert_not_awaited()
++        assert _row(oid)["state"] == "abandoned"
++        if lane == "crashed":
++            runner._async_session_store.clear_resume_pending.assert_awaited_once_with(key)
++
+     @pytest.mark.asyncio
+     async def test_pending_redelivers_plain_and_clears_resume(self):
+         _record()  # pending
 diff --git a/tests/gateway/test_feishu.py b/tests/gateway/test_feishu.py
-index 7bb29396..e1ac84e5 100644
+index 7bb2939..2c09255 100644
 --- a/tests/gateway/test_feishu.py
 +++ b/tests/gateway/test_feishu.py
-@@ -1243,6 +1243,60 @@ class TestAdapterBehavior(unittest.TestCase):
+@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, Mock, patch
+
+ import pytest
+
+-from gateway.platforms.event import ProcessingOutcome
++from gateway.platforms.event import MessageEvent, ProcessingOutcome
+
+
+ if TYPE_CHECKING:
+@@ -1243,6 +1243,170 @@ class TestAdapterBehavior(unittest.TestCase):
                  second = FeishuAdapter(PlatformConfig())
                  self.assertTrue(asyncio.run(second._is_duplicate("om_same")))
--
+
++    def test_dedup_persists_only_committed_batches(self):
++        from dataclasses import replace
++        from gateway.config import PlatformConfig
++        from gateway.platforms.base import merge_pending_message_event
++        from gateway.platforms.event import MessageEvent, MessageType
++        from plugins.platforms.feishu.adapter import FeishuAdapter
++
++        async def run():
++            adapter = FeishuAdapter(PlatformConfig())
++            adapter.handle_message = AsyncMock()
++            for message_id in ("om_1", "om_2"):
++                self.assertFalse(await adapter._is_duplicate(message_id, pending_admission=True))
++                self.assertTrue(await adapter._is_duplicate(message_id, pending_admission=True))
++                event = MessageEvent(
++                    text=message_id, message_type=MessageType.TEXT, message_id=message_id,
++                    source=adapter.build_source(chat_id="oc_chat", chat_type="dm", user_id="ou_user"),
++                )
++                event.add_commit_callback(lambda key=message_id: adapter._commit_seen_message(key))
++                await adapter._dispatch_inbound_event(event)
++            await adapter._flush_text_batch_now(next(iter(adapter._pending_text_batches)))
++            adapter.handle_message.assert_awaited_once()
++            batch = adapter.handle_message.await_args.args[0]
++            self.assertEqual(batch.text, "om_1\nom_2")
++            # A flush from a different committed input must exclude the buffered batch.
++            await adapter._is_duplicate("other_committed")
++            restarted = FeishuAdapter(PlatformConfig())
++            for message_id in ("om_1", "om_2"):
++                self.assertFalse(await restarted._is_duplicate(message_id, pending_admission=True))
++            # Native busy bursts may merge it again, and routing can rewrite the event.
++            self.assertFalse(await adapter._is_duplicate("om_3", pending_admission=True))
++            extra = replace(batch, text="om_3", message_id="om_3", _on_commit=None)
++            extra.add_commit_callback(lambda: adapter._commit_seen_message("om_3"))
++            merge_pending_message_event({"chat": batch}, "chat", extra, merge_text=True)
++            replace(batch).commit_input()
++            await adapter._dedup_flush_task
++            recovered = FeishuAdapter(PlatformConfig())
++            for message_id in ("om_1", "om_2", "om_3"):
++                self.assertTrue(await recovered._is_duplicate(message_id, pending_admission=True))
++
++        with tempfile.TemporaryDirectory() as temp_home:
++            with patch.dict(os.environ, {"HERMES_HOME": temp_home}, clear=False):
++                asyncio.run(run())
 +
 +    @patch.dict(os.environ, {}, clear=True)
 +    def test_thread_anchor_skips_deleted_messages(self):
@@ -78,7 +769,7 @@ index 7bb29396..e1ac84e5 100644
 +            patch.object(adapter, "_fetch_last_message_in_thread", new=AsyncMock(return_value="om_anchor")) as fetch,
 +            patch.object(adapter, "_run_blocking", new=AsyncMock(return_value=object())) as send,
 +        ):
-+            asyncio.run(adapter._send_raw_message(
++            asyncio.run(adapter._feishu_send_with_retry(
 +                chat_id="oc_chat", msg_type="text", payload='{"text":"done"}',
 +                reply_to=None, metadata={"thread_id": "omt_thread"},
 +            ))
@@ -95,16 +786,324 @@ index 7bb29396..e1ac84e5 100644
 +
 +        adapter = FeishuAdapter(PlatformConfig())
 +        with (
-+            patch.object(adapter, "_fetch_last_message_in_thread", new=AsyncMock(return_value=None)),
++            patch.object(adapter, "_fetch_last_message_in_thread", new=AsyncMock(return_value=None)) as fetch,
 +            patch.object(adapter, "_run_blocking", new=AsyncMock()) as send,
-+            self.assertRaisesRegex(ValueError, "No reply anchor"),
 +        ):
-+            asyncio.run(adapter._send_raw_message(
++            result = asyncio.run(adapter._feishu_send_with_retry(
 +                chat_id="oc_chat", msg_type="text", payload='{"text":"done"}',
 +                reply_to=None, metadata={"thread_id": "omt_thread"},
 +            ))
++        self.assertIn("No reply anchor", result.error)
++        self.assertTrue(adapter._send_retry_is_final(result))
++        fetch.assert_awaited_once_with("omt_thread")
 +        send.assert_not_awaited()
++
++    @patch.dict(os.environ, {}, clear=True)
++    def test_thread_send_retry_reuses_anchor_and_uuid(self):
++        from gateway.config import PlatformConfig
++        from plugins.platforms.feishu.adapter import FeishuAdapter
++
++        adapter = FeishuAdapter(PlatformConfig())
++        api = SimpleNamespace(reply=Mock(), create=Mock())
++        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=api)))
++        response = SimpleNamespace(success=lambda: True, data=SimpleNamespace(message_id="om_sent"))
++        with (
++            patch.object(adapter, "_fetch_last_message_in_thread", new=AsyncMock(return_value="om_anchor")) as fetch,
++            patch.object(adapter, "_run_blocking", new=AsyncMock(side_effect=[TimeoutError(), response])) as send,
++            patch("plugins.platforms.feishu.adapter.asyncio.sleep", new=AsyncMock()),
++        ):
++            result = asyncio.run(adapter.send("oc_chat", "done", metadata={"thread_id": "omt_thread"}))
++        self.assertTrue(result.success)
++        fetch.assert_awaited_once_with("omt_thread")
++        first, second = [call.args for call in send.await_args_list]
++        self.assertIs(first[0], api.reply)
++        self.assertIs(second[0], api.reply)
++        self.assertEqual(first[1].message_id, second[1].message_id)
++        self.assertEqual(first[1].request_body.uuid, second[1].request_body.uuid)
++
++    @patch.dict(os.environ, {}, clear=True)
++    def test_send_does_not_fall_back_after_an_uncertain_reply(self):
++        from gateway.config import PlatformConfig
++        from plugins.platforms.feishu.adapter import FeishuAdapter
++
++        adapter = FeishuAdapter(PlatformConfig())
++        api = SimpleNamespace(reply=Mock(), create=Mock())
++        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=api)))
++        unavailable = SimpleNamespace(success=lambda: False, code=230011, msg="withdrawn")
++        with (
++            patch.object(adapter, "_run_blocking", new=AsyncMock(side_effect=[TimeoutError(), unavailable])) as send,
++            patch("plugins.platforms.feishu.adapter.asyncio.sleep", new=AsyncMock()),
++        ):
++            result = asyncio.run(adapter._send_with_retry("oc_chat", "done", reply_to="om_anchor"))
++        self.assertFalse(result.success)
++        self.assertTrue(result.raw_response["delivery_uncertain"])
++        self.assertEqual([call.args[0] for call in send.await_args_list], [api.reply, api.reply])
++
++    @patch.dict(os.environ, {}, clear=True)
++    def test_thread_rate_limit_reuses_anchor_and_key_across_all_attempts(self):
++        from gateway.config import PlatformConfig
++        from plugins.platforms.feishu.adapter import FeishuAdapter
++
++        adapter = FeishuAdapter(PlatformConfig())
++        api = SimpleNamespace(reply=Mock(), create=Mock())
++        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=api)))
++        limited = SimpleNamespace(success=lambda: False, code=230020, msg="rate limit")
++        with (
++            patch.object(adapter, "_fetch_last_message_in_thread", new=AsyncMock(return_value="om_anchor")) as fetch,
++            patch.object(adapter, "_run_blocking", new=AsyncMock(return_value=limited)) as send,
++            patch("plugins.platforms.feishu.adapter.asyncio.sleep", new=AsyncMock()),
++        ):
++            result = asyncio.run(adapter._send_with_retry("oc_chat", "done", metadata={"thread_id": "omt_thread"}))
++        self.assertFalse(result.success)
++        fetch.assert_awaited_once_with("omt_thread")
++        requests = [request for method, request in (call.args for call in send.await_args_list) if method is api.reply]
++        self.assertEqual(send.await_count, 3)
++        self.assertEqual(len(requests), 3)
++        self.assertEqual({req.message_id for req in requests}, {"om_anchor"})
++        self.assertEqual(len({req.request_body.uuid for req in requests}), 1)
++        self.assertNotIn("delivery_uncertain", result.raw_response)
 +
      @patch.dict(os.environ, {}, clear=True)
      def test_send_document_reply_uses_thread_flag(self):
          from gateway.config import PlatformConfig
+@@ -2498,7 +2662,10 @@ def _reaction_adapter(*, delete_success=True):
+
+
+ def _run_processing(adapter, outcome):
+-    event = SimpleNamespace(message_id="om_msg")
++    event = MessageEvent(
++        text="", message_id="om_msg",
++        source=adapter.build_source(chat_id="oc_chat", chat_type="dm", user_id="ou_user"),
++    )
+     asyncio.run(adapter.on_processing_start(event))
+     asyncio.run(adapter.on_processing_complete(event, outcome))
+
+diff --git a/tests/gateway/test_feishu_audio_delivery.py b/tests/gateway/test_feishu_audio_delivery.py
+index 944c0eb..f64b0b0 100644
+--- a/tests/gateway/test_feishu_audio_delivery.py
++++ b/tests/gateway/test_feishu_audio_delivery.py
+@@ -1,7 +1,7 @@
+ """Feishu audio delivery: plain audio MEDIA is a named file, only voice intent is a voice note."""
+ import asyncio
+ from types import SimpleNamespace
+-from unittest.mock import patch
++from unittest.mock import AsyncMock, Mock, patch
+
+ import pytest
+
+@@ -50,8 +50,8 @@ def test_plain_audio_media_is_a_named_file_not_a_transcoded_voice_note(tmp_path,
+     assert sent["messages"] == ["file"]
+
+
+-def test_voice_intent_ogg_stays_a_native_audio_message(tmp_path):
+-    adapter, sent = _recording_adapter()
++@pytest.fixture
++def voice_file(tmp_path):
+     path = tmp_path / "reply.ogg"
+     # a well-formed two-page Ogg stream: Feishu probes its granule for the voice duration
+     head = b"OpusHead" + bytes([1, 1]) + (312).to_bytes(2, "little") + (48000).to_bytes(4, "little") + b"\x00" * 3
+@@ -59,10 +59,37 @@ def test_voice_intent_ogg_stays_a_native_audio_message(tmp_path):
+         b"OggS" + bytes([0, kind]) + granule.to_bytes(8, "little") + b"\x01\x00\x00\x00" + seq.to_bytes(4, "little")
+         + b"\x00" * 4 + bytes([1, len(packet)]) + packet
+         for kind, granule, seq, packet in ((2, 0, 0, head), (4, 96312, 1, b"\xfc" * 8))))
++    return path
++
++
++def test_voice_intent_ogg_stays_a_native_audio_message(voice_file):
++    adapter, sent = _recording_adapter()
+
+     with patch("plugins.platforms.feishu.adapter.asyncio.to_thread", side_effect=_direct):
+-        result = asyncio.run(adapter.send_voice("oc_chat", str(path)))
++        result = asyncio.run(adapter.send_voice("oc_chat", str(voice_file)))
+
+     assert result.success
+     assert sent["uploads"] == [("opus", "reply.ogg")]
+     assert sent["messages"] == ["audio"]
++
++
++@pytest.mark.parametrize("timed_out", [False, True])
++def test_thread_voice_failure_never_posts_to_main_chat(voice_file, timed_out):
++    adapter, sent = _recording_adapter()
++    api = adapter._client.im.v1.message
++    api.reply = Mock(
++        side_effect=TimeoutError if timed_out else None,
++        return_value=SimpleNamespace(success=lambda: False, code=99992402, msg="bad request"),
++    )
++    with patch("plugins.platforms.feishu.adapter.asyncio.sleep", new=AsyncMock()):
++        result = asyncio.run(adapter.send_voice(
++            "oc_chat", str(voice_file), reply_to="om_anchor", metadata={"thread_id": "omt_thread"},
++        ))
++    assert not result.success and not sent["messages"]
++    requests = [call.args[0] for call in api.reply.call_args_list]
++    assert requests and all(req.message_id == "om_anchor" for req in requests)
++    assert len({req.request_body.uuid for req in requests}) == 1
++    if timed_out:
++        assert result.raw_response["delivery_uncertain"] is True
++    else:
++        assert len(requests) == 1
+diff --git a/tests/gateway/test_feishu_meeting_invite.py b/tests/gateway/test_feishu_meeting_invite.py
+index 2ff4e3c..aef9b6f 100644
+--- a/tests/gateway/test_feishu_meeting_invite.py
++++ b/tests/gateway/test_feishu_meeting_invite.py
+@@ -188,7 +188,7 @@ class TestMeetingInviteSendRouting(unittest.TestCase):
+                 request_body=request_body,
+             )),
+         ):
+-            self._run(adapter._send_raw_message(
++            self._run(adapter._feishu_send_with_retry(
+                 chat_id="feishu_user_id:3001",
+                 msg_type="text",
+                 payload='{"text":"ok"}',
+diff --git a/tests/gateway/test_messaging_slash_command_fifo.py b/tests/gateway/test_messaging_slash_command_fifo.py
+index a51d860..e73f839 100644
+--- a/tests/gateway/test_messaging_slash_command_fifo.py
++++ b/tests/gateway/test_messaging_slash_command_fifo.py
+@@ -329,15 +329,52 @@ async def test_queued_ack_follows_the_commit(monkeypatch, command, agent, ack):
+         return await real(authority, event)
+     monkeypatch.setattr(ingress, 'admit_message', released_early)
+     rig = await _start_a(monkeypatch, 'queue', agent=agent)
+-    await rig.adapter.handle_message(MessageEvent(text=command, message_type=MessageType.COMMAND,
+-                                                  source=rig.source, message_id='C'))
++    commits = []
++    event = MessageEvent(text=command, message_type=MessageType.COMMAND, source=rig.source, message_id='C')
++    event.add_commit_callback(lambda: commits.append(_rows(rig)))
++    await rig.adapter.handle_message(event)
+     assert t(ack) not in rig.sent and 'C' not in _rows(rig), rig.sent
++    assert not commits
+     held.set()
+     await async_wait_until(lambda: t(ack) in rig.sent, what='the ack after the commit')
+     assert 'C' in _rows(rig) and rig.sent.count(t(ack)) == 1, rig.sent
++    assert commits == [['A', 'C']]
+     rig.finish.set()
+
+
++@pytest.mark.asyncio
++@pytest.mark.parametrize("command", ["/approve", "/deny", "/steer note"])
++async def test_consumed_busy_command_persists_feishu_dedup(monkeypatch, command):
++    from gateway.config import PlatformConfig
++    from gateway.platforms.event import MessageEvent, MessageType
++    from plugins.platforms.feishu.adapter import FeishuAdapter
++    from tools import approval, slash_confirm
++
++    rig = await _start_a(monkeypatch, "queue")
++    slash_confirm.clear(rig.key)
++    transport = FeishuAdapter(PlatformConfig())
++    applied = []
++    if command.startswith("/steer"):
++        agent = rig.runner._session_state(rig.key).turn.agent
++        agent.steer = lambda text: applied.append(text) or True
++    else:
++        monkeypatch.setattr(rig.runner, "_blocking_approval_or_stale", lambda *_a, **_kw: (rig.key, None, ["req"]))
++        monkeypatch.setattr(approval, "resolve_gateway_approval", lambda *_a, **_kw: applied.append(command) or 1)
++
++    try:
++        assert not await transport._is_duplicate("om_command", pending_admission=True)
++        event = MessageEvent(text=command, message_type=MessageType.COMMAND, source=rig.source, message_id="om_command")
++        event.add_commit_callback(lambda: transport._commit_seen_message("om_command"))
++        await rig.adapter.handle_message(event)
++        assert len(applied) == 1 and transport._dedup_flush_task is not None, rig.sent
++        await transport._dedup_flush_task
++        restarted = FeishuAdapter(PlatformConfig())
++        assert await restarted._is_duplicate("om_command", pending_admission=True)
++        assert "om_command" not in _rows(rig)
++    finally:
++        rig.finish.set()
++
++
+ @pytest.mark.asyncio
+ async def test_queued_approval_word_is_a_turn_never_an_approval(monkeypatch):
+     """Keep working: ``/queue yes`` queues a user turn; it never answers a blocking dangerous-command
+diff --git a/tests/gateway/test_stream_consumer_thread_routing.py b/tests/gateway/test_stream_consumer_thread_routing.py
+index 974a1d7..3ce4f1c 100644
+--- a/tests/gateway/test_stream_consumer_thread_routing.py
++++ b/tests/gateway/test_stream_consumer_thread_routing.py
+@@ -107,70 +107,30 @@ class TestOverflowFirstMessage:
+
+
+ class TestFeishuFallbackThreadRouting:
+-    """Verify FeishuAdapter._send_raw_message routes to topic on fallback."""
+-
+     @pytest.mark.asyncio
+-    async def test_create_uses_thread_id_when_available(self):
+-        """When reply_to=None and metadata has thread_id, message.create
+-        should use receive_id_type='thread_id'."""
++    async def test_metadata_anchor_replies_in_the_existing_topic(self):
++        from gateway.config import PlatformConfig
+         from plugins.platforms.feishu.adapter import FeishuAdapter
+
+-        # We test the _send_raw_message method directly by mocking the client
+-        adapter = MagicMock(spec=FeishuAdapter)
+-
+-        # Set up the real _send_raw_message logic manually
+-        mock_client = MagicMock()
+-        mock_create_response = SimpleNamespace(
+-            success=lambda: True,
+-            data=SimpleNamespace(message_id="new_msg_1"),
+-        )
+-        mock_client.im.v1.message.create = MagicMock(return_value=mock_create_response)
+-
+-        # Use the real implementation path
+-        adapter._client = mock_client
+-        adapter._build_create_message_body = FeishuAdapter._build_create_message_body
+-        adapter._build_create_message_request = FeishuAdapter._build_create_message_request
+-        # _send_raw_message routes blocking SDK calls through _run_blocking
+-        # (adapter-owned executor). On a MagicMock(spec=...) that method is
+-        # auto-mocked and would swallow the real call, so wire a passthrough.
+-        async def _run_blocking_passthrough(func, *args):
+-            return func(*args)
+-        adapter._run_blocking = _run_blocking_passthrough
+-
+-        # Call _send_raw_message with reply_to=None and thread_id in metadata
+-        import json
+-        await FeishuAdapter._send_raw_message(
+-            adapter,
+-            chat_id="oc_main_chat",
+-            msg_type="text",
+-            payload=json.dumps({"text": "hello"}),
+-            reply_to=None,
+-            metadata={"thread_id": "omt_topic_abc"},
++        adapter = FeishuAdapter(PlatformConfig())
++        api = SimpleNamespace(reply=MagicMock(), create=MagicMock())
++        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=api)))
++        adapter._fetch_last_message_in_thread = AsyncMock()
++        adapter._run_blocking = AsyncMock(return_value=SimpleNamespace(
++            success=lambda: True, data=SimpleNamespace(message_id="new_msg_1"),
++        ))
++
++        result = await adapter.send(
++            "oc_main_chat", "hello",
++            metadata={"thread_id": "omt_topic_abc", "reply_to_message_id": "om_anchor"},
+         )
+
+-        # Verify message.create was called (not message.reply)
+-        mock_client.im.v1.message.create.assert_called_once()
+-
+-        # The request should have receive_id_type="thread_id"
+-        call_args = mock_client.im.v1.message.create.call_args[0][0]
+-        # Lark SDK builder exposes .body; the in-tree fallback exposes .request_body.
+-        # The contributor's branch had the lark SDK installed, the test environment
+-        # may not — handle both shapes.
+-        body = getattr(call_args, "body", None) or getattr(call_args, "request_body", None)
+-        assert body is not None, "request has neither .body nor .request_body"
+-        # receive_id should be the thread_id, not the chat_id
+-        receive_id = getattr(body, "receive_id", None)
+-        if receive_id is None and isinstance(body, str):
+-            import json as _json
+-            receive_id = _json.loads(body).get("receive_id")
+-        assert receive_id == "omt_topic_abc", (
+-            f"Expected receive_id='omt_topic_abc', got '{receive_id}'"
+-        )
+-        # And receive_id_type must be 'thread_id', not 'chat_id'
+-        receive_id_type = getattr(call_args, "receive_id_type", None)
+-        assert receive_id_type == "thread_id", (
+-            f"Expected receive_id_type='thread_id', got '{receive_id_type}'"
+-        )
++        assert result.success
++        adapter._fetch_last_message_in_thread.assert_not_awaited()
++        method, request = adapter._run_blocking.await_args.args
++        assert method is api.reply
++        assert request.message_id == "om_anchor"
++        assert request.request_body.reply_in_thread is True
+
+
+ class TestFallbackResendThreading:

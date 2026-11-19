@@ -79,9 +79,14 @@ agent:
 
 父会话使用 `gpt-6-luna`，原生子 Agent 默认继承该模型。测试群成员通过 @ 触发；引用机器人回复时也 @ 机器人。`group_allowed_chats` 授权该群，`group_rules` 控制群成员及 @ 触发，`admins` 留空以免绕过群规则。需要限制特定群成员时，可将该群的 `policy` 改为 `allowlist` 并列出成员 ID。私聊沿用 Hermes 的一对一会话，用 `/new` 切分。需要跨会话回忆时，先确定群聊和私聊在该 profile 内的可见范围。定期检查使用 Hermes 原生 `/loop`。
 
-Hermes v0.23.2 需要[话题后台回复补丁](../patches/hermes-0.23.2-feishu-topic-replies.patch)：后台结果缺少回复目标时，补丁使用话题内最新有效消息作为回复锚点。升级 Hermes 后检查上游是否已修复；如仍需要补丁，在对应源码目录先用 `git apply --check` 验证再应用，并重跑飞书适配器测试。
+Hermes v0.23.2 需要[飞书话题与去重补丁](../patches/hermes-0.23.2-feishu-topic-replies.patch)。后台结果缺少回复目标时，适配器使用话题内最近的有效消息作为锚点。同一次回复重试复用锚点和 UUID。Gateway 投递账本把结果不明的 Feishu 回复留待核对，并在日志中记录。核对飞书上的实际结果后再决定是否手工重发。
+
+飞书适配器保留原生合批。消息在入队提交或被 Gateway 消费前只在进程内去重，因而重启后能接收飞书对这些消息的重投。恢复仍依赖飞书重投尚未持久入队的事件。若进程在入队提交后、适配器去重文件写盘前退出，飞书单独重投未被原生入队键覆盖的成员时，仍可能重复执行。旧版本已经写入的去重记录按原保留期过期。
+
+补丁基于未修改的上游 `v0.23.2` 标签。确认以下版本检查输出 `v0.23.2` 后再应用。升级到其他版本后，重新检查上游的回复与入队行为并运行对应的 Gateway 测试。
 
 ```bash
+git -C /path/to/hermes-agent describe --tags --exact-match HEAD
 git -C /path/to/hermes-agent apply --check /path/to/feishu-shadow-agent/docs/patches/hermes-0.23.2-feishu-topic-replies.patch
 git -C /path/to/hermes-agent apply /path/to/feishu-shadow-agent/docs/patches/hermes-0.23.2-feishu-topic-replies.patch
 ```
@@ -98,5 +103,7 @@ hermes -p coworker dashboard --host 127.0.0.1 --port 9119 --no-open
 需要远程操作时，使用 SSH 转发本机端口。Hermes 的 Dashboard、CLI、TUI 或 Desktop 显示和续接其原生会话；项目 Console 显示项目持有的状态。
 
 项目启动入口不接受 `--config`、`--mode` 或 `--reply-mode`；这些设置由 Hermes profile 管理。profile 的 `SOUL.md` 是 Hermes 的身份提示，新会话会读取该文件。
+
+Hermes 默认使用 `display.busy_input_mode: interrupt`。需要后续输入依次执行时，可在 profile 中设为 `queue`。飞书撤回事件目前由适配器记录，已入队的快照和已运行的任务由 Gateway 管理。可用原生 `/stop` 终止当前会话的工作。
 
 Hermes Gateway 没有项目级 dry-run 开关，项目启动入口对 Hermes 的 `--dry-run` 返回错误。验证启动命令可先使用无飞书凭据的隔离 profile 和模拟网关；连接真实应用后，网关可能自动答复，须单独安排实际发送验收。
