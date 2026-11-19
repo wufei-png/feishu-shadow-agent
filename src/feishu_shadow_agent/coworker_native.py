@@ -28,7 +28,11 @@ from .coworker import (
     event_message_from_raw,
 )
 from .coworker_native_state import NativeCoworkerState
-from .coworker_native_store import NativeDelivery, NativeDeliveryStore
+from .coworker_native_store import (
+    NativeDelivery,
+    NativeDeliveryStore,
+    snapshot_evidence,
+)
 from .coworker_store import (
     GROUP_MAIN_KEY,
     NATIVE_LOCATING_KEY,
@@ -519,6 +523,7 @@ class NativeCoworkerService(CoworkerService):
         session_id: int | None = None
         origin_event_id: int | None = None
         source_revision: int | None = None
+        steer_snapshot: dict[str, Any] | None = None
         session_lock: RLock | None = None
         turn_id: str | None = None
         try:
@@ -657,6 +662,7 @@ class NativeCoworkerService(CoworkerService):
             if turn_id is None or server.active_turn_id(thread_id) != turn_id:
                 self.events.defer_late_native_steer(event.id, origin_event_id)
                 return False
+            steer_snapshot = snapshot_evidence(message.raw)
             self.events.mark_steer_sending(event.id, native=True)
             sending = True
             prompt = "当前任务的补充信息：\n" + _code_block(
@@ -688,6 +694,7 @@ class NativeCoworkerService(CoworkerService):
                     turn_id=turn_id,
                     source_revision=source_revision,
                     error=f"{type(exc).__name__}: {exc}"[:500],
+                    snapshot=steer_snapshot,
                 )
             else:
                 self.events.skip_native_steer(event.id)
@@ -700,6 +707,7 @@ class NativeCoworkerService(CoworkerService):
                 turn_id=turn_id,
                 source_revision=source_revision,
                 error=None,
+                snapshot=steer_snapshot,
             )
             self.logger.info(
                 "native_coworker_steer_accepted", data={"message_id": event.message_id}
@@ -896,8 +904,9 @@ class NativeCoworkerService(CoworkerService):
             watch_trigger = watched and not direct
         batch: list[tuple[int, str, int]] = []
         batch_messages: list[dict[str, Any]] = []
+        batch_snapshots: dict[str, dict[str, Any]] = {}
         if watch_trigger:
-            batch, batch_messages = self._watch_batch(event, bot)
+            batch, batch_messages, batch_snapshots = self._watch_batch(event, bot)
         upsert = self.store.upsert_message_with_revision(message)
         if upsert.requires_confirmation or upsert.is_deleted:
             raise ValueError("current message revision cannot be verified")
@@ -1123,6 +1132,8 @@ class NativeCoworkerService(CoworkerService):
                 reply_in_thread=not private
                 and (event.topic_key != GROUP_MAIN_KEY or purpose != "reply"),
                 batch=batch,
+                source_snapshot=snapshot_evidence(message.raw),
+                context_snapshots=batch_snapshots,
                 requires_watch=watch_trigger and output.action == "reply",
                 purpose=purpose,
             )
@@ -1186,6 +1197,7 @@ class NativeCoworkerService(CoworkerService):
         if upsert.requires_confirmation or upsert.is_deleted:
             raise ValueError("topic transfer source cannot be verified")
         supplements: list[dict[str, Any]] = []
+        context_snapshots: dict[str, dict[str, Any]] = {}
         for item in context:
             if (
                 item["current_revision"] != item["revision"]
@@ -1208,6 +1220,7 @@ class NativeCoworkerService(CoworkerService):
             ):
                 raise ValueError("topic transfer context changed")
             supplements.append(_prompt_message(supplement))
+            context_snapshots[supplement.message_id] = snapshot_evidence(supplement.raw)
         session = self.events.get_or_create_session(
             app_id=event.app_id,
             chat_id=event.chat_id,
@@ -1293,6 +1306,8 @@ class NativeCoworkerService(CoworkerService):
             source_revision=upsert.revision,
             source_event_id=origin_id,
             source_message_id=str(source_id),
+            source_snapshot=snapshot_evidence(message.raw),
+            context_snapshots=context_snapshots,
             target_message_id=str(target),
             text=composed.text,
             reply_in_thread=True,
@@ -1300,7 +1315,9 @@ class NativeCoworkerService(CoworkerService):
 
     def _watch_batch(
         self, event: CoworkerEvent, bot: str
-    ) -> tuple[list[tuple[int, str, int]], list[dict[str, Any]]]:
+    ) -> tuple[
+        list[tuple[int, str, int]], list[dict[str, Any]], dict[str, dict[str, Any]]
+    ]:
         with self.store.connect() as conn:
             leader = conn.execute(
                 "SELECT received_at FROM coworker_events WHERE id = ?", (event.id,)
@@ -1355,6 +1372,7 @@ class NativeCoworkerService(CoworkerService):
             raise _WatchDeferred
         batch: list[tuple[int, str, int]] = []
         messages: list[dict[str, Any]] = []
+        snapshots: dict[str, dict[str, Any]] = {}
         for row, raw in candidates:
             enriched = self._enrich_message(
                 raw, str(row["message_id"]), event.chat_id, bot
@@ -1379,8 +1397,9 @@ class NativeCoworkerService(CoworkerService):
                 raise ValueError("watched message revision cannot be verified")
             batch.append((int(row["id"]), message.message_id, upsert.revision))
             messages.append(_prompt_message(message))
+            snapshots[message.message_id] = snapshot_evidence(message.raw)
         reserved = self.deliveries.reserve_watch_batch(event.id, batch)
-        return batch[:reserved], messages[:reserved]
+        return batch[:reserved], messages[:reserved], snapshots
 
     def _process_native_completion(self, event: CoworkerEvent) -> None:
         policy = self.current_policy()
@@ -1477,13 +1496,13 @@ class NativeCoworkerService(CoworkerService):
             raise ValueError("private sender is not the owner")
         with self.store.connect() as conn:
             context = conn.execute(
-                """SELECT c.message_id, c.revision FROM coworker_native_delivery_context c
+                """SELECT c.message_id, c.revision, c.snapshot_json FROM coworker_native_delivery_context c
                    JOIN coworker_native_deliveries d ON d.id = c.delivery_id
                    WHERE (d.event_id = ? AND d.session_id = ?) OR d.id IN (
                      SELECT t.delivery_id FROM coworker_native_transfers t
                      WHERE t.event_id = ? AND t.delivery_id = ?)
                    UNION
-                   SELECT e.message_id, s.source_revision FROM coworker_native_steers s
+                   SELECT e.message_id, s.source_revision, s.snapshot_json FROM coworker_native_steers s
                    JOIN coworker_events e ON e.id = s.event_id
                    WHERE s.origin_event_id = ? AND s.session_id = ? AND s.status = 'accepted'""",
                 (
@@ -1496,7 +1515,11 @@ class NativeCoworkerService(CoworkerService):
                 ),
             ).fetchall()
         self._validate_source_snapshots(
-            event.chat_id, [(str(item[0]), int(item[1])) for item in context]
+            event.chat_id,
+            [
+                (str(item[0]), int(item[1]), json.loads(item[2]) if item[2] else None)
+                for item in context
+            ],
         )
         notice = {
             "type": "internal_subagent_completion",
@@ -1569,6 +1592,7 @@ class NativeCoworkerService(CoworkerService):
             source_revision=upsert.revision,
             source_event_id=source_event_id,
             source_message_id=message.message_id,
+            source_snapshot=snapshot_evidence(message.raw),
             target_message_id=reply_target,
             text=composed.text,
             reply_in_thread=not private and event.topic_key != GROUP_MAIN_KEY,
@@ -1842,13 +1866,15 @@ class NativeCoworkerService(CoworkerService):
         topic_thread: str | None = None
         try:
             self._validate_delivery(delivery)
-            self._validate_source_snapshots(
-                delivery.chat_id,
-                [
-                    (delivery.source_message_id, delivery.source_revision),
-                    *delivery.context_sources,
-                ],
-            )
+            sources = [
+                (
+                    delivery.source_message_id,
+                    delivery.source_revision,
+                    delivery.source_snapshot,
+                ),
+                *delivery.context_sources,
+            ]
+            self._validate_source_snapshots(delivery.chat_id, sources)
             self._validate_delivery(delivery)
             client = cast(_ReplyClient, self.feishu)
             preview = client.reply_message(
@@ -1864,6 +1890,7 @@ class NativeCoworkerService(CoworkerService):
             if self.execution_mode == "dry_run":
                 self.deliveries.finish(delivery.id, status="previewed")
                 return
+            self._validate_source_snapshots(delivery.chat_id, sources)
             self._validate_delivery(delivery)
             result = client.reply_message(
                 as_identity="bot",
@@ -1924,9 +1951,11 @@ class NativeCoworkerService(CoworkerService):
             )
 
     def _validate_source_snapshots(
-        self, chat_id: str, sources: list[tuple[str, int]]
+        self,
+        chat_id: str,
+        sources: list[tuple[str, int, dict[str, Any] | None]],
     ) -> None:
-        for source_id, revision in sources:
+        for source_id, revision, snapshot in sources:
             source = self.store.get_message(source_id)
             if (
                 source is None
@@ -1935,7 +1964,11 @@ class NativeCoworkerService(CoworkerService):
                 or source["is_deleted"]
             ):
                 raise ValueError("reply source revision changed")
-            saved = _mapping(json.loads(str(source["raw_json"])))
+            saved = (
+                snapshot
+                if snapshot is not None
+                else _mapping(json.loads(str(source["raw_json"])))
+            )
             try:
                 page = self.feishu.get_messages(
                     as_identity="bot", message_ids=[source_id]
@@ -2008,7 +2041,7 @@ class NativeCoworkerService(CoworkerService):
             )
         ):
             raise ValueError("reply source revision changed")
-        for message_id, revision in delivery.context_sources:
+        for message_id, revision, _snapshot in delivery.context_sources:
             context = self.store.get_message(message_id)
             if (
                 context is None

@@ -104,13 +104,17 @@ def message_content_fingerprint(
             value["mentions"] = sorted(mention_identifiers(mentions))
         else:
             items = cast(list[object], mentions) if isinstance(mentions, list) else []
-            value["mentions"] = sorted(
-                (
-                    str(item.get("key") or "") if isinstance(item, dict) else "",
-                    tuple(sorted(mention_identifiers([item]))),
+            bindings: list[tuple[str, tuple[str, ...]]] = []
+            for item in items:
+                entry = cast(dict[str, Any], item) if isinstance(item, dict) else {}
+                key = entry.get("key")
+                bindings.append(
+                    (
+                        key if isinstance(key, str) else "",
+                        tuple(sorted(mention_identifiers([cast(object, item)]))),
+                    )
                 )
-                for item in items
-            )
+            value["mentions"] = sorted(bindings)
     encoded = json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )

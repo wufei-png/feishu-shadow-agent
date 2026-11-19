@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import socket
 from datetime import timedelta
@@ -227,6 +228,7 @@ class NativeCoworkerState:
         turn_id: str,
         source_revision: int,
         error: str | None,
+        snapshot: dict[str, Any] | None = None,
     ) -> None:
         self.store.initialize()
         now = self.store.clock()
@@ -243,7 +245,7 @@ class NativeCoworkerState:
                 raise ValueError("steered event is no longer sending")
             conn.execute(
                 """INSERT INTO coworker_native_steers(event_id, origin_event_id, session_id,
-                   turn_id, source_revision, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                   turn_id, source_revision, status, updated_at, snapshot_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     event_id,
                     origin_event_id,
@@ -252,6 +254,7 @@ class NativeCoworkerState:
                     source_revision,
                     "needs_review" if error else "accepted",
                     now,
+                    json.dumps(snapshot) if snapshot is not None else None,
                 ),
             )
             if error is None:

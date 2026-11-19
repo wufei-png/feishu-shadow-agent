@@ -1,7 +1,7 @@
 BEGIN IMMEDIATE;
 
 PRAGMA application_id = 1179861319;
-PRAGMA user_version = 12;
+PRAGMA user_version = 13;
 
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -514,6 +514,7 @@ CREATE TABLE IF NOT EXISTS coworker_native_deliveries (
   purpose TEXT NOT NULL DEFAULT 'reply' CHECK (purpose IN ('reply', 'topic', 'transfer')),
   source_revision INTEGER NOT NULL,
   source_message_id TEXT NOT NULL,
+  source_snapshot_json TEXT,
   target_message_id TEXT NOT NULL,
   text TEXT NOT NULL,
   reply_in_thread INTEGER NOT NULL DEFAULT 0,
@@ -540,6 +541,7 @@ CREATE TABLE IF NOT EXISTS coworker_native_delivery_context (
   delivery_id INTEGER NOT NULL,
   message_id TEXT NOT NULL,
   revision INTEGER NOT NULL,
+  snapshot_json TEXT,
   PRIMARY KEY (delivery_id, message_id),
   FOREIGN KEY (delivery_id) REFERENCES coworker_native_deliveries(id)
 );
@@ -581,6 +583,7 @@ CREATE TABLE IF NOT EXISTS coworker_native_steers (
   session_id INTEGER NOT NULL,
   turn_id TEXT NOT NULL,
   source_revision INTEGER NOT NULL,
+  snapshot_json TEXT,
   status TEXT NOT NULL CHECK (status IN ('accepted', 'needs_review')),
   updated_at TEXT NOT NULL,
   FOREIGN KEY (event_id) REFERENCES coworker_events(id),

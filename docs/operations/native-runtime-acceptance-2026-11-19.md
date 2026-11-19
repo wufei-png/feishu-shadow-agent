@@ -29,7 +29,7 @@
 - 本机默认 CLI workspace 曾在本次工作中通过用户身份验证，但最新状态为 `needs_refresh`；Hermes 应用对应的 CLI workspace 中 bot 身份可用，user token 缺失。
 - 以 Hermes 应用的 bot 身份读取原配置群的信息成功，返回普通群类型。这不是独立测试应用的验收。
 - `lark-cli im +messages-reply --dry-run` 返回请求预览，没有调用发送接口。隔离临时数据库的 `doctor --mode dry-run` 中，Codex App Server、多 Agent、bot 身份及应用 ID 匹配检查通过；整体未通过，原因是 Hermes workspace 的 user token 和 scopes 无法验证，磁盘空闲比例触发告警。
-- 原项目配置所指生产 SQLite 为 v8；新代码只提供 v9、v10、v11 到 v12 的迁移，未修改原库。不要直接用该生产配置启动新版本。
+- 原项目配置所指生产 SQLite 为 v8；新代码提供 v9、v10、v11、v12 到 v13 的迁移，未修改原库。不要直接用该生产配置启动新版本。
 
 ## 尚待验收
 

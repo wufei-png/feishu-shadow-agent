@@ -635,6 +635,10 @@ def test_pending_reply_accepts_previous_snapshot_fingerprint(
         feishu.messages["request"], include_mentions=version == 2, mention_version=2
     )
     with service.store.connect() as conn:
+        # A delivery written before per-delivery snapshots uses the old evidence.
+        conn.execute(
+            "UPDATE coworker_native_deliveries SET source_snapshot_json = NULL"
+        )
         conn.execute(
             """UPDATE messages SET raw_json = json_set(raw_json,
                  '$.coworker_source_content_sha256', ?) WHERE message_id = 'request'""",
@@ -643,6 +647,109 @@ def test_pending_reply_accepts_previous_snapshot_fingerprint(
 
     assert service.process_next()
     assert feishu.sent == 1
+
+
+def test_pending_reply_keeps_its_snapshot_when_shared_message_changes(
+    tmp_path: Path,
+) -> None:
+    service, feishu, _server = _service(tmp_path, dry_run=False)
+    _receive(service, feishu, "request")
+    assert service.process_next()
+    feishu.messages["request"].pop("mentions")
+    new_fingerprint = message_content_fingerprint(
+        feishu.messages["request"], include_mentions=True
+    )
+    with service.store.connect() as conn:
+        conn.execute(
+            """UPDATE messages SET raw_json = json_set(raw_json,
+                 '$.coworker_source_content_sha256', ?) WHERE message_id = 'request'""",
+            (new_fingerprint,),
+        )
+    assert service.process_next()
+    assert feishu.sent == 0
+    with service.store.connect() as conn:
+        assert (
+            conn.execute("SELECT status FROM coworker_native_deliveries").fetchone()[0]
+            == "needs_review"
+        )
+
+
+def test_reply_rechecks_snapshot_after_preview(tmp_path: Path) -> None:
+    service, feishu, _server = _service(tmp_path, dry_run=False)
+    _receive(service, feishu, "request")
+    assert service.process_next()
+    feishu.on_preview = lambda: feishu.messages["request"].pop("mentions")
+    assert service.process_next()
+    assert feishu.sent == 0
+    with service.store.connect() as conn:
+        assert (
+            conn.execute("SELECT status FROM coworker_native_deliveries").fetchone()[0]
+            == "needs_review"
+        )
+
+
+@pytest.mark.parametrize("edit_after_child", [False, True])
+def test_child_completion_binds_its_own_new_source_snapshot(
+    tmp_path: Path, edit_after_child: bool
+) -> None:
+    service, feishu, _server = _service(tmp_path, dry_run=False)
+    _receive(service, feishu, "first", location="thread")
+    snapshot = feishu.messages["first"]
+    snapshot["update_time"] = "2026-11-19 16:30"
+    assert service.process_next() and service.process_next()
+    legacy = message_content_fingerprint(snapshot)
+    with service.store.connect() as conn:
+        conn.execute(
+            """UPDATE messages SET raw_json = json_set(raw_json,
+                 '$.coworker_source_content_sha256', ?) WHERE message_id = 'first'""",
+            (legacy,),
+        )
+    service.on_app_server_notification(
+        {
+            "method": "item/completed",
+            "params": {
+                "threadId": "session-1",
+                "item": {
+                    "type": "subAgentActivity",
+                    "kind": "started",
+                    "agentThreadId": "child",
+                    "agentPath": "worker",
+                },
+            },
+        }
+    )
+    snapshot["update_time"] = "2026-11-19 16:31"
+    for method in ("turn/started", "turn/completed"):
+        service.on_app_server_notification(
+            {
+                "method": method,
+                "params": {
+                    "threadId": "child",
+                    "turn": {
+                        "id": "child-turn",
+                        "status": "completed" if method == "turn/completed" else None,
+                    },
+                },
+            }
+        )
+    assert service.process_next()
+    with service.store.connect() as conn:
+        saved = json.loads(
+            conn.execute(
+                "SELECT source_snapshot_json FROM coworker_native_deliveries ORDER BY id DESC"
+            ).fetchone()[0]
+        )
+    assert saved["coworker_source_update_time"] == "2026-11-19 16:31"
+    assert saved["coworker_source_content_sha256"].startswith("v3:")
+    if edit_after_child:
+        snapshot.pop("mentions")
+    assert service.process_next()
+    assert feishu.sent == (1 if edit_after_child else 2)
+    with service.store.connect() as conn:
+        status = conn.execute(
+            "SELECT status FROM coworker_native_deliveries ORDER BY id DESC"
+        ).fetchone()[0]
+    assert status == ("needs_review" if edit_after_child else "sent")
 
 
 def test_existing_topic_alias_resumes_old_session(tmp_path: Path) -> None:

@@ -12,6 +12,13 @@ from .coworker_store import _owner_has_exited  # pyright: ignore[reportPrivateUs
 from .store.sqlite_store import SQLiteStore
 
 
+def snapshot_evidence(raw: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "coworker_source_content_sha256": raw.get("coworker_source_content_sha256"),
+        "coworker_source_update_time": raw.get("coworker_source_update_time"),
+    }
+
+
 @dataclass(frozen=True)
 class NativeDelivery:
     id: int
@@ -24,12 +31,13 @@ class NativeDelivery:
     purpose: str
     source_revision: int
     source_message_id: str
+    source_snapshot: dict[str, Any] | None
     target_message_id: str
     text: str
     reply_in_thread: bool
     requires_watch: bool
     idempotency_key: str
-    context_sources: tuple[tuple[str, int], ...]
+    context_sources: tuple[tuple[str, int, dict[str, Any] | None], ...]
 
 
 class NativeDeliveryStore:
@@ -85,6 +93,8 @@ class NativeDeliveryStore:
         source_message_id: str | None = None,
         purpose: str = "reply",
         requires_watch: bool = False,
+        source_snapshot: dict[str, Any] | None = None,
+        context_snapshots: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         if not text or not target_message_id:
             raise ValueError("a reply and its target are required")
@@ -175,16 +185,19 @@ class NativeDeliveryStore:
                     raise ValueError("transferred reply target is not verified")
             cursor = conn.execute(
                 """INSERT INTO coworker_native_deliveries(
-                     event_id, session_id, purpose, source_revision, source_message_id,
+                     event_id, session_id, purpose, source_revision, source_message_id, source_snapshot_json,
                      target_message_id, text, reply_in_thread, requires_watch, bot_open_id,
                      idempotency_key, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     event_id,
                     session_id,
                     purpose,
                     source_revision,
                     source_message_id,
+                    json.dumps(source_snapshot)
+                    if source_snapshot is not None
+                    else None,
                     target_message_id,
                     text,
                     int(reply_in_thread),
@@ -197,8 +210,10 @@ class NativeDeliveryStore:
             )
             delivery_id = int(cursor.lastrowid or 0)
             self._finish_batch(conn, event_id, batch or [], now)
+            context_snapshots = context_snapshots or {}
             context_sources = [
-                (message_id, revision) for _, message_id, revision in batch or []
+                (message_id, revision, context_snapshots.get(message_id))
+                for _, message_id, revision in batch or []
             ]
             internal_value = payload.get("_internal")
             internal = (
@@ -211,7 +226,7 @@ class NativeDeliveryStore:
                 "subagent_completed",
             }:
                 inherited = conn.execute(
-                    """SELECT c.message_id, c.revision, m.revision AS current_revision, m.is_deleted
+                    """SELECT c.message_id, c.revision, c.snapshot_json, m.revision AS current_revision, m.is_deleted
                        FROM coworker_native_delivery_context c
                        LEFT JOIN messages m ON m.message_id = c.message_id
                        WHERE c.delivery_id = ?""",
@@ -224,10 +239,19 @@ class NativeDeliveryStore:
                     ):
                         raise ValueError("topic transfer context changed")
                     context_sources.append(
-                        (str(item["message_id"]), int(item["revision"]))
+                        (
+                            str(item["message_id"]),
+                            int(item["revision"]),
+                            context_snapshots.get(str(item["message_id"]))
+                            or (
+                                json.loads(item["snapshot_json"])
+                                if item["snapshot_json"]
+                                else None
+                            ),
+                        )
                     )
             steers = conn.execute(
-                """SELECT e.message_id, s.source_revision, m.revision, m.is_deleted
+                """SELECT e.message_id, s.source_revision, s.snapshot_json, m.revision, m.is_deleted
                    FROM coworker_native_steers s JOIN coworker_events e ON e.id = s.event_id
                    LEFT JOIN messages m ON m.message_id = e.message_id
                    WHERE s.origin_event_id IN (?, ?) AND s.session_id = ? AND s.status = 'accepted'""",
@@ -243,12 +267,23 @@ class NativeDeliveryStore:
                 if steer["revision"] != steer["source_revision"] or steer["is_deleted"]:
                     raise ValueError("accepted steer source revision changed")
                 context_sources.append(
-                    (str(steer["message_id"]), int(steer["source_revision"]))
+                    (
+                        str(steer["message_id"]),
+                        int(steer["source_revision"]),
+                        json.loads(steer["snapshot_json"])
+                        if steer["snapshot_json"]
+                        else None,
+                    )
                 )
-            for message_id, revision in context_sources:
+            for message_id, revision, snapshot in context_sources:
                 conn.execute(
-                    "INSERT INTO coworker_native_delivery_context(delivery_id, message_id, revision) VALUES (?, ?, ?)",
-                    (delivery_id, message_id, revision),
+                    "INSERT INTO coworker_native_delivery_context(delivery_id, message_id, revision, snapshot_json) VALUES (?, ?, ?, ?)",
+                    (
+                        delivery_id,
+                        message_id,
+                        revision,
+                        json.dumps(snapshot) if snapshot is not None else None,
+                    ),
                 )
             conn.execute(
                 """UPDATE coworker_events SET status = 'completed', raw_json = NULL,
@@ -326,7 +361,7 @@ class NativeDeliveryStore:
                 (os.getpid(), socket.gethostname(), self.store.clock(), row["id"]),
             )
             context = conn.execute(
-                "SELECT message_id, revision FROM coworker_native_delivery_context WHERE delivery_id = ?",
+                "SELECT message_id, revision, snapshot_json FROM coworker_native_delivery_context WHERE delivery_id = ?",
                 (row["id"],),
             ).fetchall()
         return NativeDelivery(
@@ -340,12 +375,18 @@ class NativeDeliveryStore:
             purpose=str(row["purpose"]),
             source_revision=int(row["source_revision"]),
             source_message_id=str(row["source_message_id"]),
+            source_snapshot=json.loads(row["source_snapshot_json"])
+            if row["source_snapshot_json"]
+            else None,
             target_message_id=str(row["target_message_id"]),
             text=str(row["text"]),
             reply_in_thread=bool(row["reply_in_thread"]),
             requires_watch=bool(row["requires_watch"]),
             idempotency_key=str(row["idempotency_key"]),
-            context_sources=tuple((str(item[0]), int(item[1])) for item in context),
+            context_sources=tuple(
+                (str(item[0]), int(item[1]), json.loads(item[2]) if item[2] else None)
+                for item in context
+            ),
         )
 
     def finish(

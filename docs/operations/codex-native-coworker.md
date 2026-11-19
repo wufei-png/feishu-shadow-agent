@@ -78,4 +78,4 @@ uv run --locked python -m feishu_shadow_agent coworker resolve-delivery --config
 
 两个命令二选一。`--daemon-stopped` 是操作员声明；确认消息和话题 ID 属于该次发送后再记录。`coworker discard-event` 用于处置执行结果不明的入站事件。切换新旧运行时时，先处理对方运行时的排队、执行中和待核对工作；启动器发现冲突会拒绝启动，不会丢弃旧工作。
 
-SQLite v9、v10、v11 会事务升级到 v12。升级前备份数据；v8 及其他不支持的版本不会自动修改。完整业务和真实飞书联调状态见 [验证记录](native-runtime-acceptance-2026-11-19.md)。
+SQLite v9、v10、v11、v12 会事务升级到 v13。升级前备份数据；v8 及其他不支持的版本不会自动修改。完整业务和真实飞书联调状态见 [验证记录](native-runtime-acceptance-2026-11-19.md)。
