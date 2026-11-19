@@ -30,6 +30,9 @@ from .console_security import (
     validate_console_bind_host,
 )
 from .coworker import CoworkerService, CoworkerWorker
+from .coworker_native import NativeCoworkerService, NativeCoworkerWorker
+from .coworker_native_state import NativeCoworkerState
+from .coworker_native_store import NativeDeliveryStore
 from .coworker_replay import (
     CoworkerReplaySnapshot,
     replay_recorded_events,
@@ -155,11 +158,42 @@ def build_parser() -> argparse.ArgumentParser:
 
     coworker = subparsers.add_parser("coworker", help="AI coworker status and recovery")
     coworker_subparsers = coworker.add_subparsers(dest="coworker_command")
+    coworker_run = coworker_subparsers.add_parser(
+        "run", help="start the selected coworker runtime"
+    )
+    _add_config_arg(coworker_run)
+    coworker_run.add_argument("--runtime", choices=("codex", "hermes"), required=True)
+    coworker_run.add_argument("--reply-mode", choices=("quote", "topic", "auto"))
+    coworker_run.add_argument("--dry-run", action="store_true")
+    coworker_run.set_defaults(handler=_handle_coworker_run)
     coworker_status = coworker_subparsers.add_parser(
         "status", help="show coworker sessions and pending work"
     )
     _add_config_arg(coworker_status)
     coworker_status.set_defaults(handler=_handle_coworker_status)
+    coworker_resolve = coworker_subparsers.add_parser(
+        "resolve-delivery",
+        help="record a checked receipt or discard an uncertain delivery",
+    )
+    _add_config_arg(coworker_resolve)
+    coworker_resolve.add_argument("--delivery-id", required=True, type=int)
+    resolution = coworker_resolve.add_mutually_exclusive_group(required=True)
+    resolution.add_argument("--sent-message-id")
+    resolution.add_argument("--discard", action="store_true")
+    coworker_resolve.add_argument("--thread-id")
+    coworker_resolve.add_argument(
+        "--daemon-stopped", action="store_true", required=True
+    )
+    coworker_resolve.set_defaults(handler=_handle_coworker_resolve_delivery)
+    for command, resume in (("pause", False), ("resume", True)):
+        handoff = coworker_subparsers.add_parser(
+            command, help="pause or return one Codex session"
+        )
+        _add_config_arg(handoff)
+        handoff.add_argument("--session-id", required=True, type=int)
+        if not resume:
+            handoff.add_argument("--retry", action="store_true")
+        handoff.set_defaults(handler=_handle_coworker_handoff, handoff_resume=resume)
     coworker_discard = coworker_subparsers.add_parser(
         "discard-event", help="discard an uncertain event without replay"
     )
@@ -578,6 +612,17 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         None if raw_coworker is None else CoworkerConfig.model_validate(raw_coworker)
     )
     coworker_enabled = coworker_policy is not None and coworker_policy.enabled
+    native = getattr(args, "runtime", None) == "codex"
+    if getattr(args, "runtime", None) == "codex" and (
+        not coworker_enabled
+        or coworker_policy is None
+        or coworker_policy.provider != "codex"
+    ):
+        print(
+            "coworker error: the active policy must enable coworker with provider codex",
+            file=sys.stderr,
+        )
+        return 2
     backend_config = loaded.config.agent_backend
     agent_working_dir = resolve_agent_working_dir(
         backend_config.working_dir, loaded.base_dir
@@ -613,12 +658,22 @@ def _handle_daemon(args: argparse.Namespace) -> int:
         coworker_chat_id=coworker_policy.chat_id
         if coworker_enabled and coworker_policy
         else None,
+        native_coworker=native,
     )
     message_handler = None
     on_message_reconnect = None
     if coworker_enabled:
         if coworker_policy is None or coworker_policy.chat_id is None:
             raise ValueError("enabled coworker policy requires a chat ID")
+        app_id = os.environ.get(loaded.config.interactive_cards.app_id_env, "")
+        if CoworkerStore(store).runtime_conflicts(
+            app_id=app_id, chat_id=coworker_policy.chat_id, native=native
+        ):
+            print(
+                "coworker error: the other runtime has unfinished work; resolve or drain it before switching",
+                file=sys.stderr,
+            )
+            return 2
         try:
             chat_layout = client.get_chat_layout(chat_id=coworker_policy.chat_id)
         except (LarkCliCommandError, ValueError) as exc:
@@ -628,16 +683,27 @@ def _handle_daemon(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
-        service = CoworkerService(
+        service_class = NativeCoworkerService if native else CoworkerService
+        service_options: dict[str, Any] = {}
+        if native:
+            service_options["reply_mode"] = getattr(args, "reply_mode", None) or "quote"
+        service = service_class(
             store=store,
             config=loaded.config,
             feishu=client,
             logger=logger,
             base_dir=loaded.base_dir,
-            app_id=os.environ.get(loaded.config.interactive_cards.app_id_env, ""),
+            app_id=app_id,
             dry_run=args.dry_run,
             chat_layout=chat_layout,
+            **service_options,
         )
+        if isinstance(service, NativeCoworkerService):
+            try:
+                service.validate_workspace(agent_working_dir)
+            except ValueError as exc:
+                print(f"coworker error: {exc}", file=sys.stderr)
+                return 2
         if coworker_policy.provider == "codex":
             runtime = coworker_runtime_config(loaded.config, coworker_policy)
             service.app_server = CodexAppServer(
@@ -645,8 +711,19 @@ def _handle_daemon(args: argparse.Namespace) -> int:
                 skill_names=runtime.agent_backend.codex.skills,
                 explicit_context_paths=runtime.agent_backend.explicit_context.paths,
                 on_notification=service.on_app_server_notification,
+                confine_production=native,
+                writable_roots=[service.memory_root]
+                if isinstance(service, NativeCoworkerService) and service.memory_root
+                else None,
+                on_read_topic=service.read_topic
+                if isinstance(service, NativeCoworkerService)
+                else None,
+                on_read_group=service.read_group_history
+                if isinstance(service, NativeCoworkerService)
+                else None,
             )
-        daemon.coworker_worker = CoworkerWorker(
+        worker_class = NativeCoworkerWorker if native else CoworkerWorker
+        daemon.coworker_worker = worker_class(
             service,
             runtime_allows_processing=daemon.runtime_health_allows_card_actions,
             wake_daemon=daemon.wake,
@@ -670,13 +747,36 @@ def _handle_daemon(args: argparse.Namespace) -> int:
                 not coworker_enabled
                 or (
                     coworker_policy is not None
-                    and coworker_policy.send_mode == "project"
+                    and (native or coworker_policy.send_mode == "project")
                 )
             ),
             on_message_reconnect=on_message_reconnect,
             approval_scope="coworker" if coworker_enabled else "shadow",
         )
     return daemon.run_forever()
+
+
+def _handle_coworker_run(args: argparse.Namespace) -> int:
+    if args.runtime == "codex":
+        return _handle_daemon(args)
+    if args.dry_run or args.mode == "dry-run":
+        print("coworker error: Hermes Gateway has no dry-run mode", file=sys.stderr)
+        return 2
+    if (
+        args.config is not None
+        or args.mode is not None
+        or getattr(args, "reply_mode", None) is not None
+    ):
+        print("coworker error: Hermes uses its own coworker profile", file=sys.stderr)
+        return 2
+    try:
+        return subprocess.run(
+            ["hermes", "-p", "coworker", "gateway", "start"],  # noqa: S607
+            check=False,
+        ).returncode
+    except FileNotFoundError:
+        print("coworker error: hermes executable not found", file=sys.stderr)
+        return 2
 
 
 def _handle_console(args: argparse.Namespace) -> int:
@@ -796,6 +896,37 @@ def _handle_coworker_discard(args: argparse.Namespace) -> int:
         print(f"coworker error: {exc}", file=sys.stderr)
         return 2
     print(f"discarded event {args.event_id}")
+    return 0
+
+
+def _handle_coworker_resolve_delivery(args: argparse.Namespace) -> int:
+    _, store, _ = _load_runtime(args.config, mode=args.mode)
+    try:
+        NativeDeliveryStore(store).resolve_uncertain(
+            args.delivery_id,
+            sent_message_id=args.sent_message_id,
+            daemon_stopped=args.daemon_stopped,
+            thread_id=args.thread_id,
+        )
+    except ValueError as exc:
+        print(f"coworker error: {exc}", file=sys.stderr)
+        return 2
+    print(f"delivery {args.delivery_id} resolved")
+    return 0
+
+
+def _handle_coworker_handoff(args: argparse.Namespace) -> int:
+    _, store, _ = _load_runtime(args.config, mode=args.mode)
+    try:
+        NativeCoworkerState(store).request_handoff(
+            args.session_id,
+            resume=args.handoff_resume,
+            retry=getattr(args, "retry", False),
+        )
+    except ValueError as exc:
+        print(f"coworker error: {exc}", file=sys.stderr)
+        return 2
+    print("handoff requested; use coworker status to check progress")
     return 0
 
 

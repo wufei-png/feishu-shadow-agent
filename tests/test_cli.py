@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import argparse
 import io
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -10,6 +12,139 @@ import yaml
 from feishu_shadow_agent.cli import main
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import LarkCliResult, MessagePage
+
+
+def test_coworker_hermes_launcher_uses_profile_without_loading_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], *, check: bool) -> object:
+        assert not check
+        calls.append(argv)
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("feishu_shadow_agent.cli.subprocess.run", run)
+    assert main(["coworker", "run", "--runtime", "hermes"]) == 0
+    assert calls == [["hermes", "-p", "coworker", "gateway", "start"]]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_coworker_hermes_dry_run_does_not_start_gateway(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def unexpected(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Hermes must not start during dry-run")
+
+    monkeypatch.setattr("feishu_shadow_agent.cli.subprocess.run", unexpected)
+    assert main(["coworker", "run", "--runtime", "hermes", "--dry-run"]) == 2
+    assert "no dry-run mode" in capsys.readouterr().err
+
+
+def test_coworker_codex_launcher_reuses_daemon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, bool]] = []
+
+    def daemon(args: argparse.Namespace) -> int:
+        calls.append((args.runtime, args.dry_run))
+        return 7
+
+    monkeypatch.setattr("feishu_shadow_agent.cli._handle_daemon", daemon)
+    assert main(["coworker", "run", "--runtime", "codex", "--dry-run"]) == 7
+    assert calls == [("codex", True)]
+
+
+def test_codex_runtime_selects_native_worker_and_daemon_keeps_legacy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from feishu_shadow_agent.config import (
+        AppConfig,
+        ChatPolicyConfig,
+        CoworkerConfig,
+        LoadedConfig,
+        OwnerConfig,
+    )
+    from feishu_shadow_agent.coworker import CoworkerService
+    from feishu_shadow_agent.coworker_native import NativeCoworkerService
+    from feishu_shadow_agent.jsonl import JSONLLogger
+
+    config = AppConfig(
+        owner=OwnerConfig(open_id="owner"),
+        coworker=CoworkerConfig(enabled=True, chat_id="group"),  # type: ignore[arg-type]
+        chats={
+            "group": ChatPolicyConfig(
+                auto_reply=True, bot_joined=True, reply_identity="bot"
+            )
+        },
+    )
+    loaded = LoadedConfig(
+        config=config, path=tmp_path / "config.yaml", base_dir=tmp_path, raw={}
+    )
+    store = SQLiteStore(tmp_path / "db.sqlite3")
+    store.import_product_policy_from_config(config)
+    logger = JSONLLogger(tmp_path / "log.jsonl")
+    observed: list[object] = []
+
+    class FakeClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def get_chat_layout(self, *, chat_id: str) -> str:
+            return "group"
+
+    class FakeDaemon:
+        def __init__(self, **_kwargs: object) -> None:
+            self.coworker_worker: Any = None
+
+        def runtime_health_allows_card_actions(self) -> bool:
+            return True
+
+        def wake(self) -> None:
+            pass
+
+        def run_forever(self) -> int:
+            observed.append(self.coworker_worker.service)
+            return 0
+
+    monkeypatch.setenv(config.interactive_cards.app_id_env, "app")
+    monkeypatch.setattr(
+        "feishu_shadow_agent.cli._load_runtime",
+        lambda *_a, **_k: (loaded, store, logger),
+    )
+    monkeypatch.setattr("feishu_shadow_agent.cli.LarkCliClient", FakeClient)
+    monkeypatch.setattr(
+        "feishu_shadow_agent.cli.HealthSuite", lambda **_kwargs: object()
+    )
+    monkeypatch.setattr("feishu_shadow_agent.cli.Daemon", FakeDaemon)
+    monkeypatch.setattr(
+        "feishu_shadow_agent.cli.CodexAppServer", lambda **_kwargs: object()
+    )
+    monkeypatch.setattr(
+        "feishu_shadow_agent.cli.create_card_action_connection",
+        lambda **_kwargs: object(),
+    )
+    assert (
+        main(
+            [
+                "coworker",
+                "run",
+                "--runtime",
+                "codex",
+                "--reply-mode",
+                "topic",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    assert (
+        isinstance(observed[-1], NativeCoworkerService)
+        and observed[-1].reply_mode == "topic"
+    )
+    assert main(["daemon", "--dry-run"]) == 0
+    assert type(observed[-1]) is CoworkerService
 
 
 def _write_config(tmp_path: Path) -> Path:
