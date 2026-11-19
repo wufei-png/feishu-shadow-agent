@@ -215,14 +215,6 @@ class CoworkerStore:
                                JOIN coworker_events supplement ON supplement.id = steer.event_id
                                WHERE steer.origin_event_id = origin.id AND steer.status = 'accepted'
                                  AND supplement.message_id = ?) OR EXISTS (
-                               SELECT 1 FROM coworker_events supplement
-                               WHERE supplement.app_id = origin.app_id AND supplement.chat_id = origin.chat_id
-                                 AND supplement.message_id = ? AND supplement.status = 'queued'
-                                 AND CASE WHEN json_valid(supplement.raw_json) THEN
-                                   json_extract(supplement.raw_json, '$._runtime.followup_origin') = origin.id
-                                   OR EXISTS (SELECT 1 FROM json_each(supplement.raw_json,
-                                     '$._runtime.followup_candidates') candidate WHERE candidate.value = origin.id)
-                                   ELSE 0 END) OR EXISTS (
                                SELECT 1 FROM coworker_native_delivery_context c
                                WHERE c.delivery_id = CASE WHEN json_valid(origin.raw_json)
                                  THEN json_extract(origin.raw_json, '$._internal.delivery_id') END
@@ -237,7 +229,6 @@ class CoworkerStore:
                     (
                         app_id,
                         chat_id,
-                        parent,
                         parent,
                         parent,
                         parent,

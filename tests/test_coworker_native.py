@@ -2985,9 +2985,9 @@ def test_transfer_waits_for_topic_receipt_then_starts_separate_session(
 
 
 @pytest.mark.parametrize("location", ["topic", "main", "other"])
-@pytest.mark.parametrize("queued_chain", [False, True])
+@pytest.mark.parametrize("followup", ["single", "chain", "ignored", "cross"])
 def test_quoted_followup_selects_matching_pending_origin(
-    tmp_path: Path, location: str, queued_chain: bool
+    tmp_path: Path, location: str, followup: str
 ) -> None:
     class ParallelServer(FakeServer):
         def __init__(self) -> None:
@@ -3056,18 +3056,23 @@ def test_quoted_followup_selects_matching_pending_origin(
         parent="request",
         location="main" if location == "main" else "thread",
         thread="opened-thread" if location == "topic" else "other",
-        text="请改为检查 2.0",
+        root="request",
+        text="@_all 通知" if followup == "ignored" else "请改为检查 2.0",
     )
-    if queued_chain:
+    if followup != "single":
+        second_location = location
+        if followup == "cross":
+            second_location = "main" if location == "topic" else "topic"
         _receive(
             service,
             feishu,
             "correction-two",
             mention=False,
             parent="correction",
-            location="main" if location == "main" else "thread",
-            thread="opened-thread" if location == "topic" else "other",
-            text="再改为检查 3.0",
+            location="main" if second_location == "main" else "thread",
+            thread="opened-thread" if second_location == "topic" else "other",
+            root="request",
+            text="收到谢谢" if followup == "ignored" else "再改为检查 3.0",
         )
     model_calls = len(server.prompts)
     assert (
@@ -3075,12 +3080,12 @@ def test_quoted_followup_selects_matching_pending_origin(
     )  # Drain both fake deliveries.
     while service.process_next():
         pass
-    if location == "other":
+    if location == "other" or followup == "ignored":
         assert len(server.prompts) == model_calls
     else:
-        assert len(server.prompts) == model_calls + 1 + int(queued_chain)
+        assert len(server.prompts) == model_calls + 1 + int(followup == "chain")
         assert "请改为检查 2.0" in server.prompts[model_calls]
-        if queued_chain:
+        if followup == "chain":
             assert "再改为检查 3.0" in server.prompts[-1]
         assert all(
             session == ("session-1" if location == "main" else "session-3")
