@@ -2026,9 +2026,11 @@ class NativeCoworkerWorker(CoworkerWorker):
         return topic_workers
 
     def _process_steering(self) -> bool:
-        located = self.service.process_next(locating_only=True)
-        steered = not self._stop.is_set() and self.service.process_next_steer()
-        return located or steered
+        steered = self.service.process_next_steer()
+        located = not self._stop.is_set() and self.service.process_next(
+            locating_only=True
+        )
+        return steered or located
 
     def _can_wait_for_followups(self) -> bool:
         server = self.service.app_server

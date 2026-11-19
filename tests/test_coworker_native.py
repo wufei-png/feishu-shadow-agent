@@ -2592,6 +2592,63 @@ def test_locator_only_queues_message_without_starting_a_model(tmp_path: Path) ->
     assert service.process_next() and len(server.prompts) == 1
 
 
+def test_ready_followup_is_steered_before_a_slow_unrelated_location(
+    tmp_path: Path,
+) -> None:
+    class SignalingServer(BlockingNativeServer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.steered = threading.Event()
+
+        def steer(self, *args: Any, **kwargs: Any) -> None:
+            super().steer(*args, **kwargs)
+            self.steered.set()
+
+    service, feishu, _ = _service(tmp_path)
+    server = SignalingServer()
+    service.app_server = server  # type: ignore[assignment]
+    _receive(service, feishu, "request", location="thread")
+    task = threading.Thread(target=service.process_next)
+    task.start()
+    assert server.started.wait(timeout=3)
+    locating, release_location = threading.Event(), threading.Event()
+    steering: threading.Thread | None = None
+    try:
+        _receive(
+            service,
+            feishu,
+            "correction",
+            location="thread",
+            parent="request",
+            mention=False,
+        )
+        assert service.process_next(locating_only=True)
+        _receive(service, feishu, "unrelated", location="thread", thread="other")
+
+        def block_unrelated(message_id: str) -> None:
+            if message_id == "unrelated":
+                locating.set()
+                assert release_location.wait(timeout=5)
+
+        feishu.on_get = block_unrelated
+        worker = NativeCoworkerWorker(
+            service, runtime_allows_processing=lambda: True, wake_daemon=lambda: None
+        )
+        steering = threading.Thread(target=worker._process_steering)
+        steering.start()
+        assert locating.wait(timeout=3)
+        assert server.steered.is_set()
+        assert "correction" in server.steers[0]
+    finally:
+        release_location.set()
+        server.release.set()
+        if steering is not None:
+            steering.join(timeout=5)
+        task.join(timeout=5)
+    assert steering is not None and not steering.is_alive()
+    assert not task.is_alive()
+
+
 @pytest.mark.parametrize("topic_count", [1, 2])
 def test_followup_is_steered_when_all_topic_workers_are_busy(
     tmp_path: Path, topic_count: int
