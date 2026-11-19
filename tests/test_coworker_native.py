@@ -1275,6 +1275,14 @@ def test_watched_batch_context_follows_child_completion(
         assert service.process_next()
     elif change:
         feishu.messages["second"]["content"] = "版本改为 3.0"
+    if parent_action == "silent" and not change:
+        service.events.scrub_expired_payloads(
+            cutoff="2020-01-01T00:00:00Z", dry_run=False, protect_pending=True
+        )
+        with service.store.connect() as conn:
+            assert conn.execute(
+                "SELECT raw_json FROM coworker_events WHERE message_id = 'first'"
+            ).fetchone()[0]
     for method in ("turn/started", "turn/completed"):
         service.on_app_server_notification(
             {
@@ -1286,6 +1294,19 @@ def test_watched_batch_context_follows_child_completion(
             }
         )
     previous_sent = feishu.sent
+    if parent_action == "silent" and not change:
+
+        def scrub_during_completion(_message_id: str) -> None:
+            feishu.on_get = None
+            service.events.scrub_expired_payloads(
+                cutoff="2020-01-01T00:00:00Z", dry_run=False, protect_pending=True
+            )
+            with service.store.connect() as conn:
+                assert conn.execute(
+                    "SELECT raw_json FROM coworker_events WHERE message_id = 'first'"
+                ).fetchone()[0]
+
+        feishu.on_get = scrub_during_completion
     assert service.process_next()
     if change and parent_action == "silent":
         with service.store.connect() as conn:
@@ -1303,6 +1324,17 @@ def test_watched_batch_context_follows_child_completion(
             "SELECT status FROM coworker_native_deliveries ORDER BY id DESC LIMIT 1"
         ).fetchone()[0]
     assert status == ("needs_review" if change else "sent")
+    if parent_action == "silent" and not change:
+        service.events.scrub_expired_payloads(
+            cutoff="2020-01-01T00:00:00Z", dry_run=False, protect_pending=True
+        )
+        with service.store.connect() as conn:
+            origin = conn.execute(
+                "SELECT status, raw_json FROM coworker_events WHERE message_id = 'first'"
+            ).fetchone()
+        assert tuple(origin) == ("completed", None)
+        _receive(service, feishu, "later", location="thread")
+        assert service.process_next() and service.process_next()
 
 
 def test_non_owner_cannot_enable_watch(tmp_path: Path) -> None:
@@ -3627,7 +3659,15 @@ def test_followup_candidates_include_origin_that_starts_after_ingress(
 
 @pytest.mark.parametrize(
     "change",
-    ["none", "before-start", "before-start-mention", "before-reply", "before-child"],
+    [
+        "none",
+        "before-start",
+        "before-start-mention",
+        "before-reply",
+        "before-child",
+        "legacy-v1",
+        "legacy-v2",
+    ],
 )
 def test_transfer_preserves_accepted_supplement_and_checks_its_revision(
     tmp_path: Path, change: str
@@ -3669,6 +3709,22 @@ def test_transfer_preserves_accepted_supplement_and_checks_its_revision(
     assert not worker.is_alive()
     assert service.process_next()  # The fake client confirms the topic receipt.
     assert feishu.sent == 1
+    if change in {"legacy-v1", "legacy-v2"}:
+        old = message_content_fingerprint(
+            feishu.messages["supplement"],
+            include_mentions=change == "legacy-v2",
+            mention_version=2,
+        )
+        with service.store.connect() as conn:
+            conn.execute(
+                "UPDATE coworker_native_delivery_context SET snapshot_json = NULL WHERE message_id = 'supplement'"
+            )
+            conn.execute("UPDATE coworker_native_steers SET snapshot_json = NULL")
+            conn.execute(
+                """UPDATE messages SET raw_json=json_set(raw_json,
+                   '$.coworker_source_content_sha256', ?) WHERE message_id='supplement'""",
+                (old,),
+            )
     if change == "before-start":
         feishu.messages["supplement"]["content"] = "补充：检查 3.0"
     elif change == "before-start-mention":
@@ -3701,7 +3757,7 @@ def test_transfer_preserves_accepted_supplement_and_checks_its_revision(
         ).fetchone()[0]
     assert status == ("needs_review" if change == "before-reply" else "sent")
     assert feishu.sent == (1 if change == "before-reply" else 2)
-    if change == "before-child":
+    if change in {"before-child", "legacy-v1", "legacy-v2"}:
         service.on_app_server_notification(
             {
                 "method": "item/completed",
@@ -3715,7 +3771,8 @@ def test_transfer_preserves_accepted_supplement_and_checks_its_revision(
                 },
             }
         )
-        feishu.messages["supplement"]["content"] = "补充：检查 3.0"
+        if change == "before-child":
+            feishu.messages["supplement"]["content"] = "补充：检查 3.0"
         for method in ("turn/started", "turn/completed"):
             service.on_app_server_notification(
                 {
@@ -3728,6 +3785,10 @@ def test_transfer_preserves_accepted_supplement_and_checks_its_revision(
             )
         model_calls = len(server.prompts)
         assert service.process_next()
+        if change != "before-child":
+            assert len(server.prompts) == model_calls + 1
+            assert service.process_next() and feishu.sent == 3
+            return
         assert len(server.prompts) == model_calls and feishu.sent == 2
         with service.store.connect() as conn:
             state = conn.execute(

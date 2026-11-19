@@ -1558,17 +1558,43 @@ class CoworkerStore:
     ) -> int:
         self.store.initialize()
         with self.store.connect() as conn:
+            conn.execute("BEGIN" if dry_run else "BEGIN IMMEDIATE")
             rows = conn.execute(
-                "SELECT id FROM coworker_events WHERE raw_json IS NOT NULL AND status != 'processing' AND julianday(received_at) < julianday(?) AND (? = 0 OR status NOT IN ('queued', 'needs_review'))",
+                """SELECT id, status, CASE WHEN json_valid(raw_json)
+                     THEN json_type(raw_json, '$._runtime.batch_context') = 'array' ELSE 0 END AS batch_context
+                   FROM coworker_events WHERE raw_json IS NOT NULL AND status != 'processing'
+                     AND julianday(received_at) < julianday(?)
+                     AND (? = 0 OR status NOT IN ('queued', 'needs_review'))""",
                 (cutoff, int(protect_pending)),
             ).fetchall()
+            candidates: list[sqlite3.Row] = []
+            for row in rows:
+                if row["status"] == "completed" and row["batch_context"]:
+                    pending = conn.execute(
+                        """SELECT EXISTS(SELECT 1 FROM coworker_subagents
+                               WHERE origin_event_id = ? AND status IN ('running', 'needs_review'))
+                           OR EXISTS(SELECT 1 FROM coworker_events
+                               WHERE status IN ('queued', 'processing', 'needs_review')
+                                 AND CASE WHEN json_valid(raw_json)
+                                     THEN json_extract(raw_json, '$._internal.origin_event_id') END = ?)""",
+                        (row["id"], row["id"]),
+                    ).fetchone()[0]
+                    if pending:
+                        continue
+                candidates.append(row)
             if not dry_run:
-                for row in rows:
-                    conn.execute(
-                        "UPDATE coworker_events SET raw_json = NULL, status = 'needs_review', error = 'content_expired', updated_at = ? WHERE id = ?",
-                        (self.store.clock(), row["id"]),
-                    )
-        return len(rows)
+                for row in candidates:
+                    if row["status"] == "completed" and row["batch_context"]:
+                        conn.execute(
+                            "UPDATE coworker_events SET raw_json = NULL, updated_at = ? WHERE id = ?",
+                            (self.store.clock(), row["id"]),
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE coworker_events SET raw_json = NULL, status = 'needs_review', error = 'content_expired', updated_at = ? WHERE id = ?",
+                            (self.store.clock(), row["id"]),
+                        )
+        return len(candidates)
 
     def match_delegation(
         self,

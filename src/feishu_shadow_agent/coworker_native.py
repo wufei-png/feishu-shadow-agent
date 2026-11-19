@@ -1546,6 +1546,26 @@ class NativeCoworkerService(CoworkerService):
             for item in context
         ]
         self._validate_source_snapshots(event.chat_id, inherited_context)
+        unique_context: dict[str, tuple[str, int, dict[str, Any] | None]] = {}
+        for item in inherited_context:
+            previous = unique_context.get(item[0])
+            snapshot = item[2]
+            if previous is None or (
+                snapshot is not None
+                and (
+                    previous[2] is None
+                    or (
+                        str(snapshot.get("coworker_source_content_sha256")).startswith(
+                            "v3:"
+                        )
+                        and not str(
+                            previous[2].get("coworker_source_content_sha256")
+                        ).startswith("v3:")
+                    )
+                )
+            ):
+                unique_context[item[0]] = item
+        inherited_context = list(unique_context.values())
         notice = {
             "type": "internal_subagent_completion",
             "source_message_id": source_id,
