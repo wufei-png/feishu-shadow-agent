@@ -29,6 +29,7 @@ from feishu_shadow_agent.message_normalization import (
     message_content_fingerprint,
 )
 from feishu_shadow_agent.operator_commands import OperatorCommandService
+from feishu_shadow_agent.retention import RetentionService
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 from feishu_shadow_agent.types import LarkCliResult, MessagePage
 
@@ -3665,8 +3666,12 @@ def test_followup_candidates_include_origin_that_starts_after_ingress(
         "before-start-mention",
         "before-reply",
         "before-child",
-        "legacy-v1",
-        "legacy-v2",
+        "retained-transfer-context",
+        "retained-source",
+        "legacy-v1-running",
+        "legacy-v1-queued",
+        "legacy-v2-running",
+        "legacy-v2-queued",
     ],
 )
 def test_transfer_preserves_accepted_supplement_and_checks_its_revision(
@@ -3709,10 +3714,10 @@ def test_transfer_preserves_accepted_supplement_and_checks_its_revision(
     assert not worker.is_alive()
     assert service.process_next()  # The fake client confirms the topic receipt.
     assert feishu.sent == 1
-    if change in {"legacy-v1", "legacy-v2"}:
+    if change.startswith("legacy-"):
         old = message_content_fingerprint(
             feishu.messages["supplement"],
-            include_mentions=change == "legacy-v2",
+            include_mentions=change.startswith("legacy-v2"),
             mention_version=2,
         )
         with service.store.connect() as conn:
@@ -3722,7 +3727,8 @@ def test_transfer_preserves_accepted_supplement_and_checks_its_revision(
             conn.execute("UPDATE coworker_native_steers SET snapshot_json = NULL")
             conn.execute(
                 """UPDATE messages SET raw_json=json_set(raw_json,
-                   '$.coworker_source_content_sha256', ?) WHERE message_id='supplement'""",
+                   '$.coworker_source_content_sha256', ?), inserted_at='2000-01-01T00:00:00Z'
+                   WHERE message_id='supplement'""",
                 (old,),
             )
     if change == "before-start":
@@ -3730,6 +3736,14 @@ def test_transfer_preserves_accepted_supplement_and_checks_its_revision(
     elif change == "before-start-mention":
         mentions = feishu.messages["supplement"]["mentions"]
         mentions[0]["id"], mentions[1]["id"] = mentions[1]["id"], mentions[0]["id"]
+    elif change == "retained-transfer-context":
+        with service.store.connect() as conn:
+            conn.execute(
+                "UPDATE messages SET inserted_at = '2000-01-01T00:00:00Z' WHERE message_id = 'supplement'"
+            )
+        RetentionService(
+            store=service.store, config=service.config, base_dir=tmp_path
+        ).prune(protect_pending=True)
     assert service.process_next()
     if change in {"before-start", "before-start-mention"}:
         assert len(server.prompts) == 1
@@ -3757,7 +3771,15 @@ def test_transfer_preserves_accepted_supplement_and_checks_its_revision(
         ).fetchone()[0]
     assert status == ("needs_review" if change == "before-reply" else "sent")
     assert feishu.sent == (1 if change == "before-reply" else 2)
-    if change in {"before-child", "legacy-v1", "legacy-v2"}:
+    if change == "retained-transfer-context":
+        RetentionService(
+            store=service.store, config=service.config, base_dir=tmp_path
+        ).prune(protect_pending=True)
+        with service.store.connect() as conn:
+            assert not conn.execute(
+                "SELECT text FROM messages WHERE message_id = 'supplement'"
+            ).fetchone()[0]
+    if change in {"before-child", "retained-source"} or change.startswith("legacy-"):
         service.on_app_server_notification(
             {
                 "method": "item/completed",
@@ -3773,6 +3795,10 @@ def test_transfer_preserves_accepted_supplement_and_checks_its_revision(
         )
         if change == "before-child":
             feishu.messages["supplement"]["content"] = "补充：检查 3.0"
+        if change.endswith("-running"):
+            RetentionService(
+                store=service.store, config=service.config, base_dir=tmp_path
+            ).prune(protect_pending=True)
         for method in ("turn/started", "turn/completed"):
             service.on_app_server_notification(
                 {
@@ -3783,11 +3809,28 @@ def test_transfer_preserves_accepted_supplement_and_checks_its_revision(
                     },
                 }
             )
+        if change == "retained-source" or change.endswith("-queued"):
+            with service.store.connect() as conn:
+                if change == "retained-source":
+                    conn.execute(
+                        "UPDATE messages SET inserted_at = '2000-01-01T00:00:00Z' WHERE message_id = 'request'"
+                    )
+            RetentionService(
+                store=service.store, config=service.config, base_dir=tmp_path
+            ).prune(protect_pending=True)
         model_calls = len(server.prompts)
         assert service.process_next()
         if change != "before-child":
             assert len(server.prompts) == model_calls + 1
             assert service.process_next() and feishu.sent == 3
+            RetentionService(
+                store=service.store, config=service.config, base_dir=tmp_path
+            ).prune(protect_pending=True)
+            message_id = "request" if change == "retained-source" else "supplement"
+            with service.store.connect() as conn:
+                assert not conn.execute(
+                    "SELECT text FROM messages WHERE message_id = ?", (message_id,)
+                ).fetchone()[0]
             return
         assert len(server.prompts) == model_calls and feishu.sent == 2
         with service.store.connect() as conn:
