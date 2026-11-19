@@ -496,6 +496,7 @@ class CoworkerStore:
         chat_id: str | None = None,
         internal_only: bool = False,
         native: bool = False,
+        locating_only: bool = False,
     ) -> CoworkerEvent | None:
         self.store.initialize()
         with self.store.connect() as conn:
@@ -517,6 +518,7 @@ class CoworkerStore:
                 SELECT e.* FROM coworker_events e
                 WHERE e.status = 'queued'
                   AND e.runtime = ?
+                  AND (? = 0 OR e.topic_key GLOB '__native_locating__:*')
                   AND (? IS NULL OR e.app_id = ?)
                   AND (? IS NULL OR e.chat_id = ?)
                   AND (? = 0 OR e.message_id LIKE 'internal:subagent:%')
@@ -582,6 +584,7 @@ class CoworkerStore:
                 """,
                 (
                     "native" if native else "legacy",
+                    int(locating_only),
                     app_id,
                     app_id,
                     chat_id,
@@ -656,7 +659,9 @@ class CoworkerStore:
                     parent_id=parent,
                 )
 
-    def route_native_event(self, event: CoworkerEvent, topic_key: str) -> bool:
+    def route_native_event(
+        self, event: CoworkerEvent, topic_key: str, *, queue_only: bool = False
+    ) -> bool:
         """Move a claimed event after its actual Feishu location has been read."""
         if not topic_key or topic_key.startswith(NATIVE_LOCATING_KEY):
             raise ValueError("invalid native topic")
@@ -778,12 +783,12 @@ class CoworkerStore:
                 "UPDATE coworker_events SET topic_key = ?, status = ?, updated_at = ? WHERE id = ?",
                 (
                     topic_key,
-                    "queued" if blocked else "processing",
+                    "queued" if blocked or queue_only else "processing",
                     self.store.clock(),
                     event.id,
                 ),
             )
-            return blocked is None
+            return blocked is None and not queue_only
 
     def retry_before_agent(
         self, event_id: int, *, error: str, steer: bool = False

@@ -1540,7 +1540,7 @@ class CoworkerWorker:
                 if (
                     self._server_allows_processing()
                     and self.runtime_allows_processing()
-                    and self.service.process_next_steer()
+                    and self._process_steering()
                 ):
                     continue
             except Exception as exc:  # noqa: BLE001
@@ -1549,6 +1549,9 @@ class CoworkerWorker:
                     data={"error_type": type(exc).__name__},
                 )
             self._stop.wait(timeout=0.25)
+
+    def _process_steering(self) -> bool:
+        return self.service.process_next_steer()
 
     def _server_allows_processing(self) -> bool:
         server, chat_id = self.service.app_server, self.service.startup_chat_id

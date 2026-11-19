@@ -403,7 +403,9 @@ class NativeCoworkerService(CoworkerService):
         finally:
             server.close()
 
-    def process_next(self, *, internal_only: bool = False) -> bool:
+    def process_next(
+        self, *, internal_only: bool = False, locating_only: bool = False
+    ) -> bool:
         policy = self.current_policy()
         if (
             policy is None
@@ -411,7 +413,7 @@ class NativeCoworkerService(CoworkerService):
             or not policy.chat_id
         ):
             return False
-        if not internal_only:
+        if not internal_only and not locating_only:
             handoff = self.native_state.claim_handoff(app_id=self.app_id)
             if handoff is not None:
                 self._process_handoff(handoff)
@@ -424,6 +426,7 @@ class NativeCoworkerService(CoworkerService):
             app_id=self.app_id,
             internal_only=internal_only,
             native=True,
+            locating_only=locating_only,
         )
         if event is None:
             return False
@@ -434,7 +437,9 @@ class NativeCoworkerService(CoworkerService):
                 raw = event_message_from_raw(envelope, bot_id=bot)
                 raw = self._enrich_message(raw, event.message_id, event.chat_id, bot)
                 topic = self._topic_for_message(raw, event.message_id)
-                if not self.events.route_native_event(event, topic):
+                if not self.events.route_native_event(
+                    event, topic, queue_only=locating_only
+                ):
                     return True
                 event = replace(event, topic_key=topic)
             self._process_native(event)
@@ -2019,6 +2024,11 @@ class NativeCoworkerWorker(CoworkerWorker):
 
     def _steer_worker_count(self, topic_workers: int) -> int:
         return topic_workers
+
+    def _process_steering(self) -> bool:
+        located = self.service.process_next(locating_only=True)
+        steered = not self._stop.is_set() and self.service.process_next_steer()
+        return located or steered
 
     def _can_wait_for_followups(self) -> bool:
         server = self.service.app_server

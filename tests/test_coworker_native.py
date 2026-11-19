@@ -2333,6 +2333,7 @@ def test_worker_stop_or_health_change_releases_waiting_followup(
                 server.healthy = False
             else:
                 runtime_healthy.clear()
+            status = "processing"
             for _ in range(80):
                 with service.store.connect() as conn:
                     status = conn.execute(
@@ -2534,6 +2535,108 @@ def test_slow_classification_does_not_block_another_topic(
         assert second_finished.wait(timeout=2)
     finally:
         release_first.set()
+        worker.stop()
+
+
+def test_locator_only_queues_message_without_starting_a_model(tmp_path: Path) -> None:
+    service, feishu, server = _service(tmp_path)
+    _receive(service, feishu, "request", location="thread")
+    assert service.process_next(locating_only=True)
+    assert not server.prompts
+    with service.store.connect() as conn:
+        row = conn.execute(
+            "SELECT status, topic_key FROM coworker_events WHERE message_id = 'request'"
+        ).fetchone()
+    assert tuple(row) == ("queued", "thread")
+    assert service.process_next() and len(server.prompts) == 1
+
+
+@pytest.mark.parametrize("topic_count", [1, 2])
+def test_followup_is_steered_when_all_topic_workers_are_busy(
+    tmp_path: Path, topic_count: int
+) -> None:
+    class SaturatedServer(FakeServer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lock = threading.Lock()
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.steered = threading.Event()
+            self.steers: list[str] = []
+            self.count = 0
+
+        def start(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def is_healthy(self) -> bool:
+            return True
+
+        def run_turn(self, prompt: str, **kwargs: Any) -> AgentRunResult:
+            if kwargs["output_model"] is SteerDecision:
+                return super().run_turn(prompt, **kwargs)
+            with self.lock:
+                self.count += 1
+                thread_id = f"active-{self.count}"
+                self.prompts.append(prompt)
+                if self.count == topic_count:
+                    self.started.set()
+            kwargs["on_thread"](thread_id)
+            assert self.release.wait(timeout=8)
+            return AgentRunResult(
+                argv=[],
+                exit_code=0,
+                session_id=thread_id,
+                json_data={"action": "reply", "text": "answer"},
+            )
+
+        def active_turn_id(self, thread_id: str) -> str | None:
+            return None if self.release.is_set() else f"{thread_id}-turn"
+
+        def steer(
+            self, thread_id: str, prompt: str, *, expected_turn_id: str | None = None
+        ) -> None:
+            assert expected_turn_id == f"{thread_id}-turn"
+            self.steers.append(prompt)
+            self.steered.set()
+
+    service, feishu, _ = _service(tmp_path)
+    service.config.coworker.max_concurrent_topics = topic_count
+    service.store.import_product_policy_from_config(service.config, replace=True)
+    server = SaturatedServer()
+    service.app_server = server  # type: ignore[assignment]
+    worker = NativeCoworkerWorker(
+        service, runtime_allows_processing=lambda: True, wake_daemon=lambda: None
+    )
+    worker.start()
+    try:
+        for index in range(topic_count):
+            _receive(
+                service,
+                feishu,
+                f"request-{index}",
+                location="thread",
+                thread=f"topic-{index}",
+                root=f"root-{index}",
+            )
+        assert server.started.wait(timeout=5)
+        _receive(
+            service,
+            feishu,
+            "followup",
+            location="thread",
+            thread="topic-0",
+            root="root-0",
+            parent="request-0",
+            mention=False,
+            text="补充：截止周五",
+        )
+        assert server.steered.wait(timeout=5)
+        assert "截止周五" in server.steers[0]
+    finally:
+        server.release.set()
         worker.stop()
 
 
