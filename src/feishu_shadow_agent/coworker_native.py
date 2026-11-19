@@ -793,16 +793,19 @@ class NativeCoworkerService(CoworkerService):
         return native is not None or legacy is not None
 
     def _is_active_followup(self, event: CoworkerEvent, parent_id: str | None) -> bool:
-        runtime = _mapping(event.raw.get("_runtime"))
-        origin = runtime.get("followup_origin")
-        if not isinstance(origin, int) or parent_id != runtime.get("followup_parent"):
+        if not parent_id:
             return False
         with self.store.connect() as conn:
             return (
                 conn.execute(
-                    """SELECT 1 FROM coworker_events WHERE id = ? AND app_id = ? AND chat_id = ?
-                   AND topic_key = ? AND runtime = 'native'""",
-                    (origin, event.app_id, event.chat_id, event.topic_key),
+                    """SELECT 1 FROM coworker_events followup
+                       JOIN coworker_events origin ON origin.id = json_extract(
+                         followup.raw_json, '$._runtime.followup_origin')
+                       WHERE followup.id = ? AND followup.status = 'processing'
+                         AND json_extract(followup.raw_json, '$._runtime.followup_parent') = ?
+                         AND origin.app_id = followup.app_id AND origin.chat_id = followup.chat_id
+                         AND origin.topic_key = followup.topic_key AND origin.runtime = 'native'""",
+                    (event.id, parent_id),
                 ).fetchone()
                 is not None
             )

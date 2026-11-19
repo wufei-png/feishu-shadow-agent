@@ -591,6 +591,40 @@ class CoworkerStore:
             )
             if cursor.rowcount != 1:
                 raise ValueError("coworker event is no longer processing")
+            origin = conn.execute(
+                "SELECT app_id, chat_id, message_id, raw_json, runtime FROM coworker_events WHERE id = ?",
+                (event_id,),
+            ).fetchone()
+            if origin is None or origin["runtime"] != "native":
+                return
+            internal = _mapping(
+                _mapping(json.loads(str(origin["raw_json"]))).get("_internal")
+            )
+            parents = {
+                origin["message_id"],
+                internal.get("source_message_id"),
+                internal.get("reply_target"),
+            }
+            for parent in parents:
+                if not isinstance(parent, str) or not parent:
+                    continue
+                conn.execute(
+                    """UPDATE coworker_events SET raw_json = json_set(raw_json,
+                         '$._runtime.followup_origin', ?, '$._runtime.followup_parent', ?)
+                       WHERE app_id = ? AND chat_id = ? AND runtime = 'native' AND id != ?
+                         AND status IN ('queued', 'processing') AND json_valid(raw_json)
+                         AND json_extract(raw_json, '$._runtime.followup_origin') IS NULL
+                         AND COALESCE(NULLIF(json_extract(raw_json, '$.event.event.message.parent_id'), ''),
+                           NULLIF(json_extract(raw_json, '$.event.event.message.reply_to_message_id'), '')) = ?""",
+                    (
+                        event_id,
+                        parent,
+                        origin["app_id"],
+                        origin["chat_id"],
+                        event_id,
+                        parent,
+                    ),
+                )
 
     def route_native_event(self, event: CoworkerEvent, topic_key: str) -> bool:
         """Move a claimed event after its actual Feishu location has been read."""

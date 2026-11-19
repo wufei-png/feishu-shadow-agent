@@ -1494,6 +1494,39 @@ def test_natural_followup_is_classified_without_losing_queued_messages(
         assert any(followup in prompt for prompt in server.prompts)
 
 
+def test_queued_request_and_its_followup_both_reach_the_model(tmp_path: Path) -> None:
+    service, feishu, server = _service(tmp_path)
+    _receive(service, feishu, "request", location="thread", text="检查 1.0")
+    _receive(
+        service,
+        feishu,
+        "followup",
+        location="thread",
+        parent="request",
+        mention=False,
+        text="更正：应该检查 2.0",
+    )
+    while service.process_next():
+        pass
+    assert len(server.prompts) == 2 and "应该检查 2.0" in server.prompts[1]
+
+
+def test_reply_to_an_unaddressed_group_message_stays_silent(tmp_path: Path) -> None:
+    service, feishu, server = _service(tmp_path)
+    _receive(service, feishu, "ordinary", location="thread", mention=False)
+    _receive(
+        service,
+        feishu,
+        "reply",
+        location="thread",
+        parent="ordinary",
+        mention=False,
+    )
+    while service.process_next():
+        pass
+    assert not server.prompts
+
+
 def test_followup_changed_during_classification_is_not_steered_from_old_text(
     tmp_path: Path,
 ) -> None:
