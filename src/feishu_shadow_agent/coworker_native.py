@@ -626,9 +626,6 @@ class NativeCoworkerService(CoworkerService):
             if classification != "current":
                 self.events.skip_native_steer(event.id)
                 return False
-            if turn_id is None or server.active_turn_id(thread_id) != turn_id:
-                self.events.defer_late_native_steer(event.id, origin_event_id)
-                return False
             if self.current_policy() != policy or (
                 not private
                 and self._group_activation_id(event.chat_id)
@@ -646,6 +643,9 @@ class NativeCoworkerService(CoworkerService):
                 or verified.revision != source_revision
             ):
                 self.events.finish_steer(event.id, retry=True)
+                return False
+            if turn_id is None or server.active_turn_id(thread_id) != turn_id:
+                self.events.defer_late_native_steer(event.id, origin_event_id)
                 return False
             self.events.mark_steer_sending(event.id, native=True)
             sending = True

@@ -1922,6 +1922,78 @@ def test_claimed_followup_blocks_reply_before_the_classifier_takes_the_lock(
     assert [row[0] for row in deliveries] == ["correction"]
 
 
+@pytest.mark.parametrize("change", ["delete", "edit"])
+def test_changed_late_followup_does_not_suppress_the_original_reply(
+    tmp_path: Path, change: str
+) -> None:
+    class ClassificationServer(BlockingNativeServer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.classifying = threading.Event()
+            self.finish_classifying = threading.Event()
+            self.original_returned = threading.Event()
+
+        def run_turn(self, prompt: str, **kwargs: Any) -> AgentRunResult:
+            if kwargs["output_model"] is SteerDecision:
+                self.classifying.set()
+                assert self.finish_classifying.wait(timeout=5)
+                return FakeServer.run_turn(self, prompt, **kwargs)
+            result = super().run_turn(prompt, **kwargs)
+            self.original_returned.set()
+            return result
+
+    service, feishu, _ = _service(tmp_path)
+    server = ClassificationServer()
+    service.app_server = server  # type: ignore[assignment]
+    _receive(service, feishu, "request", location="thread")
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    classifier: threading.Thread | None = None
+    try:
+        _receive(
+            service,
+            feishu,
+            "correction",
+            location="thread",
+            parent="request",
+            mention=False,
+            text="应该检查 2.0",
+        )
+        assert service.process_next()
+        classifier = threading.Thread(target=service.process_next_steer)
+        classifier.start()
+        assert server.classifying.wait(timeout=3)
+        server.release.set()
+        assert server.original_returned.wait(timeout=3)
+        if change == "delete":
+            feishu.messages["correction"]["is_deleted"] = True
+        else:
+            feishu.messages["correction"]["content"] = "应该检查 3.0"
+    finally:
+        server.finish_classifying.set()
+        if classifier is not None:
+            classifier.join(timeout=5)
+        server.release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    while service.process_next():
+        pass
+    with service.store.connect() as conn:
+        deliveries = conn.execute(
+            """SELECT e.message_id FROM coworker_native_deliveries d
+               JOIN coworker_events e ON e.id = d.event_id ORDER BY d.id"""
+        ).fetchall()
+        status = conn.execute(
+            "SELECT status FROM coworker_events WHERE message_id = 'correction'"
+        ).fetchone()[0]
+    assert deliveries[0][0] == "request"
+    assert status == ("needs_review" if change == "delete" else "completed")
+    if change == "edit":
+        assert [row[0] for row in deliveries] == ["request", "correction"]
+        assert any("应该检查 3.0" in prompt for prompt in server.prompts)
+
+
 def test_followup_classifier_uses_isolated_notifications_and_closes(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
