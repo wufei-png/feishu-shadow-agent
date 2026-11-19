@@ -4,6 +4,18 @@ Feishu Shadow Agent is a local operator-owned assistant for Feishu conversations
 
 ## Language
 
+**Shadow Mode**:
+The project daemon path that polls group mentions of the owner and private messages, then manages tasks, approvals and dispatch.
+
+**Codex Native Coworker**:
+The project-managed Feishu coworker path that uses Codex App Server for sessions and native subagents, with replies published by the project.
+
+**Hermes Gateway Coworker**:
+The Hermes-managed coworker profile, whose Gateway owns Feishu connections, sessions, replies and delegation.
+
+**Legacy Coworker Path**:
+The project `daemon` coworker path, where `send_mode` selects agent-direct or project dispatch. It remains available alongside the native paths.
+
 **Operator Surface**:
 The local product surface used by the owner to inspect daemon state, review approvals, recover dispatch actions, and manage runtime policy.
 _Avoid_: UI API, admin panel, status dump

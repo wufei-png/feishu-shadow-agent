@@ -4,109 +4,66 @@
   <img src="docs/assets/covers/shadow-assistant-night-office.png" alt="Feishu Shadow Agent Cover" width="100%">
 </p>
 
-Feishu Shadow Agent 是一个本机运行的飞书个人办公影子助手。它定时读取群聊里 `@我` 的消息和 P2P 私聊消息，交给可插拔的 Agent backend 处理；低风险、高置信的回复可以自动发出，不确定、高风险或需要人工判断的内容会先通过 bot 私聊 owner 审批。
+Feishu Shadow Agent 是运行在本机的飞书个人助手。它支持影子助手、Codex 直连 AI 同事和 Hermes Gateway AI 同事三种使用方式。
 
-当前项目处于 MVP 阶段，核心形态是：
+| 方式 | 消息与会话 | 运行入口 | 操作指南 |
+| --- | --- | --- | --- |
+| 影子助手 | 项目轮询 owner 的群内 @ 和私聊，维护任务、审批和发送队列；使用 Hermes、Codex 或 Claude Code 处理任务。 | `daemon` | [首次准备与预演](docs/getting-started.md) |
+| Codex 直连 AI 同事 | 项目接收机器人事件并发布回复；Codex App Server 管理群、话题、私聊会话及原生子 Agent。 | `coworker run --runtime codex` | [Codex 直连](docs/operations/codex-native-coworker.md) |
+| Hermes Gateway AI 同事 | Hermes 的 `coworker` profile 管理飞书连接、会话、回复和原生子 Agent。 | `coworker run --runtime hermes` | [Hermes Gateway](docs/operations/hermes-coworker.md) |
 
-- `Python + SQLite + lark-cli subprocess + pluggable agent backend`
-- 长驻 `daemon/watch`，附带本机 Operator Console；不做 LaunchAgent、cron、systemd、远程 Web UI 或桌面二进制
-- 飞书 user 身份负责读消息和必要的代发回复
-- 飞书 bot 身份负责 owner 通知、审批入口、群聊自动回复和资源下载
-- Hermes、Codex 或 Claude Code CLI 负责任务路由和单任务会话处理
-- 可选官方飞书 Python SDK 长连接只接收 `card.action.trigger`；消息正文仍通过 user 身份轮询获取
+项目还保留 `daemon` 启动的[兼容 AI 同事路径](docs/operations/single-group-ai-coworker.md)，支持模型直发或项目代发。它与 Codex 直连使用不同的运行路径；同一项目 daemon 一次只运行影子助手或一种 AI 同事路径。
 
-当前扩展边界、Agent prompt 契约和 Context Access 信任边界见 [当前架构边界](docs/architecture/current-boundaries.md)；更多设计背景见 [MVP 设计](docs/specs/feishu-shadow-agent-mvp-design.md) 和 [流程图](docs/specs/feishu-shadow-agent-flows.md)。
+影子助手和 Codex 直连使用项目的 SQLite、策略及本地 Operator Console。Hermes Gateway 使用自己的 profile、配置和数据，项目启动入口不加载项目 SQLite 或 `config.yaml`。同一飞书应用的多个长连接会分流事件；切换接收方前先停止原连接。
 
-## 快速启动
+## 开始使用
 
-从零准备飞书应用、权限、账号和测试群，请按 [首次准备与预演](docs/getting-started.md) 操作。
-
-要求 Python 3.11+、uv 0.12.4，并确保本机已经可以使用 `lark-cli`，以及配置所选择的 Hermes、Codex 或 Claude Code CLI。
-
-```bash
-uv sync --locked
-. .venv/bin/activate
-cp config.example.yaml config.yaml
-```
-
-如需启用交互式审批卡片，同时安装可选的官方回调 SDK：
+项目启动入口需要 Python 3.11+ 和 uv 0.12.4；影子助手与 Codex 直连还需要 `lark-cli`。按上表选择指南，准备飞书应用及相应 Agent 运行环境。影子助手或 Codex 直连使用项目配置：
 
 ```bash
 uv sync --locked --extra cards
+cp -n config.example.yaml config.yaml
 ```
 
-编辑 `config.yaml`，至少确认：
-
-- `owner.open_id` 是 owner 的飞书 open_id
-- Policy Import Source 中需要自动回复的群配置了 `chats.<chat_id>.auto_reply: true`
-- 需要下载图片/文件资源的群在 Policy Import Source 中配置了 `chats.<chat_id>.bot_joined: true`
-- `lark_cli.path` 和所选 backend 的 `path` 留空时会使用当前 `PATH`
-- 交互式卡片默认关闭；启用时只在 YAML 中配置凭证环境变量名，真实 `app_id` / `app_secret` 由环境变量提供
-
-完整配置项见 [配置参考](docs/configuration.md)；JSON Schema 见 [schemas/config.schema.json](schemas/config.schema.json)。
-
-单测试群还可启用公开的 AI 同事模式：普通群按群共享、话题按话题共享会话，默认由 @ 触发并按需回看；Codex 主 Agent 可自主委派后台子 Agent，不同话题可并行。支持模型直发或项目代发、伙伴机器人协作和后台记忆整理。每次 daemon 启动只运行 AI 同事或原影子模式之一，切换需停止、更新生效策略并重启。该模式默认关闭，配置和真实联调前提见 [AI 同事运行与验证](docs/operations/single-group-ai-coworker.md)。
-
-原生运行时入口和推荐配置见 [Codex 直连](docs/operations/codex-native-coworker.md)与 [Hermes Gateway](docs/operations/hermes-coworker.md)。
-
-启动前先把 `config.yaml` 中的策略字段显式导入 Product Policy Store；daemon 运行时只读取 SQLite 中的 Product Policy，未初始化时会 fail closed：
+`cards` extra 提供官方飞书长连接 SDK，Codex 直连和兼容 AI 同事接收消息时需要它；影子助手启用交互式审批卡片时也需要。填写 `owner.open_id`、测试群和所选后端后，先导入策略并运行健康检查：
 
 ```bash
-python -m feishu_shadow_agent policy import-config --config config.yaml
+uv run --locked python -m feishu_shadow_agent policy import-config --config config.yaml
+uv run --locked python -m feishu_shadow_agent doctor --config config.yaml
 ```
 
-如需用当前 `config.yaml` 覆盖已有全局策略和其中列出的群策略，使用 `--replace`。导入后再跑健康检查：
+运行时从 SQLite Product Policy Store 读取已导入的策略。更新已有策略时，`policy import-config --replace` 覆盖全局策略和配置中列出的群策略，不删除仅存在于数据库中的其他群策略。
+
+影子助手先执行预演：
 
 ```bash
-python -m feishu_shadow_agent doctor --config config.yaml
+uv run --locked python -m feishu_shadow_agent daemon --config config.yaml --dry-run
 ```
 
-推荐先用 dry-run 跑 daemon。这个模式会执行拉取、路由、Agent 和 dispatch preview，但不会真实发送回复或 owner 通知；审批使用本地 Operator Console。dry-run 中产生的审批和动作不会被提升为生产发送；生产模式必须重新生成审批。
+Codex 直连需要先在策略中启用 `coworker` 并选择 `provider: codex`，再执行：
 
 ```bash
-python -m feishu_shadow_agent daemon --config config.yaml --dry-run
+uv run --locked python -m feishu_shadow_agent coworker run --runtime codex --config config.yaml --dry-run
 ```
 
-另开终端启动同一预演状态的 Console：
+两条预演路径使用与生产隔离的数据库、资源和日志，项目发送走预览；预演审批不能用于生产发送。影子助手及兼容 AI 同事的 Agent 仍可能通过自身工具产生外部写入，Codex 直连预演会隔离原生工具。去掉 `--dry-run` 即进入真实发送路径。Hermes Gateway 没有项目级 dry-run，启动和测试步骤见其运行指南。
+
+已有预演库不会自动同步后续的生产策略修改；需要更新时运行 `policy sync-production --config config.yaml --mode dry-run`，该命令会覆盖预演策略。
+
+启动本地 Operator Console 并查看对应状态：
 
 ```bash
-python -m feishu_shadow_agent console --config config.yaml --mode dry-run
-python -m feishu_shadow_agent status --config config.yaml --mode dry-run
+uv run --locked python -m feishu_shadow_agent console --config config.yaml --mode dry-run
+uv run --locked python -m feishu_shadow_agent status --config config.yaml --mode dry-run
 ```
 
-预演首次创建时只从已初始化的生产库复制当前策略，数据库、资源和日志分别使用独立的 `.dry-run` 路径。之后两套策略独立修改；如需再次从生产库同步，运行 `python -m feishu_shadow_agent policy sync-production --config config.yaml --mode dry-run`。若生产策略尚未初始化，可用 `policy import-config --config config.yaml --mode dry-run` 直接初始化预演策略。
+Console 默认监听 `127.0.0.1`，使用启动时生成的 token。它展示项目持有的策略、任务、审批和运行状态；Hermes Gateway 的会话和状态使用 Hermes 自带的 CLI 或 Dashboard 查看。
 
-项目自身不会在 dry-run 中发送消息，但 `tool_permissions: full_access` 的 Agent 可以独立调用 shell 或飞书 CLI 并产生外部写入；dry-run 不会限制这些 Agent 工具。首次验证建议使用 `read_only` 或外部沙箱。
-
-确认行为符合预期后，再去掉 `--dry-run` 进入真实发送模式：
-
-```bash
-python -m feishu_shadow_agent daemon --config config.yaml
-```
-
-常用运维命令：
-
-```bash
-python -m feishu_shadow_agent status --config config.yaml
-python -m feishu_shadow_agent replay --config config.yaml --message-id <message_id> --dry-run
-python -m feishu_shadow_agent config show --config config.yaml --redacted
-python -m feishu_shadow_agent config validate --config config.yaml
-python -m feishu_shadow_agent config schema
-python -m feishu_shadow_agent retention prune --config config.yaml --dry-run
-python -m feishu_shadow_agent console --config config.yaml
-```
-
-本地 Operator Console 默认绑定 `127.0.0.1`，通过启动时生成的一次性 bearer token 访问。token 只放在 URL fragment 中（不会随 HTTP 请求发送），renderer 随后保存到当前 tab 的 `sessionStorage` 并立即清除 fragment；所有响应启用 no-store、no-referrer、CSP、nosniff 和禁止嵌入等安全头。Console 覆盖 Dashboard、Approvals、Tasks、Dispatch、Feedback、Policy、Settings、Health 和 Maintenance；Feedback 提供 7/30 天结果统计、决策原因切片和原始/最终回复差异。Console 只通过本地 `/api/*` 调用 `OperatorQueryService` / `OperatorCommandService`，不直接读 SQLite，也不写 `config.yaml`。Maintenance 是本机运维命令台，承载 doctor、config validate、retention prune 和 reply style refresh 等低频显式命令；审批队列清理仍放在 Approvals/Dashboard 的工作流语境中。
-
-审批通知始终保留文本命令兜底。启用 `interactive_cards` 且回调长连接健康时，owner 还会收到绑定具体 approval 的四操作卡片：直接发送建议、编辑后发送、不发送并继续关注、不发送并结束任务。回调只接受配置 owner 的操作，事件 ID 用作幂等键；连接不健康时自动回退为纯文本通知。
-
-每次 owner 处理审批都会写一条不可变反馈，区分建议直接发送、编辑后发送、不发送继续关注和不发送结束任务。反馈不会自动修改 Product Policy。默认保留敏感文本 30 天；到期只清空原记录中的敏感字段，保留最小审计元数据，不级联删除任务链记录。仍处于有效 `watch_until` 的 watching task 暂缓清理，具体可通过 `retention` 配置。
-
-从源码修改 `frontend/operator-console/` 后，先运行 `npm --prefix frontend/operator-console ci` 安装锁定依赖，再依次运行 `lint`、`test` 和 `build`；build 会把 renderer 重新写入 Python 包内的 bundled static assets。
+完整配置见[配置参考](docs/configuration.md)，文档索引见[文档导航](docs/README.md)。
 
 ## 测试
 
-本地单元测试不会真实访问飞书或 Agent backend：
+本地测试默认使用 fake 客户端和临时 SQLite：
 
 ```bash
 uv run --locked pytest -q
@@ -116,11 +73,11 @@ uv run --locked --extra cards pyright
 uv run --locked pre-commit run --all-files
 ```
 
-端到端测试需要真实 `lark-cli`、飞书 user/bot 授权、owner open_id、测试群或测试 P2P 会话，以及可用的所选 Agent CLI。交互式卡片还需要安装 `cards` extra、配置应用凭证环境变量并启用飞书卡片回调长连接。完整步骤见 [测试方式](docs/testing.md)。
+真实飞书测试需要授权的测试群或私聊。各模式的测试入口和范围见[测试方式](docs/testing.md)。
 
 ## 发布产物
 
-公开分发走 GitHub tag + GitHub Release。发布前先构建 renderer，再构建 Python sdist/wheel，确保 wheel 内包含 `feishu_shadow_agent/console_static/index.html` 和它引用的 `/assets/*` 文件：
+GitHub Release 附加同一次构建生成的 source distribution 和 wheel。前端锁定的 Vite 要求 Node.js `^20.19.0 || >=22.12.0`。修改 Operator Console 后，先安装前端依赖并重新构建 renderer，再构建 Python 包：
 
 ```bash
 npm --prefix frontend/operator-console ci
@@ -130,14 +87,8 @@ npm --prefix frontend/operator-console run build
 uv run --locked python -m build
 ```
 
-GitHub Release 应附加同一次构建生成的 source distribution 和 wheel；当前不发布 GitHub Pages，也不构建 Electron、Tauri 或 PyInstaller 二进制。
+wheel 应包含 `feishu_shadow_agent/console_static/index.html` 及其引用的资源。当前不发布 GitHub Pages，也不构建桌面二进制。
 
 ## 数据与日志
 
-默认本地状态写入：
-
-- SQLite：`data/agent.sqlite3`
-- 下载资源：`data/resources/`
-- JSONL 日志：`logs/agent.jsonl`
-
-真实配置 `config.yaml`、运行数据和日志默认不应提交到 git。`config.example.yaml` 只保留非密钥示例配置。
+项目默认将 SQLite、下载资源和 JSONL 日志分别写入 `data/agent.sqlite3`、`data/resources/` 和 `logs/agent.jsonl`。真实配置 `config.yaml`、运行数据、日志和凭据不提交到 Git；`config.example.yaml` 使用占位值。

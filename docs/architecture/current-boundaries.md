@@ -4,30 +4,29 @@ This document describes the current implementation boundary for Feishu Shadow Ag
 
 ## Product Shape
 
-Feishu Shadow Agent is a local, single-owner Feishu assistant with two mutually exclusive daemon modes. Shadow mode watches direct owner mentions in group chats and P2P messages and uses the project's policy, approval, dispatch, and audit gates. The opt-in AI coworker mode receives events for one configured group and can let the agent send directly with its native tool permissions; project dispatch remains an alternative.
+Feishu Shadow Agent is a local, single-owner Feishu assistant with three main runtime paths:
+
+| Path | Feishu and state ownership | Agent execution |
+| --- | --- | --- |
+| Shadow `daemon` | The project polls user messages and owns tasks, policy, approvals, dispatch and SQLite state. | Hermes, Codex or Claude Code handles routed tasks. |
+| Codex native coworker | The project receives bot events for a configured group and owner private chat, owns SQLite state, and publishes replies. | Codex App Server owns sessions and native subagents. |
+| Hermes Gateway coworker | Hermes Gateway owns the Feishu connection, sessions, replies and profile state. The project launcher does not load its SQLite or configuration. | Hermes runs the `coworker` profile and native delegation. |
+
+The `daemon` command also supports the existing project-managed coworker path, where `send_mode` selects agent-direct or project dispatch. Each project daemon selects shadow or coworker at startup. Separate long connections for the same Feishu application share event delivery, so stop the previous receiver before switching.
 
 Current non-goals remain deliberate:
 
 - No multi-owner, multi-tenant, or remote web console.
-- No LaunchAgent, cron, systemd, desktop binary, or service installer.
-- No runtime merge between `config.yaml` and Product Policy Store.
-- No automatic resend when dispatch state is uncertain.
+- No project-provided LaunchAgent, cron, systemd service, desktop binary, or service installer. Hermes manages its own Gateway service.
+- No runtime merge between project `config.yaml` and Product Policy Store.
+- No automatic resend by project dispatch when its send state is uncertain.
 - No direct Feishu sending workflow in shadow mode; its prompts use project dispatch, while native tool capabilities depend on the backend environment.
-- No WebSocket message ingestion for shadow tasks. Shadow uses user-authenticated polling; the SDK connection handles approval cards and, in coworker mode, the configured group's message events.
+- No WebSocket message ingestion for shadow tasks. Shadow uses user-authenticated polling; the SDK connection handles approval cards and, in project coworker mode, message events for the configured group and supported private chats.
 - No automatic Product Policy changes learned from approval feedback.
 
 ## Document Precedence
 
-Use this order when documents disagree:
-
-1. `docs/architecture/current-boundaries.md`
-2. `CONTEXT.md` for product language
-3. `docs/adr/*.md` for accepted architectural decisions
-4. `docs/specs/*.md` for current product and API contracts
-5. `docs/plans/post-mvp-backlog.md` for the current active/deferred post-MVP index
-6. other `docs/plans/*.md` files for historical phased implementation context
-
-Other phase plans can still be useful for rationale, acceptance commands, and old edge cases, but they are not the live contract once the corresponding phase has landed. The backlog is only an index for current work and cannot override this boundary.
+Code and tests establish implemented behavior. This document, the mode-specific operating guides and `docs/configuration.md` describe the current interface; `CONTEXT.md` defines project terms. ADRs and specifications carry the scope and status stated in each file. Phase plans and dated acceptance records preserve decisions and evidence from their time. Start with the [documentation index](../README.md).
 
 ## Code-Owned Rules
 
@@ -35,10 +34,10 @@ These rules belong in deterministic code and tests. Do not delegate them to prom
 
 - Feishu identity selection: shadow ingestion uses user reads, user P2P replies, bot owner notifications, bot-preferred group replies, and bot resource downloads. Project-owned coworker reads and replies use the configured bot identity without a user-identity fallback; the agent's own tools use their effective permissions and are guided by prompt instructions.
 - Message ingress eligibility: shadow group `@owner` and P2P rules remain separate from the opt-in coworker group's bot events, trigger and peer-correlation rules. Both suppress unintended `@All` triggers and distinguish self messages.
-- Shadow routing ownership and shortcuts: a revision stays with its original active task; otherwise reply-to, thread, and burst-window attachment are evaluated in that order before TaskRouter. Each daemon runs exactly one business mode until restart: shadow ingestion and retries are stopped in coworker mode, and project-owned dispatch and approval queues are limited to the active mode. Coworker sessions are group-shared for ordinary messages and topic-shared for threads. Every structural lookup remains scoped to the current chat.
-- Product Policy resolution: Product Policy Store as runtime truth, explicit Policy Import Source comparison, and fail-closed behavior when global policy is missing.
-- Coworker Codex execution uses one persistent App Server: root turns are serialized within a group/topic session and can run concurrently across topics. The model chooses whether to spawn or interact with native subagents. The project records child state, forwards follow-ups to active root turns, and resumes the root on completion; an accepted steer is not proof of a completed action. Hermes remains a one-shot backend and does not provide this background integration.
-- SQLite schema: empty stores initialize to v11; marked v9 and v10 stores upgrade transactionally without dropping existing data. Other versions or application markers are rejected. Read-only policy snapshots can read v9, v10 or v11 without modifying the source.
+- Shadow routing ownership and shortcuts: a revision stays with its original active task; otherwise reply-to, thread, and burst-window attachment are evaluated in that order before TaskRouter. Each daemon runs exactly one business mode until restart: shadow ingestion and retries are stopped in coworker mode, and project-owned dispatch and approval queues are limited to the active mode. Coworker sessions are group-shared for ordinary messages and topic-shared for threads; Codex native private requests have separate sessions that referenced replies can resume. Every structural lookup remains scoped to the current chat.
+- Project Product Policy resolution: Product Policy Store as runtime truth, explicit Policy Import Source comparison, and fail-closed behavior when global policy is missing.
+- Project-managed Codex coworker execution uses one persistent App Server: root turns are serialized within a group/topic session and can run concurrently across topics. The project records child state and resumes the root on completion; an accepted steer is not proof of a completed action. The legacy `daemon` coworker path calls Hermes once per turn. Native Hermes Gateway manages its own sessions and background delegation.
+- SQLite schema: empty project stores initialize to v13; marked v9, v10, v11 and v12 stores upgrade transactionally. Other versions or application markers are rejected. Read-only policy snapshots can read marked v9, v10, v11 and current v13 stores without modifying the source.
 - Removing a group policy holds its watching tasks, queued processing retries and pending send actions. Re-adding the policy does not release these holds; an operator explicitly reopens a task or retries an action. In-flight provider calls cannot be retracted, and successful send evidence remains authoritative.
 - Resource gates: bot joined, resource download enabled, size/quota checks, retryable download failures, and owner notification on blocked resources.
 - Storage capacity guard: `runtime_storage_capacity` measures the sqlite, log, and resource roots and blocks ingestion and real sends only when free space on the tightest runtime filesystem drops below the fixed critical floor. A low-space warning never blocks runtime work, and a measurement failure never becomes a blocking verdict.
@@ -61,7 +60,7 @@ Runtime prompt responsibilities are split by authority:
 - Codex/Hermes/Claude adapter instructions remain provider-specific and are injected by the adapter layer. Evaluation judge prompts remain under `evals/` and are not added to production prompts.
 - The runtime prompt catalog includes `router`, `task_session`, `reply_postprocess`, `owner_style_refresh`, `coworker`, and `coworker_memory`; production audits include the coworker prompt kinds, while owner-style refresh has no production audit row. Evaluation adds `ingress_judge`, `semantic_judge`, and the generic `structured_output` fallback. `agent_audits.request_type` is the persisted prompt kind. Audit rows and eval artifacts record the catalog version and SHA-256 of the exact backend-neutral business prompt; full prompt text remains debug-only.
 
-Context Access has an intentionally narrow trust boundary. Its URI, allowed tables, and query scope are logically read-only, enforced primarily by the model-visible instructions and the model's instruction following. This remains true when `tool_permissions: full_access` or inherited native permissions give the backend other local write-capable tools; it is not a filesystem or security sandbox. Stronger local isolation requires `read_only` or an external sandbox. The project's built-in Feishu dispatch applies schema, policy, approval, dry-run, idempotency and dispatch gates. An Agent can independently invoke shell commands or Feishu CLI and make external changes when its effective permissions allow; those tool calls are outside the built-in dispatch gates, including during dry-run.
+Context Access provides a read-only URI, allowed tables and query scope; it does not isolate other backend tools. The project's built-in Feishu dispatch applies policy, approval, dry-run and idempotency checks. In shadow and legacy coworker paths, native tool calls use the backend's effective permissions even during dry-run. Codex native coworker uses a restricted tool configuration in dry-run; its production calls inherit Codex settings. Hermes Gateway uses Hermes permissions and has no project-level dry-run.
 
 Owner-provided task background is a separate, explicit evidence channel. Operator Command appends a task-scoped version for set, replace, or clear; it does not reset `agent_session_id` or change task ownership. `TaskSessionRunner` reads only the latest non-cleared value and injects it only when building a fresh provider session. Changes made after a session is created apply only to a future fresh session; resumed sessions never receive them. The prompt labels background as owner-supplied evidence rather than an instruction. It asks the model to weigh the source, context and timing of conflicts and to request owner review when a material conflict remains unresolved. This is model judgment, not a deterministic conflict detector.
 
@@ -87,6 +86,9 @@ If an agent output crosses these bounds, the code should reject it, downgrade to
 - `processing.py`: task-level orchestration from route result to task session, postprocess, reply gate, approval, or send action. New feature branches should prefer extracting helpers over adding more nested branches here.
 - `ingestion.py`: ingress orchestration, resource acquisition, and claimed manual processing retries. A task-router retry must recover the original deterministic placeholder rather than treating the later failure audit as a final route.
 - `dispatcher.py`: dispatch claiming, dry-run, actual send, readback, stale sending detection, and manual recovery.
+- `coworker.py` and `coworker_store.py`: project-managed coworker events, sessions and the legacy daemon path.
+- `coworker_native.py`, `coworker_native_store.py` and `coworker_native_state.py`: Codex native coworker routing, delivery, watches and handoff state.
+- `codex_app_server.py`: the Codex App Server connection, native sessions and dynamic read tools.
 - `approval_cards.py`: deterministic Card JSON construction. Cards bind one concrete approval and expose only the supported resolution actions.
 - `card_actions.py`: owner-only `card.action.trigger` parsing, event-id idempotency, atomic command/feedback application, callback connection health, and daemon wake-up.
 - `operator_queries/`: read-only operator DTOs. It may derive status, overdue fields, feedback metrics, health issues, and recommended actions, but it must not mutate state.
@@ -108,7 +110,7 @@ A `needs_owner` output may omit a reply draft. It becomes a pending approval tha
 
 Owner resolution writes exactly one immutable feedback outcome: `suggestion_sent`, `edited_sent`, `no_send_keep_watching`, or `no_send_end_task`. A fixed optional feedback reason and short note may accompany the outcome. Metrics and UI can aggregate these facts, but runtime policy must not mutate itself from them.
 
-Interactive approval cards are optional. Outbound cards still use `lark-cli`; the official Python SDK long connection receives only `card.action.trigger`. Each callback is scoped to its approval, validates the owner open ID, uses the Feishu event ID as the command idempotency key, applies the operator command and feedback atomically, returns a queued acknowledgement, and wakes the daemon. Text commands remain available regardless of connection health.
+Interactive approval cards are optional. Outbound cards use `lark-cli`; in shadow mode the SDK long connection receives `card.action.trigger`. In project-managed coworker mode the same connection also receives message events. Each card callback is scoped to its approval and owner, uses the Feishu event ID as an idempotency key, and applies the operator command and feedback atomically. Text commands remain available when the card connection is unavailable.
 
 ## Agent Input Field Checklist
 
