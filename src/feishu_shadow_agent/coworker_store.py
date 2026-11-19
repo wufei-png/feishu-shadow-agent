@@ -994,6 +994,56 @@ class CoworkerStore:
                 (self.store.clock(), event_id),
             )
 
+    def associate_native_followup(
+        self, event_id: int, origin_event_id: int, parent_id: str
+    ) -> None:
+        self.store.initialize()
+        with self.store.connect() as conn:
+            cursor = conn.execute(
+                """UPDATE coworker_events SET raw_json = json_set(raw_json,
+                     '$._runtime.followup_origin', ?, '$._runtime.followup_parent', ?), updated_at = ?
+                   WHERE id = ? AND status = 'queued' AND EXISTS (
+                     SELECT 1 FROM coworker_events origin WHERE origin.id = ?
+                       AND origin.runtime = 'native'
+                       AND origin.app_id = coworker_events.app_id
+                       AND origin.chat_id = coworker_events.chat_id
+                       AND origin.topic_key = coworker_events.topic_key)""",
+                (
+                    origin_event_id,
+                    parent_id,
+                    self.store.clock(),
+                    event_id,
+                    origin_event_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("follow-up no longer belongs to the active task")
+
+    def defer_late_native_steer(self, event_id: int, origin_event_id: int) -> None:
+        self.store.initialize()
+        with self.store.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            now = self.store.clock()
+            origin = conn.execute(
+                """UPDATE coworker_events SET raw_json = json_set(raw_json,
+                     '$._runtime.superseded', json('true')), updated_at = ?
+                   WHERE id = ? AND status = 'processing' AND runtime = 'native'
+                     AND EXISTS (SELECT 1 FROM coworker_events followup WHERE followup.id = ?
+                       AND followup.status = 'queued' AND followup.app_id = coworker_events.app_id
+                       AND followup.chat_id = coworker_events.chat_id
+                       AND followup.topic_key = coworker_events.topic_key)""",
+                (now, origin_event_id, event_id),
+            )
+            conn.execute(
+                """UPDATE coworker_events SET raw_json = json_set(
+                     json_remove(raw_json, '$._runtime.steer_state'),
+                     '$._runtime.steer_checked', json('true'),
+                     '$._runtime.agent_started', json('false'),
+                     '$._runtime.previous_unpublished', json(?)), updated_at = ?
+                   WHERE id = ? AND status = 'queued'""",
+                ("true" if origin.rowcount == 1 else "false", now, event_id),
+            )
+
     def finish_steer(
         self, event_id: int, *, retry: bool = False, error: str | None = None
     ) -> None:

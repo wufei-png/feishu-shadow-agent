@@ -114,6 +114,15 @@ class NativeCoworkerService(CoworkerService):
         with self._app_server_lock:
             return self._session_locks.setdefault(session_id, RLock())
 
+    def _turn_superseded(self, event_id: int) -> bool:
+        with self.store.connect() as conn:
+            row = conn.execute(
+                """SELECT json_extract(raw_json, '$._runtime.superseded') FROM coworker_events
+                   WHERE id = ? AND status = 'processing' AND json_valid(raw_json)""",
+                (event_id,),
+            ).fetchone()
+        return row is not None and row[0] == 1
+
     def _classify_followup(
         self, policy: CoworkerConfig, prompt: str, cwd: str
     ) -> Literal["current", "unrelated", "uncertain"]:
@@ -541,6 +550,7 @@ class NativeCoworkerService(CoworkerService):
             if not isinstance(parent, str) or parent not in origins or message.at_all:
                 self.events.skip_native_steer(event.id)
                 return False
+            self.events.associate_native_followup(event.id, origin_event_id, parent)
             if private and message.sender_id != self.config.owner.open_id:
                 raise ValueError("private sender is not the owner")
             if (
@@ -556,6 +566,11 @@ class NativeCoworkerService(CoworkerService):
             source_revision = saved.revision
             turn_id = server.active_turn_id(thread_id)
             if not turn_id:
+                self.events.finish_steer(event.id, retry=True)
+                return False
+            session_lock = self._session_lock(session_id)
+            session_lock.acquire()
+            if server.active_turn_id(thread_id) != turn_id:
                 self.events.finish_steer(event.id, retry=True)
                 return False
             origin_message_id = (
@@ -591,6 +606,9 @@ class NativeCoworkerService(CoworkerService):
             if classification != "current":
                 self.events.skip_native_steer(event.id)
                 return False
+            if server.active_turn_id(thread_id) != turn_id:
+                self.events.defer_late_native_steer(event.id, origin_event_id)
+                return False
             if self.current_policy() != policy or (
                 not private
                 and self._group_activation_id(event.chat_id)
@@ -609,8 +627,6 @@ class NativeCoworkerService(CoworkerService):
             ):
                 self.events.finish_steer(event.id, retry=True)
                 return False
-            session_lock = self._session_lock(session_id)
-            session_lock.acquire()
             self.events.mark_steer_sending(event.id, native=True)
             sending = True
             prompt = "当前任务的补充信息：\n" + _code_block(
@@ -618,7 +634,10 @@ class NativeCoworkerService(CoworkerService):
             )
             server.steer(thread_id, prompt, expected_turn_id=turn_id)
         except TurnNotActive:
-            self.events.finish_steer(event.id, retry=True)
+            if session_lock is not None and origin_event_id is not None:
+                self.events.defer_late_native_steer(event.id, origin_event_id)
+            else:
+                self.events.finish_steer(event.id, retry=True)
             return False
         except _SourceUnavailable as exc:
             self.events.retry_before_agent(
@@ -902,6 +921,8 @@ class NativeCoworkerService(CoworkerService):
             "对关注产生的普通发言，只在相关时回复。\n"
             + _code_block(json.dumps(details, ensure_ascii=False), "json")
         )
+        if _mapping(event.raw.get("_runtime")).get("previous_unpublished") is True:
+            prompt += "\n上一轮答复尚未发布，请结合补充重新完成并答复当前任务。"
         if not private and event.topic_key == GROUP_MAIN_KEY:
             choices = {
                 "quote": "默认引用原消息回复；明确要求开话题时选择话题。",
@@ -965,6 +986,10 @@ class NativeCoworkerService(CoworkerService):
             self._check_current_policy(policy, event.chat_id, activation)
         output = NativeOutput.model_validate(result.json_data)
         with self._session_lock(session.id):
+            if self._turn_superseded(event.id):
+                if batch:
+                    self.deliveries.finish_silent_batch(event.id, batch)
+                return
             self._require_certain_steers(event.id, session.id)
             if output.action == "silent":
                 if batch:
@@ -1522,6 +1547,8 @@ class NativeCoworkerService(CoworkerService):
 
     def _queue_native_reply(self, *, session_id: int, **kwargs: Any) -> None:
         with self._session_lock(session_id):
+            if self._turn_superseded(int(kwargs["event_id"])):
+                return
             self._require_certain_steers(int(kwargs["event_id"]), session_id)
             self.deliveries.queue_reply(session_id=session_id, **kwargs)
 
@@ -1709,6 +1736,8 @@ class NativeCoworkerService(CoworkerService):
         reason: str | None,
         manual_only: bool,
     ) -> None:
+        if self._turn_superseded(event.id):
+            return
         self._require_certain_steers(event.id, session_id)
         with self.store.connect() as conn:
             steered = conn.execute(

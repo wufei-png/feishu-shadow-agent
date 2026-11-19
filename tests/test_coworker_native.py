@@ -11,7 +11,7 @@ from typing import Any, Literal
 import pytest
 
 from feishu_shadow_agent.agent_backend import AgentRunResult
-from feishu_shadow_agent.codex_app_server import AppServerError
+from feishu_shadow_agent.codex_app_server import AppServerError, TurnNotActive
 from feishu_shadow_agent.config import (
     AppConfig,
     ChatPolicyConfig,
@@ -1447,8 +1447,9 @@ def test_queued_unrelated_request_does_not_block_later_supplement(
 
 
 @pytest.mark.parametrize("decision", ["current", "unrelated", "uncertain", "invalid"])
+@pytest.mark.parametrize("enqueued_before_start", [False, True])
 def test_natural_followup_is_classified_without_losing_queued_messages(
-    tmp_path: Path, decision: str
+    tmp_path: Path, decision: str, enqueued_before_start: bool
 ) -> None:
     service, feishu, _ = _service(tmp_path)
     server = BlockingNativeServer()
@@ -1458,10 +1459,8 @@ def test_natural_followup_is_classified_without_losing_queued_messages(
         "另做一个独立任务" if decision == "unrelated" else "刚才版本说错了，应该是 2.0"
     )
     _receive(service, feishu, "one", location="thread", text="检查 1.0 的发布")
-    worker = threading.Thread(target=service.process_next)
-    worker.start()
-    assert server.started.wait(timeout=3)
-    try:
+
+    def receive_followup() -> None:
         _receive(
             service,
             feishu,
@@ -1471,6 +1470,15 @@ def test_natural_followup_is_classified_without_losing_queued_messages(
             mention=False,
             text=followup,
         )
+
+    if enqueued_before_start:
+        receive_followup()
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    try:
+        if not enqueued_before_start:
+            receive_followup()
         assert service.process_next()
         assert service.process_next_steer() is (decision == "current")
         assert "检查 1.0 的发布" in server.classification_prompts[0]
@@ -1667,6 +1675,79 @@ def test_followup_is_processed_if_current_turn_finishes_before_steering(
     while service.process_next():
         pass
     assert any("应该是 2.0" in prompt for prompt in server.prompts)
+
+
+@pytest.mark.parametrize("decision", ["current", "unrelated", "uncertain"])
+def test_followup_classified_after_turn_end_suppresses_only_stale_reply(
+    tmp_path: Path, decision: str
+) -> None:
+    class RacingServer(BlockingNativeServer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.classifying = threading.Event()
+            self.finish_classifying = threading.Event()
+            self.original_returned = threading.Event()
+
+        def run_turn(self, prompt: str, **kwargs: Any) -> AgentRunResult:
+            if kwargs["output_model"] is SteerDecision:
+                self.classifying.set()
+                assert self.finish_classifying.wait(timeout=5)
+                return FakeServer.run_turn(self, prompt, **kwargs)
+            result = super().run_turn(prompt, **kwargs)
+            self.original_returned.set()
+            return result
+
+        def steer(
+            self, _thread_id: str, prompt: str, *, expected_turn_id: str | None = None
+        ) -> None:
+            assert prompt
+            raise TurnNotActive("turn already finished")
+
+    service, feishu, _ = _service(tmp_path)
+    server = RacingServer()
+    server.decisions = [decision]
+    service.app_server = server  # type: ignore[assignment]
+    _receive(service, feishu, "request", location="thread", text="检查 1.0")
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    classifier: threading.Thread | None = None
+    try:
+        _receive(
+            service,
+            feishu,
+            "correction",
+            location="thread",
+            parent="request",
+            mention=False,
+            text="应该检查 2.0",
+        )
+        assert service.process_next()
+        classifier = threading.Thread(target=service.process_next_steer)
+        classifier.start()
+        assert server.classifying.wait(timeout=3)
+        server.release.set()
+        assert server.original_returned.wait(timeout=3)
+        worker.join(timeout=0.5)
+    finally:
+        server.finish_classifying.set()
+        if classifier is not None:
+            classifier.join(timeout=5)
+        server.release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    while service.process_next():
+        pass
+    with service.store.connect() as conn:
+        deliveries = conn.execute(
+            """SELECT e.message_id FROM coworker_native_deliveries d
+               JOIN coworker_events e ON e.id = d.event_id ORDER BY d.id"""
+        ).fetchall()
+    assert [row[0] for row in deliveries] == (
+        ["correction"] if decision == "current" else ["request", "correction"]
+    )
+    assert any("应该检查 2.0" in prompt for prompt in server.prompts)
+    assert ("上一轮答复尚未发布" in server.prompts[-1]) is (decision == "current")
 
 
 def test_followup_classifier_uses_isolated_notifications_and_closes(
