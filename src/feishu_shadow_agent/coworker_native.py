@@ -514,40 +514,8 @@ class NativeCoworkerService(CoworkerService):
             parent = raw.get("parent_id") or raw.get("reply_to_message_id")
             active_raw = _mapping(json.loads(str(current["raw_json"])))
             active_internal = _mapping(active_raw.get("_internal"))
-            origins = {
-                current["message_id"],
-                active_internal.get("source_message_id"),
-                active_internal.get("reply_target"),
-            }
-            if not isinstance(parent, str) or parent not in origins or message.at_all:
-                self.events.skip_native_steer(event.id)
-                return False
-            if private and message.sender_id != self.config.owner.open_id:
-                raise ValueError("private sender is not the owner")
-            if (
-                not private
-                and self._group_activation_id(event.chat_id)
-                != event.group_activation_id
-            ):
-                raise ValueError("group policy changed before steer")
-            saved = self.store.upsert_message_with_revision(message)
-            if saved.requires_confirmation or saved.is_deleted:
-                raise ValueError("steer source revision cannot be verified")
-            thread_id = str(current["backend_session_id"])
             session_id = int(current["session_id"])
             origin_event_id = int(current["origin_event_id"])
-            source_revision = saved.revision
-            turn_id = server.active_turn_id(thread_id)
-            if not turn_id:
-                self.events.finish_steer(event.id, retry=True)
-                return False
-            origin_message_id = (
-                active_internal.get("source_message_id") or current["message_id"]
-            )
-            origin_message = self.store.get_message(str(origin_message_id))
-            if origin_message is None:
-                self.events.finish_steer(event.id, retry=True)
-                return False
             with self.store.connect() as conn:
                 inherited = conn.execute(
                     """SELECT m.message_id, m.sender_id, m.text
@@ -564,6 +532,39 @@ class NativeCoworkerService(CoworkerService):
                        ORDER BY e.received_at, e.id""",
                     (origin_event_id, session_id),
                 ).fetchall()
+            origins = {
+                current["message_id"],
+                active_internal.get("source_message_id"),
+                active_internal.get("reply_target"),
+            }
+            origins.update(item["message_id"] for item in (*inherited, *accepted))
+            if not isinstance(parent, str) or parent not in origins or message.at_all:
+                self.events.skip_native_steer(event.id)
+                return False
+            if private and message.sender_id != self.config.owner.open_id:
+                raise ValueError("private sender is not the owner")
+            if (
+                not private
+                and self._group_activation_id(event.chat_id)
+                != event.group_activation_id
+            ):
+                raise ValueError("group policy changed before steer")
+            saved = self.store.upsert_message_with_revision(message)
+            if saved.requires_confirmation or saved.is_deleted:
+                raise ValueError("steer source revision cannot be verified")
+            thread_id = str(current["backend_session_id"])
+            source_revision = saved.revision
+            turn_id = server.active_turn_id(thread_id)
+            if not turn_id:
+                self.events.finish_steer(event.id, retry=True)
+                return False
+            origin_message_id = (
+                active_internal.get("source_message_id") or current["message_id"]
+            )
+            origin_message = self.store.get_message(str(origin_message_id))
+            if origin_message is None:
+                self.events.finish_steer(event.id, retry=True)
+                return False
             classification = self._classify_followup(
                 policy,
                 "判断新消息是否明确补充或更正当前任务。属于当前任务返回 current；"

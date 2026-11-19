@@ -159,13 +159,29 @@ class CoworkerStore:
             parent = message.get("parent_id") or message.get("reply_to_message_id")
             if native and isinstance(parent, str) and parent:
                 origin = conn.execute(
-                    """SELECT id FROM coworker_events WHERE app_id = ? AND chat_id = ?
-                       AND runtime = 'native' AND status = 'processing' AND (
-                         message_id = ? OR CASE WHEN json_valid(raw_json) THEN
-                           ? IN (json_extract(raw_json, '$._internal.source_message_id'),
-                                 json_extract(raw_json, '$._internal.reply_target'))
-                           ELSE 0 END) ORDER BY id LIMIT 1""",
-                    (app_id, chat_id, parent, parent),
+                    """SELECT origin.id FROM coworker_events origin
+                       WHERE origin.app_id = ? AND origin.chat_id = ?
+                         AND origin.runtime = 'native' AND origin.status = 'processing' AND (
+                           origin.message_id = ? OR CASE WHEN json_valid(origin.raw_json) THEN
+                             ? IN (json_extract(origin.raw_json, '$._internal.source_message_id'),
+                                   json_extract(origin.raw_json, '$._internal.reply_target'))
+                             ELSE 0 END OR EXISTS (
+                               SELECT 1 FROM coworker_native_steers steer
+                               JOIN coworker_events supplement ON supplement.id = steer.event_id
+                               WHERE steer.origin_event_id = origin.id AND steer.status = 'accepted'
+                                 AND supplement.message_id = ?) OR EXISTS (
+                               SELECT 1 FROM coworker_events supplement
+                               WHERE supplement.app_id = origin.app_id AND supplement.chat_id = origin.chat_id
+                                 AND supplement.message_id = ? AND supplement.status = 'queued'
+                                 AND CASE WHEN json_valid(supplement.raw_json) THEN
+                                   json_extract(supplement.raw_json, '$._runtime.followup_origin') = origin.id
+                                   ELSE 0 END) OR EXISTS (
+                               SELECT 1 FROM coworker_native_delivery_context c
+                               WHERE c.delivery_id = CASE WHEN json_valid(origin.raw_json)
+                                 THEN json_extract(origin.raw_json, '$._internal.delivery_id') END
+                                 AND c.message_id = ?))
+                       ORDER BY origin.id LIMIT 1""",
+                    (app_id, chat_id, parent, parent, parent, parent, parent),
                 ).fetchone()
                 if origin is not None:
                     runtime.update(

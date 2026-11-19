@@ -1526,6 +1526,114 @@ def test_followup_changed_during_classification_is_not_steered_from_old_text(
     assert any("版本应为 3.0" in prompt for prompt in server.prompts)
 
 
+@pytest.mark.parametrize("finish_before_steer", [False, True])
+def test_reply_to_an_accepted_supplement_continues_the_same_task(
+    tmp_path: Path, finish_before_steer: bool
+) -> None:
+    service, feishu, _ = _service(tmp_path)
+    server = BlockingNativeServer()
+    service.app_server = server  # type: ignore[assignment]
+    _receive(service, feishu, "request", location="thread")
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    try:
+        _receive(
+            service,
+            feishu,
+            "first",
+            location="thread",
+            parent="request",
+            mention=False,
+            text="补充：只检查 2.0",
+        )
+        assert service.process_next() and service.process_next_steer()
+        _receive(
+            service,
+            feishu,
+            "second",
+            location="thread",
+            parent="first",
+            mention=False,
+            text="刚才更正为 3.0",
+        )
+        assert service.process_next()
+        if not finish_before_steer:
+            assert service.process_next_steer()
+            assert "只检查 2.0" in server.classification_prompts[-1]
+    finally:
+        server.release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    while service.process_next():
+        pass
+    assert any("更正为 3.0" in text for text in server.prompts + server.steers)
+    with service.store.connect() as conn:
+        state = conn.execute(
+            "SELECT status FROM coworker_events WHERE message_id = 'second'"
+        ).fetchone()[0]
+    assert state == "completed"
+
+
+def test_reply_to_supplement_waiting_for_steer_receipt_is_not_lost(
+    tmp_path: Path,
+) -> None:
+    class WaitingServer(BlockingNativeServer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sending = threading.Event()
+            self.confirm = threading.Event()
+
+        def steer(
+            self, _thread_id: str, prompt: str, *, expected_turn_id: str | None = None
+        ) -> None:
+            assert expected_turn_id == "active-turn"
+            self.steers.append(prompt)
+            self.sending.set()
+            assert self.confirm.wait(timeout=5)
+
+    service, feishu, _ = _service(tmp_path)
+    server = WaitingServer()
+    service.app_server = server  # type: ignore[assignment]
+    _receive(service, feishu, "request", location="thread")
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    steer_worker: threading.Thread | None = None
+    try:
+        _receive(
+            service, feishu, "first", location="thread", parent="request", mention=False
+        )
+        assert service.process_next()
+        steer_worker = threading.Thread(target=service.process_next_steer)
+        steer_worker.start()
+        assert server.sending.wait(timeout=3)
+        _receive(
+            service,
+            feishu,
+            "second",
+            location="thread",
+            parent="first",
+            mention=False,
+            text="刚才更正为 3.0",
+        )
+        assert service.process_next()
+    finally:
+        server.release.set()
+        server.confirm.set()
+        if steer_worker is not None:
+            steer_worker.join(timeout=5)
+        worker.join(timeout=5)
+    assert (
+        not worker.is_alive()
+        and steer_worker is not None
+        and not steer_worker.is_alive()
+    )
+    while service.process_next():
+        pass
+    assert any("更正为 3.0" in prompt for prompt in server.prompts)
+
+
 def test_followup_is_processed_if_current_turn_finishes_before_steering(
     tmp_path: Path,
 ) -> None:
