@@ -100,7 +100,7 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `agent_backend.codex.model` | string/null | `null` | 可选 Codex model 覆盖；`null` 时由 Codex CLI 决定。示例配置选择 `gpt-6-luna`。 |
 | `agent_backend.codex.reasoning_effort` | `minimal`/`low`/`medium`/`high`/`xhigh`/null | `null` | 可选 Codex reasoning effort 覆盖；配置后通过 `model_reasoning_effort` 传给 Codex CLI。Hermes 不读取此字段。 |
 | `agent_backend.codex.timeout_seconds` | int `> 0`/null | `null` | Codex Agent 子进程超时；`null` 不设置 wall-clock 截止时间。readiness 探测使用 `health.timeout_seconds`。 |
-| `agent_backend.codex.skills` | list[string] | `[]` | 已由部署环境安装到 Codex 原生发现范围的 skill 名称。名称只能使用小写字母、数字和内部连字符，最长 64 字符；新建 Task Session prompt 最后一行追加 `$name`。配置表示 requested/configured，不代表 runtime loaded。 |
+| `agent_backend.codex.skills` | list[string] | `[]` | 已由部署环境安装到 Codex 原生发现范围的技能名称。名称只能使用小写字母、数字和内部连字符，最长 64 字符。新会话首轮中，轻量直连提供用途和路径供按需阅读，`codex exec` 使用原生 `$name` 显式调用。 |
 | `agent_backend.claude_code.path` | string/null | `null` | 指定 Claude Code CLI 路径；`null` 使用当前 `PATH`。 |
 | `agent_backend.claude_code.model` | string/null | `null` | 可选 Claude Code model 覆盖；`null` 时由 Claude Code CLI 决定。 |
 | `agent_backend.claude_code.timeout_seconds` | int `> 0`/null | `null` | Claude Code Agent 子进程超时；`null` 不设置 wall-clock 截止时间。readiness 探测使用 `health.timeout_seconds`。 |
@@ -248,7 +248,7 @@ hermes chat -q <prompt> -Q --source <source> --toolsets <...> [--yolo] --max-tur
 - `--ignore-rules`：默认由 `agent_backend.auto_context: disabled` 启用，跳过 `AGENTS.md`、`SOUL.md`、memory 和预加载 skill 的自动注入，避免仓库/编辑器规则污染飞书任务 prompt。
 - `--skills <path>`：只在 task session 中根据 `agent_backend.hermes.skill_paths` 注入；task router 默认不请求 skill，保持路由决策更窄、更稳定。
 
-Codex 只按 `agent_backend.codex.skills` 中的名称生成原生显式调用，例如新 Task Session 业务 prompt 最后一行的 `$docmate`。skill 必须由部署环境预先安装到 Codex 原生发现范围；本程序不读取 `SKILL.md`、不注册任意路径，也不模拟 Codex 的仓库根发现算法。完整 skill 是否加载由 Codex 决定，配置只表示 requested/configured。运行中的旧 session 不因配置变化自动增加 skill，需要新建或显式重置 session。生产 prompt、输出 schema 和 audit response 不增加 skill trace 字段。
+轻量直连在生产新会话首轮使用 App Server 的 `skills/list` 发现已启用的配置技能，把用途和路径放在本轮规则和当前请求之间。Codex 按请求相关性读取对应的 `SKILL.md`。`codex exec` 在新建 Task Session 时使用 `$name` 显式调用。部署环境负责安装技能。恢复旧会话时沿用原线程上下文。
 
 影子模式 Codex Task Session 通常通过 CLI `-c developer_instructions=...` 传入固定的非交互约束：工具探索保持静默，只返回一个最终 JSON 对象。`tool_permissions: inherit` 且 `config_scope: native` 时不传该覆盖项，以保留用户原有的 `developer_instructions`。结构化输出使用 `--output-schema`、`--output-last-message` 和 Python schema 校验。旧 `daemon` 的 AI 同事直发模式使用自然输出；`coworker run --runtime codex` 使用独立的项目发布路径，见 [Codex 直连运行说明](operations/codex-native-coworker.md)。
 

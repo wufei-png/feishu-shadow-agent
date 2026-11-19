@@ -15,10 +15,7 @@ from pydantic import BaseModel
 
 from .agent_backend import AgentRunResult
 from .agent_output_schema import agent_output_schema
-from .agent_skill_context import (
-    append_codex_skill_mentions,
-    append_explicit_context_paths,
-)
+from .agent_skill_context import append_explicit_context_paths
 from .config import CodexConfig
 
 _READ_TOPIC_TOOL: dict[str, Any] = {
@@ -164,6 +161,7 @@ class CodexAppServer:
         cwd: str | Path | None,
         output_model: type[BaseModel] | None,
         on_thread: Callable[[str], None],
+        instructions: str = "",
         private: bool = False,
         unload_delay_seconds: int | None = None,
         dry_run_safety: bool = False,
@@ -203,12 +201,15 @@ class CodexAppServer:
                     params["cwd"] = str(cwd)
                 if self.config.model:
                     params["model"] = self.config.model
+                references = "" if dry_run_safety else self._skill_references(cwd)
                 response = self._request("thread/start", params)
                 thread_id = _thread_id(response)
-                prompt = append_explicit_context_paths(
-                    prompt, self.explicit_context_paths
-                )
-                prompt = append_codex_skill_mentions(prompt, self.skill_names)
+                if not dry_run_safety:
+                    prompt = append_explicit_context_paths(
+                        prompt, self.explicit_context_paths
+                    )
+                if references:
+                    prompt = f"{references}\n\n{prompt}"
             else:
                 resume_params: dict[str, Any] = {
                     "threadId": thread_id,
@@ -221,6 +222,8 @@ class CodexAppServer:
                 if thread_config:
                     resume_params["config"] = thread_config
                 self._request("thread/resume", resume_params)
+            if instructions:
+                prompt = f"{instructions}\n\n{prompt}"
             if dry_run_safety:
                 self._verify_no_mcp_tools(thread_id)
             on_thread(thread_id)
@@ -394,6 +397,30 @@ class CodexAppServer:
             raise AppServerError("resumed thread ID did not match")
         if dry_run_safety:
             self._verify_no_mcp_tools(thread_id)
+
+    def _skill_references(self, cwd: str | Path | None) -> str:
+        if not self.skill_names:
+            return ""
+        params = {"cwds": [str(cwd)]} if cwd is not None else {}
+        try:
+            result = self._request("skills/list", params)
+        except AppServerError:
+            return ""
+
+        entries: dict[str, str] = {}
+        for scope in result.get("data", []):
+            for value in _mapping(scope).get("skills", []):
+                skill = _mapping(value)
+                name, path = skill.get("name"), skill.get("path")
+                if name not in self.skill_names or not skill.get("enabled"):
+                    continue
+                if not isinstance(name, str) or not isinstance(path, str) or not path:
+                    continue
+                description = str(skill.get("description") or "").partition("\n")[0]
+                purpose = f"（{description[:160]}）" if description else ""
+                entries.setdefault(name, f"- {name}{purpose} `{path}`")
+        rows = [entries[name] for name in self.skill_names if name in entries]
+        return "与当前请求相关时，读取相应技能。\n" + "\n".join(rows) if rows else ""
 
     def _restricted_tool_config(self, cwd: str | Path | None) -> dict[str, Any]:
         response = self._request(

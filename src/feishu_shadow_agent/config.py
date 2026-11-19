@@ -344,7 +344,7 @@ class CodexConfig(StrictModel):
     )
     skills: list[str] = Field(
         default_factory=list,
-        description="Codex-native skill names appended as $name only to a new Task Session prompt.",
+        description="Native Codex skill names to reference in the first turn of a new session.",
     )
 
     @field_validator("skills")

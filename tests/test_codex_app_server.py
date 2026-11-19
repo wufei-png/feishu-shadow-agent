@@ -4,6 +4,7 @@ import json
 import threading
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from pydantic import BaseModel
@@ -36,6 +37,12 @@ for line in sys.stdin:
         emit({'id': ident, 'result': {'config': {'mcp_servers': {'example': {}}}}})
     elif method == 'mcpServerStatus/list':
         emit({'id': ident, 'result': {'data': [{'name': 'example', 'tools': {}}], 'nextCursor': None}})
+    elif method == 'skills/list':
+        emit({'id': ident, 'result': {'data': [{'cwd': params['cwds'][0], 'skills': [
+            {'name': 'docmate', 'enabled': True, 'path': '/skills/docmate/SKILL.md', 'description': 'Documentation QA'},
+            {'name': 'viper-vps-dev', 'enabled': True, 'path': '/skills/viper-vps-dev/SKILL.md', 'description': 'VPS operations'},
+            {'name': 'disabled', 'enabled': False, 'path': '/skills/disabled/SKILL.md'},
+        ]}]}})
     elif method == 'thread/start':
         emit({'id': ident, 'result': {'thread': {'id': 'thread-1'}}})
     elif method == 'thread/resume':
@@ -118,6 +125,65 @@ def test_app_server_resumes_structured_turn_without_replacing_native_settings(
         server.close()
     assert result.ok and result.json_data == {"answer": "ok"}
     assert result.session_id == "existing-session" == thread_ids[0]
+
+
+def test_app_server_places_skills_between_instructions_and_request(
+    tmp_path: Path,
+) -> None:
+    context_path = tmp_path / "reference.md"
+    server = CodexAppServer(
+        config=CodexConfig(path=str(_server_executable(tmp_path)), timeout_seconds=5),
+        skill_names=["docmate", "viper-vps-dev", "disabled"],
+        explicit_context_paths=[str(context_path)],
+        on_notification=lambda _event: None,
+    )
+    server.start()
+    try:
+        with patch.object(server, "_request", wraps=server._request) as request:
+            first = server.run_turn(
+                "first request",
+                session_id=None,
+                cwd=tmp_path,
+                output_model=_Output,
+                on_thread=lambda _: None,
+                instructions="Task and constraints",
+            )
+            resumed = server.run_turn(
+                "follow-up request",
+                session_id=first.session_id,
+                cwd=tmp_path,
+                output_model=_Output,
+                on_thread=lambda _: None,
+                instructions="Follow-up task and constraints",
+            )
+            dry_run = server.run_turn(
+                "dry-run-safety",
+                session_id=None,
+                cwd=tmp_path,
+                output_model=_Output,
+                on_thread=lambda _: None,
+                dry_run_safety=True,
+            )
+    finally:
+        server.close()
+
+    assert first.ok and resumed.ok and dry_run.ok
+    assert [
+        call.args[1] for call in request.call_args_list if call.args[0] == "skills/list"
+    ] == [{"cwds": [str(tmp_path)]}]
+    assert [
+        call.args[1]["input"][0]["text"]
+        for call in request.call_args_list
+        if call.args[0] == "turn/start"
+    ] == [
+        "Task and constraints\n\n与当前请求相关时，读取相应技能。\n"
+        "- docmate（Documentation QA） `/skills/docmate/SKILL.md`\n"
+        "- viper-vps-dev（VPS operations） `/skills/viper-vps-dev/SKILL.md`\n\nfirst request\n\n"
+        "可用的非原生 skills（仅提供路径，尚未加载；需要时先读取对应路径并按其中说明执行）：\n"
+        f"- `{context_path}`",
+        "Follow-up task and constraints\n\nfollow-up request",
+        "dry-run-safety",
+    ]
 
 
 def test_private_memory_settings_apply_on_start_and_resume(tmp_path: Path) -> None:

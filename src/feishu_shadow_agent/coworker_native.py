@@ -52,6 +52,35 @@ from .time_utils import format_instant, parse_instant_or_none, shift_instant, ut
 from .types import LarkCliResult, MessagePage, NormalizedMessage
 
 PRIVATE_TOPIC_PREFIX = "__private__:"
+_DELIVERY_GUIDANCE = "飞书消息由项目统一发布，禁止用工具发送或回复飞书消息。"
+_DRY_RUN_GUIDANCE = "本轮为只读预演。根据已提供的资料起草答复，实际操作留待正式运行。"
+_REPLY_GUIDANCE = (
+    "返回 action=reply 并填写正文，或返回 action=silent 和空正文。"
+    "需要 owner 判断、授权或替其承诺时，设置 approval_required=true 并写明 approval_reason。"
+)
+_CLARIFICATION_GUIDANCE = (
+    "缺少会影响结果的信息时，集中提出必要的澄清问题。"
+    "能独立推进的部分先做，并说明采用的假设。"
+)
+_RECENT_SUPPLEMENTS = 4
+
+
+def _prompt_quote(message: NormalizedMessage) -> dict[str, Any]:
+    # The Feishu body keeps inline attachments scoped to the quoted message.
+    content = message.raw.get("content")
+    quote: dict[str, Any] = {
+        "message_id": message.message_id,
+        "sender_id": message.sender_id,
+        "sender_name": message.sender_name,
+        "sender_type": message.sender_type,
+        "sent_at": message.sent_at,
+        "message_type": message.message_type,
+        "content": content if isinstance(content, (str, dict, list)) else message.text,
+    }
+    for key in ("mentions", "mention_details"):
+        if message.raw.get(key):
+            quote[key] = message.raw[key]
+    return quote
 
 
 def _is_supplement(text: str) -> bool:
@@ -89,14 +118,25 @@ class _ReplyClient(Protocol):
     ) -> LarkCliResult: ...
 
 
-class NativeOutput(BaseModel):
+class _NativeReplyFields(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["reply", "silent", "watch", "unwatch", "topic", "transfer"]
     text: str
-    watch_duration_seconds: int | None = None
     approval_required: bool = False
     approval_reason: str | None = None
+
+
+class NativeReplyOutput(_NativeReplyFields):
+    action: Literal["reply", "silent"]
+
+
+class NativeMainOutput(_NativeReplyFields):
+    action: Literal["reply", "silent", "topic", "transfer"]
+
+
+class NativeWatchOutput(_NativeReplyFields):
+    action: Literal["reply", "silent", "watch", "unwatch"]
+    watch_duration_seconds: int | None = None
 
 
 class SteerDecision(BaseModel):
@@ -173,7 +213,12 @@ class NativeCoworkerService(CoworkerService):
         return row is not None and row[0] == 1
 
     def _classify_followup(
-        self, policy: CoworkerConfig, prompt: str, cwd: str
+        self,
+        policy: CoworkerConfig,
+        prompt: str,
+        cwd: str,
+        *,
+        fallback_prompt: Callable[[], str] | None = None,
     ) -> Literal["current", "unrelated", "uncertain"]:
         runtime = coworker_runtime_config(self.config, policy)
         classifier = CodexAppServer(
@@ -185,30 +230,34 @@ class NativeCoworkerService(CoworkerService):
         )
         try:
             classifier.start()
-            result = classifier.run_turn(
-                prompt,
-                session_id=None,
-                cwd=cwd,
-                output_model=SteerDecision,
-                on_thread=lambda _thread: None,
-                private=True,
-                unload_delay_seconds=1,
-                dry_run_safety=True,
-                turn_timeout_seconds=30,
-                ephemeral=True,
-            )
-        except (AppServerError, OSError):
-            return "uncertain"
+            remaining = 30.0
+            deadline = time.monotonic() + remaining
+            while remaining > 0:
+                result = classifier.run_turn(
+                    prompt,
+                    session_id=None,
+                    cwd=cwd,
+                    output_model=SteerDecision,
+                    on_thread=lambda _thread: None,
+                    private=True,
+                    unload_delay_seconds=1,
+                    dry_run_safety=True,
+                    turn_timeout_seconds=remaining,
+                    ephemeral=True,
+                )
+                if not result.ok:
+                    break
+                decision = SteerDecision.model_validate(result.json_data).decision
+                if decision != "uncertain" or fallback_prompt is None:
+                    return decision
+                prompt = fallback_prompt()
+                fallback_prompt = None
+                remaining = deadline - time.monotonic()
+        except (AppServerError, OSError, ValidationError):
+            pass
         finally:
             classifier.close()
-        try:
-            return (
-                SteerDecision.model_validate(result.json_data).decision
-                if result.ok
-                else "uncertain"
-            )
-        except ValidationError:
-            return "uncertain"
+        return "uncertain"
 
     def on_app_server_notification(self, notification: dict[str, Any]) -> None:
         method = notification.get("method")
@@ -427,6 +476,29 @@ class NativeCoworkerService(CoworkerService):
             return False
         return super().maintain_memory_if_due()
 
+    def _reply_instructions(self) -> str:
+        execution = (
+            _DRY_RUN_GUIDANCE
+            if self.execution_mode == "dry_run"
+            else "按需使用原生工具完成请求。任务适合拆分时可使用子 Agent。"
+        )
+        return (
+            "你是飞书 AI 同事。"
+            + _DELIVERY_GUIDANCE
+            + execution
+            + _REPLY_GUIDANCE
+            + _CLARIFICATION_GUIDANCE
+        )
+
+    def _group_instructions(self, policy: CoworkerConfig) -> str:
+        if self.execution_mode == "dry_run":
+            return "本轮仅使用本群资料。"
+        return (
+            "本轮仅使用本群资料。明确要求记住时，写入本群专用记忆 "
+            f"{self.shared_memory(policy).path}。"
+            "可用时按需调用 read_feishu_topic 或 read_feishu_group_history 查看本群讨论。"
+        )
+
     def run_memory_task(
         self, backend: CoworkerBackend, prompt: str, cwd: Path
     ) -> AgentRunResult:
@@ -436,7 +508,7 @@ class NativeCoworkerService(CoworkerService):
         runtime = coworker_runtime_config(self.config, policy)
         server = CodexAppServer(
             config=runtime.agent_backend.codex,
-            skill_names=runtime.agent_backend.codex.skills,
+            skill_names=[],
             explicit_context_paths=runtime.agent_backend.explicit_context.paths,
             on_notification=lambda _event: None,
             on_read_group=self.read_memory_history,
@@ -444,12 +516,15 @@ class NativeCoworkerService(CoworkerService):
         server.start()
         try:
             return server.run_turn(
-                prompt + "\n只整理本群资料和本群记忆，不读取私聊资料或私聊笔记。"
-                "通过 read_feishu_group_history 按需读取本群历史。",
+                prompt,
                 session_id=None,
                 cwd=cwd,
                 output_model=None,
                 on_thread=lambda _thread: None,
+                instructions=(
+                    "只整理本群资料和本群记忆，不读取私聊资料或私聊笔记。"
+                    "通过 read_feishu_group_history 按需读取本群历史。"
+                ),
                 private=True,
                 unload_delay_seconds=1,
             )
@@ -682,28 +757,52 @@ class NativeCoworkerService(CoworkerService):
             if origin_message is None:
                 self.events.finish_steer(event.id, retry=True)
                 return False
+            current_request = {
+                key: origin_message[key] for key in ("message_id", "sender_id", "text")
+            }
+            supplements = {
+                item["message_id"]: dict(item)
+                for item in (*inherited, *accepted)
+                if item["message_id"] != current_request["message_id"]
+            }
+            recent_ids = {*list(supplements)[-_RECENT_SUPPLEMENTS:], parent}
+            recent = [item for key, item in supplements.items() if key in recent_ids]
+            new_message = _prompt_message(message) | {"reply_to_message_id": parent}
+
+            def classification_prompt(*, use_full_context: bool) -> str:
+                instructions = (
+                    "判断新消息是否明确补充或更正当前任务。属于当前任务返回 current。"
+                    "另一个任务返回 unrelated。证据不足时返回 uncertain。"
+                )
+                if not use_full_context:
+                    instructions += "已接受的补充仅列出与直接引用有关的条目和近期条目。"
+                return (
+                    instructions
+                    + "\n"
+                    + _code_block(
+                        json.dumps(
+                            {
+                                "current_request": current_request,
+                                "accepted_supplements": list(supplements.values())
+                                if use_full_context
+                                else recent,
+                                "new_message": new_message,
+                            },
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        "json",
+                    )
+                )
+
+            has_full_context = len(recent) == len(supplements)
             classification = self._classify_followup(
                 policy,
-                "判断新消息是否明确补充或更正当前任务。属于当前任务返回 current；"
-                "另一个任务返回 unrelated；无法确定返回 uncertain。\n"
-                + _code_block(
-                    json.dumps(
-                        {
-                            "current_request": {
-                                "message_id": origin_message["message_id"],
-                                "sender_id": origin_message["sender_id"],
-                                "text": origin_message["text"],
-                            },
-                            "accepted_supplements": [
-                                dict(item) for item in (*inherited, *accepted)
-                            ],
-                            "new_message": _prompt_message(message),
-                        },
-                        ensure_ascii=False,
-                    ),
-                    "json",
-                ),
+                classification_prompt(use_full_context=has_full_context),
                 str(current["agent_working_dir"]),
+                fallback_prompt=None
+                if has_full_context
+                else lambda: classification_prompt(use_full_context=True),
             )
             if classification != "current":
                 self.events.skip_native_steer(event.id)
@@ -1160,56 +1259,52 @@ class NativeCoworkerService(CoworkerService):
         }
         if batch_messages:
             details["watched_updates"] = batch_messages
-        prompt = (
-            "你是飞书 AI 同事。使用原生工具和子 Agent 完成请求；项目负责发布最终答复。"
-            "飞书消息只能由项目发布，不要使用工具自行发送或回复。"
-            "返回 action=reply 和自然文本，或 action=silent。"
-            "需要 owner 判断、授权或替其承诺时，设置 approval_required=true 并写明 approval_reason。"
-            "对关注产生的普通发言，只在相关时回复。\n"
-            + _code_block(json.dumps(details, ensure_ascii=False), "json")
-        )
-        if (
+        group_main = not private and event.topic_key == GROUP_MAIN_KEY
+        can_watch = (
             not private
-            and event.topic_key != GROUP_MAIN_KEY
+            and not group_main
             and message.sender_id == self.config.owner.open_id
-        ):
-            prompt += (
+        )
+        output_model = (
+            NativeMainOutput
+            if group_main
+            else NativeWatchOutput
+            if can_watch
+            else NativeReplyOutput
+        )
+        instructions = self._reply_instructions()
+        if watch_trigger:
+            instructions += "\n对关注产生的普通发言，只在相关时回复。"
+        if can_watch:
+            instructions += (
                 "\nowner 明确要求关注或取消关注本话题时，返回 watch 或 unwatch，并填写确认正文。"
                 "关注默认 24 小时，指定 watch_duration_seconds 时须为正数。"
             )
         if _mapping(event.raw.get("_runtime")).get("previous_unpublished") is True:
-            prompt += "\n上一轮答复尚未发布，请结合补充重新完成并答复当前任务。"
-        if not private and event.topic_key == GROUP_MAIN_KEY:
+            instructions += "\n上一轮答复尚未发布，请结合补充重新完成并答复当前任务。"
+        if group_main:
             choices = {
                 "quote": "默认引用原消息回复；明确要求开话题时选择话题。",
                 "topic": "主区新请求使用话题回复。",
                 "auto": "根据任务选择引用回复或使用话题。",
             }
-            prompt += (
+            instructions += (
                 "\n"
                 + choices[self.reply_mode]
                 + "一次即可完成的结果可用 action=topic 在话题发布；需要在话题持续处理或明确要求开题时，"
                 "先只返回 action=transfer 和简短接单内容，说明本任务的已知进展，话题建立后再执行任务。"
             )
         if private:
-            notes = resolve_relative_path(policy.shared_memory_path, self.base_dir)
-            suffix = (
-                ".private.dry-run" if self.execution_mode == "dry_run" else ".private"
-            )
-            notes = notes.with_name(notes.name + suffix)
-            prompt += (
-                "\n这是 owner 私聊；仅在明确要求记住时写入私聊笔记 "
-                + str(notes)
-                + "。不要向转发来源发送消息；目标不清楚时询问。"
-            )
-        else:
-            prompt += (
-                "\n群内答复和整理使用本群资料；明确要求记住时使用本群专用记忆 "
-                + str(self.shared_memory(policy).path)
-                + "，不要读取私聊笔记。"
-            )
+            instructions += "\n这是 owner 私聊。不要向转发来源发送消息。"
             if self.execution_mode != "dry_run":
-                prompt += "按需使用 read_feishu_topic 读取本群话题，或使用 read_feishu_group_history 读取本群历史。"
+                notes = resolve_relative_path(policy.shared_memory_path, self.base_dir)
+                notes = notes.with_name(notes.name + ".private")
+                instructions += f"仅在明确要求记住时，写入私聊笔记 {notes}。"
+        else:
+            instructions += "\n" + self._group_instructions(policy)
+        prompt = "## 当前请求\n\n" + _code_block(
+            json.dumps(details, ensure_ascii=False), "json"
+        )
         quote_source = None
         if parent_id:
             quote = self._read_quote(parent_id, event.chat_id, bot, private=private)
@@ -1223,10 +1318,11 @@ class NativeCoworkerService(CoworkerService):
             prompt,
             session_id=session.backend_session_id,
             cwd=session.agent_working_dir,
-            output_model=NativeOutput,
+            output_model=output_model,
             on_thread=lambda thread_id: self._register_native_root(
                 thread_id, session.id, event.id, bot
             ),
+            instructions=instructions,
             private=True,
             unload_delay_seconds=1,
             dry_run_safety=self.execution_mode == "dry_run",
@@ -1242,7 +1338,7 @@ class NativeCoworkerService(CoworkerService):
             if activation is None:
                 raise ValueError("group activation is unavailable")
             self._check_current_policy(policy, event.chat_id, activation)
-        output = NativeOutput.model_validate(result.json_data)
+        output = output_model.model_validate(result.json_data)
         with self._session_lock(session.id):
             self._reserve_publication(session.id, event.id)
             if self._turn_superseded(event.id):
@@ -1269,19 +1365,6 @@ class NativeCoworkerService(CoworkerService):
                         event.id, batch, batch_snapshots
                     )
                 return
-            if output.action in {"watch", "unwatch"}:
-                if (
-                    private
-                    or event.topic_key == GROUP_MAIN_KEY
-                    or message.sender_id != self.config.owner.open_id
-                ):
-                    raise ValueError("only the owner can change a real topic watch")
-                if (
-                    output.action == "watch"
-                    and output.watch_duration_seconds is not None
-                    and output.watch_duration_seconds <= 0
-                ):
-                    raise ValueError("watch duration must be positive")
             composed = SendComposer(owner_open_id=self.config.owner.open_id).compose(
                 proposed_reply=output.text,
                 reply_target=None,
@@ -1289,22 +1372,26 @@ class NativeCoworkerService(CoworkerService):
             )
             if composed.had_forbidden_mentions or not composed.text:
                 raise ValueError("reply is empty or contains an unauthorized mention")
-            if output.action in {"topic", "transfer"} and (
-                private or event.topic_key != GROUP_MAIN_KEY
-            ):
-                raise ValueError("only group main messages can open a new topic")
             purpose = (
                 output.action if output.action in {"topic", "transfer"} else "reply"
             )
             if (
                 purpose == "reply"
                 and output.action == "reply"
-                and not private
-                and event.topic_key == GROUP_MAIN_KEY
+                and group_main
                 and self.reply_mode == "topic"
             ):
                 purpose = "topic"
-            if output.action in {"watch", "unwatch"}:
+            if isinstance(output, NativeWatchOutput) and output.action in {
+                "watch",
+                "unwatch",
+            }:
+                if (
+                    output.action == "watch"
+                    and output.watch_duration_seconds is not None
+                    and output.watch_duration_seconds <= 0
+                ):
+                    raise ValueError("watch duration must be positive")
                 sources = [
                     (
                         message.message_id,
@@ -1476,7 +1563,7 @@ class NativeCoworkerService(CoworkerService):
             evidence = snapshot_evidence(supplement.raw)
             context_snapshots[supplement.message_id] = evidence
             if supplement.message_id == parent:
-                quoted_message = supplement.raw
+                quoted_message = _prompt_quote(supplement)
                 quote_source = (supplement.message_id, saved.revision, evidence)
             else:
                 supplements.append(_prompt_message(supplement))
@@ -1495,15 +1582,14 @@ class NativeCoworkerService(CoworkerService):
             raise ValueError("new topic already has a Codex session")
         if self.app_server is None:
             raise RuntimeError("Codex app-server is unavailable")
-        prompt = (
-            "飞书话题已经建立并确认接单。现在处理以下请求，按需使用原生工具和子 Agent；"
-            "项目负责在本话题发布最终回复，不要使用工具自行发送或回复飞书消息。只使用群资料；明确记住时写入本群记忆 "
-            + str(self.shared_memory(policy).path)
-            + "，不要读取私聊笔记。返回 action=reply 和自然文本，或 action=silent；"
-            "需要 owner 判断、授权或替其承诺时设置 approval_required=true 并写明 approval_reason。\n"
-            + _code_block(
-                json.dumps(_prompt_message(message), ensure_ascii=False), "json"
-            )
+        instructions = (
+            "飞书话题已经建立并确认接单。"
+            + self._reply_instructions()
+            + "\n"
+            + self._group_instructions(policy)
+        )
+        prompt = "## 当前请求\n\n" + _code_block(
+            json.dumps(_prompt_message(message), ensure_ascii=False), "json"
         )
         prompt += "\n已发送的接单内容：\n" + _code_block(str(row["acknowledgement"]))
         if supplements:
@@ -1523,10 +1609,11 @@ class NativeCoworkerService(CoworkerService):
             prompt,
             session_id=None,
             cwd=session.agent_working_dir,
-            output_model=NativeOutput,
+            output_model=NativeReplyOutput,
             on_thread=lambda thread_id: self._register_native_root(
                 thread_id, session.id, event.id, str(bot)
             ),
+            instructions=instructions,
             private=True,
             unload_delay_seconds=1,
             dry_run_safety=self.execution_mode == "dry_run",
@@ -1534,11 +1621,9 @@ class NativeCoworkerService(CoworkerService):
         if not result.ok:
             raise RuntimeError(result.error or "topic transfer turn failed")
         self._check_current_policy(policy, event.chat_id, activation)
-        output = NativeOutput.model_validate(result.json_data)
+        output = NativeReplyOutput.model_validate(result.json_data)
         if output.action == "silent":
             return
-        if output.action != "reply":
-            raise ValueError("topic transfer must produce a reply or remain silent")
         composed = SendComposer(owner_open_id=self.config.owner.open_id).compose(
             proposed_reply=output.text, reply_target=None, chat_type="group"
         )
@@ -1827,9 +1912,12 @@ class NativeCoworkerService(CoworkerService):
             "outcome": internal.get("outcome"),
         }
         prompt = (
-            "子 Agent 已结束。查看结果并判断是否需要回复；项目发布最终答复，不要用工具发送飞书消息。"
+            "子 Agent 已结束。查看结果并判断是否需要回复。"
             "根据当前原请求判断子 Agent 的结果是否仍然适用。"
-            "返回 action=reply 和自然文本，或 action=silent；需要 owner 判断或授权时设置 approval_required=true。\n"
+            + _DELIVERY_GUIDANCE
+            + (_DRY_RUN_GUIDANCE if self.execution_mode == "dry_run" else "")
+            + _REPLY_GUIDANCE
+            + "\n"
             + _code_block(json.dumps(notice, ensure_ascii=False), "json")
         )
         self.events.mark_agent_started(event.id)
@@ -1837,7 +1925,7 @@ class NativeCoworkerService(CoworkerService):
             prompt,
             session_id=session.backend_session_id,
             cwd=session.agent_working_dir,
-            output_model=NativeOutput,
+            output_model=NativeReplyOutput,
             on_thread=lambda thread_id: self._register_native_root(
                 thread_id, session.id, origin_id, bot
             ),
@@ -1854,11 +1942,9 @@ class NativeCoworkerService(CoworkerService):
             if activation is None:
                 raise ValueError("group activation is unavailable")
             self._check_current_policy(policy, event.chat_id, activation)
-        output = NativeOutput.model_validate(result.json_data)
+        output = NativeReplyOutput.model_validate(result.json_data)
         if output.action == "silent":
             return
-        if output.action != "reply":
-            raise ValueError("a child completion cannot change a topic watch")
         composed = SendComposer(owner_open_id=self.config.owner.open_id).compose(
             proposed_reply=output.text,
             reply_target=None,
@@ -1955,7 +2041,7 @@ class NativeCoworkerService(CoworkerService):
             revision = int(stored["revision"])
         else:
             return None
-        return item, (
+        return _prompt_quote(message), (
             message_id,
             revision,
             {

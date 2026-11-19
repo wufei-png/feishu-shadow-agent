@@ -7,6 +7,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Literal, cast
 
 import pytest
@@ -22,6 +23,9 @@ from feishu_shadow_agent.config import (
 from feishu_shadow_agent.coworker_native import (
     NativeCoworkerService,
     NativeCoworkerWorker,
+    NativeMainOutput,
+    NativeReplyOutput,
+    NativeWatchOutput,
     SteerDecision,
 )
 from feishu_shadow_agent.dispatcher import Dispatcher, DispatchSummary
@@ -124,6 +128,7 @@ class FakeServer:
     def __init__(self) -> None:
         self.sessions: list[str | None] = []
         self.prompts: list[str] = []
+        self.output_models: list[object] = []
         self.private: list[bool] = []
         self.outputs: list[dict[str, Any]] = []
         self.decisions: list[str] = []
@@ -147,6 +152,7 @@ class FakeServer:
         cwd: str,
         output_model: object,
         on_thread: Any,
+        instructions: str = "",
         private: bool = False,
         unload_delay_seconds: int | None = None,
         dry_run_safety: bool = False,
@@ -155,14 +161,15 @@ class FakeServer:
     ) -> AgentRunResult:
         if output_model is SteerDecision:
             assert session_id is None and private and dry_run_safety and ephemeral
-            assert turn_timeout_seconds == 30
+            assert turn_timeout_seconds is not None and 0 < turn_timeout_seconds <= 30
             self.classification_prompts.append(prompt)
             decision = self.decisions.pop(0) if self.decisions else "current"
             return AgentRunResult(
                 argv=[], exit_code=0, json_data={"decision": decision}
             )
         self.sessions.append(session_id)
-        self.prompts.append(prompt)
+        self.output_models.append(output_model)
+        self.prompts.append(f"{instructions}\n\n{prompt}" if instructions else prompt)
         self.private.append(private)
         result_id = session_id or f"session-{len(self.sessions)}"
         on_thread(result_id)
@@ -193,6 +200,7 @@ class BlockingNativeServer(FakeServer):
         cwd: str,
         output_model: object,
         on_thread: Any,
+        instructions: str = "",
         private: bool = False,
         unload_delay_seconds: int | None = None,
         dry_run_safety: bool = False,
@@ -206,13 +214,14 @@ class BlockingNativeServer(FakeServer):
                 cwd=cwd,
                 output_model=output_model,
                 on_thread=on_thread,
+                instructions=instructions,
                 private=private,
                 unload_delay_seconds=unload_delay_seconds,
                 dry_run_safety=dry_run_safety,
                 turn_timeout_seconds=turn_timeout_seconds,
                 ephemeral=ephemeral,
             )
-        self.prompts.append(prompt)
+        self.prompts.append(f"{instructions}\n\n{prompt}" if instructions else prompt)
         thread_id = session_id or "active-session"
         on_thread(thread_id)
         self.started.set()
@@ -246,29 +255,34 @@ class BlockingNativeServer(FakeServer):
 
 class FakeNativeCoworkerService(NativeCoworkerService):
     def _classify_followup(
-        self, policy: CoworkerConfig, prompt: str, cwd: str
+        self,
+        policy: CoworkerConfig,
+        prompt: str,
+        cwd: str,
+        *,
+        fallback_prompt: Callable[[], str] | None = None,
     ) -> Literal["current", "unrelated", "uncertain"]:
         assert self.app_server is not None
-        result = self.app_server.run_turn(
-            prompt,
-            session_id=None,
-            cwd=cwd,
-            output_model=SteerDecision,
-            on_thread=lambda _thread: None,
-            private=True,
-            unload_delay_seconds=1,
-            dry_run_safety=True,
-            turn_timeout_seconds=30,
-            ephemeral=True,
-        )
-        try:
-            return (
-                SteerDecision.model_validate(result.json_data).decision
-                if result.ok
-                else "uncertain"
+        while True:
+            result = self.app_server.run_turn(
+                prompt,
+                session_id=None,
+                cwd=cwd,
+                output_model=SteerDecision,
+                on_thread=lambda _thread: None,
+                private=True,
+                unload_delay_seconds=1,
+                dry_run_safety=True,
+                turn_timeout_seconds=30,
+                ephemeral=True,
             )
-        except ValueError:
-            return "uncertain"
+            if not result.ok:
+                return "uncertain"
+            decision = SteerDecision.model_validate(result.json_data).decision
+            if decision != "uncertain" or fallback_prompt is None:
+                return decision
+            prompt = fallback_prompt()
+            fallback_prompt = None
 
 
 def _service(
@@ -517,6 +531,14 @@ def test_main_and_topic_sessions_and_dry_run_receipts(tmp_path: Path) -> None:
     _receive(service, feishu, "topic", location="thread")
     assert service.process_next() and service.process_next()
     assert server.sessions == [None, "session-1", None]
+    assert server.output_models == [
+        NativeMainOutput,
+        NativeMainOutput,
+        NativeReplyOutput,
+    ]
+    assert all("子 Agent" not in prompt for prompt in server.prompts)
+    assert all("本轮为只读预演" in prompt for prompt in server.prompts)
+    assert all("写入本群专用记忆" not in prompt for prompt in server.prompts)
     assert feishu.replies[-1]["reply_in_thread"] is True
     with service.store.connect() as conn:
         assert [
@@ -1004,7 +1026,9 @@ def test_child_completion_returns_to_own_session_and_source(tmp_path: Path) -> N
         )
     assert service.process_next() and service.process_next()
     assert server.sessions == [None, "session-1"]
+    assert server.output_models[-1] is NativeReplyOutput
     assert "internal_subagent_completion" in server.prompts[1]
+    assert "禁止用工具发送或回复飞书消息" in server.prompts[1]
     assert "changed request after the child started" in server.prompts[1]
     assert feishu.replies[-1]["message_id"] == "first"
     with service.store.connect() as conn:
@@ -1198,7 +1222,8 @@ def test_owner_private_forwards_start_separate_sessions_and_quote_resumes(
     assert server.sessions == [None, None, "session-1"]
     assert server.private == [True, True, True]
     assert "forwarded content forward-one" in server.prompts[2]
-    assert ".private.dry-run" in server.prompts[0]
+    assert "本轮为只读预演" in server.prompts[0]
+    assert "写入私聊笔记" not in server.prompts[0]
     assert all(call["dry_run"] for call in feishu.replies)
 
 
@@ -1339,14 +1364,48 @@ def test_group_quote_is_scoped_and_checked_before_delivery(
         "chat_id": "group" if changed_quote else "other-group",
         "content": "unique quote text",
         "msg_type": "text",
+        "unused_transport_metadata": "raw-only",
     }
     _receive(service, feishu, "request", location="thread", parent="quoted")
     assert service.process_next()
     assert ("unique quote text" in server.prompts[-1]) == changed_quote
+    assert "unused_transport_metadata" not in server.prompts[-1]
     if changed_quote:
         feishu.messages["quoted"]["content"] = "edited quote"
     assert service.process_next()
     assert feishu.sent == (0 if changed_quote else 1)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"status":"failed"}',
+        '{"text":"example","version":2}',
+        {"title": "附件说明", "content": [[{"tag": "text", "text": "完整正文"}]]},
+        '<file key="file_quote" name="example.pdf"/>',
+    ],
+)
+def test_group_quote_preserves_own_body_and_author(
+    tmp_path: Path, content: object
+) -> None:
+    service, feishu, server = _service(tmp_path)
+    feishu.messages["quoted"] = {
+        "message_id": "quoted",
+        "chat_id": "group",
+        "content": content,
+        "msg_type": "text",
+        "sender": {"id": "author", "name": "引用作者"},
+        "thread_replies": [
+            {"message_id": "reply", "content": {"file_key": "file_unrelated"}}
+        ],
+    }
+    _receive(service, feishu, "request", location="thread", parent="quoted")
+    assert service.process_next()
+    quote_body = server.prompts[-1].split("\n引用内容：\n```json\n", 1)[1]
+    quote = json.loads(quote_body.removesuffix("\n```"))
+    assert quote["message_id"] == "quoted" and quote["content"] == content
+    assert quote["sender_id"] == "author" and quote["sender_name"] == "引用作者"
+    assert "file_unrelated" not in server.prompts[-1]
 
 
 @pytest.mark.parametrize("root_silent", [False, True])
@@ -1434,6 +1493,7 @@ def test_owner_can_watch_real_topic_and_expiry_stops_unmentioned_messages(
     )
     _receive(service, feishu, "watch", location="thread", sender="owner")
     assert service.process_next() and service.process_next()
+    assert server.output_models[-1] is NativeWatchOutput
     server.outputs.append({"action": "silent", "text": ""})
     _receive(service, feishu, "update", mention=False, location="thread")
     assert service.process_next()
@@ -2086,6 +2146,7 @@ def test_only_explicit_supplement_to_current_request_is_steered(tmp_path: Path) 
             cwd: str,
             output_model: object,
             on_thread: Any,
+            instructions: str = "",
             private: bool = False,
             unload_delay_seconds: int | None = None,
             dry_run_safety: bool = False,
@@ -2099,6 +2160,7 @@ def test_only_explicit_supplement_to_current_request_is_steered(tmp_path: Path) 
                     cwd=cwd,
                     output_model=output_model,
                     on_thread=on_thread,
+                    instructions=instructions,
                     private=private,
                     unload_delay_seconds=unload_delay_seconds,
                     dry_run_safety=dry_run_safety,
@@ -2420,6 +2482,62 @@ def test_followup_changed_during_classification_is_not_steered_from_old_text(
     assert state == "completed"
     if change == "text":
         assert any("版本应为 3.0" in prompt for prompt in server.prompts)
+
+
+def test_followup_classification_preserves_old_direct_quote_and_can_use_full_context(
+    tmp_path: Path,
+) -> None:
+    service, feishu, _ = _service(tmp_path)
+    server = BlockingNativeServer()
+    service.app_server = server  # type: ignore[assignment]
+    _receive(service, feishu, "request", location="thread")
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    try:
+        for index in range(6):
+            _receive(
+                service,
+                feishu,
+                f"update-{index}",
+                location="thread",
+                parent="request",
+                mention=False,
+                text=f"补充线索 {index}",
+            )
+            assert service.process_next() and service.process_next_steer()
+
+        server.decisions.extend(["uncertain", "current"])
+        _receive(
+            service,
+            feishu,
+            "followup",
+            location="thread",
+            parent="update-0",
+            mention=False,
+            text="确认使用这条补充。",
+        )
+        assert service.process_next() and service.process_next_steer()
+        compact, full = [
+            json.loads(prompt.split("```json\n", 1)[1].rsplit("\n```", 1)[0])
+            for prompt in server.classification_prompts[-2:]
+        ]
+        assert compact["new_message"]["reply_to_message_id"] == "update-0"
+        assert [item["message_id"] for item in compact["accepted_supplements"]] == [
+            "update-0",
+            "update-2",
+            "update-3",
+            "update-4",
+            "update-5",
+        ]
+        assert [item["message_id"] for item in full["accepted_supplements"]] == [
+            f"update-{index}" for index in range(6)
+        ]
+        assert "确认使用这条补充" in server.steers[-1]
+    finally:
+        server.release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
 
 
 @pytest.mark.parametrize("finish_before_steer", [False, True])
@@ -3307,6 +3425,7 @@ def test_followup_classifier_uses_isolated_notifications_and_closes(
     assert policy is not None
     outcome = "current"
     closed: list[str] = []
+    budgets: dict[str, float] = {}
 
     class IsolatedServer:
         def __init__(self, *, on_notification: Any, **kwargs: Any) -> None:
@@ -3324,12 +3443,16 @@ def test_followup_classifier_uses_isolated_notifications_and_closes(
             if outcome == "failure":
                 raise AppServerError("start failed")
 
-        def run_turn(self, _prompt: str, **kwargs: Any) -> AgentRunResult:
-            assert kwargs["dry_run_safety"] and kwargs["turn_timeout_seconds"] == 30
+        def run_turn(self, prompt: str, **kwargs: Any) -> AgentRunResult:
+            assert kwargs["dry_run_safety"] and 0 < kwargs["turn_timeout_seconds"] <= 30
             assert kwargs["ephemeral"]
+            budgets[prompt] = kwargs["turn_timeout_seconds"]
             if outcome == "timeout":
                 return AgentRunResult(argv=[], exit_code=None, timed_out=True)
-            return AgentRunResult(argv=[], exit_code=0, json_data={"decision": outcome})
+            decision = "current" if prompt == "full context" else outcome
+            return AgentRunResult(
+                argv=[], exit_code=0, json_data={"decision": decision}
+            )
 
         def close(self) -> None:
             self.notify(
@@ -3359,6 +3482,25 @@ def test_followup_classifier_uses_isolated_notifications_and_closes(
         )
         assert closed[-1] == outcome
     assert len(closed) == 263
+    outcome = "uncertain"
+    clock = iter((10.0, 18.0))
+    with monkeypatch.context() as mocked:
+        mocked.setattr(
+            "feishu_shadow_agent.coworker_native.time",
+            SimpleNamespace(monotonic=clock.__next__),
+        )
+        assert (
+            NativeCoworkerService._classify_followup(  # pyright: ignore[reportPrivateUsage]
+                service,
+                policy,
+                "classify",
+                str(tmp_path),
+                fallback_prompt=lambda: "full context",
+            )
+            == "current"
+        )
+    assert budgets == {"classify": 30, "full context": 22}
+    assert len(closed) == 264
     assert not service._child_turns  # pyright: ignore[reportPrivateUsage]
 
 
@@ -3827,6 +3969,10 @@ def test_transfer_waits_for_topic_receipt_then_starts_separate_session(
     assert len(server.prompts) == 1 and feishu.sent == 1
     assert service.process_next() and service.process_next()
     assert server.sessions == [None, None]
+    assert server.output_models == [NativeMainOutput, NativeReplyOutput]
+    assert "集中提出必要的澄清问题" in server.prompts[-1]
+    assert "写入本群专用记忆" in server.prompts[-1]
+    assert all("禁止用工具发送或回复飞书消息" in prompt for prompt in server.prompts)
     assert feishu.replies[-1]["message_id"] == "sent-1"
     assert feishu.replies[-1]["reply_in_thread"] is True
     with service.store.connect() as conn:
@@ -3916,7 +4062,7 @@ def test_quoted_followup_selects_matching_pending_origin(
             self.release_topic = threading.Event()
 
         def run_turn(self, prompt: str, **kwargs: Any) -> AgentRunResult:
-            if "飞书话题已经建立" in prompt:
+            if "飞书话题已经建立" in kwargs.get("instructions", ""):
                 self.topic_started.set()
                 assert self.release_topic.wait(timeout=5)
             return super().run_turn(prompt, **kwargs)
@@ -4544,4 +4690,4 @@ def test_native_memory_maintenance_disables_shared_native_memory(
     backend = service.backend_factory(service.config, policy, service.base_dir)
     assert service.run_memory_task(backend, "整理", tmp_path / "workspace").ok
     assert observed["private"] is True and observed["started"] and observed["closed"]
-    assert "只整理本群资料" in observed["prompt"]
+    assert "只整理本群资料" in observed["instructions"]

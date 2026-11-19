@@ -73,8 +73,19 @@ display:
 memory:
   memory_enabled: false
   user_profile_enabled: false
+platform_toolsets:
+  feishu: [web, browser, vision, terminal, file, skills, clarify, delegation, cronjob, feishu_doc, feishu_drive]
+  cron: [web, browser, vision, terminal, file, skills, delegation, feishu_doc, feishu_drive]
+platform_hints:
+  feishu:
+    replace: 飞书答复支持 Markdown。需要随答复发送本地附件时，使用 MEDIA:/absolute/path/to/file。
 agent:
-  disabled_toolsets: [session_search]
+  disabled_toolsets: [session_search, code_execution, computer_use, connections, image_gen, kanban, memory, todo, tts]
+  tool_use_enforcement: false
+  execution_guidance: false
+  task_completion_guidance: false
+  environment_probe: false
+  bot_mode_protocol: false
 ```
 
 父会话使用 `gpt-6-luna`，原生子 Agent 默认继承该模型。测试群成员通过 @ 触发；引用机器人回复时也 @ 机器人。`group_allowed_chats` 授权该群，`group_rules` 控制群成员及 @ 触发，`admins` 留空以免绕过群规则。需要限制特定群成员时，可将该群的 `policy` 改为 `allowlist` 并列出成员 ID。私聊沿用 Hermes 的一对一会话，用 `/new` 切分。需要跨会话回忆时，先确定群聊和私聊在该 profile 内的可见范围。定期检查使用 Hermes 原生 `/loop`。
@@ -102,7 +113,7 @@ hermes -p coworker dashboard --host 127.0.0.1 --port 9119 --no-open
 
 需要远程操作时，使用 SSH 转发本机端口。Hermes 的 Dashboard、CLI、TUI 或 Desktop 显示和续接其原生会话；项目 Console 显示项目持有的状态。
 
-项目启动入口不接受 `--config`、`--mode` 或 `--reply-mode`；这些设置由 Hermes profile 管理。profile 的 `SOUL.md` 是 Hermes 的身份提示，新会话会读取该文件。
+项目启动入口不接受 `--config`、`--mode` 或 `--reply-mode`；这些设置由 Hermes profile 管理。`SOUL.md` 定义飞书同事的职责、资料范围和协作方式，新会话读取该文件。建议保持简短，把可选流程放在按需读取的技能中。飞书会话使用 `platform_toolsets.feishu`。独立定时任务默认使用 `platform_toolsets.cron`，任务自选工具组仍受 `agent.disabled_toolsets` 限制。技能索引可通过 `skills.disabled` 精简。
 
 Hermes 默认使用 `display.busy_input_mode: interrupt`。需要后续输入依次执行时，可在 profile 中设为 `queue`。飞书撤回事件目前由适配器记录，已入队的快照和已运行的任务由 Gateway 管理。可用原生 `/stop` 终止当前会话的工作。
 

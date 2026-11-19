@@ -24,7 +24,7 @@
 ### 关注、私聊与人工接手
 
 - **关注。** 仅 owner 可以明确开启或取消指定的真实话题关注。默认 24 小时，可指定期限。复用现有飞书入站和话题队列，合并密集消息为一次增量判断，只有相关变化才回原话题。到期或取消后，@ 和引用仍可续接。无 @ 的关注依赖相应事件权限，涉及其他机器人发言时单独验收。 [飞书消息事件权限](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/guide/faq)
-- **私聊。** 仅接收 owner 与机器人的私聊。每次未引用的新请求开启独立会话，包括单条和合并转发；引用对应的转发或机器人回复续接。转发内容保留可取得的原文与来源，目标不清楚时由 Agent 问一句。回复保持在该私聊，默认不向转发来源发送消息。明确要求记住时写入私聊专用笔记。群整理只使用群资料，私聊轮次不进入共享的原生记忆积累。实现前用实际 Codex 版本核实关闭共享记忆读写的生效方式，并覆盖首次启动和恢复。 [Codex 本地记忆](https://learn.chatgpt.com/docs/customization/memories)
+- **私聊。** 仅接收 owner 与机器人的私聊。每次未引用的新请求开启独立会话，包括单条和合并转发。引用对应的转发或机器人回复时续接。转发内容保留可取得的原文与来源，目标不清楚时由 Agent 集中提出必要的澄清问题。回复保持在该私聊，默认不向转发来源发送消息。明确要求记住时写入私聊专用笔记。群整理只使用群资料，私聊轮次不进入共享的原生记忆积累。实现前用实际 Codex 版本核实关闭共享记忆读写的生效方式，并覆盖首次启动和恢复。 [Codex 本地记忆](https://learn.chatgpt.com/docs/customization/memories)
 - **人工接手。** 暂停选中会话的自动领取和 steering，继续接收入队；等主轮和原生子 Agent 收尾，确认 App Server 已释放该线程。操作员在原工作目录运行 `codex --no-daemon resume <UUID>`。操作员退出并交还后，daemon 从原生存储重新加载同一 UUID，再处理积压。其他话题照常运行。Console 或 CLI 展示可验证的暂停、就绪、恢复状态和接手命令。 [App Server 线程释放](https://learn.chatgpt.com/docs/app-server#unsubscribe-from-a-loaded-thread)
 - **上下文与提示词。** 每轮只提供身份、触发原因、当前消息、直接引用与所在位置，以及需要的通道指令。历史和记忆按需取用，沿用原生规则、skills 和压缩。恢复只在需要时加载，调用方不用读取完整历史时使用当前版本支持的精简 `thread/resume`。新配置默认关闭群记忆每日整理，保留显式写入及整理开关，已生效的 SQLite 设置照旧。 [App Server 恢复接口](https://learn.chatgpt.com/docs/app-server#start-or-resume-a-thread)
 
