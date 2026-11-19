@@ -18,6 +18,26 @@ SUBAGENT_EVENT_PREFIX = "internal:subagent:"
 CACHED_HISTORY_EVENT_ID = "internal:history"
 
 
+def _associate_queued_replies(
+    conn: sqlite3.Connection,
+    *,
+    origin_event_id: int,
+    app_id: str,
+    chat_id: str,
+    parent_id: str,
+) -> None:
+    conn.execute(
+        """UPDATE coworker_events SET raw_json = json_set(raw_json,
+             '$._runtime.followup_origin', ?, '$._runtime.followup_parent', ?)
+           WHERE app_id = ? AND chat_id = ? AND runtime = 'native' AND id != ?
+             AND status IN ('queued', 'processing') AND json_valid(raw_json)
+             AND json_extract(raw_json, '$._runtime.followup_origin') IS NULL
+             AND COALESCE(NULLIF(json_extract(raw_json, '$.event.event.message.parent_id'), ''),
+               NULLIF(json_extract(raw_json, '$.event.event.message.reply_to_message_id'), '')) = ?""",
+        (origin_event_id, parent_id, app_id, chat_id, origin_event_id, parent_id),
+    )
+
+
 @dataclass(frozen=True)
 class CoworkerEvent:
     id: int
@@ -608,22 +628,12 @@ class CoworkerStore:
             for parent in parents:
                 if not isinstance(parent, str) or not parent:
                     continue
-                conn.execute(
-                    """UPDATE coworker_events SET raw_json = json_set(raw_json,
-                         '$._runtime.followup_origin', ?, '$._runtime.followup_parent', ?)
-                       WHERE app_id = ? AND chat_id = ? AND runtime = 'native' AND id != ?
-                         AND status IN ('queued', 'processing') AND json_valid(raw_json)
-                         AND json_extract(raw_json, '$._runtime.followup_origin') IS NULL
-                         AND COALESCE(NULLIF(json_extract(raw_json, '$.event.event.message.parent_id'), ''),
-                           NULLIF(json_extract(raw_json, '$.event.event.message.reply_to_message_id'), '')) = ?""",
-                    (
-                        event_id,
-                        parent,
-                        origin["app_id"],
-                        origin["chat_id"],
-                        event_id,
-                        parent,
-                    ),
+                _associate_queued_replies(
+                    conn,
+                    origin_event_id=event_id,
+                    app_id=str(origin["app_id"]),
+                    chat_id=str(origin["chat_id"]),
+                    parent_id=parent,
                 )
 
     def route_native_event(self, event: CoworkerEvent, topic_key: str) -> bool:

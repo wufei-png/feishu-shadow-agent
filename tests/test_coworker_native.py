@@ -1686,6 +1686,46 @@ def test_reply_to_supplement_waiting_for_steer_receipt_is_not_lost(
     assert any("更正为 3.0" in prompt for prompt in server.prompts)
 
 
+def test_queued_chain_survives_when_only_first_supplement_is_steered(
+    tmp_path: Path,
+) -> None:
+    service, feishu, _ = _service(tmp_path)
+    server = BlockingNativeServer()
+    service.app_server = server  # type: ignore[assignment]
+    _receive(service, feishu, "request", location="thread", text="检查 1.0")
+    _receive(
+        service,
+        feishu,
+        "first",
+        location="thread",
+        parent="request",
+        mention=False,
+        text="补充：检查 2.0",
+    )
+    _receive(
+        service,
+        feishu,
+        "second",
+        location="thread",
+        parent="first",
+        mention=False,
+        text="更正：应该检查 3.0",
+    )
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    try:
+        assert service.process_next() and service.process_next()
+        assert service.process_next_steer()
+    finally:
+        server.release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    while service.process_next():
+        pass
+    assert any("应该检查 3.0" in prompt for prompt in server.prompts)
+
+
 def test_followup_is_processed_if_current_turn_finishes_before_steering(
     tmp_path: Path,
 ) -> None:

@@ -5,7 +5,10 @@ import socket
 from datetime import timedelta
 from typing import Any
 
-from .coworker_store import _owner_has_exited  # pyright: ignore[reportPrivateUsage]
+from .coworker_store import (
+    _associate_queued_replies,  # pyright: ignore[reportPrivateUsage]
+    _owner_has_exited,  # pyright: ignore[reportPrivateUsage]
+)
 from .store.sqlite_store import SQLiteStore
 from .time_utils import shift_instant
 
@@ -251,3 +254,17 @@ class NativeCoworkerState:
                     now,
                 ),
             )
+            if error is None:
+                source = conn.execute(
+                    "SELECT app_id, chat_id, message_id FROM coworker_events WHERE id = ?",
+                    (event_id,),
+                ).fetchone()
+                if source is None:
+                    raise ValueError("steered event is unavailable")
+                _associate_queued_replies(
+                    conn,
+                    origin_event_id=origin_event_id,
+                    app_id=str(source["app_id"]),
+                    chat_id=str(source["chat_id"]),
+                    parent_id=str(source["message_id"]),
+                )
