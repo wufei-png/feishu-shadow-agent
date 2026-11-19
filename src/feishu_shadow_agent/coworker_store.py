@@ -1028,6 +1028,24 @@ class CoworkerStore:
                 (self.store.clock(), event_id),
             )
 
+    def has_inflight_native_steer(self, origin_event_id: int) -> bool:
+        self.store.initialize()
+        with self.store.connect() as conn:
+            return (
+                conn.execute(
+                    """SELECT 1 FROM coworker_events followup
+                       JOIN coworker_events origin ON origin.id = ?
+                       WHERE followup.app_id = origin.app_id AND followup.chat_id = origin.chat_id
+                         AND followup.topic_key = origin.topic_key AND followup.status = 'queued'
+                         AND json_valid(followup.raw_json)
+                         AND json_extract(followup.raw_json, '$._runtime.followup_origin') = origin.id
+                         AND json_extract(followup.raw_json, '$._runtime.steer_state') IN ('preparing', 'sending')
+                       LIMIT 1""",
+                    (origin_event_id,),
+                ).fetchone()
+                is not None
+            )
+
     def associate_native_followup(
         self, event_id: int, origin_event_id: int, parent_id: str
     ) -> None:

@@ -1783,6 +1783,145 @@ def test_followup_classified_after_turn_end_suppresses_only_stale_reply(
     assert ("上一轮答复尚未发布" in server.prompts[-1]) is (decision == "current")
 
 
+def test_followup_snapshot_read_blocks_stale_reply_until_classified(
+    tmp_path: Path,
+) -> None:
+    class ReadbackServer(BlockingNativeServer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.original_returned = threading.Event()
+
+        def run_turn(self, prompt: str, **kwargs: Any) -> AgentRunResult:
+            if kwargs["output_model"] is SteerDecision:
+                return FakeServer.run_turn(self, prompt, **kwargs)
+            result = super().run_turn(prompt, **kwargs)
+            self.original_returned.set()
+            return result
+
+        def steer(
+            self, _thread_id: str, prompt: str, *, expected_turn_id: str | None = None
+        ) -> None:
+            assert prompt
+            raise TurnNotActive("turn already finished")
+
+    service, feishu, _ = _service(tmp_path)
+    server = ReadbackServer()
+    service.app_server = server  # type: ignore[assignment]
+    _receive(service, feishu, "request", location="thread", text="检查 1.0")
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    classifier: threading.Thread | None = None
+    reading, allow_read = threading.Event(), threading.Event()
+    try:
+        _receive(
+            service,
+            feishu,
+            "correction",
+            location="thread",
+            parent="request",
+            mention=False,
+            text="应该检查 2.0",
+        )
+        assert service.process_next()
+
+        def block_read(message_id: str) -> None:
+            if message_id == "correction":
+                reading.set()
+                assert allow_read.wait(timeout=5)
+
+        feishu.on_get = block_read
+        classifier = threading.Thread(target=service.process_next_steer)
+        classifier.start()
+        assert reading.wait(timeout=3)
+        server.release.set()
+        assert server.original_returned.wait(timeout=3)
+        worker.join(timeout=0.5)
+    finally:
+        allow_read.set()
+        if classifier is not None:
+            classifier.join(timeout=5)
+        server.release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    while service.process_next():
+        pass
+    with service.store.connect() as conn:
+        deliveries = conn.execute(
+            """SELECT e.message_id FROM coworker_native_deliveries d
+               JOIN coworker_events e ON e.id = d.event_id ORDER BY d.id"""
+        ).fetchall()
+    assert [row[0] for row in deliveries] == ["correction"]
+
+
+def test_claimed_followup_blocks_reply_before_the_classifier_takes_the_lock(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    class ClaimServer(BlockingNativeServer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.original_returned = threading.Event()
+
+        def run_turn(self, prompt: str, **kwargs: Any) -> AgentRunResult:
+            if kwargs["output_model"] is SteerDecision:
+                return FakeServer.run_turn(self, prompt, **kwargs)
+            result = super().run_turn(prompt, **kwargs)
+            self.original_returned.set()
+            return result
+
+    service, feishu, _ = _service(tmp_path)
+    server = ClaimServer()
+    service.app_server = server  # type: ignore[assignment]
+    _receive(service, feishu, "request", location="thread")
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    claimed, allow_claim = threading.Event(), threading.Event()
+    original_claim = service.events.claim_next_steer
+
+    def delayed_claim(**kwargs: Any) -> Any:
+        event = original_claim(**kwargs)
+        if event is not None:
+            claimed.set()
+            assert allow_claim.wait(timeout=5)
+        return event
+
+    monkeypatch.setattr(service.events, "claim_next_steer", delayed_claim)
+    classifier: threading.Thread | None = None
+    try:
+        _receive(
+            service,
+            feishu,
+            "correction",
+            location="thread",
+            parent="request",
+            mention=False,
+            text="应该检查 2.0",
+        )
+        assert service.process_next()
+        classifier = threading.Thread(target=service.process_next_steer)
+        classifier.start()
+        assert claimed.wait(timeout=3)
+        server.release.set()
+        assert server.original_returned.wait(timeout=3)
+        worker.join(timeout=0.5)
+    finally:
+        allow_claim.set()
+        if classifier is not None:
+            classifier.join(timeout=5)
+        server.release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    while service.process_next():
+        pass
+    with service.store.connect() as conn:
+        deliveries = conn.execute(
+            """SELECT e.message_id FROM coworker_native_deliveries d
+               JOIN coworker_events e ON e.id = d.event_id ORDER BY d.id"""
+        ).fetchall()
+    assert [row[0] for row in deliveries] == ["correction"]
+
+
 def test_followup_classifier_uses_isolated_notifications_and_closes(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

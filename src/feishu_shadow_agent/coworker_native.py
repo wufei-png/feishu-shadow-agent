@@ -5,6 +5,7 @@ from _thread import RLock
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
+from threading import Condition
 from typing import Any, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -109,10 +110,24 @@ class NativeCoworkerService(CoworkerService):
         self._pending_collab: dict[str, set[str]] = {}
         self._held_completions: dict[str, tuple[str, str]] = {}
         self._session_locks: dict[int, RLock] = {}
+        self._session_conditions: dict[int, Condition] = {}
 
     def _session_lock(self, session_id: int) -> RLock:
         with self._app_server_lock:
             return self._session_locks.setdefault(session_id, RLock())
+
+    def _session_condition(self, session_id: int) -> Condition:
+        with self._app_server_lock:
+            condition = self._session_conditions.get(session_id)
+            if condition is None:
+                condition = Condition(self._session_lock(session_id))
+                self._session_conditions[session_id] = condition
+            return condition
+
+    def _wait_for_inflight_steer(self, session_id: int, event_id: int) -> None:
+        condition = self._session_condition(session_id)
+        while self.events.has_inflight_native_steer(event_id):
+            condition.wait(timeout=1)
 
     def _turn_superseded(self, event_id: int) -> bool:
         with self.store.connect() as conn:
@@ -513,13 +528,6 @@ class NativeCoworkerService(CoworkerService):
             envelope = _mapping(_mapping(event.raw.get("event")).get("event"))
             bot = str(event.raw.get("bot_open_id") or "")
             raw = event_message_from_raw(envelope, bot_id=bot)
-            raw = self._enrich_message(raw, event.message_id, event.chat_id, bot)
-            if self._topic_for_message(raw, event.message_id) != event.topic_key:
-                raise ValueError("steer source changed location")
-            private = event.topic_key.startswith(PRIVATE_TOPIC_PREFIX)
-            message = MessageNormalizer(owner_open_id=bot).normalize(
-                raw, default_chat_type="p2p" if private else "group"
-            )
             parent = raw.get("parent_id") or raw.get("reply_to_message_id")
             active_raw = _mapping(json.loads(str(current["raw_json"])))
             active_internal = _mapping(active_raw.get("_internal"))
@@ -547,10 +555,32 @@ class NativeCoworkerService(CoworkerService):
                 active_internal.get("reply_target"),
             }
             origins.update(item["message_id"] for item in (*inherited, *accepted))
-            if not isinstance(parent, str) or parent not in origins or message.at_all:
+            if not isinstance(parent, str) or parent not in origins:
                 self.events.skip_native_steer(event.id)
                 return False
             self.events.associate_native_followup(event.id, origin_event_id, parent)
+            thread_id = str(current["backend_session_id"])
+            turn_id = server.active_turn_id(thread_id)
+            session_lock = self._session_lock(session_id)
+            session_lock.acquire()
+            with self.store.connect() as conn:
+                still_processing = conn.execute(
+                    "SELECT 1 FROM coworker_events WHERE id = ? AND status = 'processing'",
+                    (origin_event_id,),
+                ).fetchone()
+            if still_processing is None:
+                self.events.finish_steer(event.id, retry=True)
+                return False
+            raw = self._enrich_message(raw, event.message_id, event.chat_id, bot)
+            if self._topic_for_message(raw, event.message_id) != event.topic_key:
+                raise ValueError("steer source changed location")
+            private = event.topic_key.startswith(PRIVATE_TOPIC_PREFIX)
+            message = MessageNormalizer(owner_open_id=bot).normalize(
+                raw, default_chat_type="p2p" if private else "group"
+            )
+            if message.at_all:
+                self.events.skip_native_steer(event.id)
+                return False
             if private and message.sender_id != self.config.owner.open_id:
                 raise ValueError("private sender is not the owner")
             if (
@@ -562,17 +592,7 @@ class NativeCoworkerService(CoworkerService):
             saved = self.store.upsert_message_with_revision(message)
             if saved.requires_confirmation or saved.is_deleted:
                 raise ValueError("steer source revision cannot be verified")
-            thread_id = str(current["backend_session_id"])
             source_revision = saved.revision
-            turn_id = server.active_turn_id(thread_id)
-            if not turn_id:
-                self.events.finish_steer(event.id, retry=True)
-                return False
-            session_lock = self._session_lock(session_id)
-            session_lock.acquire()
-            if server.active_turn_id(thread_id) != turn_id:
-                self.events.finish_steer(event.id, retry=True)
-                return False
             origin_message_id = (
                 active_internal.get("source_message_id") or current["message_id"]
             )
@@ -606,7 +626,7 @@ class NativeCoworkerService(CoworkerService):
             if classification != "current":
                 self.events.skip_native_steer(event.id)
                 return False
-            if server.active_turn_id(thread_id) != turn_id:
+            if turn_id is None or server.active_turn_id(thread_id) != turn_id:
                 self.events.defer_late_native_steer(event.id, origin_event_id)
                 return False
             if self.current_policy() != policy or (
@@ -676,6 +696,8 @@ class NativeCoworkerService(CoworkerService):
             )
         finally:
             if session_lock is not None:
+                if session_id is not None:
+                    self._session_condition(session_id).notify_all()
                 session_lock.release()
         return True
 
@@ -989,6 +1011,7 @@ class NativeCoworkerService(CoworkerService):
             self._check_current_policy(policy, event.chat_id, activation)
         output = NativeOutput.model_validate(result.json_data)
         with self._session_lock(session.id):
+            self._wait_for_inflight_steer(session.id, event.id)
             if self._turn_superseded(event.id):
                 if batch:
                     self.deliveries.finish_silent_batch(event.id, batch)
@@ -1550,6 +1573,7 @@ class NativeCoworkerService(CoworkerService):
 
     def _queue_native_reply(self, *, session_id: int, **kwargs: Any) -> None:
         with self._session_lock(session_id):
+            self._wait_for_inflight_steer(session_id, int(kwargs["event_id"]))
             if self._turn_superseded(int(kwargs["event_id"])):
                 return
             self._require_certain_steers(int(kwargs["event_id"]), session_id)
@@ -1739,6 +1763,7 @@ class NativeCoworkerService(CoworkerService):
         reason: str | None,
         manual_only: bool,
     ) -> None:
+        self._wait_for_inflight_steer(session_id, event.id)
         if self._turn_superseded(event.id):
             return
         self._require_certain_steers(event.id, session_id)
