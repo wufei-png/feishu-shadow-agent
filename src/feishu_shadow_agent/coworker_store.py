@@ -28,13 +28,34 @@ def _associate_queued_replies(
 ) -> None:
     conn.execute(
         """UPDATE coworker_events SET raw_json = json_set(raw_json,
-             '$._runtime.followup_origin', ?, '$._runtime.followup_parent', ?)
+             '$._runtime.followup_origin', CASE WHEN substr(topic_key, 1, ?) = ?
+               THEN COALESCE(json_extract(raw_json, '$._runtime.followup_origin'), ?)
+               ELSE ? END,
+             '$._runtime.followup_parent', ?, '$._runtime.followup_candidates',
+             json_insert(CASE WHEN json_type(raw_json, '$._runtime.followup_candidates') = 'array'
+               THEN json_extract(raw_json, '$._runtime.followup_candidates') ELSE json('[]') END,
+               '$[#]', ?))
            WHERE app_id = ? AND chat_id = ? AND runtime = 'native' AND id != ?
              AND status IN ('queued', 'processing') AND json_valid(raw_json)
-             AND json_extract(raw_json, '$._runtime.followup_origin') IS NULL
+             AND (substr(topic_key, 1, ?) = ? OR topic_key =
+               (SELECT topic_key FROM coworker_events WHERE id = ?))
              AND COALESCE(NULLIF(json_extract(raw_json, '$.event.event.message.parent_id'), ''),
                NULLIF(json_extract(raw_json, '$.event.event.message.reply_to_message_id'), '')) = ?""",
-        (origin_event_id, parent_id, app_id, chat_id, origin_event_id, parent_id),
+        (
+            len(NATIVE_LOCATING_KEY) + 1,
+            f"{NATIVE_LOCATING_KEY}:",
+            origin_event_id,
+            origin_event_id,
+            parent_id,
+            origin_event_id,
+            app_id,
+            chat_id,
+            origin_event_id,
+            len(NATIVE_LOCATING_KEY) + 1,
+            f"{NATIVE_LOCATING_KEY}:",
+            origin_event_id,
+            parent_id,
+        ),
     )
 
 
@@ -178,7 +199,7 @@ class CoworkerStore:
             runtime: dict[str, Any] = {"agent_started": False, "retry_count": 0}
             parent = message.get("parent_id") or message.get("reply_to_message_id")
             if native and isinstance(parent, str) and parent:
-                origin = conn.execute(
+                origins = conn.execute(
                     """SELECT origin.id FROM coworker_events origin
                        WHERE origin.app_id = ? AND origin.chat_id = ?
                          AND origin.runtime = 'native' AND (
@@ -199,6 +220,8 @@ class CoworkerStore:
                                  AND supplement.message_id = ? AND supplement.status = 'queued'
                                  AND CASE WHEN json_valid(supplement.raw_json) THEN
                                    json_extract(supplement.raw_json, '$._runtime.followup_origin') = origin.id
+                                   OR EXISTS (SELECT 1 FROM json_each(supplement.raw_json,
+                                     '$._runtime.followup_candidates') candidate WHERE candidate.value = origin.id)
                                    ELSE 0 END) OR EXISTS (
                                SELECT 1 FROM coworker_native_delivery_context c
                                WHERE c.delivery_id = CASE WHEN json_valid(origin.raw_json)
@@ -210,7 +233,7 @@ class CoworkerStore:
                                  AND delivery.status IN ('pending', 'sending', 'needs_review')
                                  AND (? IN (delivery.source_message_id, delivery.target_message_id)
                                    OR c.message_id = ?)))
-                       ORDER BY origin.id LIMIT 1""",
+                       ORDER BY origin.id""",
                     (
                         app_id,
                         chat_id,
@@ -222,10 +245,12 @@ class CoworkerStore:
                         parent,
                         parent,
                     ),
-                ).fetchone()
-                if origin is not None:
+                ).fetchall()
+                if origins:
                     runtime.update(
-                        followup_origin=int(origin["id"]), followup_parent=parent
+                        followup_origin=int(origins[0]["id"]),
+                        followup_candidates=[int(origin["id"]) for origin in origins],
+                        followup_parent=parent,
                     )
             payload = json.dumps(
                 {
@@ -669,7 +694,7 @@ class CoworkerStore:
         with self.store.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                """SELECT received_at FROM coworker_events WHERE id = ?
+                """SELECT received_at, raw_json FROM coworker_events WHERE id = ?
                    AND status = 'processing' AND runtime = 'native' AND topic_key = ?""",
                 (event.id, event.topic_key),
             ).fetchone()
@@ -779,12 +804,34 @@ class CoworkerStore:
                        WHERE s.app_id = ? AND s.chat_id = ? AND s.thread_id = ? LIMIT 1""",
                     (event.app_id, event.chat_id, topic_key),
                 ).fetchone()
+            origin = conn.execute(
+                """SELECT id FROM coworker_events origin WHERE origin.app_id = ? AND origin.chat_id = ?
+                   AND origin.runtime = 'native' AND origin.topic_key = ? AND (
+                     origin.id = json_extract(?, '$._runtime.followup_origin') OR origin.id IN
+                       (SELECT value FROM json_each(?, '$._runtime.followup_candidates')))
+                   ORDER BY id LIMIT 1""",
+                (
+                    event.app_id,
+                    event.chat_id,
+                    topic_key,
+                    row["raw_json"],
+                    row["raw_json"],
+                ),
+            ).fetchone()
+            origin_id = None if origin is None else int(origin["id"])
             conn.execute(
-                "UPDATE coworker_events SET topic_key = ?, status = ?, updated_at = ? WHERE id = ?",
+                """UPDATE coworker_events SET topic_key = ?, status = ?, updated_at = ?,
+                   raw_json = CASE WHEN ? IS NULL THEN json_remove(raw_json,
+                     '$._runtime.followup_origin', '$._runtime.followup_candidates')
+                     ELSE json_set(raw_json, '$._runtime.followup_origin', ?,
+                       '$._runtime.followup_candidates', json_array(?)) END WHERE id = ?""",
                 (
                     topic_key,
                     "queued" if blocked or queue_only else "processing",
                     self.store.clock(),
+                    origin_id,
+                    origin_id,
+                    origin_id,
                     event.id,
                 ),
             )

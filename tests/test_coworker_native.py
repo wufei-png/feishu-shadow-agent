@@ -2984,6 +2984,174 @@ def test_transfer_waits_for_topic_receipt_then_starts_separate_session(
     assert feishu.replies[-1]["message_id"] == "sent-1"
 
 
+@pytest.mark.parametrize("location", ["topic", "main", "other"])
+@pytest.mark.parametrize("queued_chain", [False, True])
+def test_quoted_followup_selects_matching_pending_origin(
+    tmp_path: Path, location: str, queued_chain: bool
+) -> None:
+    class ParallelServer(FakeServer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.topic_started = threading.Event()
+            self.release_topic = threading.Event()
+
+        def run_turn(self, prompt: str, **kwargs: Any) -> AgentRunResult:
+            if "飞书话题已经建立" in prompt:
+                self.topic_started.set()
+                assert self.release_topic.wait(timeout=5)
+            return super().run_turn(prompt, **kwargs)
+
+    service, feishu, _ = _service(tmp_path, dry_run=False)
+    server = ParallelServer()
+    service.app_server = server  # type: ignore[assignment]
+    server.outputs.append({"action": "transfer", "text": "已接单"})
+    _receive(service, feishu, "request")
+    assert service.process_next()
+    service.on_app_server_notification(
+        {
+            "method": "item/completed",
+            "params": {
+                "threadId": "session-1",
+                "item": {
+                    "type": "subAgentActivity",
+                    "kind": "started",
+                    "agentThreadId": "main-child",
+                },
+            },
+        }
+    )
+    for method in ("turn/started", "turn/completed"):
+        service.on_app_server_notification(
+            {
+                "method": method,
+                "params": {
+                    "threadId": "main-child",
+                    "turn": {"id": "child-turn", "status": "completed"},
+                },
+            }
+        )
+    assert service.process_next()  # Fake client confirms the topic-opening reply.
+    topic_task = threading.Thread(target=service.process_next)
+    topic_task.start()
+    assert server.topic_started.wait(timeout=3)
+    try:
+        assert service.process_next(internal_only=True)
+    finally:
+        server.release_topic.set()
+        topic_task.join(timeout=5)
+    assert not topic_task.is_alive()
+    with service.store.connect() as conn:
+        pending = conn.execute(
+            """SELECT e.id, e.topic_key FROM coworker_native_deliveries d
+               JOIN coworker_events e ON e.id = d.event_id
+               WHERE d.status = 'pending' ORDER BY e.id"""
+        ).fetchall()
+    assert [row["topic_key"] for row in pending] == ["__group_main__", "opened-thread"]
+
+    _receive(
+        service,
+        feishu,
+        "correction",
+        mention=False,
+        parent="request",
+        location="main" if location == "main" else "thread",
+        thread="opened-thread" if location == "topic" else "other",
+        text="请改为检查 2.0",
+    )
+    if queued_chain:
+        _receive(
+            service,
+            feishu,
+            "correction-two",
+            mention=False,
+            parent="correction",
+            location="main" if location == "main" else "thread",
+            thread="opened-thread" if location == "topic" else "other",
+            text="再改为检查 3.0",
+        )
+    model_calls = len(server.prompts)
+    assert (
+        service.process_next() and service.process_next()
+    )  # Drain both fake deliveries.
+    while service.process_next():
+        pass
+    if location == "other":
+        assert len(server.prompts) == model_calls
+    else:
+        assert len(server.prompts) == model_calls + 1 + int(queued_chain)
+        assert "请改为检查 2.0" in server.prompts[model_calls]
+        if queued_chain:
+            assert "再改为检查 3.0" in server.prompts[-1]
+        assert all(
+            session == ("session-1" if location == "main" else "session-3")
+            for session in server.sessions[model_calls:]
+        )
+
+
+def test_followup_candidates_include_origin_that_starts_after_ingress(
+    tmp_path: Path,
+) -> None:
+    service, feishu, server = _service(tmp_path, dry_run=False)
+    server.outputs.append({"action": "transfer", "text": "已接单"})
+    _receive(service, feishu, "request")
+    assert service.process_next()
+    service.on_app_server_notification(
+        {
+            "method": "item/completed",
+            "params": {
+                "threadId": "session-1",
+                "item": {
+                    "type": "subAgentActivity",
+                    "kind": "started",
+                    "agentThreadId": "main-child",
+                },
+            },
+        }
+    )
+    for method in ("turn/started", "turn/completed"):
+        service.on_app_server_notification(
+            {
+                "method": method,
+                "params": {
+                    "threadId": "main-child",
+                    "turn": {"id": "child-turn", "status": "completed"},
+                },
+            }
+        )
+    assert service.process_next() and service.process_next(internal_only=True)
+    _receive(
+        service,
+        feishu,
+        "correction",
+        mention=False,
+        parent="request",
+        location="thread",
+        thread="opened-thread",
+        text="请改为检查 2.0",
+    )
+    with service.store.connect() as conn:
+        payload = json.loads(
+            conn.execute(
+                "SELECT raw_json FROM coworker_events WHERE message_id = 'correction'"
+            ).fetchone()[0]
+        )
+    assert len(payload["_runtime"]["followup_candidates"]) == 1
+
+    assert service.process_next()  # Send the main child result through the fake client.
+    assert service.process_next()  # Start and finish the transferred topic task.
+    with service.store.connect() as conn:
+        payload = json.loads(
+            conn.execute(
+                "SELECT raw_json FROM coworker_events WHERE message_id = 'correction'"
+            ).fetchone()[0]
+        )
+    assert len(payload["_runtime"]["followup_candidates"]) == 2
+    while service.process_next():
+        pass
+    assert "请改为检查 2.0" in server.prompts[-1]
+    assert server.sessions[-1] == "session-3"
+
+
 @pytest.mark.parametrize(
     "change", ["none", "before-start", "before-reply", "before-child"]
 )
