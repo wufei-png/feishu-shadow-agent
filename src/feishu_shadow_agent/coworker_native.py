@@ -787,7 +787,7 @@ class NativeCoworkerService(CoworkerService):
                 "\n"
                 + choices[self.reply_mode]
                 + "一次即可完成的结果可用 action=topic 在话题发布；需要在话题持续处理或明确要求开题时，"
-                "先只返回 action=transfer 和简短接单内容，话题建立后再执行任务。"
+                "先只返回 action=transfer 和简短接单内容，说明本任务的已知进展，话题建立后再执行任务。"
             )
         if private:
             notes = resolve_relative_path(policy.shared_memory_path, self.base_dir)
@@ -960,7 +960,9 @@ class NativeCoworkerService(CoworkerService):
             raise ValueError("topic transfer context is incomplete")
         with self.store.connect() as conn:
             row = conn.execute(
-                """SELECT m.raw_json FROM coworker_native_transfers t
+                """SELECT m.raw_json, d.text AS acknowledgement
+                   FROM coworker_native_transfers t
+                   JOIN coworker_native_deliveries d ON d.id = t.delivery_id AND d.status = 'sent'
                    JOIN coworker_events source ON source.id = t.source_event_id
                    JOIN messages m ON m.message_id = source.message_id
                    WHERE t.event_id = ? AND t.source_event_id = ? AND t.reply_target = ?
@@ -976,6 +978,15 @@ class NativeCoworkerService(CoworkerService):
                     GROUP_MAIN_KEY,
                 ),
             ).fetchone()
+            context = conn.execute(
+                """SELECT c.message_id, c.revision, m.raw_json, m.revision AS current_revision,
+                          m.is_deleted, m.chat_id
+                   FROM coworker_native_transfers t
+                   JOIN coworker_native_delivery_context c ON c.delivery_id = t.delivery_id
+                   LEFT JOIN messages m ON m.message_id = c.message_id
+                   WHERE t.event_id = ? ORDER BY c.rowid""",
+                (event.id,),
+            ).fetchall()
         if row is None:
             raise ValueError("topic transfer origin is unavailable")
         source_raw = _mapping(json.loads(str(row["raw_json"])))
@@ -988,6 +999,29 @@ class NativeCoworkerService(CoworkerService):
         upsert = self.store.upsert_message_with_revision(message)
         if upsert.requires_confirmation or upsert.is_deleted:
             raise ValueError("topic transfer source cannot be verified")
+        supplements: list[dict[str, Any]] = []
+        for item in context:
+            if (
+                item["current_revision"] != item["revision"]
+                or item["is_deleted"]
+                or item["chat_id"] != event.chat_id
+            ):
+                raise ValueError("topic transfer context changed")
+            supplement_raw = _mapping(json.loads(str(item["raw_json"])))
+            supplement_raw = self._enrich_message(
+                supplement_raw, str(item["message_id"]), event.chat_id, str(bot)
+            )
+            supplement = MessageNormalizer(owner_open_id=str(bot)).normalize(
+                supplement_raw, default_chat_type="group"
+            )
+            saved = self.store.upsert_message_with_revision(supplement)
+            if (
+                saved.requires_confirmation
+                or saved.is_deleted
+                or saved.revision != item["revision"]
+            ):
+                raise ValueError("topic transfer context changed")
+            supplements.append(_prompt_message(supplement))
         session = self.events.get_or_create_session(
             app_id=event.app_id,
             chat_id=event.chat_id,
@@ -1013,6 +1047,11 @@ class NativeCoworkerService(CoworkerService):
                 json.dumps(_prompt_message(message), ensure_ascii=False), "json"
             )
         )
+        prompt += "\n已发送的接单内容：\n" + _code_block(str(row["acknowledgement"]))
+        if supplements:
+            prompt += "\n本任务已接收的补充：\n" + _code_block(
+                json.dumps(supplements, ensure_ascii=False), "json"
+            )
         parent = source_raw.get("parent_id") or source_raw.get("reply_to_message_id")
         if isinstance(parent, str) and parent:
             quote = self._quoted_message(parent)

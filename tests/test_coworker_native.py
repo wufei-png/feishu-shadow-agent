@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -1523,6 +1524,70 @@ def test_transfer_waits_for_topic_receipt_then_starts_separate_session(
         )
     assert service.process_next() and service.process_next()
     assert feishu.replies[-1]["message_id"] == "sent-1"
+
+
+@pytest.mark.parametrize("change", ["none", "before-start", "before-reply"])
+def test_transfer_preserves_accepted_supplement_and_checks_its_revision(
+    tmp_path: Path, change: str
+) -> None:
+    class TransferServer(BlockingNativeServer):
+        def run_turn(self, prompt: str, **kwargs: Any) -> AgentRunResult:
+            if not self.started.is_set():
+                result = super().run_turn(prompt, **kwargs)
+                return replace(
+                    result, json_data={"action": "transfer", "text": "已接单"}
+                )
+            return FakeServer.run_turn(self, prompt, **kwargs)
+
+    service, feishu, _ = _service(tmp_path, dry_run=False)
+    server = TransferServer()
+    service.app_server = server  # type: ignore[assignment]
+    _receive(service, feishu, "request", location="main")
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    try:
+        _receive(
+            service,
+            feishu,
+            "supplement",
+            location="main",
+            parent="request",
+            text="补充：只检查 2.0",
+        )
+        assert service.process_next() and service.process_next_steer()
+    finally:
+        server.release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert service.process_next()  # The fake client confirms the topic receipt.
+    assert feishu.sent == 1
+    if change == "before-start":
+        feishu.messages["supplement"]["content"] = "补充：检查 3.0"
+    assert service.process_next()
+    if change == "before-start":
+        assert len(server.prompts) == 1
+        with service.store.connect() as conn:
+            status = conn.execute(
+                "SELECT status FROM coworker_events WHERE message_id LIKE 'internal:transfer:%'"
+            ).fetchone()[0]
+        assert status == "needs_review"
+        return
+
+    assert len(server.prompts) == 2
+    assert "只检查 2.0" in server.prompts[1] and "已接单" in server.prompts[1]
+    if change == "before-reply":
+        with service.store.connect() as conn:
+            conn.execute(
+                "UPDATE messages SET revision = revision + 1 WHERE message_id = 'supplement'"
+            )
+    assert service.process_next()
+    with service.store.connect() as conn:
+        status = conn.execute(
+            "SELECT status FROM coworker_native_deliveries ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+    assert status == ("needs_review" if change == "before-reply" else "sent")
+    assert feishu.sent == (1 if change == "before-reply" else 2)
 
 
 def test_transfer_dry_run_never_claims_topic_or_starts_task(tmp_path: Path) -> None:

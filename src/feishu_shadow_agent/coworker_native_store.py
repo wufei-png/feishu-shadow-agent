@@ -200,6 +200,27 @@ class NativeDeliveryStore:
             context_sources = [
                 (message_id, revision) for _, message_id, revision in batch or []
             ]
+            internal = payload.get("_internal")
+            if isinstance(internal, dict) and internal.get("kind") in {
+                "native_transfer",
+                "subagent_completed",
+            }:
+                inherited = conn.execute(
+                    """SELECT c.message_id, c.revision, m.revision AS current_revision, m.is_deleted
+                       FROM coworker_native_delivery_context c
+                       LEFT JOIN messages m ON m.message_id = c.message_id
+                       WHERE c.delivery_id = ?""",
+                    (internal.get("delivery_id"),),
+                ).fetchall()
+                for item in inherited:
+                    if (
+                        item["current_revision"] != item["revision"]
+                        or item["is_deleted"]
+                    ):
+                        raise ValueError("topic transfer context changed")
+                    context_sources.append(
+                        (str(item["message_id"]), int(item["revision"]))
+                    )
             steers = conn.execute(
                 """SELECT e.message_id, s.source_revision, m.revision, m.is_deleted
                    FROM coworker_native_steers s JOIN coworker_events e ON e.id = s.event_id
