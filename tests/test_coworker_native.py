@@ -1830,6 +1830,59 @@ def test_queued_chain_survives_when_only_first_supplement_is_steered(
     assert any("应该检查 3.0" in prompt for prompt in server.prompts)
 
 
+def test_followup_checked_again_when_its_queued_parent_starts(tmp_path: Path) -> None:
+    service, feishu, _ = _service(tmp_path)
+    server = BlockingNativeServer()
+    server.decisions = ["unrelated", "current"]
+    service.app_server = server  # type: ignore[assignment]
+    _receive(service, feishu, "first", location="thread", text="原任务")
+    first = threading.Thread(target=service.process_next)
+    first.start()
+    assert server.started.wait(timeout=3)
+    second: threading.Thread | None = None
+    try:
+        _receive(
+            service,
+            feishu,
+            "new-task",
+            location="thread",
+            parent="first",
+            mention=False,
+            text="另一个任务：检查版本 1.0",
+        )
+        _receive(
+            service,
+            feishu,
+            "correction",
+            location="thread",
+            parent="new-task",
+            mention=False,
+            text="更正为 2.0",
+        )
+        assert service.process_next(locating_only=True)
+        assert service.process_next(locating_only=True)
+        assert not service.process_next_steer()  # New task is unrelated to the first.
+        assert not service.process_next_steer()  # Its correction is not for the first.
+        server.release.set()
+        first.join(timeout=5)
+        assert not first.is_alive()
+        assert service.process_next()  # Preview the first reply.
+
+        server.release.clear()
+        server.started.clear()
+        second = threading.Thread(target=service.process_next)
+        second.start()
+        assert server.started.wait(timeout=3)
+        assert service.process_next_steer()
+        assert "更正为 2.0" in server.steers[-1]
+    finally:
+        server.release.set()
+        first.join(timeout=5)
+        if second is not None:
+            second.join(timeout=5)
+    assert second is not None and not second.is_alive()
+
+
 def test_followup_is_processed_if_current_turn_finishes_before_steering(
     tmp_path: Path,
 ) -> None:

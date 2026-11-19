@@ -27,7 +27,8 @@ def _associate_queued_replies(
     parent_id: str,
 ) -> None:
     conn.execute(
-        """UPDATE coworker_events SET raw_json = json_set(raw_json,
+        """UPDATE coworker_events SET raw_json = json_set(
+             json_remove(raw_json, '$._runtime.steer_checked'),
              '$._runtime.followup_origin', CASE WHEN substr(topic_key, 1, ?) = ?
                THEN COALESCE(json_extract(raw_json, '$._runtime.followup_origin'), ?)
                ELSE ? END,
