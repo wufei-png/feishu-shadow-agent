@@ -1,6 +1,6 @@
 # Feishu Shadow Agent MVP 流程图
 
-本文是 [MVP 设计](./feishu-shadow-agent-mvp-design.md) 的 Mermaid 流程图补充。主 spec 描述约束和规则；本文只沉淀数据如何在系统里流动，以及关键子流程如何闭环。
+本文是[影子助手 MVP 设计](./feishu-shadow-agent-mvp-design.md)的历史流程图，不描述 Codex 直连或 Hermes Gateway。当前运行边界见[架构说明](../architecture/current-boundaries.md)。
 
 <a id="overall-flow"></a>
 

@@ -1,6 +1,6 @@
 # AI 同事原生运行时实施方案
 
-2026-11-19。实现和操作步骤见 [Codex 直连](../operations/codex-native-coworker.md)、[Hermes Gateway](../operations/hermes-coworker.md)及[验收记录](../operations/native-runtime-acceptance-2026-11-19.md)。
+2026-11-19 的实施方案记录。当前操作步骤见 [Codex 直连](../operations/codex-native-coworker.md)、[Hermes Gateway](../operations/hermes-coworker.md)及[验收记录](../operations/native-runtime-acceptance-2026-11-19.md)。
 
 ## 运行时边界
 

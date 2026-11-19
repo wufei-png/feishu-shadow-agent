@@ -1,6 +1,6 @@
 # 单测试群 AI 同事：设计草案
 
-状态：方案已确认，本地实现与合成验证已完成主要路径；独立测试群的真实联调及试点评估尚待完成。本文保留设计目标，实际配置与操作以[运行与验证](../operations/single-group-ai-coworker.md)为准。
+本文保留 `daemon` 兼容 AI 同事的设计过程和阶段性验证记录。当前操作见[兼容路径手册](../operations/single-group-ai-coworker.md)；Codex 直连和 Hermes Gateway 的验收结果见[原生运行时验证记录](../operations/native-runtime-acceptance-2026-11-19.md)。
 
 下一阶段的设计和验收范围见 [AI 同事原生运行时实施方案](ai-coworker-native-runtimes.md)。
 

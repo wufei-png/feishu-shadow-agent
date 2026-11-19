@@ -1,6 +1,6 @@
 # 原生运行时架构审查：2026-11-19
 
-审查基于 `dbf0281`，对照 [实施方案](../plans/ai-coworker-native-runtimes.md)和原生运行路径。以下问题均尚待修复。复现使用隔离 SQLite、假飞书客户端或内存 stub，没有发送飞书消息。
+审查基于 `dbf0281`，对照 [实施方案](../plans/ai-coworker-native-runtimes.md)和原生运行路径。以下是该版本的待修复问题；复现使用隔离 SQLite、假飞书客户端或内存 stub。
 
 ## 已确认的问题
 

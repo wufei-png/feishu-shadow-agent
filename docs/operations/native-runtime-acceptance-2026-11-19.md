@@ -29,13 +29,13 @@
 - 原生 `delegate_task` 在群主区、私聊和话题中完成后台任务。话题测试确认结果发回原话题；切换默认配置后的验收样本中，父任务和子 Agent 均使用 `gpt-6-luna`。早期群主区和话题试验曾使用 `gpt-5.6-luna`。
 - Hermes v0.23.2 原版话题后台回复曾因使用话题 ID 创建消息而失败。安装 [适配器补丁](../patches/hermes-0.23.2-feishu-topic-replies.patch)后，同一业务场景真实回投通过。补丁位于本机 Hermes 分支 `codex/feishu-topic-reply-anchor`，提交 `f5765e51`。
 
-## 迁移与当前状态
+## 迁移与部署记录
 
-- Hermes 从 v0.20.0 迁移至 v0.23.2 多 profile 主网关。原数据和 systemd 单元保存在 `~/.hermes/backups/native-runtimes-20261119-ifp4wnga/`，原安装保留。
-- `default`、`wechatbot` 和 `coworker` 均由主网关承载。重复的飞书凭据已从前两个 profile 移除；原飞书应用凭据配置在 `coworker` profile。该 profile 工作目录现为 `~/.hermes/profiles/coworker/workspace`，实际私聊中的终端 `pwd` 与原生子 Agent 执行 `pwd` 并回投均已验证。
-- 原项目生产 SQLite v8 已备份到 `data/backups/agent-v8-20261119-211634.sqlite3`，并用 v13 新库替换；原全局策略和两条聊天策略保留，历史业务数据未导入。dry-run SQLite 从 v11 升级到 v13 并同步生产策略；两库完整性检查及生产、dry-run `doctor` 通过。
-- 本机配置中的 Codex 模型已设为 `gpt-6-luna`。现有策略未启用项目 Codex 同事，Codex daemon 未启动；本次 `doctor` 检查的是当前配置。
-- `coworker` profile 的 `SOUL.md` 从 667 字节精简至 354 字节，原文件保存在 profile 的 `backups/SOUL-before-simplification-20261119-212220.md`。新会话使用该文件；已有会话的缓存提示在会话刷新或压缩后更新。
+- Hermes 从 v0.20.0 迁移至 v0.23.2 多 profile 主网关。原数据和 systemd 单元已备份，原安装保留。
+- 验收时，`default`、`wechatbot` 和 `coworker` 均由主网关承载。重复的飞书凭据已从前两个 profile 移除；原飞书应用凭据配置在 `coworker` profile。该 profile 使用持久工作目录，实际私聊中的终端 `pwd` 与原生子 Agent 执行 `pwd` 并回投均已验证。
+- 原项目生产 SQLite v8 已备份，并用 v13 新库替换；原全局策略和两条聊天策略保留，历史业务数据未导入。dry-run SQLite 从 v11 升级到 v13 并同步生产策略；两库完整性检查及 production、dry-run `doctor` 通过。
+- 验收时本机 Codex 模型为 `gpt-6-luna`，项目 Codex 同事策略未启用；`doctor` 检查的是当时的配置。
+- `coworker` profile 的 `SOUL.md` 从 667 字节精简至 354 字节，原文件已备份。新会话读取该文件；已有会话的缓存提示在会话刷新或压缩后更新。
 
 本次架构审查的问题与优化建议见[原生运行时架构审查](native-runtime-architecture-review-2026-11-19.md)。
 

@@ -4,7 +4,7 @@
 
 本文沉淀 `feishu-shadow-agent` MVP 的已确认设计。目标是做一个本机飞书个人助手：定时读取群聊里 `@我` 的消息和 P2P 私聊消息，交给 Hermes 处理，低风险高置信时自动回复，不确定或高风险时通过 bot 私聊 owner 审批。
 
-维护说明：本文是 2026-06-22 的 MVP 基线。后续 Product Policy Store、Operator Console 和 release readiness 的当前边界以 ADR、`docs/plans/operator-surface-outline.md`、`docs/specs/operator-console-*.md` 和 `docs/configuration.md` 为准；本文中早期的“未来 UI”“config.yaml 为主”等表述不应覆盖这些后续决策。
+本文记录 2026-06-22 的影子助手 MVP 基线及后续修订。当前三种运行方式和项目边界见[当前架构边界](../architecture/current-boundaries.md)，操作步骤见[文档导航](../README.md)。文中的阶段目标和早期配置不作为当前运行手册。
 
 流程图补充见 [Feishu Shadow Agent MVP 流程图](./feishu-shadow-agent-flows.md)，其中 [整体数据流程](./feishu-shadow-agent-flows.md#overall-flow) 可作为实现阅读入口。
 

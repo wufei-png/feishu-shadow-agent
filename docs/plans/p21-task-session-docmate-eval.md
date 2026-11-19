@@ -1,6 +1,6 @@
 # P21 Task Session DocMate 评测与优化
 
-状态：**已闭环（2026-08 刷新）**。代码、标注、promote、baseline 与多轮单变量对照均已完成；本文保留为交接入口、固定边界与历史结论。遗留一个 owner 决策（是否继续 DocMate 优化），见 [遗留决策](#遗留决策-owner)。通用评测契约、命令和产物结构以 [`docs/evals.md`](../evals.md) 与 [`p20-production-parity-model-evals.md`](p20-production-parity-model-evals.md) 为准。
+状态：**已闭环（2026-08 刷新）**。代码、标注、promote、baseline 与多轮单变量对照均已完成；本文保留为交接入口、固定边界与历史结论。遗留一个 owner 决策（是否继续 DocMate 优化），见 [遗留决策](#p21-owner-decision)。通用评测契约、命令和产物结构以 [`docs/evals.md`](../evals.md) 与 [`p20-production-parity-model-evals.md`](p20-production-parity-model-evals.md) 为准。
 
 ## 目标
 
@@ -12,7 +12,7 @@
 
 - Evaluation Run Config 使用 `tool_permissions: full_access`，与 owner 的默认生产用法一致。不要再为评测自动改成 `read_only`。
 - Hermes 的 model/provider 保持 `null`，使用运行时默认模型。每次评测必须在报告或伴随记录中保存实际模型和 provider，不把某次观察到的型号写死。
-- 通过 Hermes 全局 `skills.external_dirs` 暴露 `/home/SENSETIME/wufei2/.agents/skills` 下的全部技能；Task Session 不显式注入 DocMate。
+- 通过 Hermes 全局 `skills.external_dirs` 暴露 `$HOME/.agents/skills` 下的全部技能；Task Session 不显式注入 DocMate。
 - 先依赖 `docmate/SKILL.md` frontmatter 的 `description` 自然命中。基线证明存在漏命中或误命中后，优先优化 description；暂不修改 Task Session 提示词。
 - DocMate 适用于项目文档、配置、API、实现行为、版本能力和需要仓库证据的故障排查。进度同步、人员协调、承诺和普通聊天不应命中。
 - Hermes 保持 `full_access`；评测期间把 DocMate catalog 中的外部仓库当作只读证据源，不主动修改这些仓库。
@@ -26,7 +26,7 @@
 - 10 个 case 已 promote 到 `data/evals/golden/task-session/`，`labels.yaml` 含 owner 审核后的 `answerability`/`watch_action`/`reference_answer`/`expected_skills`（7 个技术问答标 `[docmate]`；`group-deployment-param`、`p2p-atlas-package`、`p2p-wait-no-reply` 为空列表）。
 - 2026-07-15 完成真实 baseline 与多轮单变量对照，完整实验记录在 ignored 的 `data/evals/P21_BASELINE_COMPARISON.md`（运行产物与报告一律不提交）。
 - 另有 5 个 lark-monthly case（20260812 捕获、20260813 运行）作为独立月循环，不属于本计划的 10 case 范围。
-- 当前机器即 Ubuntu 主机（`/home/SENSETIME/wufei2/go/src/github.com/wufei-png/feishu-shadow-agent` 及其 worktree）；如需 live capture/live ingress，运行前先确认 Lark CLI 登录状态。fixture eval 不依赖登录。
+- 评测在 Ubuntu 主机的项目工作区及其 worktree 执行；如需 live capture/live ingress，运行前先确认 Lark CLI 登录状态。fixture eval 不依赖登录。
 - ignored 的 `data/evals/TASK_SESSION_ANNOTATION.md`、`AI_PRELABEL_REVIEW.md` 仍含早期「16 个 case / read_only」表述，已过期；以本文为准则，本地不再据此行动。
 
 ## 实验结果摘要
@@ -39,6 +39,8 @@
 - **保留的生产优化**：Task Session Markdown 分区输入（single authority，见 ADR-0011）、Session 级原生 skill 激活、紧凑 prompt（仅 Messages 嵌入正文）、Codex-only 静默 developer instruction。
 - **未保留的实验**：时间兼容判别（对仅 answerability/watch_action 结构差异且已证明修复落地的当前状态答案放宽）只在实验中验证过（见 `data/evals/P21_BASELINE_COMPARISON.md` 无 wall-clock timeout 一节），未进入已提交代码——semantic judge 对结构差异仍 fail closed，`task_session_eval.py` 以结构通过为前提，`tests/test_eval_model.py` 断言 `"compatibility"` 不出现在结构结果中。
 - **剩余失败归因**：已从「DocMate 未命中」转为「命中后的证据收敛与答案忠实度」：package 读到正确 FAQ 后改坏命令；VPS/P2P 所需结论不在现有 DocMate FAQ/catalog；`p2p-pod-crash` 存在 capture-time reference 与 full-access 外部状态漂移（线上已修复时输出「当前已恢复」）。
+
+<a id="p21-owner-decision"></a>
 
 ## 遗留决策（owner）
 

@@ -1,5 +1,7 @@
 # Single-group AI coworker
 
+This decision describes the project-managed `daemon` coworker path. Codex native coworker and Hermes Gateway were added later; their current ownership and operation are described in [architecture boundaries](../architecture/current-boundaries.md) and the [documentation index](../README.md).
+
 **Revision:** Regular group main messages share a group session, while topic messages share a topic session. The default send mode is agent direct; project dispatch remains configurable. The mode is fixed at startup, and changing it retains the provider session while injecting the current instructions. Agent-direct delegation uses task IDs and mutual mentions without project-side timeout or loop tracking. Existing imported policies without a send mode retain project dispatch until explicitly reimported. This revision supersedes conflicting details below.
 
 **Process isolation revision:** Each daemon launch selects either shadow or coworker business mode, fixed until restart. Shadow ingestion and retries do not run in coworker mode; project-owned sends and approval callbacks are scoped to the running mode. Suspended approvals keep their wall-clock deadlines and are marked expired when their mode resumes. Separately launched processes are not globally locked.
