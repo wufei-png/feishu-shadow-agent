@@ -230,8 +230,14 @@ class NativeDeliveryStore:
                 """SELECT e.message_id, s.source_revision, m.revision, m.is_deleted
                    FROM coworker_native_steers s JOIN coworker_events e ON e.id = s.event_id
                    LEFT JOIN messages m ON m.message_id = e.message_id
-                   WHERE s.origin_event_id = ? AND s.session_id = ? AND s.status = 'accepted'""",
-                (event_id, session_id),
+                   WHERE s.origin_event_id IN (?, ?) AND s.session_id = ? AND s.status = 'accepted'""",
+                (
+                    event_id,
+                    internal.get("origin_event_id")
+                    if internal.get("kind") == "subagent_completed"
+                    else None,
+                    session_id,
+                ),
             ).fetchall()
             for steer in steers:
                 if steer["revision"] != steer["source_revision"] or steer["is_deleted"]:

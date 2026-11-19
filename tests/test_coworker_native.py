@@ -1874,6 +1874,89 @@ def test_transfer_preserves_accepted_supplement_and_checks_its_revision(
     assert feishu.sent == (1 if change == "before-reply" else 2)
 
 
+@pytest.mark.parametrize("edit_supplement", [False, True])
+def test_child_reply_inherits_supplement_accepted_inside_new_topic(
+    tmp_path: Path, edit_supplement: bool
+) -> None:
+    class TopicServer(BlockingNativeServer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.first = True
+
+        def run_turn(self, prompt: str, **kwargs: Any) -> AgentRunResult:
+            if kwargs["output_model"] is SteerDecision:
+                return FakeServer.run_turn(self, prompt, **kwargs)
+            if self.first:
+                self.first = False
+                self.outputs.append({"action": "transfer", "text": "已接单"})
+                return FakeServer.run_turn(self, prompt, **kwargs)
+            if not self.started.is_set():
+                return super().run_turn(prompt, **kwargs)
+            return FakeServer.run_turn(self, prompt, **kwargs)
+
+    service, feishu, _ = _service(tmp_path, dry_run=False)
+    server = TopicServer()
+    service.app_server = server  # type: ignore[assignment]
+    _receive(service, feishu, "request", location="main")
+    assert service.process_next() and service.process_next()
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    try:
+        service.on_app_server_notification(
+            {
+                "method": "item/completed",
+                "params": {
+                    "threadId": "active-session",
+                    "item": {
+                        "type": "subAgentActivity",
+                        "kind": "started",
+                        "agentThreadId": "topic-child",
+                    },
+                },
+            }
+        )
+        _receive(
+            service,
+            feishu,
+            "supplement",
+            location="thread",
+            thread="opened-thread",
+            parent="sent-1",
+            text="补充：只检查 2.0",
+        )
+        assert service.process_next() and service.process_next_steer()
+    finally:
+        server.release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert service.process_next() and feishu.sent == 2
+    if edit_supplement:
+        feishu.messages["supplement"]["content"] = "补充：只检查 3.0"
+    for method in ("turn/started", "turn/completed"):
+        service.on_app_server_notification(
+            {
+                "method": method,
+                "params": {
+                    "threadId": "topic-child",
+                    "turn": {"id": "child-turn", "status": "completed"},
+                },
+            }
+        )
+    assert service.process_next() and service.process_next()
+    with service.store.connect() as conn:
+        delivery = conn.execute(
+            "SELECT id, status FROM coworker_native_deliveries ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        context = conn.execute(
+            "SELECT message_id FROM coworker_native_delivery_context WHERE delivery_id = ?",
+            (delivery["id"],),
+        ).fetchall()
+    assert [item[0] for item in context] == ["supplement"]
+    assert delivery["status"] == ("needs_review" if edit_supplement else "sent")
+    assert feishu.sent == (2 if edit_supplement else 3)
+
+
 def test_transfer_dry_run_never_claims_topic_or_starts_task(tmp_path: Path) -> None:
     service, feishu, server = _service(tmp_path)
     server.outputs.append({"action": "transfer", "text": "已接单"})
