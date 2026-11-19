@@ -62,11 +62,11 @@ owner 在真实话题中 @ 机器人并明确要求关注或取消关注；默�
 ```bash
 uv run --locked python -m feishu_shadow_agent coworker pause --config config.yaml --session-id 1
 uv run --locked python -m feishu_shadow_agent coworker status --config config.yaml
-# 状态为 ready 时，运行 status 显示的 cd ... && codex resume <UUID>
+# 状态为 ready 时，运行 status 显示的 cd ... && codex --no-daemon resume <UUID>
 uv run --locked python -m feishu_shadow_agent coworker resume --config config.yaml --session-id 1
 ```
 
-操作员退出 Codex 后再执行 `resume`；项目重新加载原 UUID 后处理积压。`needs_review` 表示卸载或恢复结果不明，核对后可用 `coworker pause --session-id 1 --retry` 重新申请释放。
+`--no-daemon` 使交互进程退出时释放会话。操作员退出 Codex 后再执行 `resume`；项目重新加载原 UUID 后处理积压。`needs_review` 表示卸载或恢复结果不明，核对后可用 `coworker pause --session-id 1 --retry` 重新申请释放。
 
 发送结果不确定时不会自动重跑模型或换幂等键。停止 daemon，核对飞书侧实际结果，再记录回执或丢弃：
 

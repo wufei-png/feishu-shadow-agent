@@ -1629,7 +1629,7 @@ def test_handoff_pauses_one_topic_and_reloads_before_backlog(tmp_path: Path) -> 
     status = service.events.status()["native_handoffs"][0]
     assert (
         status["status"] == "ready"
-        and "codex resume session-1" in status["operator_command"]
+        and "codex --no-daemon resume session-1" in status["operator_command"]
     )
     _receive(service, feishu, "blocked", location="thread")
     _receive(

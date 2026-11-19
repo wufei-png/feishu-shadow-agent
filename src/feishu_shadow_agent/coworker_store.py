@@ -364,7 +364,7 @@ class CoworkerStore:
                 {
                     **dict(row),
                     "operator_command": (
-                        f"cd {shlex.quote(str(row['agent_working_dir']))} && codex resume "
+                        f"cd {shlex.quote(str(row['agent_working_dir']))} && codex --no-daemon resume "
                         f"{shlex.quote(str(row['backend_session_id']))}"
                         if row["status"] == "ready"
                         else None
