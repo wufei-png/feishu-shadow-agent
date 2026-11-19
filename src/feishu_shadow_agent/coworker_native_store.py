@@ -95,6 +95,7 @@ class NativeDeliveryStore:
         requires_watch: bool = False,
         source_snapshot: dict[str, Any] | None = None,
         context_snapshots: dict[str, dict[str, Any]] | None = None,
+        inherited_context: list[tuple[str, int, dict[str, Any] | None]] | None = None,
     ) -> None:
         if not text or not target_message_id:
             raise ValueError("a reply and its target are required")
@@ -211,7 +212,7 @@ class NativeDeliveryStore:
             delivery_id = int(cursor.lastrowid or 0)
             self._finish_batch(conn, event_id, batch or [], now)
             context_snapshots = context_snapshots or {}
-            context_sources = [
+            context_sources = list(inherited_context or []) + [
                 (message_id, revision, context_snapshots.get(message_id))
                 for _, message_id, revision in batch or []
             ]
@@ -221,10 +222,10 @@ class NativeDeliveryStore:
                 if isinstance(internal_value, dict)
                 else {}
             )
-            if internal.get("kind") in {
-                "native_transfer",
-                "subagent_completed",
-            }:
+            if internal.get("kind") == "native_transfer" or (
+                internal.get("kind") == "subagent_completed"
+                and inherited_context is None
+            ):
                 inherited = conn.execute(
                     """SELECT c.message_id, c.revision, c.snapshot_json, m.revision AS current_revision, m.is_deleted
                        FROM coworker_native_delivery_context c
@@ -259,6 +260,7 @@ class NativeDeliveryStore:
                     event_id,
                     internal.get("origin_event_id")
                     if internal.get("kind") == "subagent_completed"
+                    and inherited_context is None
                     else None,
                     session_id,
                 ),
@@ -292,17 +294,42 @@ class NativeDeliveryStore:
             )
 
     def finish_silent_batch(
-        self, event_id: int, batch: list[tuple[int, str, int]]
+        self,
+        event_id: int,
+        batch: list[tuple[int, str, int]],
+        snapshots: dict[str, dict[str, Any]],
     ) -> None:
         self.store.initialize()
         now = self.store.clock()
         with self.store.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._finish_batch(conn, event_id, batch, now)
+            child = conn.execute(
+                "SELECT 1 FROM coworker_subagents WHERE origin_event_id = ? LIMIT 1",
+                (event_id,),
+            ).fetchone()
+            context = (
+                json.dumps(
+                    {
+                        "_runtime": {
+                            "batch_context": [
+                                {
+                                    "message_id": message_id,
+                                    "revision": revision,
+                                    "snapshot": snapshots[message_id],
+                                }
+                                for _, message_id, revision in batch
+                            ]
+                        }
+                    }
+                )
+                if child
+                else None
+            )
             cursor = conn.execute(
-                """UPDATE coworker_events SET status = 'completed', raw_json = NULL,
+                """UPDATE coworker_events SET status = 'completed', raw_json = ?,
                    error = NULL, updated_at = ? WHERE id = ? AND status = 'processing'""",
-                (now, event_id),
+                (context, now, event_id),
             )
             if cursor.rowcount != 1:
                 raise ValueError("batch event is no longer processing")

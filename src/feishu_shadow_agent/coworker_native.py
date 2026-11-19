@@ -1035,12 +1035,16 @@ class NativeCoworkerService(CoworkerService):
             self._reserve_publication(session.id, event.id)
             if self._turn_superseded(event.id):
                 if batch:
-                    self.deliveries.finish_silent_batch(event.id, batch)
+                    self.deliveries.finish_silent_batch(
+                        event.id, batch, batch_snapshots
+                    )
                 return
             self._require_certain_steers(event.id, session.id)
             if output.action == "silent":
                 if batch:
-                    self.deliveries.finish_silent_batch(event.id, batch)
+                    self.deliveries.finish_silent_batch(
+                        event.id, batch, batch_snapshots
+                    )
                 return
             if watch_trigger and not self.native_state.is_watched(
                 app_id=event.app_id,
@@ -1049,7 +1053,9 @@ class NativeCoworkerService(CoworkerService):
                 owner_open_id=self.config.owner.open_id,
             ):
                 if batch:
-                    self.deliveries.finish_silent_batch(event.id, batch)
+                    self.deliveries.finish_silent_batch(
+                        event.id, batch, batch_snapshots
+                    )
                 return
             if output.action in {"watch", "unwatch"}:
                 if (
@@ -1123,7 +1129,9 @@ class NativeCoworkerService(CoworkerService):
                         or purpose in {"topic", "transfer"},
                     )
                     if batch:
-                        self.deliveries.finish_silent_batch(event.id, batch)
+                        self.deliveries.finish_silent_batch(
+                            event.id, batch, batch_snapshots
+                        )
                 return
             self._queue_native_reply(
                 event_id=event.id,
@@ -1515,7 +1523,14 @@ class NativeCoworkerService(CoworkerService):
                    UNION
                    SELECT e.message_id, s.source_revision, s.snapshot_json FROM coworker_native_steers s
                    JOIN coworker_events e ON e.id = s.event_id
-                   WHERE s.origin_event_id = ? AND s.session_id = ? AND s.status = 'accepted'""",
+                   WHERE s.origin_event_id = ? AND s.session_id = ? AND s.status = 'accepted'
+                   UNION
+                   SELECT json_extract(item.value, '$.message_id'), json_extract(item.value, '$.revision'),
+                          json_extract(item.value, '$.snapshot')
+                   FROM coworker_events origin,
+                        json_each(CASE WHEN json_valid(origin.raw_json) THEN origin.raw_json ELSE '{}' END,
+                                  '$._runtime.batch_context') item
+                   WHERE origin.id = ?""",
                 (
                     origin_id,
                     session.id,
@@ -1523,15 +1538,14 @@ class NativeCoworkerService(CoworkerService):
                     internal.get("delivery_id"),
                     origin_id,
                     session.id,
+                    origin_id,
                 ),
             ).fetchall()
-        self._validate_source_snapshots(
-            event.chat_id,
-            [
-                (str(item[0]), int(item[1]), json.loads(item[2]) if item[2] else None)
-                for item in context
-            ],
-        )
+        inherited_context = [
+            (str(item[0]), int(item[1]), json.loads(item[2]) if item[2] else None)
+            for item in context
+        ]
+        self._validate_source_snapshots(event.chat_id, inherited_context)
         notice = {
             "type": "internal_subagent_completion",
             "source_message_id": source_id,
@@ -1606,6 +1620,7 @@ class NativeCoworkerService(CoworkerService):
             source_event_id=source_event_id,
             source_message_id=message.message_id,
             source_snapshot=snapshot_evidence(message.raw),
+            inherited_context=inherited_context,
             target_message_id=reply_target,
             text=composed.text,
             reply_in_thread=not private and event.topic_key != GROUP_MAIN_KEY,

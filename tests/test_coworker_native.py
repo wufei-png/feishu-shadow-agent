@@ -1219,6 +1219,92 @@ def test_changed_watched_context_blocks_batch_delivery(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize("parent_action", ["silent", "reply"])
+@pytest.mark.parametrize("change", [False, True])
+def test_watched_batch_context_follows_child_completion(
+    tmp_path: Path, parent_action: str, change: bool
+) -> None:
+    service, feishu, _ = _service(tmp_path, dry_run=False)
+
+    class DelegatingServer(FakeServer):
+        def run_turn(self, prompt: str, **kwargs: Any) -> AgentRunResult:
+            result = super().run_turn(prompt, **kwargs)
+            if "watched_updates" in prompt:
+                service.on_app_server_notification(
+                    {
+                        "method": "item/completed",
+                        "params": {
+                            "threadId": result.session_id,
+                            "item": {
+                                "type": "subAgentActivity",
+                                "kind": "started",
+                                "agentThreadId": "child",
+                            },
+                        },
+                    }
+                )
+                return replace(
+                    result, json_data={"action": parent_action, "text": "已接单"}
+                )
+            if "子 Agent 已结束" in prompt:
+                return replace(
+                    result, json_data={"action": "reply", "text": "已检查 2.0"}
+                )
+            return result
+
+    server = DelegatingServer()
+    service.app_server = server  # type: ignore[assignment]
+    server.outputs.append({"action": "watch", "text": "watching"})
+    _receive(service, feishu, "watch", location="thread", sender="owner")
+    assert service.process_next() and service.process_next()
+    _receive(
+        service, feishu, "first", mention=False, location="thread", text="讨论版本"
+    )
+    _receive(
+        service, feishu, "second", mention=False, location="thread", text="版本是 2.0"
+    )
+    assert service.process_next(locating_only=True) and service.process_next(
+        locating_only=True
+    )
+    with service.store.connect() as conn:
+        conn.execute(
+            "UPDATE coworker_events SET received_at = '2000-01-01T00:00:00Z' WHERE status = 'queued'"
+        )
+    assert service.process_next()
+    if parent_action == "reply":
+        assert service.process_next()
+    elif change:
+        feishu.messages["second"]["content"] = "版本改为 3.0"
+    for method in ("turn/started", "turn/completed"):
+        service.on_app_server_notification(
+            {
+                "method": method,
+                "params": {
+                    "threadId": "child",
+                    "turn": {"id": "turn", "status": "completed"},
+                },
+            }
+        )
+    previous_sent = feishu.sent
+    assert service.process_next()
+    if change and parent_action == "silent":
+        with service.store.connect() as conn:
+            status = conn.execute(
+                "SELECT status FROM coworker_events WHERE message_id LIKE 'internal:subagent:%'"
+            ).fetchone()[0]
+        assert status == "needs_review" and feishu.sent == previous_sent
+        return
+    if change:
+        feishu.messages["second"]["content"] = "版本改为 3.0"
+    assert service.process_next()
+    assert feishu.sent == previous_sent + (0 if change else 1)
+    with service.store.connect() as conn:
+        status = conn.execute(
+            "SELECT status FROM coworker_native_deliveries ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+    assert status == ("needs_review" if change else "sent")
+
+
 def test_non_owner_cannot_enable_watch(tmp_path: Path) -> None:
     service, feishu, server = _service(tmp_path)
     server.outputs.append({"action": "watch", "text": "watching"})
