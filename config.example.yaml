@@ -70,7 +70,8 @@ agent_backend:
     api_key_env: HERMES_API_KEY
   codex:
     path: null
-    model: null
+    # Set null to inherit the Codex default.
+    model: gpt-6-luna
     # minimal, low, medium, high, or xhigh; null uses the Codex default.
     reasoning_effort: null
     timeout_seconds: null

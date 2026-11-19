@@ -4,7 +4,7 @@
 
 ## 准备和启动
 
-首次联调使用独立飞书应用和测试群。应用需要机器人、消息读取与回复、群信息权限，并以长连接订阅 `im.message.receive_v1`；关注未 @ 的消息还需要相应事件权限。将机器人加入群。配置 `lark-cli` 与长连接使用同一个应用，`FEISHU_APP_ID` 和 `FEISHU_APP_SECRET` 通过环境或凭据管理提供。不要同时让另一个接收方连接此应用。
+首次联调使用独立飞书应用和测试群。应用需要机器人、消息读取与回复、群信息权限，并以长连接订阅 `im.message.receive_v1`。接收未 @ 的群消息需要应用身份权限 `im:message.group_msg`；权限生效后才能使用无 @ 引用和话题关注。将机器人加入群。配置 `lark-cli` 与长连接使用同一个应用，`FEISHU_APP_ID` 和 `FEISHU_APP_SECRET` 通过环境或凭据管理提供。不要同时让另一个接收方连接此应用。
 
 基于 `config.example.yaml` 准备本地 `config.yaml`，填写 `owner.open_id`、独立测试群及工作目录。测试群策略至少包含：
 
@@ -13,6 +13,8 @@ storage:
   sqlite_path: /path/to/coworker-state/agent.sqlite3
 agent_backend:
   working_dir: /path/to/coworker-workspace
+  codex:
+    model: gpt-6-luna
 chats:
   oc_test_group:
     auto_reply: true
@@ -27,7 +29,7 @@ coworker:
   shared_memory_path: /path/to/coworker-workspace/coworker-memory.md
 ```
 
-首次测试可使用新建的 SQLite 文件。更新已有策略时，导入命令须加 `--replace`。旧会话继续使用原工作目录，群记忆路径由策略中的 `coworker.shared_memory_path` 决定。
+首次测试可使用新建的 SQLite 文件。示例选择 `gpt-6-luna`；将 `agent_backend.codex.model` 设为 `null` 可沿用 Codex 自身默认模型。子 Agent 使用 Codex 原生模型配置。更新已有策略时，导入命令须加 `--replace`。旧会话继续使用原工作目录，群记忆路径由策略中的 `coworker.shared_memory_path` 决定。
 
 导入策略并先运行 dry-run：
 
