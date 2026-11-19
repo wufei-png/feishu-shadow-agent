@@ -46,10 +46,11 @@ platforms:
     enabled: true
     extra:
       default_group_policy: disabled
+      admins: []
+      group_allowed_chats: [oc_test_group]
       group_rules:
         oc_test_group:
-          policy: allowlist
-          allowlist: [ou_owner]
+          policy: open
           require_mention: true
 delegation:
   gateway_mode: background

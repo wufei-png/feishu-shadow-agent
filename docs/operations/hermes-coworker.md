@@ -42,7 +42,7 @@ hermes -p coworker gateway setup
 hermes -p coworker model
 ```
 
-通过 Hermes 配置工具在 `coworker` profile 中设置应用 ID、密钥、`FEISHU_DOMAIN=feishu`、`FEISHU_CONNECTION_MODE=websocket` 和 `FEISHU_ALLOWED_USERS=ou_owner`，保持 `FEISHU_ALLOW_ALL_USERS` 关闭。向导只允许指定用户；完成下列群规则并核对配置后再启动。不要将凭据写入本仓库。将以下内容合并到该 profile 的 `config.yaml`，替换工作目录、测试群和当前应用下的 owner open ID：
+通过 Hermes 配置工具在 `coworker` profile 中设置应用 ID、密钥、`FEISHU_DOMAIN=feishu`、`FEISHU_CONNECTION_MODE=websocket` 和 `FEISHU_ALLOWED_USERS=ou_owner`，保持 `FEISHU_ALLOW_ALL_USERS` 和 `GATEWAY_ALLOW_ALL_USERS` 关闭。若事件还包含同一 owner 的 `user_id`，将它也加入白名单，例如 `FEISHU_ALLOWED_USERS=ou_owner,u_owner`；Hermes Gateway 优先用 `user_id` 做授权。不要将凭据写入本仓库。将以下内容合并到该 profile 的 `config.yaml`，替换工作目录和测试群：
 
 ```yaml
 terminal:
@@ -54,10 +54,11 @@ platforms:
     enabled: true
     extra:
       default_group_policy: disabled
+      admins: []
+      group_allowed_chats: [oc_test_group]
       group_rules:
         oc_test_group:
-          policy: allowlist
-          allowlist: [ou_owner]
+          policy: open
           require_mention: true
 delegation:
   gateway_mode: background
@@ -73,7 +74,7 @@ agent:
   disabled_toolsets: [session_search]
 ```
 
-群聊通过 @ 触发；引用机器人回复时也 @ 机器人。私聊沿用 Hermes 的一对一会话，用 `/new` 切分。需要跨会话回忆时，先确定群聊和私聊在该 profile 内的可见范围。定期检查使用 Hermes 原生 `/loop`。
+测试群成员通过 @ 触发；引用机器人回复时也 @ 机器人。`group_allowed_chats` 授权该群，`group_rules` 控制群成员及 @ 触发，`admins` 留空以免绕过群规则。需要限制特定群成员时，可将该群的 `policy` 改为 `allowlist` 并列出成员 ID。私聊沿用 Hermes 的一对一会话，用 `/new` 切分。需要跨会话回忆时，先确定群聊和私聊在该 profile 内的可见范围。定期检查使用 Hermes 原生 `/loop`。
 
 ## 启停与操作台
 

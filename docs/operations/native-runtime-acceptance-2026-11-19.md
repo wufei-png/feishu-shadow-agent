@@ -19,6 +19,7 @@
 - 数据和原 systemd 单元已备份至 `~/.hermes/backups/native-runtimes-20261119-ifp4wnga/`，原 v0.20.0 安装保留。为保证本次验证不发飞书消息，两个旧 profile 的飞书应用 ID 和密钥已从运行配置中暂时移除，备份中保留原值。
 - 已安装 v0.23.2，原生迁移器将 `wechatbot` 并入 `default` 主网关并移除独立服务。`hermes gateway list` 确认两个 profile 由同一主进程承载；最新 `systemctl --user show` 显示主网关 `active/running`。
 - 新建 `coworker` profile 使用占位群和用户 ID，飞书平台关闭。无凭据状态下通过项目启动入口确认它由主网关承载，随后重新停放；配置独立测试应用前保持停放。
+- 本次需求审查使用 v0.23.2 的 Feishu adapter 和 Gateway 授权代码及隔离假事件，验证指定群其他成员 @ 可进入、未 @ 静默、其他群拒绝、owner 私聊允许、其他人私聊拒绝；owner 仅有 `open_id` 和同时有 `user_id` 两种情况均覆盖。未连接飞书，也未改变现有 profile。
 
 ## 真实飞书只读检查
 
