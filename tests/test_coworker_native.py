@@ -16,7 +16,7 @@ from feishu_shadow_agent.config import (
     CoworkerConfig,
     OwnerConfig,
 )
-from feishu_shadow_agent.coworker_native import NativeCoworkerService
+from feishu_shadow_agent.coworker_native import NativeCoworkerService, SteerDecision
 from feishu_shadow_agent.jsonl import JSONLLogger
 from feishu_shadow_agent.operator_commands import OperatorCommandService
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
@@ -112,6 +112,8 @@ class FakeServer:
         self.prompts: list[str] = []
         self.private: list[bool] = []
         self.outputs: list[dict[str, Any]] = []
+        self.decisions: list[str] = []
+        self.classification_prompts: list[str] = []
         self.released: list[str] = []
         self.reloaded: list[tuple[str, bool, str]] = []
 
@@ -134,7 +136,16 @@ class FakeServer:
         private: bool = False,
         unload_delay_seconds: int | None = None,
         dry_run_safety: bool = False,
+        turn_timeout_seconds: float | None = None,
     ) -> AgentRunResult:
+        if output_model is SteerDecision:
+            assert session_id is None and private and dry_run_safety
+            assert turn_timeout_seconds == 30
+            self.classification_prompts.append(prompt)
+            decision = self.decisions.pop(0) if self.decisions else "current"
+            return AgentRunResult(
+                argv=[], exit_code=0, json_data={"decision": decision}
+            )
         self.sessions.append(session_id)
         self.prompts.append(prompt)
         self.private.append(private)
@@ -170,7 +181,20 @@ class BlockingNativeServer(FakeServer):
         private: bool = False,
         unload_delay_seconds: int | None = None,
         dry_run_safety: bool = False,
+        turn_timeout_seconds: float | None = None,
     ) -> AgentRunResult:
+        if output_model is SteerDecision:
+            return super().run_turn(
+                prompt,
+                session_id=session_id,
+                cwd=cwd,
+                output_model=output_model,
+                on_thread=on_thread,
+                private=private,
+                unload_delay_seconds=unload_delay_seconds,
+                dry_run_safety=dry_run_safety,
+                turn_timeout_seconds=turn_timeout_seconds,
+            )
         self.prompts.append(prompt)
         thread_id = session_id or "active-session"
         on_thread(thread_id)
@@ -1252,7 +1276,20 @@ def test_only_explicit_supplement_to_current_request_is_steered(tmp_path: Path) 
             private: bool = False,
             unload_delay_seconds: int | None = None,
             dry_run_safety: bool = False,
+            turn_timeout_seconds: float | None = None,
         ) -> AgentRunResult:
+            if output_model is SteerDecision:
+                return super().run_turn(
+                    prompt,
+                    session_id=session_id,
+                    cwd=cwd,
+                    output_model=output_model,
+                    on_thread=on_thread,
+                    private=private,
+                    unload_delay_seconds=unload_delay_seconds,
+                    dry_run_safety=dry_run_safety,
+                    turn_timeout_seconds=turn_timeout_seconds,
+                )
             if not self.started.is_set():
                 on_thread("active-session")
                 self.started.set()
@@ -1278,6 +1315,7 @@ def test_only_explicit_supplement_to_current_request_is_steered(tmp_path: Path) 
             self.steers.append(prompt)
 
     server = BlockingServer()
+    server.decisions = ["current", "unrelated"]
     service.app_server = server  # type: ignore[assignment]
     _receive(service, feishu, "one", location="thread")
     worker = threading.Thread(target=service.process_next)
@@ -1374,6 +1412,121 @@ def test_queued_unrelated_request_does_not_block_later_supplement(
     while service.process_next():
         pass
     assert any("另做一个任务" in prompt for prompt in server.prompts)
+
+
+@pytest.mark.parametrize("decision", ["current", "unrelated", "uncertain", "invalid"])
+def test_natural_followup_is_classified_without_losing_queued_messages(
+    tmp_path: Path, decision: str
+) -> None:
+    service, feishu, _ = _service(tmp_path)
+    server = BlockingNativeServer()
+    server.decisions = [decision]
+    service.app_server = server  # type: ignore[assignment]
+    followup = (
+        "另做一个独立任务" if decision == "unrelated" else "刚才版本说错了，应该是 2.0"
+    )
+    _receive(service, feishu, "one", location="thread", text="检查 1.0 的发布")
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    try:
+        _receive(
+            service,
+            feishu,
+            "followup",
+            location="thread",
+            parent="one",
+            mention=False,
+            text=followup,
+        )
+        assert service.process_next()
+        assert service.process_next_steer() is (decision == "current")
+        assert "检查 1.0 的发布" in server.classification_prompts[0]
+        assert followup in server.classification_prompts[0]
+        assert bool(server.steers) is (decision == "current")
+    finally:
+        server.release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    while service.process_next():
+        pass
+    if decision != "current":
+        assert any(followup in prompt for prompt in server.prompts)
+
+
+def test_followup_changed_during_classification_is_not_steered_from_old_text(
+    tmp_path: Path,
+) -> None:
+    service, feishu, _ = _service(tmp_path)
+
+    class EditingServer(BlockingNativeServer):
+        def run_turn(self, prompt: str, **kwargs: Any) -> AgentRunResult:
+            result = super().run_turn(prompt, **kwargs)
+            if kwargs["output_model"] is SteerDecision:
+                feishu.messages["followup"]["content"] = "版本应为 3.0"
+            return result
+
+    server = EditingServer()
+    service.app_server = server  # type: ignore[assignment]
+    _receive(service, feishu, "one", location="thread")
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    try:
+        _receive(
+            service,
+            feishu,
+            "followup",
+            location="thread",
+            parent="one",
+            mention=False,
+            text="版本应为 2.0",
+        )
+        assert service.process_next()
+        assert not service.process_next_steer()
+        assert not server.steers
+    finally:
+        server.release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    while service.process_next():
+        pass
+    with service.store.connect() as conn:
+        state = conn.execute(
+            "SELECT status FROM coworker_events WHERE message_id = 'followup'"
+        ).fetchone()[0]
+    assert state == "completed"
+    assert any("版本应为 3.0" in prompt for prompt in server.prompts)
+
+
+def test_followup_is_processed_if_current_turn_finishes_before_steering(
+    tmp_path: Path,
+) -> None:
+    service, feishu, _ = _service(tmp_path)
+    server = BlockingNativeServer()
+    service.app_server = server  # type: ignore[assignment]
+    _receive(service, feishu, "one", location="thread")
+    worker = threading.Thread(target=service.process_next)
+    worker.start()
+    assert server.started.wait(timeout=3)
+    try:
+        _receive(
+            service,
+            feishu,
+            "followup",
+            location="thread",
+            parent="one",
+            mention=False,
+            text="刚才版本说错了，应该是 2.0",
+        )
+        assert service.process_next()
+    finally:
+        server.release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    while service.process_next():
+        pass
+    assert any("应该是 2.0" in prompt for prompt in server.prompts)
 
 
 def test_uncertain_steer_blocks_both_outbox_and_approval(tmp_path: Path) -> None:

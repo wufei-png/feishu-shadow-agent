@@ -230,6 +230,28 @@ def test_dry_run_disables_native_tools_on_start_and_resume(tmp_path: Path) -> No
         assert "dynamicTools" not in request["params"]
 
 
+def test_turn_can_override_the_configured_timeout(tmp_path: Path) -> None:
+    server = CodexAppServer(
+        config=CodexConfig(path=str(_server_executable(tmp_path))),
+        skill_names=[],
+        explicit_context_paths=[],
+        on_notification=lambda _event: None,
+    )
+    server.start()
+    try:
+        result = server.run_turn(
+            "no-completion",
+            session_id=None,
+            cwd=tmp_path,
+            output_model=None,
+            on_thread=lambda _: None,
+            turn_timeout_seconds=0.05,
+        )
+    finally:
+        server.close()
+    assert result.timed_out and not result.ok
+
+
 def test_production_inherits_native_tools_on_start_resume_and_reload(
     tmp_path: Path,
 ) -> None:

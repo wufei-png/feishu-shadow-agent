@@ -167,6 +167,7 @@ class CodexAppServer:
         private: bool = False,
         unload_delay_seconds: int | None = None,
         dry_run_safety: bool = False,
+        turn_timeout_seconds: float | None = None,
     ) -> AgentRunResult:
         started = time.monotonic()
         thread_id = session_id
@@ -244,7 +245,12 @@ class CodexAppServer:
             with self._lock:
                 if turn.turn_id is None:
                     turn.turn_id = _turn_id(response)
-            if not turn.done.wait(timeout=self.config.timeout_seconds):
+            timeout = (
+                self.config.timeout_seconds
+                if turn_timeout_seconds is None
+                else turn_timeout_seconds
+            )
+            if not turn.done.wait(timeout=timeout):
                 self._interrupt_best_effort(thread_id, turn.turn_id)
                 return AgentRunResult(
                     argv=[],

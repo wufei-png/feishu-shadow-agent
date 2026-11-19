@@ -7,7 +7,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .agent_backend import AgentRunResult
 from .agent_backend_factory import coworker_runtime_config
@@ -86,6 +86,12 @@ class NativeOutput(BaseModel):
     watch_duration_seconds: int | None = None
     approval_required: bool = False
     approval_reason: str | None = None
+
+
+class SteerDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["current", "unrelated", "uncertain"]
 
 
 class NativeCoworkerService(CoworkerService):
@@ -448,7 +454,7 @@ class NativeCoworkerService(CoworkerService):
             with self.store.connect() as conn:
                 current = conn.execute(
                     """SELECT e.id AS origin_event_id, e.message_id, e.raw_json,
-                              s.id AS session_id, s.backend_session_id
+                              s.id AS session_id, s.backend_session_id, s.agent_working_dir
                        FROM coworker_events e JOIN coworker_sessions s ON s.app_id = e.app_id
                          AND s.chat_id = e.chat_id AND s.thread_id = e.topic_key AND s.state = 'active'
                        WHERE e.app_id = ? AND e.chat_id = ? AND e.topic_key = ?
@@ -476,12 +482,7 @@ class NativeCoworkerService(CoworkerService):
                 active_internal.get("source_message_id"),
                 active_internal.get("reply_target"),
             }
-            if (
-                not isinstance(parent, str)
-                or parent not in origins
-                or message.at_all
-                or not _is_supplement(message.text)
-            ):
+            if not isinstance(parent, str) or parent not in origins or message.at_all:
                 self.events.skip_native_steer(event.id)
                 return False
             if private and message.sender_id != self.config.owner.open_id:
@@ -501,6 +502,87 @@ class NativeCoworkerService(CoworkerService):
             source_revision = saved.revision
             turn_id = server.active_turn_id(thread_id)
             if not turn_id:
+                self.events.finish_steer(event.id, retry=True)
+                return False
+            origin_message_id = (
+                active_internal.get("source_message_id") or current["message_id"]
+            )
+            origin_message = self.store.get_message(str(origin_message_id))
+            if origin_message is None:
+                self.events.finish_steer(event.id, retry=True)
+                return False
+            with self.store.connect() as conn:
+                inherited = conn.execute(
+                    """SELECT m.message_id, m.sender_id, m.text
+                       FROM coworker_native_delivery_context c
+                       JOIN messages m ON m.message_id = c.message_id
+                       WHERE c.delivery_id = ? ORDER BY c.rowid""",
+                    (active_internal.get("delivery_id"),),
+                ).fetchall()
+                accepted = conn.execute(
+                    """SELECT m.message_id, m.sender_id, m.text FROM coworker_native_steers s
+                       JOIN coworker_events e ON e.id = s.event_id
+                       JOIN messages m ON m.message_id = e.message_id
+                       WHERE s.origin_event_id = ? AND s.session_id = ? AND s.status = 'accepted'
+                       ORDER BY e.received_at, e.id""",
+                    (origin_event_id, session_id),
+                ).fetchall()
+            decision = server.run_turn(
+                "判断新消息是否明确补充或更正当前任务。属于当前任务返回 current；"
+                "另一个任务返回 unrelated；无法确定返回 uncertain。\n"
+                + _code_block(
+                    json.dumps(
+                        {
+                            "current_request": {
+                                "message_id": origin_message["message_id"],
+                                "sender_id": origin_message["sender_id"],
+                                "text": origin_message["text"],
+                            },
+                            "accepted_supplements": [
+                                dict(item) for item in (*inherited, *accepted)
+                            ],
+                            "new_message": _prompt_message(message),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "json",
+                ),
+                session_id=None,
+                cwd=str(current["agent_working_dir"]),
+                output_model=SteerDecision,
+                on_thread=lambda _thread: None,
+                private=True,
+                unload_delay_seconds=1,
+                dry_run_safety=True,
+                turn_timeout_seconds=30,
+            )
+            try:
+                classification = (
+                    SteerDecision.model_validate(decision.json_data).decision
+                    if decision.ok
+                    else "uncertain"
+                )
+            except ValidationError:
+                classification = "uncertain"
+            if classification != "current":
+                self.events.skip_native_steer(event.id)
+                return False
+            if self.current_policy() != policy or (
+                not private
+                and self._group_activation_id(event.chat_id)
+                != event.group_activation_id
+            ):
+                raise _StartupPolicyChanged
+            raw = self._enrich_message(raw, event.message_id, event.chat_id, bot)
+            message = MessageNormalizer(owner_open_id=bot).normalize(
+                raw, default_chat_type="p2p" if private else "group"
+            )
+            verified = self.store.upsert_message_with_revision(message)
+            if (
+                verified.requires_confirmation
+                or verified.is_deleted
+                or verified.revision != source_revision
+            ):
                 self.events.finish_steer(event.id, retry=True)
                 return False
             session_lock = self._session_lock(session_id)
@@ -667,6 +749,21 @@ class NativeCoworkerService(CoworkerService):
             ).fetchone()
         return native is not None or legacy is not None
 
+    def _is_active_followup(self, event: CoworkerEvent, parent_id: str | None) -> bool:
+        runtime = _mapping(event.raw.get("_runtime"))
+        origin = runtime.get("followup_origin")
+        if not isinstance(origin, int) or parent_id != runtime.get("followup_parent"):
+            return False
+        with self.store.connect() as conn:
+            return (
+                conn.execute(
+                    """SELECT 1 FROM coworker_events WHERE id = ? AND app_id = ? AND chat_id = ?
+                   AND topic_key = ? AND runtime = 'native'""",
+                    (origin, event.app_id, event.chat_id, event.topic_key),
+                ).fetchone()
+                is not None
+            )
+
     def _process_native(self, event: CoworkerEvent) -> None:
         if event.message_id.startswith(SUBAGENT_EVENT_PREFIX):
             self._process_native_completion(event)
@@ -702,7 +799,11 @@ class NativeCoworkerService(CoworkerService):
             ):
                 raise ValueError("private sender is not the owner")
         else:
-            direct = message.direct_mention or self._is_own_reply(event, parent_id)
+            direct = (
+                message.direct_mention
+                or self._is_own_reply(event, parent_id)
+                or self._is_active_followup(event, parent_id)
+            )
             watched = (
                 event.topic_key != GROUP_MAIN_KEY
                 and self.native_state.is_watched(
@@ -1145,7 +1246,14 @@ class NativeCoworkerService(CoworkerService):
                 or preliminary.direct_mention
                 or preliminary.at_all
                 or (isinstance(parent, str) and self._is_own_reply(event, parent))
-                or (parent == event.message_id and _is_supplement(preliminary.text))
+                or (
+                    parent == event.message_id
+                    and (
+                        _is_supplement(preliminary.text)
+                        or _mapping(payload.get("_runtime")).get("followup_origin")
+                        == event.id
+                    )
+                )
             ):
                 break
             candidates.append((row, raw))

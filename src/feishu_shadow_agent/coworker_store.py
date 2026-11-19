@@ -155,11 +155,27 @@ class CoworkerStore:
             status = "queued" if topic_key else "needs_review"
             error = None if topic_key else "unresolved_or_ambiguous_topic"
             topic_key = topic_key or f"unresolved:{message_id}"
+            runtime: dict[str, Any] = {"agent_started": False, "retry_count": 0}
+            parent = message.get("parent_id") or message.get("reply_to_message_id")
+            if native and isinstance(parent, str) and parent:
+                origin = conn.execute(
+                    """SELECT id FROM coworker_events WHERE app_id = ? AND chat_id = ?
+                       AND runtime = 'native' AND status = 'processing' AND (
+                         message_id = ? OR CASE WHEN json_valid(raw_json) THEN
+                           ? IN (json_extract(raw_json, '$._internal.source_message_id'),
+                                 json_extract(raw_json, '$._internal.reply_target'))
+                           ELSE 0 END) ORDER BY id LIMIT 1""",
+                    (app_id, chat_id, parent, parent),
+                ).fetchone()
+                if origin is not None:
+                    runtime.update(
+                        followup_origin=int(origin["id"]), followup_parent=parent
+                    )
             payload = json.dumps(
                 {
                     "event": raw,
                     "bot_open_id": bot_open_id,
-                    "_runtime": {"agent_started": False, "retry_count": 0},
+                    "_runtime": runtime,
                 },
                 ensure_ascii=False,
             )
