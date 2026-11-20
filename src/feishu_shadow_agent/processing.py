@@ -1140,10 +1140,16 @@ class TaskProcessingService:
         run_id: str,
         access_allowed: Callable[[], bool],
     ) -> ProcessingResult:
+        block_reason: str | None = None
+
         def session_allowed() -> bool:
-            return access_allowed() and not self.store.is_group_policy_held(
-                "task", task.id
+            nonlocal block_reason
+            block_reason = (
+                self.store.task_session_block_reason(task.id)
+                if access_allowed()
+                else "group_policy_changed"
             )
+            return block_reason is None
 
         agent_working_dir = self._task_agent_working_dir(task)
         working_dir_error = _agent_working_dir_error(agent_working_dir)
@@ -1319,6 +1325,26 @@ class TaskProcessingService:
         )
         outcome = session_run.outcome
         result = outcome.result
+
+        def finish_blocked_session(last_error: str | None) -> ProcessingResult:
+            if block_reason == "task_already_closed":
+                self._mark_processing_processed(
+                    message=message,
+                    stage="task_session",
+                    task_id=task.id,
+                    attempt_count=outcome.attempt_count,
+                )
+            else:
+                self._mark_processing_blocked_external(
+                    message=message,
+                    stage="task_session",
+                    task_id=task.id,
+                    attempt_count=outcome.attempt_count,
+                    last_error=last_error,
+                    reason="group_policy_changed",
+                )
+            return ProcessingResult("watch_only", task.id, reason=block_reason or "")
+
         session_response = _json_mapping(None if result is None else result.json_data)
         self.store.record_agent_audit(
             backend_provider=self.agent_backend.provider,
@@ -1341,23 +1367,18 @@ class TaskProcessingService:
             tool_permissions_profile=self.config.tool_permissions,
         )
         if outcome.blocked or not session_allowed():
-            if result is not None and result.ok and result.session_id:
+            if (
+                block_reason == "group_policy_changed"
+                and result is not None
+                and result.ok
+                and result.session_id
+            ):
                 self.store.set_task_agent_session_id(
                     task.id,
                     result.session_id,
                     backend_provider=str(self.agent_backend.provider),
                 )
-            self._mark_processing_blocked_external(
-                message=message,
-                stage="task_session",
-                task_id=task.id,
-                attempt_count=outcome.attempt_count,
-                last_error=outcome.last_error,
-                reason="group_policy_changed",
-            )
-            return ProcessingResult(
-                "watch_only", task.id, reason="group_policy_changed"
-            )
+            return finish_blocked_session(outcome.last_error)
         if result is None or not result.ok or session_response is None:
             last_error = outcome.last_error or (
                 None if result is None else agent_result_error(result)
@@ -1750,16 +1771,8 @@ class TaskProcessingService:
                 tool_permissions_profile="read_only",
             )
         if not session_allowed():
-            self._mark_processing_blocked_external(
-                message=message,
-                stage="task_session",
-                task_id=task.id,
-                attempt_count=outcome.attempt_count,
-                last_error="group policy changed during reply postprocess",
-                reason="group_policy_changed",
-            )
-            return ProcessingResult(
-                "watch_only", task.id, reason="group_policy_changed"
+            return finish_blocked_session(
+                "group policy changed during reply postprocess"
             )
         if (
             self.config.reply_postprocess.enabled

@@ -74,6 +74,10 @@ class ReadbackOutcome:
     message: NormalizedMessage | None = None
 
 
+class _SendBlocked(Exception):
+    pass
+
+
 class Dispatcher:
     def __init__(
         self,
@@ -235,7 +239,7 @@ class Dispatcher:
                 if action_status == ActionStatus.PENDING.value:
                     summary = _bump(summary, processed=1, skipped=1)
                     continue
-                if not sent and not _stale_revision_cancelled(action_status, result):
+                if not sent and action_status != ActionStatus.CANCELLED.value:
                     self._queue_failed_reply_notification(
                         claimed,
                         status=action_status,
@@ -488,9 +492,7 @@ class Dispatcher:
         if not self.store.group_send_allowed(action.id):
             return self._group_policy_paused_result(attempt_id)
         if not self.store.action_revision_is_current(action):
-            return self._stale_revision_result(
-                action, attempt_id=attempt_id, reason="stale_revision"
-            )
+            return self._cancelled_result(attempt_id, reason="stale_revision")
         try:
             dry_run = self._dry_run(action)
         except Exception as exc:  # noqa: BLE001
@@ -521,33 +523,15 @@ class Dispatcher:
             dry_run_result=result["dry_run"],
         )
 
-        # Re-check immediately before the adapter call. The store check must
-        # finish before the provider call so a slow send does not block
-        # ingestion of edits or tombstones; finish_claimed_action reconciles a
-        # successful send if a revision fence wins while it is in flight.
-        send: LarkCliResult | None = None
-        send_error: Exception | None = None
         if not self.store.group_send_allowed(action.id):
             return self._group_policy_paused_result(attempt_id)
-        revision_current = self.store.revision_send_guard(action)
-        if not revision_current:
-            stale_reason = "stale_revision_before_send"
-        else:
-            stale_reason = None
-            try:
-                send = self._send(action)
-            except Exception as exc:  # noqa: BLE001
-                send_error = exc
-        if not revision_current:
-            stale_result, stale_status = self._stale_revision_result(
-                action, attempt_id=attempt_id, reason=stale_reason or "stale_revision"
-            )
-            return stale_result, stale_status
-
-        if send_error is not None:
-            # Sending is an external boundary; preserve uncertain-send
-            # semantics for every adapter failure.
-            result["send"] = _exception_command_result(action, "send", send_error)
+        try:
+            send = self._call_send(action, dry_run=False)
+        except _SendBlocked as exc:
+            return self._cancelled_result(attempt_id, reason=str(exc))
+        except Exception as exc:  # noqa: BLE001
+            # An adapter exception leaves delivery uncertain.
+            result["send"] = _exception_command_result(action, "send", exc)
             result["error_stage"] = "send"
             self.store.update_dispatch_attempt(
                 attempt_id,
@@ -556,8 +540,6 @@ class Dispatcher:
                 error_stage=DispatchErrorStage.SEND.value,
             )
             return result, ActionStatus.FAILED_NEEDS_REVIEW.value
-        if send is None:
-            raise RuntimeError("revision check returned without a send result")
         result["send"] = _command_result(send)
         if not send.ok:
             result["error_stage"] = "send"
@@ -674,12 +656,8 @@ class Dispatcher:
         )
         return result, ActionStatus.PENDING.value
 
-    def _stale_revision_result(
-        self,
-        action: ActionRecord,
-        *,
-        attempt_id: int,
-        reason: str,
+    def _cancelled_result(
+        self, attempt_id: int, *, reason: str
     ) -> tuple[dict[str, Any], str]:
         result = _empty_result()
         result["error_stage"] = DispatchErrorStage.CLAIM.value
@@ -730,8 +708,10 @@ class Dispatcher:
     def _dry_run(self, action: ActionRecord) -> LarkCliResult:
         return self._call_send(action, dry_run=True)
 
-    def _send(self, action: ActionRecord) -> LarkCliResult:
-        return self._call_send(action, dry_run=False)
+    def _check_send_claim(self, action: ActionRecord) -> None:
+        reason = self.store.dispatch_send_block_reason(action)
+        if reason is not None:
+            raise _SendBlocked(reason)
 
     def _call_send(self, action: ActionRecord, *, dry_run: bool) -> LarkCliResult:
         if action.kind == "send_reply":
@@ -917,6 +897,8 @@ class Dispatcher:
                             identity = "user"
                         else:
                             return _local_error(action, "bot_not_joined")
+            if not dry_run:
+                self._check_send_claim(action)
             return self.feishu.reply_message(
                 as_identity=identity,
                 message_id=target_message_id,
@@ -926,6 +908,12 @@ class Dispatcher:
                 dry_run=dry_run,
             )
         if action.kind == "owner_notification":
+            if (
+                not dry_run
+                and action.source_message_id is not None
+                and action.source_revision is not None
+            ):
+                self._check_send_claim(action)
             if (
                 self.interactive_cards_available
                 and action.payload.get("type") == "approval_required"
@@ -1484,18 +1472,6 @@ def _find_message(
 
 def _expected_mentions(text: str) -> set[str]:
     return set(EXPECTED_MENTION_RE.findall(text))
-
-
-def _stale_revision_cancelled(status: str, result: dict[str, Any]) -> bool:
-    if status != ActionStatus.CANCELLED.value:
-        return False
-    warnings = result.get("warnings")
-    if not isinstance(warnings, list):
-        return False
-    return any(
-        warning in {"stale_revision", "stale_revision_before_send"}
-        for warning in cast(list[Any], warnings)
-    )
 
 
 def _watch_until(watch_minutes: int) -> str:

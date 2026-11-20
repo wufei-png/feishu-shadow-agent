@@ -137,6 +137,51 @@ def _attempts(store: SQLiteStore, action_id: int):
     return store.list_dispatch_attempts(action_id)
 
 
+@pytest.mark.parametrize("close_during_dry_run", [True, False])
+def test_close_during_dispatch_preserves_the_send_boundary(
+    tmp_path: Path, close_during_dry_run: bool
+) -> None:
+    store, dispatcher, fake = _dispatcher(tmp_path)
+    task_id = _insert_task(store)
+    action_id = _create_reply_action(
+        store,
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={"text": "hello", "identity": "user"},
+    )
+    assert action_id is not None
+    fake.reply_results.extend(
+        [
+            LarkCliResult(["dry"], 0, json_data={}),
+            LarkCliResult(["send"], 0, json_data={"data": {"message_id": "om_sent"}}),
+        ]
+    )
+    reply = fake.reply_message
+
+    def close_then_reply(**kwargs: Any) -> LarkCliResult:
+        if kwargs["dry_run"] == close_during_dry_run:
+            store.close_task_by_operator(task_id)
+        return reply(**kwargs)
+
+    with patch.object(fake, "reply_message", side_effect=close_then_reply):
+        dispatcher.dispatch(
+            run_id="run_1",
+            allow_send_reply_actual=True,
+            allow_owner_notification_actual=False,
+        )
+
+    action = store.get_action(action_id)
+    assert action is not None
+    assert store.get_task_by_id(task_id).status == "closed_by_owner"
+    if close_during_dry_run:
+        assert [call["dry_run"] for call in fake.reply_calls] == [True]
+        assert action.status == "cancelled"
+    else:
+        assert [call["dry_run"] for call in fake.reply_calls] == [True, False]
+        assert action.status == "sent"
+        assert action.result["sent_message_id"] == "om_sent"
+
+
 def test_removed_group_keeps_tasks_and_actions_paused_after_readd(
     tmp_path: Path,
 ) -> None:
@@ -896,7 +941,11 @@ def test_revision_send_does_not_hold_sqlite_lock_during_external_send(
         finally:
             edit_finished.set()
 
-    def blocked_send(_action: Any) -> LarkCliResult:
+    reply = fake.reply_message
+
+    def blocked_send(**kwargs: Any) -> LarkCliResult:
+        if kwargs["dry_run"]:
+            return reply(**kwargs)
         send_started.set()
         if not allow_send.wait(timeout=2):
             raise AssertionError("test send was not released")
@@ -910,7 +959,7 @@ def test_revision_send_does_not_hold_sqlite_lock_during_external_send(
         )
     )
     edit_thread = Thread(target=edit_source)
-    with patch.object(dispatcher, "_send", side_effect=blocked_send):
+    with patch.object(fake, "reply_message", side_effect=blocked_send):
         dispatch_thread.start()
         assert send_started.wait(timeout=1)
         edit_thread.start()

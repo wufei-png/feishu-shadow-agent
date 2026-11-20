@@ -328,6 +328,24 @@ class SQLiteStore:
     def is_group_policy_held(self, kind: str, item_id: int) -> bool:
         return self._policy_store.is_group_policy_held(kind, item_id)
 
+    def task_session_block_reason(self, task_id: int) -> str | None:
+        self.initialize()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT status, EXISTS(SELECT 1 FROM group_policy_holds
+                                      WHERE kind = 'task' AND item_id = tasks.id) AS held
+                FROM tasks WHERE id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+        if row is None or row["status"] in {
+            TaskStatus.CLOSED_BY_OWNER.value,
+            TaskStatus.HUMAN_TAKEN_OVER.value,
+        }:
+            return "task_already_closed"
+        return "group_policy_changed" if row["held"] else None
+
     def product_policy_initialization_probe(self) -> dict[str, Any]:
         return self._policy_store.product_policy_initialization_probe()
 
@@ -2445,17 +2463,39 @@ class SQLiteStore:
         with self.connect() as conn:
             return self._action_revision_is_current_locked(conn, action)
 
-    def revision_send_guard(self, action: ActionRecord) -> bool:
-        """Perform the final short-lived revision check before an adapter call.
-
-        The check must release its SQLite connection before the external send.
-        A provider call can take seconds, and holding SQLite's write lock for
-        that interval would block ingestion of edits or tombstones. If a
-        revision changes after this check, completion bookkeeping preserves any
-        successful provider result so the later revision can address it.
-        """
-
-        return self.action_revision_is_current(action)
+    def dispatch_send_block_reason(self, action: ActionRecord) -> str | None:
+        """Check the claim and source together immediately before sending."""
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT a.status, m.revision, m.is_deleted,
+                       t.status AS task_status, a.approval_id
+                FROM actions a
+                LEFT JOIN messages m ON m.message_id = a.source_message_id
+                LEFT JOIN tasks t ON t.id = a.task_id
+                WHERE a.id = ?
+                """,
+                (action.id,),
+            ).fetchone()
+        if row is None or row["status"] != ActionStatus.SENDING.value:
+            return "claim_no_longer_current"
+        if (
+            action.kind == ActionKind.SEND_REPLY.value
+            and row["approval_id"] is None
+            and row["task_status"]
+            in {
+                TaskStatus.CLOSED_BY_OWNER.value,
+                TaskStatus.HUMAN_TAKEN_OVER.value,
+            }
+        ):
+            return "task_already_closed"
+        if (
+            action.source_message_id is not None
+            and action.source_revision is not None
+            and (row["revision"] != action.source_revision or row["is_deleted"])
+        ):
+            return "stale_revision_before_send"
+        return None
 
     def get_latest_sent_reply_for_source(
         self, *, message_id: str, before_revision: int
@@ -3018,11 +3058,6 @@ class SQLiteStore:
             latest = _latest_dispatch_attempt_locked(conn, action_id=action_id)
             if latest is None or int(latest["id"]) != attempt_id:
                 return None
-            row = conn.execute(
-                "SELECT * FROM actions WHERE id = ?", (action_id,)
-            ).fetchone()
-            if row is None:
-                return None
             cursor = conn.execute(
                 """
                 UPDATE actions
@@ -3037,14 +3072,19 @@ class SQLiteStore:
                 ),
             )
             if cursor.rowcount != 1:
-                # Revision invalidation may fence an in-flight send as
-                # failed_needs_review before the provider result is recorded.
-                # A persisted sent_message_id on the same dispatch attempt is
-                # authoritative evidence that the external side effect
-                # completed; preserve it as sent instead of losing the reply.
+                # An edit or owner takeover can fence an in-flight send.
+                # A message ID on the same attempt confirms delivery.
+                row = conn.execute(
+                    "SELECT * FROM actions WHERE id = ?", (action_id,)
+                ).fetchone()
                 if not (
-                    status == ActionStatus.SENT.value
-                    and row["status"] == ActionStatus.FAILED_NEEDS_REVIEW.value
+                    row is not None
+                    and status == ActionStatus.SENT.value
+                    and row["status"]
+                    in {
+                        ActionStatus.FAILED_NEEDS_REVIEW.value,
+                        ActionStatus.CANCELLED.value,
+                    }
                     and latest["sent_message_id"]
                     and result.get("sent_message_id") == latest["sent_message_id"]
                 ):
@@ -3080,7 +3120,7 @@ class SQLiteStore:
                         json.dumps(merged_result, ensure_ascii=False, default=str),
                         self.clock(),
                         action_id,
-                        ActionStatus.FAILED_NEEDS_REVIEW.value,
+                        row["status"],
                     ),
                 )
                 if cursor.rowcount != 1:
@@ -3376,7 +3416,10 @@ class SQLiteStore:
             conn.execute(
                 # Assignment names are selected from fixed task state fields;
                 # data values remain bound parameters.
-                f"UPDATE tasks SET {', '.join(assignments)} WHERE id = ?",  # noqa: S608
+                f"""
+                UPDATE tasks SET {", ".join(assignments)}
+                WHERE id = ? AND status NOT IN ('closed_by_owner', 'human_taken_over')
+                """,  # noqa: S608
                 params,
             )
 

@@ -1176,6 +1176,45 @@ def test_group_removal_during_session_prevents_further_model_calls(
         assert json.loads(audit["response_json"])["proposed_reply"] == "reply text"
 
 
+def test_close_during_task_session_discards_output(tmp_path: Path) -> None:
+    (tmp_path / "owner_style.md").write_text("# style\n", encoding="utf-8")
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+
+    class ClosingHermes(FakeHermes):
+        def task_session(self, prompt: str, **kwargs: Any) -> AgentRunResult:
+            result = super().task_session(prompt, **kwargs)
+            (task_id,) = store.find_task_ids_for_message("om_1")
+            store.close_task_by_operator(task_id)
+            return result
+
+    hermes = ClosingHermes()
+    hermes.session_outputs.append(_session_output(reply_target_message_id="om_1"))
+    config = _config(
+        reply_postprocess=_postprocess_config(),
+        chats={"oc_1": ChatPolicyConfig(auto_reply=True, bot_joined=True)},
+    )
+    _, service, _ = _service(tmp_path, config=config, hermes=hermes, store=store)
+    result = service.process_raw_message(
+        _message("om_1", mentions=[{"open_id": "ou_owner"}]),
+        source="group_at_me",
+        default_chat_type="group",
+        run_id="run_1",
+    )
+
+    assert result is not None and result.task is not None
+    assert hermes.postprocess_prompts == []
+    assert store.get_task_by_id(result.task.id).status == "closed_by_owner"
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM approvals").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM actions").fetchone()[0] == 0
+        assert (
+            conn.execute(
+                "SELECT status FROM message_processing WHERE stage = 'task_session'"
+            ).fetchone()[0]
+            == "processed"
+        )
+
+
 @pytest.mark.parametrize("first_call_succeeds", [False, True])
 def test_group_removal_during_router_stops_retries_and_new_tasks(
     tmp_path: Path, first_call_succeeds: bool
