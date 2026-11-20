@@ -23,7 +23,7 @@ import { groupTransition, groupVariants } from "../motionTokens";
 import { usePreferences } from "../preferences";
 import { enumLabel } from "../presentation";
 import { queryKeys } from "../queryKeys";
-import type { ThemePreference } from "../theme";
+import type { MaterialPreference, ThemePreference } from "../theme";
 import type { SettingsCatalogEntry, SettingsRuntime } from "../types";
 
 type SettingsGroup = "normal" | "advanced" | "policy" | "diagnostics";
@@ -162,12 +162,16 @@ export function SettingsScreen({ token }: { token: string }) {
  */
 function SettingsPreferences() {
   const { t } = useTranslation();
-  const { theme, setTheme, language, setLanguage } = usePreferences();
+  const { theme, setTheme, material, setMaterial, language, setLanguage } = usePreferences();
 
   const themeOptions: Array<{ value: ThemePreference; label: string }> = [
     { value: "system", label: t("app.themeSystem") },
     { value: "light", label: t("app.themeLight") },
     { value: "dark", label: t("app.themeDark") }
+  ];
+  const materialOptions: Array<{ value: MaterialPreference; label: string }> = [
+    { value: "glass", label: t("settings.appearance.glass") },
+    { value: "solid", label: t("settings.appearance.solid") }
   ];
   const languageOptions: Array<{ value: ConsoleLanguage; label: string }> = [
     { value: "zh-CN", label: t("language.chinese") },
@@ -184,6 +188,9 @@ function SettingsPreferences() {
         </div>
       </div>
       <div className="preference-list">
+        <PreferenceRow description={t("settings.appearance.materialDetail")} label={t("settings.appearance.material")}>
+          <SegmentedControl label={t("settings.appearance.material")} onChange={setMaterial} options={materialOptions} value={material} />
+        </PreferenceRow>
         <PreferenceRow description={t("settings.appearance.themeDetail")} label={t("app.appearanceLabel")}>
           <SegmentedControl label={t("app.appearanceLabel")} onChange={setTheme} options={themeOptions} value={theme} />
         </PreferenceRow>

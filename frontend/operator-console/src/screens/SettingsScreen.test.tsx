@@ -28,6 +28,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   cleanup();
+  delete document.documentElement.dataset.material;
   vi.clearAllMocks();
   vi.unstubAllGlobals();
 });
@@ -62,18 +63,25 @@ describe("SettingsScreen", () => {
     expect(screen.getByText("agent_backend.codex.model")).toBeTruthy();
   });
 
-  it("changes appearance from the console's own preference group", async () => {
+  it("stores color scheme and material independently", async () => {
     const user = userEvent.setup();
     renderSettings();
 
     expect(await screen.findByText("外观与语言")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "透明玻璃" }).getAttribute("aria-pressed")).toBe("true");
+
+    await user.click(screen.getByRole("button", { name: "石墨实底" }));
+    expect(document.documentElement.dataset.material).toBe("solid");
+    expect(localStorage.getItem("feishu_shadow_agent_console_material")).toBe("solid");
 
     await user.click(screen.getByRole("button", { name: "深色" }));
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(localStorage.getItem("feishu_shadow_agent_console_theme")).toBe("dark");
+    expect(document.documentElement.dataset.material).toBe("solid");
 
-    await user.click(screen.getByRole("button", { name: "浅色" }));
-    expect(document.documentElement.dataset.theme).toBe("light");
+    await user.click(screen.getByRole("button", { name: "透明玻璃" }));
+    expect(document.documentElement.dataset.material).toBe("glass");
+    expect(document.documentElement.dataset.theme).toBe("dark");
   });
 
   it("switches interface language without leaving the settings page", async () => {

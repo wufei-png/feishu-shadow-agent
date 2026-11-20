@@ -88,8 +88,7 @@ Default UI library strategy:
 Icons: lucide-react.
 Animation: motion, limited to state transitions, overlays, list entry/exit, and
 diff expansion; respect reduced motion. The library owns mount/unmount and layout
-(`AnimatePresence`, `layoutId`); hover, press, colour, and focus stay in CSS. Both
-theme modes are supported and verified; neither is a second-class target.
+(`AnimatePresence`, `layoutId`). CSS handles hover, press, colour, and focus.
 Server state: TanStack Query for all local API queries, mutations, polling, and
 invalidation.
 Headless primitives: Radix UI Primitives when native HTML is insufficient; do
@@ -126,22 +125,21 @@ constraints.
 Visual rules:
 
 - Support light and dark as peers, following the system appearance by default.
+- Settings stores the color scheme and material independently. Clear Glass is
+  the default material. Graphite uses opaque surfaces and a neutral palette.
 - Design tokens must be semantic. Do not hard-code theme-only token names such as
   `--dark-bg`.
-- Keep the neutral ramp free of hue so the single accent stays meaningful. Neutrals
-  shift in lightness only; status colors carry the meaning.
+- Use a quiet cool tint for Clear Glass and neutral greys for Graphite. Keep
+  semantic status colors consistent across materials.
 - Use status colors only for state, command feedback, and attention.
 - Avoid decorative gradients, glowing backgrounds, large hero surfaces, and
   ornamental animation.
-- Depth is ring-first. Build a numbered elevation scale and use depth shadows only
-  where a surface genuinely floats; on dark, collapse to the ring, because depth
-  shadows do not read there.
-- Material is a rule, not a style: translucent glass marks where the machine
-  reports on itself, and anything the operator must read verbatim stays opaque.
-  Apply real `backdrop-filter` only where content passes underneath; a surface with
-  a flat canvas behind it takes a tonal step instead, because a blur there costs a
-  compositor layer and is indistinguishable from the tint. Degrade glass to opaque
-  under `prefers-reduced-transparency` and where `backdrop-filter` is unsupported.
+- Give the clear floating surfaces a curved rim with directional reflections.
+  Chromium also displaces the backdrop along the bevel. Keep content panels and
+  form controls opaque.
+- Limit glass to the desktop runtime capsule or compact navigation bar.
+  Use opaque surfaces with reduced transparency, increased contrast, forced colors, or absent
+  `backdrop-filter` support.
 - Use small, tool-like radius values, and keep nested radii concentric: an inner
   radius is the outer radius minus the gap between them.
 - Use tabular numbers for counters, timings, and metrics.
@@ -166,12 +164,11 @@ Recommended semantic token families:
 --status-warning
 --status-danger
 --status-info
---material-glass
---material-glass-strong
---material-chrome
+--chrome-fill
+--chrome-sheen
+--chrome-filter
 --elevation-1
 --elevation-2
---elevation-3
 ```
 
 ## Information Architecture
@@ -188,13 +185,13 @@ Primary navigation is grouped into three sections rather than presented as one
 flat list, because the grouping states what each destination is for:
 
 ```text
-Duty        Dashboard, Approvals, Tasks, Dispatch, Feedback
+Duty        Dashboard, AI Coworker, Approvals, Tasks, Dispatch, Feedback
 Configure   Policy, Settings
 System      Health, Maintenance
 ```
 
-Below 900px the section labels drop but hairline dividers keep the grouping
-legible, so the structure survives the compressed layout.
+At 900px and below, a pinned top bar shows the current destination. It opens a
+menu with the same three groups. The runtime summary scrolls with the content.
 
 Navigation intent:
 
@@ -216,11 +213,10 @@ attention, not decorative metrics.
 Priority order:
 
 ```text
-1. Pending approvals and overdue approvals.
-2. Failed or stale dispatch actions.
-3. Product Policy initialization state and Policy Import Diff.
-4. Daemon liveness and open Health issues.
-5. Recent command results and audit highlights.
+1. Dispatch actions to verify or recover.
+2. Pending and overdue approvals.
+3. Blocked or failed tasks.
+4. Product Policy, runtime health, and recent audit highlights.
 ```
 
 Avoid making these the primary focus:
@@ -233,8 +229,9 @@ Avoid making these the primary focus:
 
 Suggested composition:
 
-- Top runtime strip: daemon, policy, last tick, local API status.
-- Central action queue: approvals and dispatch recovery.
+- Runtime strip with daemon, policy, import difference, and data freshness.
+- Compact action index followed by dispatch and approval previews.
+- Next-step guidance when runtime state requires attention.
 - Secondary context: Health issue summary, recent audit, policy diff.
 - Empty state: clearly state that there are no pending operator actions while
   still showing daemon/policy status.

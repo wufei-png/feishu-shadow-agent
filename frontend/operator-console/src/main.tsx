@@ -4,7 +4,11 @@ import { TooltipProvider } from "@radix-ui/react-tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { App } from "./App";
 import "./i18n";
+import "./styles/tokens.css";
+import "./styles/materials.css";
 import "./styles.css";
+import "./styles/shell.css";
+import "./styles/workbench.css";
 
 const queryClient = new QueryClient({
   defaultOptions: {

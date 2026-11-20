@@ -54,13 +54,13 @@ presented as one flat list, because the grouping states what each destination is
 for:
 
 ```text
-Duty        Dashboard, Approvals, Tasks, Dispatch, Feedback
+Duty        Dashboard, AI Coworker, Approvals, Tasks, Dispatch, Feedback
 Configure   Policy, Settings
 System      Health, Maintenance
 ```
 
-Below 900px the section labels drop but hairline dividers keep the grouping
-legible, so the structure survives the compressed layout.
+At 900px and below, the pinned top bar gives access to the same grouped
+destinations through a menu.
 
 The shell layout remains:
 
@@ -85,25 +85,17 @@ words already say, so it stays out of the accessibility tree.
 
 ## Materials, Motion, and Shell Behaviour
 
-Material is a rule, not a style: **glass marks where the machine reports on
-itself, and anything the operator must read verbatim stays opaque.**
+Clear Glass and Graphite share the same layout and both support light and dark
+color schemes. Clear Glass uses a lightly tinted backdrop, directional
+reflections, and a soft scroll edge above the pinned surface. Chromium refracts
+the backdrop along the bevel. Graphite uses an opaque fill. Reduced transparency,
+increased contrast, forced colors, and browsers without backdrop filtering also
+get an opaque fill.
 
-```text
-Real glass (backdrop-filter)   sticky runtime strip, overlays, tooltips, inline confirmation
-Tonal material (no blur)       navigation rail, toolbars, segmented-control track
-Opaque                         every content panel: evidence, messages, policy text
-```
-
-Apply a real blur only where content genuinely passes underneath. A surface with a
-flat canvas behind it takes a tonal step instead, because a blur there costs a
-compositor layer and is indistinguishable from the tint. Degrade glass to an
-opaque surface under `prefers-reduced-transparency` and where `backdrop-filter` is
-unsupported: losing the glass is preferable to setting body text over a smear.
-
-The navigation rail and the runtime strip are sticky, so content scrolls under the
-strip and the shell never scrolls away from the operator. Below 900px the rail
-moves to the top and takes over the glass; the runtime strip goes opaque there
-because nothing passes beneath it any more.
+On desktop the runtime capsule floats over scrolling content and the sidebar uses
+a solid tone. At 900px and below only the navigation bar remains pinned. The
+runtime summary scrolls in the page. Reading surfaces, menus, and tooltips use
+opaque fills at every width.
 
 Motion expresses spatial continuity, not decoration. The animation library owns
 mount, unmount, and layout; CSS owns hover, press, colour, and focus.
@@ -171,10 +163,9 @@ The dashboard is the default entry point and should expose the Action Queue.
 Primary focus:
 
 ```text
-pending approvals
-overdue approvals
-failed dispatch actions
-stale sending actions
+failed and stale dispatch actions
+pending and overdue approvals
+blocked or failed tasks
 policy initialization/import diff
 daemon liveness and open Health issues
 ```
@@ -191,13 +182,10 @@ decorative trend charts
 Required sections:
 
 - Runtime strip summary.
-- Action Queue summary.
+- Compact Action Queue summary with links in priority order, followed by concrete
+  dispatch and approval previews.
 - A next-step panel when policy is missing, startup failed, daemon state needs attention, or a running daemon has not recorded its first message. Pending work remains visible alongside this guidance.
-- Pending/overdue approval preview.
-- Dispatch recovery preview.
-- Policy status and Policy Import Diff summary.
-- Health warning summary.
-- Recent command or audit highlight.
+- Secondary context area with Policy Import Diff, health, and recent signals.
 
 Primary interactions:
 
@@ -225,9 +213,14 @@ The Approvals screen is the primary work queue for human-reviewed replies.
 
 Layout:
 
-```text
-approval queue list -> approval detail panel -> command result feedback
-```
+Desktop fits a narrow, persistent queue alongside a wider review panel. On
+compact screens, selecting an item or following an approval link opens the review
+panel. Back to queue returns to the current list with the draft still attached to
+its approval.
+
+The review panel shows the suggested reply and recent related messages, then the
+reply destination, actions, and command result. Technical details can be expanded
+in place.
 
 List fields:
 

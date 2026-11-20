@@ -104,6 +104,21 @@ describe("ApprovalsScreen", () => {
     expect(api.getApproval).toHaveBeenCalledWith("token", deepLinkedApproval.approval_id);
   });
 
+  it("returns to the queue and reopens the approval with its draft", async () => {
+    const user = userEvent.setup();
+    renderScreen();
+    await screen.findByRole("heading", { name: approvalA.approval_id });
+    await user.type(screen.getByLabelText("最终回复"), "draft to keep");
+
+    await user.click(screen.getByRole("button", { name: "返回队列" }));
+    expect(window.location.hash).toBe("#approvals");
+    expect(screen.getByRole("region", { name: "审批" }).getAttribute("data-detail-open")).toBe("false");
+
+    await user.click(screen.getByRole("button", { name: new RegExp(approvalA.approval_id) }));
+    expect(window.location.hash).toBe(`#approvals/${approvalA.approval_id}`);
+    expect((screen.getByLabelText("最终回复") as HTMLTextAreaElement).value).toBe("draft to keep");
+  });
+
   it("shows the reply destination and requires a choice when it is unresolved", async () => {
     vi.mocked(api.getApproval).mockResolvedValue({
       ...approvalA,

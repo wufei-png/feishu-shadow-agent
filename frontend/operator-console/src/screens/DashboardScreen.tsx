@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ArrowUpRight, Bell, CheckCircle2, ClipboardList, RefreshCw, Send, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ArrowUpRight, Bell, CheckCircle2, ClipboardList, Info, RefreshCw, Send } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { expireApprovals, getDashboard } from "../api";
 import {
@@ -13,7 +13,6 @@ import {
   formatDate,
   ListRow,
   LoadingState,
-  SectionHeader,
   shortText,
   statusTone,
   TechnicalDetails
@@ -69,109 +68,102 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
   const emptyBadge = nextStep?.state === "waiting" ? t("dashboard.waiting") : nextStep?.state === "starting" ? t("dashboard.preparing") : nextStep ? t("dashboard.notReady") : t("dashboard.cleared");
 
   return (
-    <section className="work-grid" aria-label={t("dashboard.aria")}>
-      <div className="work-main">
-        <div className="queue-panel dashboard-overview">
-          <SectionHeader
-            eyebrow={t("dashboard.eyebrow")}
-            title={t("dashboard.title")}
-            badge={<Badge tone={actionCount ? "warning" : nextStep?.state === "attention" ? "warning" : nextStep ? "info" : "success"}>{actionCount ? t("dashboard.itemCount", { count: actionCount }) : emptyBadge}</Badge>}
-          >
-            <p className="section-note">{t("dashboard.intro")}</p>
-            <div className="command-buttons">
-              <Button disabled={dashboard.isFetching} onClick={() => void dashboard.refetch()}>
-                <RefreshCw aria-hidden="true" size={15} />
-                {dashboard.isFetching ? t("common.refreshing") : t("common.refresh")}
-              </Button>
-              <span className="detail-note">{t("common.updatedAt", { time: dashboard.dataUpdatedAt ? formatDate(new Date(dashboard.dataUpdatedAt).toISOString()) : t("common.notUpdated") })}</span>
-            </div>
-            {dashboard.error ? <p className="detail-note danger">{t("common.cachedRefreshError", { code: "" })}</p> : null}
-          </SectionHeader>
-          {nextStep ? <NextStepPanel navigate={navigate} snapshot={snapshot} step={nextStep} /> : null}
-          <div aria-label={t("dashboard.index")} className="decision-index">
+    <section className="dashboard-screen" aria-label={t("dashboard.aria")}>
+      <header className="workbench-header">
+        <div>
+          <h1>{t("dashboard.title")}</h1>
+          <div className="dashboard-status">
+            <Badge tone={actionCount || nextStep?.state === "attention" ? "warning" : nextStep ? "info" : "success"}>
+              {actionCount ? t("dashboard.pendingItems", { count: actionCount }) : emptyBadge}
+            </Badge>
+            {actionCount ? <span>{t("dashboard.affectedTasks", { count: attention?.affected_task_count ?? 0 })}</span> : null}
+          </div>
+        </div>
+        <div className="dashboard-refresh">
+          <span>{dashboard.dataUpdatedAt ? t("common.updatedAt", { time: formatDate(new Date(dashboard.dataUpdatedAt).toISOString()) }) : t("common.notUpdated")}</span>
+          <Button disabled={dashboard.isFetching} onClick={() => void dashboard.refetch()}>
+            <RefreshCw aria-hidden="true" size={15} />
+            {dashboard.isFetching ? t("common.refreshing") : t("common.refresh")}
+          </Button>
+        </div>
+      </header>
+
+      <div className="dashboard-layout">
+        <div className="work-main">
+          {dashboard.error ? <p className="detail-note danger">{t("common.cachedRefreshError", { code: "" })}</p> : null}
+          <div aria-label={t("dashboard.index")} className="decision-index" role="group">
             <DecisionLink count={sendAttention} hint={t("dashboard.viewDispatch")} label={t("dashboard.dispatchAttention")} onClick={() => navigate("dispatch", undefined, "attention")} tone="danger" />
             <DecisionLink count={attention?.pending_approval_count ?? 0} hint={t("dashboard.viewApproval")} label={t("dashboard.pendingApproval")} onClick={() => navigate("approvals")} tone="warning" />
             <DecisionLink count={blockedOrFailed} hint={t("dashboard.viewTasks")} label={t("dashboard.blockedTasks")} onClick={() => navigate("tasks", undefined, "all")} tone="danger" />
           </div>
-          <p className="decision-context">{t("dashboard.affectedTasks", { count: attention?.affected_task_count ?? 0 })}</p>
+          {nextStep ? <NextStepPanel navigate={navigate} snapshot={snapshot} step={nextStep} /> : null}
           {actionCount === 0 && !nextStep ? <EmptyState title={t("dashboard.emptyTitle")} detail={t("dashboard.emptyDetail")} /> : null}
+          <PreviewList
+            approvals={pendingApprovals}
+            actions={recoveryActions}
+            staleActions={staleSendingActions}
+            onApproval={(approvalId) => navigate("approvals", approvalId)}
+            onAction={(actionId) => navigate("dispatch", String(actionId))}
+          />
+          <AttentionTasks tasks={attentionTasks} onTask={(taskId) => navigate("tasks", taskId)} />
         </div>
 
-        <AttentionTasks tasks={attentionTasks} onTask={(taskId) => navigate("tasks", taskId)} />
-        <PreviewList
-          approvals={pendingApprovals}
-          actions={recoveryActions}
-          staleActions={staleSendingActions}
-          onApproval={(approvalId) => navigate("approvals", approvalId)}
-          onAction={(actionId) => navigate("dispatch", String(actionId))}
-        />
+        <aside className="queue-panel dashboard-context">
+          <section>
+            <h2>{t("dashboard.runtimePolicy")}</h2>
+            <dl className="fact-list">
+              <div><dt>{t("dashboard.initialization")}</dt><dd><Badge tone={policyStatus?.initialized ? "success" : "warning"}>{policyStatus?.initialized ? t("dashboard.initialized") : t("runtime.missing")}</Badge></dd></div>
+              <div><dt>{t("dashboard.policyImportDiff")}</dt><dd><Badge tone={statusTone(policyDiff?.status)}>{enumLabel(t, "status", policyDiff?.status, t("common.unknown"))}</Badge></dd></div>
+              <div><dt>{t("dashboard.lastTick")}</dt><dd>{formatDate(snapshot?.daemon_liveness?.last_tick_finished_at)}</dd></div>
+            </dl>
+            <p className="detail-note">{policyDiffSummary(t, policyDiff?.status, policyStatus?.initialized === true)}</p>
+            {policyDiff?.message ? (
+              <TechnicalDetails>
+                <p className="detail-note">{policyDiff.message}</p>
+              </TechnicalDetails>
+            ) : null}
+            {policyNeedsAttention ? <div className="quiet-empty"><AlertTriangle aria-hidden="true" size={18} /><span>{t("dashboard.policyNeedsReview")}</span></div> : null}
+            <div className="command-buttons">
+              <Button onClick={() => navigate("settings")}>{t("dashboard.openSettings")}</Button>
+              <Button onClick={() => navigate("health")}>{t("dashboard.openHealth")}</Button>
+            </div>
+          </section>
+
+          <section>
+            <h2>{t("dashboard.signalsTitle")}</h2>
+            <IngestionSignal status={snapshot?.ingestion_status} />
+            <MembershipSignal status={snapshot?.bot_membership_status} />
+          </section>
+
+          <section>
+            <h2>{t("dashboard.recentErrors")}</h2>
+            {recentErrors.length ? (
+              <ul className="timeline-list">
+                {recentErrors.slice(0, 5).map((item, index) => (
+                  <li key={`${String(item.type)}-${index}`}><AlertTriangle aria-hidden="true" size={14} /><span>{String(item.message ?? item.type ?? t("dashboard.recentIssue"))}</span><small title={String(item.status ?? "")}>{item.status ? enumLabel(t, "status", String(item.status)) : ""}</small></li>
+                ))}
+              </ul>
+            ) : <div className="quiet-empty"><CheckCircle2 aria-hidden="true" size={18} /><span>{t("dashboard.noRecentErrors")}</span></div>}
+            <p className="detail-note">{t("dashboard.healthIssues", { count: healthIssueCount })}</p>
+          </section>
+
+          <div className="rail-action">
+            <div>
+              <h3>{t("dashboard.expireTitle")}</h3>
+              <p>{t("dashboard.expireDetail")}</p>
+            </div>
+            <ConfirmButton
+              confirmLabel={t("dashboard.confirmExpire")}
+              disabled={expire.isPending}
+              onConfirm={() => expire.mutate()}
+              tone="warning"
+            >
+              {t("dashboard.expire")}
+            </ConfirmButton>
+            <CommandResultPanel result={expireResult} />
+          </div>
+        </aside>
       </div>
-
-      {/*
-        Three tiers, not five peers. The rail answers "is the machine configured
-        correctly", then "what is its condition", then "what changed recently";
-        the housekeeping command sits below all of it at a smaller size, because
-        an action is not a status readout.
-      */}
-      <aside className="work-detail">
-        <div className="detail-panel">
-          <p className="eyebrow">{t("dashboard.runtimeBoundary")}</p>
-          <h2>{t("dashboard.runtimePolicy")}</h2>
-          <dl className="fact-list">
-            <div><dt>{t("dashboard.initialization")}</dt><dd><Badge tone={policyStatus?.initialized ? "success" : "warning"}>{policyStatus?.initialized ? t("dashboard.initialized") : t("runtime.missing")}</Badge></dd></div>
-            <div><dt>{t("dashboard.policyImportDiff")}</dt><dd><Badge tone={statusTone(policyDiff?.status)}>{enumLabel(t, "status", policyDiff?.status, t("common.unknown"))}</Badge></dd></div>
-            <div><dt>{t("dashboard.lastTick")}</dt><dd>{formatDate(snapshot?.daemon_liveness?.last_tick_finished_at)}</dd></div>
-          </dl>
-          <p className="detail-note">{policyDiffSummary(t, policyDiff?.status, policyStatus?.initialized === true)}</p>
-          {policyDiff?.message ? (
-            <TechnicalDetails>
-              <p className="detail-note">{policyDiff.message}</p>
-            </TechnicalDetails>
-          ) : null}
-          {policyNeedsAttention ? <div className="quiet-empty"><AlertTriangle aria-hidden="true" size={18} /><span>{t("dashboard.policyNeedsReview")}</span></div> : null}
-          <div className="command-buttons">
-            <Button onClick={() => navigate("settings")}>{t("dashboard.openSettings")}</Button>
-            <Button onClick={() => navigate("health")}>{t("dashboard.openHealth")}</Button>
-          </div>
-        </div>
-
-        <div className="detail-panel">
-          <p className="eyebrow">{t("dashboard.signalsEyebrow")}</p>
-          <h2>{t("dashboard.signalsTitle")}</h2>
-          <IngestionSignal status={snapshot?.ingestion_status} />
-          <MembershipSignal status={snapshot?.bot_membership_status} />
-        </div>
-
-        <div className="detail-panel">
-          <p className="eyebrow">{t("dashboard.recentSignals")}</p>
-          <h2>{t("dashboard.recentErrors")}</h2>
-          {recentErrors.length ? (
-            <ul className="timeline-list">
-              {recentErrors.slice(0, 5).map((item, index) => (
-                <li key={`${String(item.type)}-${index}`}><AlertTriangle aria-hidden="true" size={14} /><span>{String(item.message ?? item.type ?? t("dashboard.recentIssue"))}</span><small title={String(item.status ?? "")}>{item.status ? enumLabel(t, "status", String(item.status)) : ""}</small></li>
-              ))}
-            </ul>
-          ) : <div className="quiet-empty"><CheckCircle2 aria-hidden="true" size={18} /><span>{t("dashboard.noRecentErrors")}</span></div>}
-          <p className="detail-note">{t("dashboard.healthIssues", { count: healthIssueCount })}</p>
-        </div>
-
-        <div className="rail-action">
-          <div>
-            <h3>{t("dashboard.expireTitle")}</h3>
-            <p>{t("dashboard.expireDetail")}</p>
-          </div>
-          <ConfirmButton
-            confirmLabel={t("dashboard.confirmExpire")}
-            disabled={expire.isPending}
-            onConfirm={() => expire.mutate()}
-            tone="warning"
-          >
-            {t("dashboard.expire")}
-          </ConfirmButton>
-          <CommandResultPanel result={expireResult} />
-        </div>
-
-      </aside>
     </section>
   );
 }
@@ -228,16 +220,18 @@ function NextStepPanel({ step, snapshot, navigate }: { step: DashboardNextStep; 
   const mode = snapshot?.runtime_mode;
   const route = step.route;
   return (
-    <section aria-label={t("dashboard.nextStep")} className="next-step-panel">
-      <p className="eyebrow">{t("dashboard.nextStep")}</p>
-      <h2>{t(step.title)}</h2>
-      <p>{t(step.detail)}</p>
-      {step.showCommand && mode ? (
-        <>
-          {mode === "production" ? <p>{t("dashboard.productionStartWarning")}</p> : null}
-          <code>python -m feishu_shadow_agent daemon --config config.yaml{mode === "dry_run" ? " --dry-run" : ""}</code>
-        </>
-      ) : null}
+    <section aria-label={t("dashboard.nextStep")} className="next-step-panel" data-attention={step.state === "attention"}>
+      {step.state === "attention" ? <AlertTriangle aria-hidden="true" size={19} /> : <Info aria-hidden="true" size={19} />}
+      <div className="next-step-copy">
+        <h2>{t(step.title)}</h2>
+        <p>{t(step.detail)}</p>
+        {step.showCommand && mode ? (
+          <>
+            {mode === "production" ? <p>{t("dashboard.productionStartWarning")}</p> : null}
+            <code>python -m feishu_shadow_agent daemon --config config.yaml{mode === "dry_run" ? " --dry-run" : ""}</code>
+          </>
+        ) : null}
+      </div>
       {route && step.action ? <Button onClick={() => navigate(route)}>{t(step.action)}</Button> : null}
     </section>
   );
@@ -332,7 +326,8 @@ function DecisionLink({ count, hint, label, onClick, tone }: {
     <button className={`decision-link ${count ? tone : "quiet"}`} onClick={onClick} type="button">
       <span className="decision-label">{label}</span>
       <strong>{count}</strong>
-      <span className="decision-hint">{hint}<ArrowUpRight aria-hidden="true" size={15} /></span>
+      <span className="decision-hint">{hint}</span>
+      <ArrowUpRight aria-hidden="true" size={15} />
     </button>
   );
 }
@@ -343,7 +338,7 @@ function AttentionTasks({ tasks, onTask }: { tasks: AttentionTask[]; onTask: (ta
     return null;
   }
   return (
-    <section className="queue-panel">
+    <section className="queue-panel dashboard-queue">
       <div className="subsection-title"><ClipboardList aria-hidden="true" size={16} /><h2>{t("dashboard.groupedTasks")}</h2></div>
       <div className="list-stack">
         {tasks.map((task) => (
@@ -380,29 +375,14 @@ function PreviewList({ approvals, actions, staleActions, onApproval, onAction }:
   const dispatchRows = [...actions, ...staleActions].filter(
     (action, index, rows) => rows.findIndex((candidate) => candidate.action_id === action.action_id) === index
   );
+  if (!dispatchRows.length && !approvals.length) {
+    return null;
+  }
   return (
-    <div className="split-panels">
-      <section className="queue-panel">
-        <div className="subsection-title"><Bell aria-hidden="true" size={16} /><h2>{t("dashboard.approvalPreview")}</h2></div>
-        {approvals.length ? (
-          <div className="list-stack">
-            {approvals.slice(0, 6).map((approval) => (
-              <ListRow
-                badge={<Badge tone={approval.is_overdue ? "danger" : statusTone(approval.status)}>{approval.is_overdue ? t("approvals.overdue") : enumLabel(t, "status", approval.status)}</Badge>}
-                key={approval.approval_id}
-                meta={`${approval.task_short_id ?? t("common.notLinked")} · ${t("dashboard.sourceMessage", { id: approval.source_message_id ?? "unknown" })} · ${formatDate(approval.created_at)}`}
-                onClick={() => onApproval(approval.approval_id)}
-                selected={false}
-                title={approval.approval_id}
-              ><span className="row-preview">{t("dashboard.suggestedReply", { preview: shortText(approval.preview) })}</span></ListRow>
-            ))}
-          </div>
-        ) : <EmptyState title={t("dashboard.noApprovals")} detail={t("dashboard.noApprovalsDetail")} />}
-      </section>
-
-      <section className="queue-panel">
-        <div className="subsection-title"><Send aria-hidden="true" size={16} /><h2>{t("dashboard.dispatchPreview")}</h2></div>
-        {dispatchRows.length ? (
+    <div className="queue-panel dashboard-queue">
+      {dispatchRows.length ? (
+        <section>
+          <div className="subsection-title"><Send aria-hidden="true" size={16} /><h2>{t("dashboard.dispatchPreview")}</h2></div>
           <div className="list-stack">
             {dispatchRows.slice(0, 6).map((action) => (
               <ListRow
@@ -412,16 +392,28 @@ function PreviewList({ approvals, actions, staleActions, onApproval, onAction }:
                 onClick={() => onAction(action.action_id)}
                 selected={false}
                 title={t("dashboard.dispatchRecord", { id: action.action_id })}
-              ><span className="row-preview">{t("dashboard.dispatchStatus", { status: enumLabel(t, "status", action.status) })}</span></ListRow>
+              />
             ))}
           </div>
-        ) : <EmptyState title={t("dashboard.noDispatch")} detail={t("dashboard.noDispatchDetail")} />}
-      </section>
-
-      <section className="queue-panel full-span">
-        <div className="subsection-title"><ShieldCheck aria-hidden="true" size={16} /><h2>{t("dashboard.guidance")}</h2></div>
-        <p className="detail-note">{t("dashboard.guidanceDetail")}</p>
-      </section>
+        </section>
+      ) : null}
+      {approvals.length ? (
+        <section>
+          <div className="subsection-title"><Bell aria-hidden="true" size={16} /><h2>{t("dashboard.approvalPreview")}</h2></div>
+          <div className="list-stack">
+            {approvals.slice(0, 6).map((approval) => (
+              <ListRow
+                badge={<Badge tone={approval.is_overdue ? "danger" : statusTone(approval.status)}>{approval.is_overdue ? t("approvals.overdue") : enumLabel(t, "status", approval.status)}</Badge>}
+                key={approval.approval_id}
+                meta={`${approval.task_short_id ?? t("common.notLinked")} · ${t("dashboard.sourceMessage", { id: approval.source_message_id ?? "unknown" })} · ${formatDate(approval.created_at)}`}
+                onClick={() => onApproval(approval.approval_id)}
+                selected={false}
+                title={approval.approval_id}
+              ><span className="row-preview">{shortText(approval.preview)}</span></ListRow>
+            ))}
+          </div>
+        </section>
+      ) : null}
     </div>
   );
 }

@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 
 export type ThemePreference = "system" | "light" | "dark";
+export type MaterialPreference = "glass" | "solid";
 
 const STORAGE_KEY = "feishu_shadow_agent_console_theme";
+const MATERIAL_STORAGE_KEY = "feishu_shadow_agent_console_material";
 const DARK_QUERY = "(prefers-color-scheme: dark)";
 
 function initialPreference(): ThemePreference {
@@ -43,4 +45,22 @@ export function useThemePreference(): [ThemePreference, (preference: ThemePrefer
   }
 
   return [preference, chooseTheme];
+}
+
+export function useMaterialPreference(): [MaterialPreference, (preference: MaterialPreference) => void] {
+  const [material, setMaterial] = useState<MaterialPreference>(() =>
+    document.documentElement.dataset.material === "solid" ? "solid" : "glass"
+  );
+
+  function chooseMaterial(next: MaterialPreference): void {
+    setMaterial(next);
+    document.documentElement.dataset.material = next;
+    try {
+      localStorage.setItem(MATERIAL_STORAGE_KEY, next);
+    } catch {
+      // The selected material still applies for this session.
+    }
+  }
+
+  return [material, chooseMaterial];
 }

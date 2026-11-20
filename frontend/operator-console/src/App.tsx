@@ -1,10 +1,11 @@
-import { Suspense, lazy, useEffect, useMemo, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import { Activity, Bell, Bot, ClipboardList, Database, FileText, HeartPulse, Home, MessageSquareDiff, Send, Settings, ShieldCheck, Wrench } from "lucide-react";
+import { Activity, Bell, Bot, ChevronDown, ClipboardList, Database, FileText, HeartPulse, Home, MessageSquareDiff, Send, Settings, ShieldCheck, Wrench } from "lucide-react";
 import { LazyMotion, MotionConfig, m } from "motion/react";
 import { getDashboard } from "./api";
+import { GlassLens } from "./components/GlassLens";
 import { Badge, EmptyState, LoadingState } from "./components/Primitives";
 import { bootstrapTokenFromHash, decodeHashSegment } from "./consoleSession";
 import { panelTransition, routeTransition, routeVariants } from "./motionTokens";
@@ -25,9 +26,7 @@ const loadMotionFeatures = () => import("motion/react").then((module) => module.
 type NavItem = { key: RouteKey; labelKey: string; icon: typeof Home };
 
 /**
- * Three sections rather than nine peers: work the operator acts on, configuration
- * they own, and the machine's own condition. The split is what makes a nine-item
- * rail scannable.
+ * Group destinations by work, configuration, and system status.
  */
 const navSections: Array<{ key: string; labelKey: string; items: NavItem[] }> = [
   {
@@ -63,7 +62,7 @@ const navSections: Array<{ key: string; labelKey: string; items: NavItem[] }> = 
 const navItems: NavItem[] = navSections.flatMap((section) => section.items);
 
 /**
- * One screen renders at a time, so bundling all nine into the first payload makes
+ * One screen renders at a time, so bundling every screen into the first payload makes
  * every visit pay for the screens it will not open. Each loads on first visit and
  * is cached by the browser afterwards; on a loopback console that fetch is free.
  */
@@ -144,48 +143,7 @@ function ConsoleShell() {
 
   return (
     <div className="app-shell">
-      <aside className="side-nav" aria-label={t("app.mainNavigation")}>
-        <div className="brand-lockup">
-          <Database aria-hidden="true" size={18} />
-          <div>
-            <span className="brand-title">Shadow Agent</span>
-            <span className="brand-subtitle">{t("app.brandSubtitle")}</span>
-            {dashboard.data?.runtime_mode ? (
-              <Badge tone={dashboard.data.runtime_mode === "dry_run" ? "info" : "success"}>
-                {t(dashboard.data.runtime_mode === "dry_run" ? "app.modeDryRun" : "app.modeProduction")}
-              </Badge>
-            ) : null}
-          </div>
-        </div>
-        <nav className="nav-list">
-          {navSections.map((section) => (
-            <div className="nav-section" key={section.key}>
-              <p className="nav-section-label">{t(section.labelKey)}</p>
-              {section.items.map((item) => (
-                <a
-                  aria-current={location.route === item.key ? "page" : undefined}
-                  className="nav-item"
-                  href={`#${item.key}`}
-                  key={item.key}
-                  title={t(item.labelKey)}
-                >
-                  {/*
-                    The selected pill is one shared element that travels between
-                    items, so selection reads as having moved rather than as one
-                    item switching off and another switching on.
-                  */}
-                  {location.route === item.key ? (
-                    <m.span aria-hidden="true" className="nav-active-pill" layoutId="nav-active-pill" transition={panelTransition} />
-                  ) : null}
-                  <item.icon aria-hidden="true" size={17} />
-                  <span>{t(item.labelKey)}</span>
-                </a>
-              ))}
-            </div>
-          ))}
-        </nav>
-      </aside>
-
+      <ConsoleNavigation route={location.route} mode={dashboard.data?.runtime_mode} />
       <div className="workspace">
         <RuntimeStrip status={runtimeStatus} />
         <main className="main-surface">
@@ -232,6 +190,105 @@ function ConsoleShell() {
   );
 }
 
+function ConsoleNavigation({ route, mode }: { route: RouteKey; mode: DashboardSnapshot["runtime_mode"] }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const [touchPressed, setTouchPressed] = useState(false);
+  const sidebar = useRef<HTMLElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const page = t(navItems.find((item) => item.key === route)?.labelKey ?? "navigation.console");
+
+  useEffect(() => {
+    if (!open) return;
+    function dismissOutside(event: PointerEvent) {
+      if (event.target instanceof Node && !sidebar.current?.contains(event.target)) setOpen(false);
+    }
+    document.addEventListener("pointerdown", dismissOutside);
+    return () => document.removeEventListener("pointerdown", dismissOutside);
+  }, [open]);
+
+  function closeMenu() {
+    setOpen(false);
+    trigger.current?.focus();
+  }
+
+  return (
+    <aside
+      className="side-nav floating-surface"
+      data-glass-pressed={touchPressed || undefined}
+      data-menu-open={open}
+      ref={sidebar}
+      onBlur={(event) => {
+        if (open && !event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+      }}
+      onKeyDown={(event) => {
+        if (open && event.key === "Escape") {
+          event.preventDefault();
+          closeMenu();
+        }
+      }}
+    >
+      <GlassLens />
+      <div className="nav-top">
+        <div className="brand-lockup">
+          <span className="brand-mark"><Database aria-hidden="true" size={19} strokeWidth={1.7} /></span>
+          <div>
+            <span className="brand-title">Shadow Agent</span>
+            <span className="brand-subtitle">{t("app.brandSubtitle")}</span>
+          </div>
+        </div>
+        {mode ? (
+          <div className="shell-mode">
+            <Badge tone={mode === "dry_run" ? "info" : "success"}>
+              {t(mode === "dry_run" ? "app.modeDryRun" : "app.modeProduction")}
+            </Badge>
+          </div>
+        ) : null}
+        <button
+          aria-controls="console-navigation"
+          aria-expanded={open}
+          aria-label={t("app.navigationMenu", { page })}
+          className="nav-trigger"
+          onClick={() => setOpen((current) => !current)}
+          onPointerDown={(event) => {
+            if (event.pointerType === "touch") setTouchPressed(true);
+          }}
+          onLostPointerCapture={() => setTouchPressed(false)}
+          onPointerCancel={() => setTouchPressed(false)}
+          onPointerUp={() => setTouchPressed(false)}
+          ref={trigger}
+          type="button"
+        >
+          <span>{page}</span>
+          <ChevronDown aria-hidden="true" size={16} />
+        </button>
+      </div>
+      <nav aria-label={t("app.mainNavigation")} className="nav-list" id="console-navigation">
+        {navSections.map((section) => (
+          <div className="nav-section" key={section.key}>
+            <p className="nav-section-label">{t(section.labelKey)}</p>
+            {section.items.map((item) => (
+              <a
+                aria-current={route === item.key ? "page" : undefined}
+                className="nav-item"
+                href={`#${item.key}`}
+                key={item.key}
+                onClick={open ? closeMenu : undefined}
+              >
+                {route === item.key ? (
+                  <m.span aria-hidden="true" className="nav-active-pill" layoutId="nav-active-pill" transition={panelTransition} />
+                ) : null}
+                <item.icon aria-hidden="true" size={17} strokeWidth={1.8} />
+                <span className="nav-item-label">{t(item.labelKey)}</span>
+              </a>
+            ))}
+          </div>
+        ))}
+      </nav>
+    </aside>
+  );
+}
+
 /**
  * Reports the machine, and only reports. Appearance and language are the
  * operator's own preferences, so they live in Settings instead of competing with
@@ -244,7 +301,8 @@ function ConsoleShell() {
 function RuntimeStrip({ status }: { status: Array<{ label: string; value: string; tone: Tone }> }) {
   const { t } = useTranslation();
   return (
-    <header className="runtime-strip material-glass">
+    <header aria-label={t("app.runtime")} className="runtime-strip floating-surface">
+      <GlassLens />
       <div className="runtime-heading">
         <Activity aria-hidden="true" size={16} />
         <span>{t("app.runtime")}</span>

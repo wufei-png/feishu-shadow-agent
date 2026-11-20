@@ -1,129 +1,3 @@
-/*
- * Token system.
- *
- * Neutral graphite base, one teal accent. The neutral ramp carries no hue of its
- * own so the accent stays the only thing on screen that means something, and so
- * the glass materials have a clean substrate to transmit.
- *
- * Material rule: glass marks where the machine reports on itself. Anything the
- * operator must read verbatim (evidence, messages, policy text) stays opaque.
- */
-:root {
-  color-scheme: light;
-  font-family: "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", sans-serif;
-  -webkit-font-smoothing: antialiased;
-  --font-display: "Bahnschrift", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
-  --font-data: "JetBrains Mono", Consolas, monospace;
-
-  /* Neutral graphite ramp: lightness only, no hue. */
-  --surface-canvas: #f2f2f4;
-  --surface-panel: #ffffff;
-  --surface-raised: #f7f7f9;
-  --surface-hover: #ededf0;
-  --surface-inset: #e8e8ec;
-  --text-primary: #17171a;
-  --text-secondary: #4c4c55;
-  --text-muted: #6f6f7a;
-  --border-subtle: rgba(20, 20, 26, 0.1);
-  --border-strong: rgba(20, 20, 26, 0.22);
-
-  /* Nav rail states. Explicit per theme: the rail sits on the canvas tone, so
-   * hover and active cannot be derived from the surface ramp without inverting
-   * their order in one of the two themes. */
-  --surface-nav-hover: rgba(20, 20, 26, 0.055);
-  --surface-nav-active: #ffffff;
-
-  /* One accent. Used for selection, focus, and success only. */
-  --accent-primary: #137b70;
-  --accent-wash: rgba(19, 123, 112, 0.1);
-  --accent-outline: rgba(19, 123, 112, 0.35);
-  --status-success: #137b70;
-  --status-warning: #8a5a12;
-  --status-danger: #a83c47;
-  --status-info: #33598f;
-  --warning-wash: rgba(138, 90, 18, 0.09);
-  --danger-wash: rgba(168, 60, 71, 0.09);
-
-  /*
-   * Materials. `--material-glass*` pair with backdrop-filter and are only used
-   * where content genuinely passes underneath. `--material-chrome` is a tonal
-   * step for surfaces with nothing behind them, where blur would cost frames
-   * and change nothing.
-   *
-   * Glass alpha sits high enough that blurred content reads as shape and tone
-   * rather than as text competing with the strip's own labels.
-   */
-  --material-glass: rgba(255, 255, 255, 0.8);
-  --material-glass-strong: rgba(255, 255, 255, 0.9);
-  --material-chrome: #f7f7f9;
-  --material-blur: 28px;
-  --material-saturate: 180%;
-
-  /* Elevation. Ring first; depth only where a surface truly floats. */
-  --elevation-1: 0 0 0 1px rgba(20, 20, 26, 0.06), 0 1px 2px -1px rgba(20, 20, 26, 0.08), 0 2px 6px rgba(20, 20, 26, 0.05);
-  --elevation-2: 0 0 0 1px rgba(20, 20, 26, 0.07), 0 2px 4px -2px rgba(20, 20, 26, 0.1), 0 8px 20px rgba(20, 20, 26, 0.1);
-  --elevation-3: 0 0 0 1px rgba(20, 20, 26, 0.08), 0 4px 8px -4px rgba(20, 20, 26, 0.12), 0 16px 40px rgba(20, 20, 26, 0.16);
-
-  /* Concentric radii: a nested radius is its parent's minus the gap between them. */
-  --radius-small: 7px;
-  --radius-inset: 8px;
-  --radius-panel: 12px;
-  --radius-glass: 14px;
-
-  /* Type scale, 1.25 ratio from a 14px body. */
-  --text-caption: 11px;
-  --text-label: 12px;
-  --text-body: 13px;
-  --text-body-lg: 14px;
-  --text-h4: 16px;
-  --text-h3: 18px;
-  --text-h1: 28px;
-  --text-display: 34px;
-
-  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
-  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
-  --duration-press: 120ms;
-  --duration-quick: 150ms;
-  --duration-route: 140ms;
-  --duration-panel: 200ms;
-}
-
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --surface-canvas: #0d0d0f;
-  --surface-panel: #17171a;
-  --surface-raised: #1f1f23;
-  --surface-hover: #27272c;
-  --surface-inset: #09090b;
-  --text-primary: #f0f0f2;
-  --text-secondary: #b6b6bf;
-  --text-muted: #8b8b95;
-  --border-subtle: rgba(255, 255, 255, 0.09);
-  --border-strong: rgba(255, 255, 255, 0.22);
-  --surface-nav-hover: rgba(255, 255, 255, 0.06);
-  --surface-nav-active: #1f1f23;
-  --accent-primary: #75d5be;
-  --accent-wash: rgba(117, 213, 190, 0.12);
-  --accent-outline: rgba(117, 213, 190, 0.38);
-  --status-success: #75d5be;
-  --status-warning: #e0b978;
-  --status-danger: #ee8b92;
-  --status-info: #91b8ed;
-  --warning-wash: rgba(224, 185, 120, 0.1);
-  --danger-wash: rgba(238, 139, 146, 0.1);
-
-  --material-glass: rgba(23, 23, 26, 0.78);
-  --material-glass-strong: rgba(28, 28, 32, 0.92);
-  --material-chrome: #131316;
-  --material-blur: 28px;
-  --material-saturate: 140%;
-
-  /* On dark, depth shadows do not read; the ring carries the layering. */
-  --elevation-1: 0 0 0 1px rgba(255, 255, 255, 0.07);
-  --elevation-2: 0 0 0 1px rgba(255, 255, 255, 0.1), 0 8px 24px rgba(0, 0, 0, 0.5);
-  --elevation-3: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 16px 48px rgba(0, 0, 0, 0.62);
-}
-
 * {
   box-sizing: border-box;
 }
@@ -134,64 +8,14 @@ body {
   min-height: 100vh;
   background: var(--surface-canvas);
   color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--text-body-lg);
+  -webkit-font-smoothing: antialiased;
 }
 
 ::selection {
   background: var(--accent-wash);
   color: var(--text-primary);
-}
-
-/*
- * Materials.
- *
- * `.material-glass` is real glass: it blurs what is behind it, so it is only
- * ever applied where content scrolls underneath. `.material-chrome` is a tonal
- * step for surfaces with a flat canvas behind them, where a blur would cost a
- * compositor layer and be indistinguishable from the tint.
- */
-.material-glass {
-  background: var(--material-glass);
-  -webkit-backdrop-filter: blur(var(--material-blur)) saturate(var(--material-saturate));
-  backdrop-filter: blur(var(--material-blur)) saturate(var(--material-saturate));
-}
-
-.material-glass-strong {
-  background: var(--material-glass-strong);
-  -webkit-backdrop-filter: blur(var(--material-blur)) saturate(var(--material-saturate));
-  backdrop-filter: blur(var(--material-blur)) saturate(var(--material-saturate));
-}
-
-.material-chrome {
-  background: var(--material-chrome);
-}
-
-/*
- * Degradation. Without backdrop-filter support, and when the operator has asked
- * the system to reduce transparency, glass becomes an opaque surface rather than
- * text over an unreadable smear. Hierarchy is carried by the ring either way.
- */
-@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .material-glass {
-    background: var(--surface-panel);
-  }
-
-  .material-glass-strong {
-    background: var(--surface-panel);
-  }
-}
-
-@media (prefers-reduced-transparency: reduce) {
-  .material-glass {
-    background: var(--surface-panel);
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
-  }
-
-  .material-glass-strong {
-    background: var(--surface-panel);
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
-  }
 }
 
 button,
@@ -206,243 +30,9 @@ button {
   color: inherit;
 }
 
-.app-shell {
-  display: grid;
-  grid-template-columns: 236px minmax(0, 1fr);
-  min-height: 100vh;
-}
-
-/*
- * The rail keeps the canvas tone instead of inventing a second background: a
- * tinted sidebar splits the window into "nav world" and "content world". The
- * hairline and the active pill carry the structure instead.
- */
-.side-nav {
-  position: sticky;
-  top: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-  height: 100vh;
-  padding: 18px 12px;
-  overflow-y: auto;
-  border-right: 1px solid var(--border-subtle);
-  background: var(--surface-canvas);
-}
-
-.brand-lockup {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 44px;
-  padding: 0 8px;
-}
-
-.brand-lockup svg {
-  color: var(--accent-primary);
-}
-
-.brand-title,
-.brand-subtitle {
-  display: block;
-  line-height: 1.2;
-}
-
-.brand-title {
-  font-family: var(--font-display);
-  font-size: 15px;
-  font-weight: 700;
-  letter-spacing: -0.015em;
-}
-
-.brand-subtitle {
+:is(input, textarea)::placeholder {
   color: var(--text-muted);
-  font-size: var(--text-label);
-  font-weight: 500;
-}
-
-/*
- * Three sections, not nine peers. The grouping states what each destination is
- * for: work you act on, configuration you own, and the machine's own condition.
- */
-.nav-list {
-  display: grid;
-  gap: 18px;
-}
-
-.nav-section {
-  display: grid;
-  gap: 2px;
-}
-
-.nav-section-label {
-  margin: 0 0 4px;
-  padding: 0 10px;
-  color: var(--text-muted);
-  font-size: var(--text-caption);
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-}
-
-.nav-item {
-  position: relative;
-  display: flex;
-  align-items: center;
-  min-height: 42px;
-  gap: 10px;
-  padding: 0 10px;
-  border-radius: var(--radius-small);
-  color: var(--text-secondary);
-  font-size: var(--text-body);
-  font-weight: 600;
-  text-decoration: none;
-  transition:
-    background-color var(--duration-quick) var(--ease-out),
-    color var(--duration-quick) var(--ease-out);
-}
-
-/*
- * The selected pill is a single shared element that travels between items, so
- * the surface carries the selection instead of each item owning its own
- * background. Icon and label are positioned so they paint above it.
- */
-.nav-active-pill {
-  position: absolute;
-  inset: 0;
-  border-radius: var(--radius-small);
-  background: var(--surface-nav-active);
-  box-shadow: var(--elevation-1), inset 3px 0 0 var(--accent-primary);
-}
-
-.nav-item > svg,
-.nav-item > span {
-  position: relative;
-}
-
-.nav-item:hover,
-.nav-item:focus-visible {
-  color: var(--text-primary);
-  background: var(--surface-nav-hover);
-}
-
-.nav-item[aria-current="page"] {
-  color: var(--text-primary);
-}
-
-.workspace {
-  min-width: 0;
-}
-
-/*
- * The runtime strip is the one surface content genuinely scrolls underneath, so
- * it is the one surface that earns a real blur. Its readings are tell-tale lamps
- * rather than badges: a row of status pills competes with the work below it, a
- * row of dim indicators does not.
- */
-.runtime-strip {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  min-height: 56px;
-  padding: 8px 24px;
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.runtime-heading,
-.runtime-items,
-.runtime-item {
-  display: flex;
-  align-items: center;
-}
-
-.runtime-heading {
-  gap: 8px;
-  padding-right: 16px;
-  border-right: 1px solid var(--border-subtle);
-  color: var(--text-primary);
-  font-size: var(--text-label);
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.runtime-heading svg {
-  color: var(--text-muted);
-}
-
-.runtime-items {
-  flex-wrap: wrap;
-  gap: 18px;
-  min-width: 0;
-}
-
-.runtime-item {
-  gap: 7px;
-  min-width: 0;
-}
-
-.runtime-label {
-  color: var(--text-muted);
-  font-size: var(--text-label);
-  font-weight: 550;
-  white-space: nowrap;
-}
-
-.runtime-value {
-  color: var(--text-secondary);
-  font-size: var(--text-label);
-  font-variant-numeric: tabular-nums;
-  font-weight: 650;
-  white-space: nowrap;
-}
-
-/*
- * Tell-tale. `color` carries the tone and the lamp inherits it, so a tone is one
- * declaration and the halo can never drift out of sync with the lamp.
- */
-.tell-tale {
-  position: relative;
-  width: 8px;
-  height: 8px;
-  flex: 0 0 auto;
-  border-radius: 999px;
-  background: currentColor;
-  color: var(--text-muted);
-}
-
-.tell-tale::after {
-  position: absolute;
-  inset: -3px;
-  border-radius: inherit;
-  background: color-mix(in srgb, currentColor 20%, transparent);
-  content: "";
-}
-
-.tell-tale.success {
-  color: var(--status-success);
-}
-
-.tell-tale.warning {
-  color: var(--status-warning);
-}
-
-.tell-tale.danger {
-  color: var(--status-danger);
-}
-
-.tell-tale.info {
-  color: var(--status-info);
-}
-
-.tell-tale.neutral {
-  color: var(--text-secondary);
-}
-
-.tell-tale.muted {
-  color: var(--text-muted);
+  opacity: 1;
 }
 
 .subsection-title,
@@ -511,11 +101,6 @@ button {
   text-wrap: pretty;
 }
 
-.main-surface {
-  min-height: calc(100vh - 56px);
-  padding: 24px;
-}
-
 .work-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.4fr) minmax(340px, 0.8fr);
@@ -581,9 +166,7 @@ button {
   margin: 0 0 5px;
   color: var(--text-muted);
   font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0;
-  text-transform: uppercase;
+  font-weight: 600;
 }
 
 h1,
@@ -595,7 +178,7 @@ p {
 h1 {
   margin-bottom: 0;
   font-family: var(--font-display);
-  font-size: 28px;
+  font-size: var(--text-h1);
   font-weight: 700;
   line-height: 1.15;
   letter-spacing: -0.025em;
@@ -604,7 +187,7 @@ h1 {
 
 h2 {
   margin-bottom: 14px;
-  font-size: 18px;
+  font-size: var(--text-h3);
   font-weight: 650;
   line-height: 1.3;
 }
@@ -664,120 +247,6 @@ h2 {
   overflow-wrap: anywhere;
 }
 
-.dashboard-overview .section-header h1 {
-  font-size: 34px;
-}
-
-.next-step-panel {
-  display: grid;
-  justify-items: start;
-  gap: 9px;
-  margin-bottom: 16px;
-  padding: 16px;
-  border: 1px solid var(--border-subtle);
-  border-left: 3px solid var(--status-info);
-  border-radius: var(--radius-small);
-  background: var(--surface-raised);
-}
-
-.next-step-panel h2,
-.next-step-panel p {
-  margin: 0;
-}
-
-.next-step-panel p:not(.eyebrow) {
-  color: var(--text-secondary);
-  font-size: 13px;
-  line-height: 1.5;
-}
-
-.next-step-panel code {
-  max-width: 100%;
-  overflow-wrap: anywhere;
-  color: var(--text-primary);
-  font-size: 12px;
-}
-
-.decision-index {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  overflow: hidden;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-small);
-  background: var(--surface-raised);
-}
-
-.decision-link {
-  display: grid;
-  justify-items: start;
-  gap: 8px;
-  min-width: 0;
-  min-height: 116px;
-  padding: 16px;
-  border: 0;
-  border-right: 1px solid var(--border-subtle);
-  background: transparent;
-  color: var(--text-primary);
-  cursor: pointer;
-  text-align: left;
-  transition: background-color 150ms cubic-bezier(0.23, 1, 0.32, 1), transform 120ms cubic-bezier(0.23, 1, 0.32, 1);
-}
-
-.decision-link:last-child {
-  border-right: 0;
-}
-
-.decision-link:hover,
-.decision-link:focus-visible {
-  background: var(--surface-hover);
-}
-
-.decision-link:active {
-  transform: scale(0.98);
-}
-
-.decision-label {
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.decision-link strong {
-  font-family: var(--font-display);
-  font-size: 32px;
-  font-variant-numeric: tabular-nums;
-  font-weight: 700;
-  line-height: 1;
-}
-
-.decision-link.danger strong {
-  color: var(--status-danger);
-}
-
-.decision-link.warning strong {
-  color: var(--status-warning);
-}
-
-.decision-link.quiet strong {
-  color: var(--text-muted);
-}
-
-.decision-hint {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  color: var(--text-muted);
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.decision-context {
-  margin: 10px 0 0;
-  color: var(--text-muted);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
 .health-metrics .metric-card {
   min-height: 84px;
 }
@@ -824,6 +293,11 @@ h2 {
   font-variant-numeric: tabular-nums;
   font-weight: 650;
   white-space: nowrap;
+}
+
+.status-pill:is(.success, .info, .warning, .danger) {
+  border-color: color-mix(in srgb, currentColor 18%, transparent);
+  background: color-mix(in srgb, currentColor 7%, var(--surface-panel));
 }
 
 .quiet-empty,
@@ -902,10 +376,7 @@ h2 {
   background: var(--surface-raised);
   text-align: left;
   cursor: pointer;
-  transition:
-    background-color 150ms cubic-bezier(0.23, 1, 0.32, 1),
-    border-color 150ms cubic-bezier(0.23, 1, 0.32, 1),
-    transform 120ms cubic-bezier(0.23, 1, 0.32, 1);
+  transition: transform var(--duration-press) var(--ease-out);
 }
 
 .list-row:hover,
@@ -920,7 +391,8 @@ h2 {
 
 .list-row[data-selected="true"] {
   border-color: var(--accent-outline);
-  box-shadow: inset 3px 0 0 var(--accent-primary);
+  background: color-mix(in srgb, var(--surface-panel) 91%, var(--accent-primary));
+  box-shadow: inset 0 1px 0 var(--control-light);
 }
 
 .list-row > .status-pill {
@@ -989,7 +461,6 @@ h2 {
   cursor: pointer;
   font-size: var(--text-label);
   font-weight: 650;
-  transition: color var(--duration-quick) var(--ease-out);
 }
 
 /*
@@ -1001,8 +472,8 @@ h2 {
   position: absolute;
   inset: 0;
   border-radius: var(--radius-inset);
-  background: var(--surface-raised);
-  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  background: var(--surface-panel);
+  box-shadow: inset 0 0 0 1px var(--border-subtle), inset 0 1px 0 var(--control-light), var(--elevation-1);
 }
 
 .segmented-option {
@@ -1047,7 +518,6 @@ dt {
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 700;
-  text-transform: uppercase;
 }
 
 dd {
@@ -1315,11 +785,10 @@ dd {
   z-index: 50;
   max-width: min(320px, calc(100vw - 24px));
   padding: 9px 11px;
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-inset);
   box-shadow: var(--elevation-2);
-  background: var(--material-glass-strong);
-  -webkit-backdrop-filter: blur(var(--material-blur)) saturate(var(--material-saturate));
-  backdrop-filter: blur(var(--material-blur)) saturate(var(--material-saturate));
+  background: var(--surface-panel);
   color: var(--text-secondary);
   font-size: var(--text-label);
   line-height: 1.5;
@@ -1328,7 +797,7 @@ dd {
 }
 
 .tooltip-arrow {
-  fill: var(--material-glass-strong);
+  fill: var(--surface-panel);
 }
 
 @keyframes tooltip-in {
@@ -1468,8 +937,7 @@ dd {
 
 /*
  * Preference rows. Label and explanation on the left, control on the right,
- * divided by space and a hairline rather than a card each: two preferences do
- * not need two boxes.
+ * divided by space and a hairline.
  */
 .settings-preferences {
   display: grid;
@@ -1617,9 +1085,6 @@ dd {
   font-weight: 650;
   text-decoration: none;
   white-space: nowrap;
-  transition:
-    background-color var(--duration-quick) var(--ease-out),
-    border-color var(--duration-quick) var(--ease-out);
 }
 
 .settings-field-link:hover,
@@ -1684,19 +1149,18 @@ dd {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-small);
   background: var(--surface-raised);
+  box-shadow: inset 0 1px 0 var(--control-light);
   color: var(--text-secondary);
   cursor: pointer;
   font-size: 13px;
   font-weight: 650;
-  transition:
-    transform 120ms cubic-bezier(0.23, 1, 0.32, 1),
-    background-color 150ms cubic-bezier(0.23, 1, 0.32, 1),
-    border-color 150ms cubic-bezier(0.23, 1, 0.32, 1);
+  transition: transform var(--duration-press) var(--ease-out);
 }
 
 .button:hover,
 .button:focus-visible {
   border-color: var(--border-strong);
+  background: var(--surface-hover);
   color: var(--text-primary);
 }
 
@@ -2043,84 +1507,8 @@ dd {
 }
 
 @media (max-width: 900px) {
-  .app-shell {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  /*
-   * Below 900px the rail moves to the top and becomes the thing content scrolls
-   * under, so it takes over the glass from the runtime strip.
-   */
-  .side-nav {
-    position: sticky;
-    top: 0;
-    z-index: 3;
-    height: auto;
-    gap: 10px;
-    min-width: 0;
-    overflow-x: clip;
-    overflow-y: visible;
-    border-right: 0;
-    border-bottom: 1px solid var(--border-subtle);
-    background: var(--material-glass);
-    -webkit-backdrop-filter: blur(var(--material-blur)) saturate(var(--material-saturate));
-    backdrop-filter: blur(var(--material-blur)) saturate(var(--material-saturate));
-  }
-
-  /* The grouping survives in compressed form: labels drop, hairline dividers stay. */
-  .nav-list {
-    display: flex;
-    gap: 0;
-    min-width: 0;
-    overflow-x: auto;
-    padding-bottom: 2px;
-  }
-
-  .nav-section {
-    display: flex;
-    gap: 4px;
-  }
-
-  .nav-section + .nav-section {
-    margin-left: 6px;
-    padding-left: 6px;
-    border-left: 1px solid var(--border-subtle);
-  }
-
-  .nav-section-label {
-    display: none;
-  }
-
-  .nav-item {
-    flex: 0 0 auto;
-  }
-
-  /*
-   * The strip no longer has content passing beneath it, so it gives the blur back
-   * rather than paying for a compositor layer that changes nothing.
-   */
-  .runtime-strip {
-    gap: 12px;
-    padding: 8px 16px;
-    overflow-x: auto;
-    background: var(--surface-panel);
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
-  }
-
-  .runtime-items {
-    flex-wrap: nowrap;
-    gap: 14px;
-    width: auto;
-  }
-
-  .runtime-item {
-    flex: 0 0 auto;
-  }
-
-  .main-surface {
-    min-height: 0;
-    padding: 16px;
+  .button {
+    min-height: 44px;
   }
 
   .metric-row,
@@ -2128,10 +1516,6 @@ dd {
   .policy-diff-grid,
   .policy-form-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .decision-index {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .reply-columns {
@@ -2150,48 +1534,6 @@ dd {
 }
 
 @media (max-width: 560px) {
-  .side-nav {
-    gap: 8px;
-    padding: 10px 8px;
-  }
-
-  .brand-lockup {
-    min-height: 32px;
-    padding: 0;
-  }
-
-  .nav-item {
-    min-width: 64px;
-    min-height: 52px;
-    flex-direction: column;
-    gap: 3px;
-    justify-content: center;
-    padding: 5px 7px;
-    font-size: 10px;
-  }
-
-  .nav-item span {
-    position: static;
-    width: auto;
-    height: auto;
-    overflow: visible;
-    clip: auto;
-    white-space: nowrap;
-  }
-
-  .runtime-strip {
-    gap: 8px;
-    padding: 8px 10px;
-  }
-
-  .runtime-heading {
-    padding-right: 8px;
-  }
-
-  .runtime-items {
-    gap: 12px;
-  }
-
   .section-header,
   .detail-title-row {
     align-items: flex-start;
@@ -2199,23 +1541,12 @@ dd {
   }
 
   .metric-row,
-  .decision-index,
   .split-panels,
   .compact-facts,
   .policy-diff-grid,
   .policy-form-grid,
   .audit-filter-row {
     grid-template-columns: 1fr;
-  }
-
-  .decision-link {
-    min-height: 88px;
-    border-right: 0;
-    border-bottom: 1px solid var(--border-subtle);
-  }
-
-  .decision-link:last-child {
-    border-bottom: 0;
   }
 
   .feedback-controls {
@@ -2231,20 +1562,21 @@ dd {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .nav-item,
   .list-row,
-  .button,
-  .decision-link {
+  .button {
     transition: none;
   }
 
   .list-row:active,
-  .button:active,
-  .decision-link:active {
+  .button:active {
     transform: none;
   }
 
   .spin {
+    animation: none;
+  }
+
+  .tooltip-content {
     animation: none;
   }
 }

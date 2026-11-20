@@ -1,0 +1,135 @@
+:root {
+  color-scheme: light;
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  --font-display: var(--font-ui);
+  --font-data: "SFMono-Regular", "JetBrains Mono", Consolas, monospace;
+
+  --surface-canvas: #edf1f5;
+  --surface-nav: #e8edf2;
+  --surface-panel: #fcfdfe;
+  --surface-raised: #f5f7fa;
+  --surface-hover: #edf2f6;
+  --surface-inset: #edf1f5;
+  --surface-chrome: #f8fafc;
+  --text-primary: #172129;
+  --text-secondary: #3e4e59;
+  --text-muted: #53616d;
+  --border-subtle: rgb(29 47 66 / 10%);
+  --border-strong: rgb(29 47 66 / 25%);
+
+  --accent-primary: #0c6b61;
+  --accent-wash: rgb(12 107 97 / 10%);
+  --accent-outline: rgb(12 107 97 / 34%);
+  --status-success: #136b53;
+  --status-warning: #865410;
+  --status-danger: #a13244;
+  --status-info: #2f5f98;
+  --warning-wash: rgb(134 84 16 / 8%);
+  --danger-wash: rgb(161 50 68 / 8%);
+
+  --glass-tint: rgb(246 251 255 / 25%);
+  --glass-specular: rgb(255 255 255 / 97%);
+  --glass-surface-glint: rgb(255 255 255 / 57%);
+  --glass-face: rgb(255 255 255 / 17%);
+  --glass-reflection: rgb(198 235 255 / 29%);
+  --glass-rim: rgb(80 123 150 / 32%);
+  --glass-top-edge: rgb(255 255 255 / 95%);
+  --glass-bottom-edge: rgb(61 105 138 / 27%);
+  --glass-contact: rgb(35 70 101 / 18%);
+  --glass-ambient: rgb(39 79 111 / 20%);
+  --glass-scene-blue: rgb(99 172 224 / 41%);
+  --glass-scene-mint: rgb(112 201 184 / 31%);
+  --glass-warm-reflection: rgb(255 230 204 / 58%);
+  --glass-saturation: 139%;
+  --glass-brightness: 1.03;
+  --control-light: rgb(255 255 255 / 86%);
+  --elevation-1: 0 1px 2px rgb(29 47 66 / 5%), 0 3px 10px -5px rgb(29 47 66 / 13%);
+  --elevation-2: 0 2px 5px -2px rgb(29 47 66 / 14%), 0 12px 32px -8px rgb(29 47 66 / 24%);
+
+  --radius-small: 8px;
+  --radius-inset: 9px;
+  --radius-panel: 14px;
+  --radius-chrome: 24px;
+  --text-caption: 11px;
+  --text-label: 12px;
+  --text-body: 13px;
+  --text-body-lg: 14px;
+  --text-h4: 16px;
+  --text-h3: 18px;
+  --text-h1: 28px;
+
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --duration-press: 120ms;
+  --duration-quick: 160ms;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-canvas: #141920;
+  --surface-nav: #181f27;
+  --surface-panel: #202730;
+  --surface-raised: #272f39;
+  --surface-hover: #303c47;
+  --surface-inset: #181f27;
+  --surface-chrome: #252e38;
+  --text-primary: #eff4f8;
+  --text-secondary: #c5cfd9;
+  --text-muted: #a1afbd;
+  --border-subtle: rgb(223 236 247 / 11%);
+  --border-strong: rgb(223 236 247 / 25%);
+
+  --accent-primary: #91decf;
+  --accent-wash: rgb(145 222 207 / 12%);
+  --accent-outline: rgb(145 222 207 / 38%);
+  --status-success: #92d5b3;
+  --status-warning: #ebc280;
+  --status-danger: #ffa2a9;
+  --status-info: #a6c7f6;
+  --warning-wash: rgb(235 194 128 / 10%);
+  --danger-wash: rgb(255 162 169 / 10%);
+
+  --glass-tint: rgb(15 24 35 / 37%);
+  --glass-specular: rgb(232 245 255 / 55%);
+  --glass-surface-glint: rgb(210 236 255 / 27%);
+  --glass-face: rgb(222 240 255 / 13%);
+  --glass-reflection: rgb(122 184 226 / 35%);
+  --glass-rim: rgb(166 207 244 / 29%);
+  --glass-top-edge: rgb(222 242 255 / 55%);
+  --glass-bottom-edge: rgb(2 9 18 / 66%);
+  --glass-contact: rgb(0 0 0 / 50%);
+  --glass-ambient: rgb(0 0 0 / 53%);
+  --glass-scene-blue: rgb(63 122 187 / 49%);
+  --glass-scene-mint: rgb(36 129 120 / 39%);
+  --glass-warm-reflection: rgb(233 174 138 / 31%);
+  --glass-saturation: 139%;
+  --glass-brightness: 0.91;
+  --control-light: rgb(255 255 255 / 8%);
+  --elevation-1: 0 1px 2px rgb(0 0 0 / 20%), 0 3px 10px -5px rgb(0 0 0 / 40%);
+  --elevation-2: 0 2px 6px rgb(0 0 0 / 25%), 0 14px 34px -8px rgb(0 0 0 / 58%);
+}
+
+:root[data-material="solid"] {
+  --surface-canvas: #efeff0;
+  --surface-nav: #e9e9eb;
+  --surface-panel: #fff;
+  --surface-raised: #f6f6f7;
+  --surface-hover: #ededf0;
+  --surface-inset: #efeff1;
+  --surface-chrome: #fbfbfc;
+  --text-primary: #1b1c1f;
+  --text-secondary: #4a4c52;
+  --text-muted: #585b64;
+}
+
+:root[data-material="solid"][data-theme="dark"] {
+  --surface-canvas: #17181a;
+  --surface-nav: #1a1b1d;
+  --surface-panel: #212224;
+  --surface-raised: #292a2e;
+  --surface-hover: #333539;
+  --surface-inset: #191a1c;
+  --surface-chrome: #232428;
+  --text-primary: #f1f1f2;
+  --text-secondary: #cccdd0;
+  --text-muted: #adaeb5;
+}
