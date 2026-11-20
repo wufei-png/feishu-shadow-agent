@@ -1,8 +1,8 @@
 diff --git a/gateway/delivery_ledger.py b/gateway/delivery_ledger.py
-index 7f65570..7922b54 100644
+index 7f65570..2cd1691 100644
 --- a/gateway/delivery_ledger.py
 +++ b/gateway/delivery_ledger.py
-@@ -319,6 +319,18 @@ def mark_failed(obligation_id: str, error: str = "") -> None:
+@@ -319,6 +319,25 @@ def mark_failed(obligation_id: str, error: str = "") -> None:
      _update_state(obligation_id, "failed", error=error)
 
 
@@ -14,14 +14,21 @@ index 7f65570..7922b54 100644
 +
 +
 +def mark_delivery_uncertain(obligation_id: str) -> None:
-+    _update_state(obligation_id, "abandoned", error="Feishu delivery uncertain; verify before resending")
++    with _DB_LOCK, _transaction() as conn:
++        cursor = conn.execute(
++            """UPDATE delivery_obligations
++               SET state='abandoned', updated_at=?, last_error=?
++               WHERE obligation_id=? AND state='attempting'""",
++            (time.time(), "Feishu delivery uncertain; verify before resending", obligation_id))
++        if not cursor.rowcount:
++            return
 +    logger.warning("Feishu delivery obligation %s requires manual verification", obligation_id)
 +
 +
  def release_runtime_claim(obligation_id: str, error: str = "") -> bool:
      """Return an unsent runtime claim to ``failed`` without spending an attempt.
 
-@@ -443,6 +455,9 @@ def sweep_recoverable(now: Optional[float] = None, *, deliverable_platforms: Opt
+@@ -443,6 +462,9 @@ def sweep_recoverable(now: Optional[float] = None, *, deliverable_platforms: Opt
                  claimed.append(_claimed_row(oid, session_key, platform, chat_id, thread_id, content, attempts,
                                              adapter_profile or "default",
                                              needs_marker=state != "pending" or attempts > 0, flood=flood_row))
@@ -175,7 +182,7 @@ index 4bd5f80..76fbf49 100644
 
          _owned, _authority_reply = await self._hm_authority_admission(event, source, _quick_key, is_internal)
 diff --git a/gateway/run_startup.py b/gateway/run_startup.py
-index bbc8e28..bc235b3 100644
+index bbc8e28..3afc99c 100644
 --- a/gateway/run_startup.py
 +++ b/gateway/run_startup.py
 @@ -479,7 +479,9 @@ class GatewayStartupMixin:
@@ -200,15 +207,54 @@ index bbc8e28..bc235b3 100644
              adapter = await self._obligation_adapter(row)
              if adapter is None:
                  continue
-@@ -509,6 +515,8 @@ class GatewayStartupMixin:
-                         "Redelivered recovered final response to %s:%s (obligation %s, attempt %d)",
-                         row["platform"], row["chat_id"], row["obligation_id"], row["attempts"],
-                     )
-+                elif needs_delivery_review(row["platform"], result):
-+                    await asyncio.to_thread(mark_delivery_uncertain, row["obligation_id"])
-                 else:
-                     await asyncio.to_thread(
-                         mark_failed, row["obligation_id"], str(getattr(result, "error", "") or "send failed")
+@@ -497,22 +503,31 @@ class GatewayStartupMixin:
+                 content = row.get("marker", RECOVERED_MARKER) + content
+             metadata = {"thread_id": row["thread_id"]} if row.get("thread_id") else None
+             try:
+-                result = await adapter.send(chat_id=row["chat_id"], content=content, metadata=metadata)
+-            except Exception as send_err:
+-                logger.warning("obligation %s: redelivery send raised: %s", row["obligation_id"], send_err)
+-                result = None
+-            with _log_suppressed(logging.DEBUG, "delivery ledger update failed", exc_info=True):
+-                if result is not None and getattr(result, "success", False):
+-                    await asyncio.to_thread(mark_delivered, row["obligation_id"])
+-                    redelivered += 1
+-                    logger.info(
+-                        "Redelivered recovered final response to %s:%s (obligation %s, attempt %d)",
+-                        row["platform"], row["chat_id"], row["obligation_id"], row["attempts"],
+-                    )
+-                else:
+-                    await asyncio.to_thread(
+-                        mark_failed, row["obligation_id"], str(getattr(result, "error", "") or "send failed")
+-                    )
++                try:
++                    result = await adapter.send(chat_id=row["chat_id"], content=content, metadata=metadata)
++                except Exception as send_err:
++                    logger.warning("obligation %s: redelivery send raised: %s", row["obligation_id"], send_err)
++                    result = None
++                with _log_suppressed(logging.DEBUG, "delivery ledger update failed", exc_info=True):
++                    if result is not None and getattr(result, "success", False):
++                        await asyncio.to_thread(mark_delivered, row["obligation_id"])
++                        redelivered += 1
++                        logger.info(
++                            "Redelivered recovered final response to %s:%s (obligation %s, attempt %d)",
++                            row["platform"], row["chat_id"], row["obligation_id"], row["attempts"],
++                        )
++                    elif needs_delivery_review(row["platform"], result):
++                        await asyncio.to_thread(mark_delivery_uncertain, row["obligation_id"])
++                    else:
++                        await asyncio.to_thread(
++                            mark_failed, row["obligation_id"], str(getattr(result, "error", "") or "send failed")
++                        )
++            except asyncio.CancelledError:
++                if row["platform"] == "feishu":
++                    # The transport may still deliver, even when this await is cancelled.
++                    with _log_suppressed(logging.DEBUG, "delivery ledger update failed", exc_info=True):
++                        await asyncio.to_thread(mark_delivery_uncertain, row["obligation_id"])
++                raise
+         # Whatever is still waiting on a flood penalty or a retry backoff (adopted at boot, skipped as not
+         # yet due, refused again just now) gets a timer, so no rejected reply waits for the next restart.
+         with _log_suppressed(logging.DEBUG, "arming flood redelivery timers failed", exc_info=True):
 diff --git a/gateway/session_authority.py b/gateway/session_authority.py
 index 400b906..7a98c8c 100644
 --- a/gateway/session_authority.py
@@ -633,10 +679,10 @@ index f9b7822..42a1c59 100644
      adapter._dedup_lock = threading.Lock()
      adapter._dedup_persist_lock = asyncio.Lock()
 diff --git a/tests/gateway/test_delivery_ledger.py b/tests/gateway/test_delivery_ledger.py
-index 37a2adb..adb569a 100644
+index 37a2adb..7bb6e94 100644
 --- a/tests/gateway/test_delivery_ledger.py
 +++ b/tests/gateway/test_delivery_ledger.py
-@@ -411,6 +411,45 @@ class TestGatewayRedeliverySweep:
+@@ -411,6 +411,80 @@ class TestGatewayRedeliverySweep:
          )
          return adapter
 
@@ -678,6 +724,41 @@ index 37a2adb..adb569a 100644
 +        assert _row(oid)["state"] == "abandoned"
 +        if lane == "crashed":
 +            runner._async_session_store.clear_resume_pending.assert_awaited_once_with(key)
++
++    @pytest.mark.asyncio
++    async def test_cancelled_feishu_redelivery_only_releases_unsent_rows(self):
++        import asyncio
++        from gateway.config import Platform
++
++        for oid in ("one", "two"):
++            _record(oid, platform="feishu", chat_id=oid)
++            dl.mark_failed(oid, "send_path_degraded")
++        started = asyncio.Event()
++        sending = []
++
++        async def hold_send(*, chat_id, **kwargs):
++            sending.append(chat_id)
++            started.set()
++            await asyncio.Future()
++
++        adapter = self._adapter()
++        adapter.send.side_effect = hold_send
++        runner = self._runner()
++        runner.adapters = {Platform.FEISHU: adapter}
++        task = asyncio.create_task(runner._redeliver_failed_obligations_for_platform(Platform.FEISHU))
++        try:
++            await asyncio.wait_for(started.wait(), timeout=5)
++        finally:
++            task.cancel()
++            with pytest.raises(asyncio.CancelledError):
++                await task
++
++        (attempted,) = sending
++        (unsent,) = {"one", "two"} - {attempted}
++        assert _row(attempted)["state"] == "abandoned"
++        assert _row(unsent)["state"] == "failed"
++        assert _row(unsent)["attempts"] == 0
++        assert [row["obligation_id"] for row in dl.sweep_failed_for_runtime("feishu")] == [unsent]
 +
      @pytest.mark.asyncio
      async def test_pending_redelivers_plain_and_clears_resume(self):
