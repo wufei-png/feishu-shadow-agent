@@ -4012,6 +4012,28 @@ def test_transfer_waits_for_topic_receipt_then_starts_separate_session(
     assert feishu.replies[-1]["message_id"] == "sent-1"
 
 
+def test_transfer_stops_if_source_changes_after_receipt(tmp_path: Path) -> None:
+    service, feishu, server = _service(tmp_path, dry_run=False)
+    server.outputs.append({"action": "transfer", "text": "已接单"})
+    _receive(service, feishu, "request", location="main")
+    assert service.process_next() and service.process_next()
+    assert feishu.sent == 1
+
+    feishu.messages["request"]["mentions"] = []
+    assert service.process_next()
+
+    assert len(server.prompts) == 1
+    assert not service.process_next()
+    assert feishu.sent == 1
+    with service.store.connect() as conn:
+        transfer = conn.execute(
+            """SELECT d.status, e.status FROM coworker_native_transfers t
+               JOIN coworker_native_deliveries d ON d.id = t.delivery_id
+               JOIN coworker_events e ON e.id = t.event_id"""
+        ).fetchone()
+    assert tuple(transfer) == ("sent", "needs_review")
+
+
 def test_transfer_approval_uses_confirmed_topic_and_keeps_pending_acknowledgement(
     tmp_path: Path,
 ) -> None:

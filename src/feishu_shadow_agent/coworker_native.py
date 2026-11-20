@@ -1487,7 +1487,8 @@ class NativeCoworkerService(CoworkerService):
             raise ValueError("topic transfer context is incomplete")
         with self.store.connect() as conn:
             row = conn.execute(
-                """SELECT m.raw_json, d.text AS acknowledgement
+                """SELECT m.raw_json, m.revision, m.is_deleted,
+                          d.text AS acknowledgement, d.source_revision, d.source_snapshot_json
                    FROM coworker_native_transfers t
                    JOIN coworker_native_deliveries d ON d.id = t.delivery_id AND d.status = 'sent'
                    JOIN coworker_events source ON source.id = t.source_event_id
@@ -1516,15 +1517,30 @@ class NativeCoworkerService(CoworkerService):
             ).fetchall()
         if row is None:
             raise ValueError("topic transfer origin is unavailable")
+        if row["revision"] != row["source_revision"] or row["is_deleted"]:
+            raise ValueError("topic transfer source changed")
         source_raw = _mapping(json.loads(str(row["raw_json"])))
+        source_snapshot = (
+            _mapping(json.loads(str(row["source_snapshot_json"])))
+            if row["source_snapshot_json"]
+            else source_raw
+        )
         source_raw = self._enrich_message(
-            source_raw, str(source_id), event.chat_id, str(bot)
+            source_raw,
+            str(source_id),
+            event.chat_id,
+            str(bot),
+            expected_snapshot=source_snapshot,
         )
         message = self._message_normalizer(str(bot)).normalize(
             source_raw, default_chat_type="group"
         )
         upsert = self.store.upsert_message_with_revision(message)
-        if upsert.requires_confirmation or upsert.is_deleted:
+        if (
+            upsert.requires_confirmation
+            or upsert.is_deleted
+            or upsert.revision != row["source_revision"]
+        ):
             raise ValueError("topic transfer source cannot be verified")
         supplements: list[dict[str, Any]] = []
         context_snapshots: dict[str, dict[str, Any]] = {}
