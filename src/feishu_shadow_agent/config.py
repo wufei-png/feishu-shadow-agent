@@ -331,11 +331,11 @@ class CodexConfig(StrictModel):
         default=None,
         description="Optional Codex model override; null uses the Codex default.",
     )
-    reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None = (
-        Field(
-            default=None,
-            description="Optional Codex reasoning effort override; null uses the Codex default.",
-        )
+    reasoning_effort: (
+        Literal["minimal", "low", "medium", "high", "xhigh", "max"] | None
+    ) = Field(
+        default=None,
+        description="Optional Codex reasoning effort override; null uses the Codex default.",
     )
     timeout_seconds: int | None = Field(
         default=None,

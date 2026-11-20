@@ -98,7 +98,7 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `agent_backend.hermes.api_key_env` | string/null | `HERMES_API_KEY` | `agent_backend.hermes.mode: http` 时可选 Bearer token 环境变量名。Hermes 官方 API server 常用 `API_SERVER_KEY`；`/health` 端点通常无需认证，此字段主要留给需要鉴权的 health URL。 |
 | `agent_backend.codex.path` | string/null | `null` | 指定 Codex CLI 路径；`null` 使用当前 `PATH`。 |
 | `agent_backend.codex.model` | string/null | `null` | 可选 Codex model 覆盖；`null` 时由 Codex CLI 决定。示例配置选择 `gpt-6-luna`。 |
-| `agent_backend.codex.reasoning_effort` | `minimal`/`low`/`medium`/`high`/`xhigh`/null | `null` | 可选 Codex reasoning effort 覆盖；配置后通过 `model_reasoning_effort` 传给 Codex CLI。Hermes 不读取此字段。 |
+| `agent_backend.codex.reasoning_effort` | `minimal`/`low`/`medium`/`high`/`xhigh`/`max`/null | `null` | 可选 Codex 推理强度覆盖。直连每轮通过 `turn/start` 传入 `effort`，`codex exec` 读取 `model_reasoning_effort`。设为 `null` 时由 Codex 原生运行时解析。 |
 | `agent_backend.codex.timeout_seconds` | int `> 0`/null | `null` | Codex Agent 子进程超时；`null` 不设置 wall-clock 截止时间。readiness 探测使用 `health.timeout_seconds`。 |
 | `agent_backend.codex.skills` | list[string] | `[]` | 已由部署环境安装到 Codex 原生发现范围的技能名称。名称只能使用小写字母、数字和内部连字符，最长 64 字符。新会话首轮中，轻量直连提供用途和路径供按需阅读，`codex exec` 使用原生 `$name` 显式调用。 |
 | `agent_backend.claude_code.path` | string/null | `null` | 指定 Claude Code CLI 路径；`null` 使用当前 `PATH`。 |

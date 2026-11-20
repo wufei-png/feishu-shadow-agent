@@ -619,10 +619,11 @@ agent_backend:
         ConfigService().load(config_path)
 
 
-def test_codex_agent_backend_provider_is_accepted(tmp_path: Path) -> None:
+@pytest.mark.parametrize("effort", ["xhigh", "max"])
+def test_codex_agent_backend_provider_is_accepted(tmp_path: Path, effort: str) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        """
+        f"""
 owner:
   open_id: ou_owner
 agent_backend:
@@ -630,7 +631,7 @@ agent_backend:
   codex:
     path: /bin/codex
     model: gpt-5.6-luna
-    reasoning_effort: xhigh
+    reasoning_effort: {effort}
     skills: [docmate, review-agent]
 """,
         encoding="utf-8",
@@ -641,7 +642,7 @@ agent_backend:
     assert loaded.config.agent_backend.provider == "codex"
     assert loaded.config.agent_backend.codex.path == "/bin/codex"
     assert loaded.config.agent_backend.codex.model == "gpt-5.6-luna"
-    assert loaded.config.agent_backend.codex.reasoning_effort == "xhigh"
+    assert loaded.config.agent_backend.codex.reasoning_effort == effort
     assert loaded.config.agent_backend.codex.skills == ["docmate", "review-agent"]
 
 
