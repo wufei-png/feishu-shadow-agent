@@ -19,6 +19,8 @@ from feishu_shadow_agent.config import (
     LoadedConfig,
     OwnerConfig,
 )
+from feishu_shadow_agent.coworker import CoworkerService
+from feishu_shadow_agent.coworker_native import NativeCoworkerService
 from feishu_shadow_agent.daemon import Daemon
 from feishu_shadow_agent.dispatcher import DispatchSummary
 from feishu_shadow_agent.health import REQUIRED_USER_SCOPES, HealthSuite
@@ -775,14 +777,22 @@ def test_stop_requested_during_startup_does_not_start_coworker_worker(
     ("native_coworker", "running_send_mode"),
     [(False, "agent_direct"), (True, "project")],
 )
-def test_coworker_reports_actual_send_mode_after_event_connection_is_ready(
+def test_coworker_reports_actual_runtime_after_event_connection_is_ready(
     tmp_path: Path, native_coworker: bool, running_send_mode: str
 ) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
+    logger = JSONLLogger(tmp_path / "agent.jsonl")
+    config = AppConfig(
+        owner=OwnerConfig(open_id="ou_owner", name="Owner"),
+        coworker=CoworkerConfig(enabled=True, chat_id="oc_group"),
+    )
+    store.import_product_policy_from_config(config)
 
     class Worker:
         started = False
-        service = type("Service", (), {"startup_provider": "codex"})()
+
+        def __init__(self, service: CoworkerService) -> None:
+            self.service = service
 
         def start(self) -> None:
             self.started = True
@@ -817,11 +827,25 @@ def test_coworker_reports_actual_send_mode_after_event_connection_is_ready(
             self.request_stop()
             return []
 
-    worker = Worker()
+    feishu = FakeFeishu()
+    service_options: dict[str, Any] = {
+        "store": store,
+        "config": config,
+        "feishu": feishu,
+        "logger": logger,
+        "base_dir": tmp_path,
+        "app_id": "cli_test",
+        "dry_run": False,
+    }
+    worker = Worker(
+        NativeCoworkerService(reply_mode="auto", **service_options)
+        if native_coworker
+        else CoworkerService(**service_options)
+    )
     connection = Connection()
     daemon = StoppingDaemon(
         store=store,
-        logger=JSONLLogger(tmp_path / "agent.jsonl"),
+        logger=logger,
         health_suite=FakeHealthSuite(
             [HealthCheckResult("config_schema", "critical", "ok", "ok")]
         ),  # type: ignore[arg-type]
@@ -847,6 +871,8 @@ def test_coworker_reports_actual_send_mode_after_event_connection_is_ready(
     assert store.latest_health_check_status("coworker_event_connection") == "ok"
     runtime = store.get_checkpoint("runtime.business_mode")
     assert runtime is not None and runtime["send_mode"] == running_send_mode
+    assert runtime["coworker_runtime"] == ("native" if native_coworker else "legacy")
+    assert runtime["reply_mode"] == ("auto" if native_coworker else None)
 
 
 def test_unhandled_exception_marks_daemon_crashed(tmp_path: Path) -> None:

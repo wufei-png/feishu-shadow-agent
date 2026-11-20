@@ -111,7 +111,7 @@ hermes -p coworker gateway stop
 hermes -p coworker dashboard --host 127.0.0.1 --port 9119 --no-open
 ```
 
-需要远程操作时，使用 SSH 转发本机端口。Hermes 的 Dashboard、CLI、TUI 或 Desktop 显示和续接其原生会话；项目 Console 显示项目持有的状态。
+项目 Console 的「AI 同事」页提供「打开 Hermes Dashboard」，在新标签页打开 `127.0.0.1:9119` 并预选 `coworker`。需要远程操作时，使用 SSH 转发 9119。Hermes 的 Dashboard、CLI、TUI 或 Desktop 显示和续接其原生会话。
 
 项目启动入口不接受 `--config`、`--mode` 或 `--reply-mode`；这些设置由 Hermes profile 管理。`SOUL.md` 定义飞书同事的职责、资料范围和协作方式，新会话读取该文件。建议保持简短，把可选流程放在按需读取的技能中。飞书会话使用 `platform_toolsets.feishu`。独立定时任务默认使用 `platform_toolsets.cron`，任务自选工具组仍受 `agent.disabled_toolsets` 限制。技能索引可通过 `skills.disabled` 精简。
 

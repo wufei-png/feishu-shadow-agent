@@ -10,6 +10,7 @@ from typing import Any, cast
 from .card_actions import FeishuCardActionConnection
 from .config import AppConfig
 from .coworker import CoworkerWorker
+from .coworker_native import NativeCoworkerService
 from .dispatcher import Dispatcher, DispatchSummary
 from .feishu.client import FeishuClient
 from .health import HealthSuite, has_critical_failure, summarize_results
@@ -476,6 +477,11 @@ class Daemon:
                 finish_status = "stopped"
                 return 0
             send_mode = "project" if self.native_coworker else self.coworker_send_mode
+            coworker_service = (
+                self.coworker_worker.service
+                if self.business_mode == "coworker" and self.coworker_worker is not None
+                else None
+            )
             self.store.set_checkpoint(
                 "runtime.business_mode",
                 {
@@ -483,9 +489,14 @@ class Daemon:
                     "business_mode": self.business_mode,
                     "send_mode": send_mode,
                     "chat_id": self.coworker_chat_id,
-                    "provider": self.coworker_worker.service.startup_provider
+                    "provider": coworker_service.startup_provider
+                    if coworker_service is not None
+                    else None,
+                    "coworker_runtime": ("native" if self.native_coworker else "legacy")
                     if self.business_mode == "coworker"
-                    and self.coworker_worker is not None
+                    else None,
+                    "reply_mode": coworker_service.reply_mode
+                    if isinstance(coworker_service, NativeCoworkerService)
                     else None,
                 },
             )

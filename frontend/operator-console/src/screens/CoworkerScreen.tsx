@@ -6,17 +6,48 @@ import {
   Badge,
   Button,
   ConfirmButton,
+  CopyValue,
   EmptyState,
   ErrorState,
   Fact,
   FieldList,
   LoadingState,
-  SectionHeader,
+  TechnicalDetails,
 } from "../components/Primitives";
 import { formatDateTime } from "../i18n";
+import { enumLabel } from "../presentation";
 import type { CoworkerPolicy } from "../types";
 
 export function CoworkerScreen({ token }: { token: string }) {
+  const { t } = useTranslation();
+  return (
+    <section className="work-main" aria-label={t("coworker.title")}>
+      <div className="queue-panel">
+        <h1>{t("coworker.title")}</h1>
+        <p className="section-note">{t("coworker.hermesProfile")}</p>
+        <div className="coworker-hermes-entry">
+          <a
+            className="button"
+            href="http://127.0.0.1:9119/sessions?profile=coworker"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {t("coworker.openHermes")}
+          </a>
+          <TechnicalDetails summary={t("coworker.startHermesDashboard")}>
+            <CopyValue
+              value="hermes -p coworker dashboard --host 127.0.0.1 --port 9119 --no-open"
+              label={t("coworker.startHermesDashboard")}
+            />
+          </TechnicalDetails>
+        </div>
+      </div>
+      <ProjectCoworkerScreen token={token} />
+    </section>
+  );
+}
+
+function ProjectCoworkerScreen({ token }: { token: string }) {
   const { t } = useTranslation();
   const client = useQueryClient();
   const snapshot = useQuery({
@@ -140,21 +171,154 @@ export function CoworkerScreen({ token }: { token: string }) {
       : String(value);
   const date = (value?: string) =>
     value ? formatDateTime(value) : t("common.notRecorded");
+  const runtime = data.runtime;
+  const publication = {
+    project: t("coworker.projectSend"),
+    agent_direct: t("coworker.agentSend"),
+  };
+  let runtimeLabel = t("coworker.runtimeUnreported");
+  if (runtime?.business_mode === "shadow") runtimeLabel = t("coworker.shadowMode");
+  if (runtime?.coworker_runtime === "legacy") runtimeLabel = t("coworker.legacyMode");
+  if (runtime?.coworker_runtime === "native") runtimeLabel = t("coworker.codexDirect");
   return (
-    <section className="work-grid" aria-label={t("coworker.title")}>
+    <div className="work-grid">
       <div className="work-main">
         <div className="queue-panel">
-          <SectionHeader
-            eyebrow="AI"
-            title={t("coworker.title")}
-            badge={
-              <Badge tone={data.runtime ? "success" : "muted"}>
-                {data.liveness.status}
-              </Badge>
-            }
-          >
-            <p className="section-note">{t("coworker.intro")}</p>
-          </SectionHeader>
+          <div className="section-header">
+            <h2>{t("coworker.runtime")}</h2>
+            <Badge tone={data.liveness.status === "live" ? "success" : "muted"}>
+              {enumLabel(t, "status", data.liveness.status)}
+            </Badge>
+          </div>
+          {runtime ? (
+            <dl className="compact-facts">
+              <Fact label={t("coworker.mode")} value={runtimeLabel} />
+              <Fact
+                label={t("coworker.feishuReceiver")}
+                value={t(
+                  runtime.business_mode === "shadow"
+                    ? "coworker.projectPolling"
+                    : "coworker.projectConnection",
+                )}
+              />
+              {runtime.business_mode === "coworker" ? (
+                <>
+                  <Fact
+                    label={t("coworker.group")}
+                    value={shown(runtime.chat_id)}
+                  />
+                  {runtime.coworker_runtime !== "native" ? (
+                    <Fact
+                      label={t("coworker.provider")}
+                      value={
+                        runtime.provider === "hermes"
+                          ? t("coworker.legacyHermes")
+                          : shown(runtime.provider)
+                      }
+                    />
+                  ) : null}
+                  <Fact
+                    label={t("coworker.send")}
+                    value={
+                      runtime.send_mode === "project" || runtime.send_mode === "agent_direct"
+                        ? publication[runtime.send_mode]
+                        : shown(runtime.send_mode)
+                    }
+                  />
+                  {runtime.reply_mode ? (
+                    <Fact
+                      label={t("coworker.replyMode")}
+                      value={t(`coworker.replyMode.${runtime.reply_mode}`)}
+                    />
+                  ) : null}
+                  {runtime.provider === "codex" && data.backend_health ? (
+                    <Fact
+                      label={t("coworker.backendHealth")}
+                      value={`${data.backend_health.status} · ${data.backend_health.message}`}
+                    />
+                  ) : null}
+                </>
+              ) : null}
+            </dl>
+          ) : (
+            <p className="detail-note">{t("coworker.runtimeUnknown")}</p>
+          )}
+          {data.liveness.status === "stale" ? (
+            <label>
+              <input
+                type="checkbox"
+                checked={confirmedStopped}
+                onChange={(event) => setConfirmedStopped(event.target.checked)}
+              />{" "}
+              {t("coworker.confirmStopped")}
+            </label>
+          ) : null}
+        </div>
+        <div className="queue-panel">
+          <h2>{t("coworker.events")}</h2>
+          <p className="detail-note">{t("coworker.listLimit")}</p>
+          <p className="detail-note">{t("coworker.recoveryNote")}</p>
+          {data.events.length ? (
+            <ul className="timeline-list">
+              {data.events.map((event) => (
+                <li key={event.id}>
+                  <span>
+                    {event.topic_key} · {event.message_id} · {event.status}{" "}
+                    {event.error ?? ""}
+                  </span>
+                  {["processing", "needs_review"].includes(event.status) ||
+                  (event.status === "queued" &&
+                    event.message_id.startsWith("internal:subagent:")) ? (
+                    <ConfirmButton
+                      disabled={!canRecover || recover.isPending}
+                      confirmLabel={t("coworker.confirmDiscard")}
+                      onConfirm={() =>
+                        recover.mutate(`events/${event.id}/discard`)
+                      }
+                    >
+                      {t("coworker.discard")}
+                    </ConfirmButton>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p>{t("common.none")}</p>
+          )}
+          <h2>{t("coworker.sessions")}</h2>
+          {data.sessions.length ? (
+            <ul className="timeline-list">
+              {data.sessions.map((session) => (
+                <li key={session.id}>
+                  <span>
+                    {session.thread_id} · {session.provider} · {session.state}
+                  </span>
+                  {session.state === "active" ? (
+                    <ConfirmButton
+                      disabled={!canRecover || recover.isPending}
+                      confirmLabel={t("coworker.confirmSession")}
+                      onConfirm={() =>
+                        recover.mutate(`sessions/${session.id}/reset`)
+                      }
+                    >
+                      {t("coworker.resetSession")}
+                    </ConfirmButton>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p>{t("common.none")}</p>
+          )}
+          {recover.error ? (
+            <ErrorState
+              title={t("common.requestFailed")}
+              error={recover.error}
+            />
+          ) : null}
+        </div>
+        <details className="queue-panel coworker-settings">
+          <summary>{t("coworker.settings")}</summary>
           <div className="policy-form-grid">
             {[
               { name: t("coworker.source"), value: data.config },
@@ -179,10 +343,14 @@ export function CoworkerScreen({ token }: { token: string }) {
                   />
                   <Fact
                     label={t("coworker.provider")}
-                    value={shown(value?.provider)}
+                    value={
+                      value?.provider === "hermes"
+                        ? t("coworker.legacyHermes")
+                        : shown(value?.provider)
+                    }
                   />
                   <Fact
-                    label={t("coworker.send")}
+                    label={t("coworker.legacySend")}
                     value={shown(value?.send_mode)}
                   />
                   <Fact
@@ -214,52 +382,9 @@ export function CoworkerScreen({ token }: { token: string }) {
                 </FieldList>
               </div>
             ))}
-            <div className="detail-panel">
-              <h2>{t("coworker.runtime")}</h2>
-              {data.runtime ? (
-                <FieldList>
-                  <Fact
-                    label={t("coworker.mode")}
-                    value={shown(data.runtime.business_mode)}
-                  />
-                  <Fact
-                    label={t("coworker.group")}
-                    value={shown(data.runtime.chat_id)}
-                  />
-                  <Fact
-                    label={t("coworker.provider")}
-                    value={shown(data.runtime.provider)}
-                  />
-                  <Fact
-                    label={t("coworker.send")}
-                    value={shown(data.runtime.send_mode)}
-                  />
-                  {data.runtime.provider === "codex" && data.backend_health ? (
-                    <Fact
-                      label={t("coworker.backendHealth")}
-                      value={`${data.backend_health.status} · ${data.backend_health.message}`}
-                    />
-                  ) : null}
-                </FieldList>
-              ) : (
-                <p className="detail-note">{t("coworker.runtimeUnknown")}</p>
-              )}
-            </div>
           </div>
-        </div>
-        <div className="queue-panel">
           <h2>{t("coworker.edit")}</h2>
           <p className="section-note">{t("coworker.editDetail")}</p>
-          {data.liveness.status === "stale" ? (
-            <label>
-              <input
-                type="checkbox"
-                checked={confirmedStopped}
-                onChange={(event) => setConfirmedStopped(event.target.checked)}
-              />{" "}
-              {t("coworker.confirmStopped")}
-            </label>
-          ) : null}
           {policy ? (
             <div className="policy-form-grid">
               <label>
@@ -287,11 +412,13 @@ export function CoworkerScreen({ token }: { token: string }) {
                   onChange={(event) => setProvider(event.target.value)}
                 >
                   <option value="codex">Codex</option>
-                  <option value="hermes">Hermes</option>
+                  <option value="hermes">
+                    {t("coworker.legacyHermes")}
+                  </option>
                 </select>
               </label>
               <label className="field-control">
-                <span>{t("coworker.send")}</span>
+                <span>{t("coworker.legacySend")}</span>
                 <select
                   value={sendMode}
                   disabled={!canRecover}
@@ -368,70 +495,7 @@ export function CoworkerScreen({ token }: { token: string }) {
           {save.error ? (
             <ErrorState title={t("common.requestFailed")} error={save.error} />
           ) : null}
-        </div>
-        <div className="queue-panel">
-          <h2>{t("coworker.events")}</h2>
-          <p className="detail-note">{t("coworker.listLimit")}</p>
-          <p className="detail-note">{t("coworker.recoveryNote")}</p>
-          {data.events.length ? (
-            <ul className="timeline-list">
-              {data.events.map((event) => (
-                <li key={event.id}>
-                  <span>
-                    {event.topic_key} · {event.message_id} · {event.status}{" "}
-                    {event.error ?? ""}
-                  </span>
-                  {["processing", "needs_review"].includes(event.status) ||
-                  (event.status === "queued" &&
-                    event.message_id.startsWith("internal:subagent:")) ? (
-                    <ConfirmButton
-                      disabled={!canRecover || recover.isPending}
-                      confirmLabel={t("coworker.confirmDiscard")}
-                      onConfirm={() =>
-                        recover.mutate(`events/${event.id}/discard`)
-                      }
-                    >
-                      {t("coworker.discard")}
-                    </ConfirmButton>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p>{t("common.none")}</p>
-          )}
-          <h2>{t("coworker.sessions")}</h2>
-          {data.sessions.length ? (
-            <ul className="timeline-list">
-              {data.sessions.map((session) => (
-                <li key={session.id}>
-                  <span>
-                    {session.thread_id} · {session.provider} · {session.state}
-                  </span>
-                  {session.state === "active" ? (
-                    <ConfirmButton
-                      disabled={!canRecover || recover.isPending}
-                      confirmLabel={t("coworker.confirmSession")}
-                      onConfirm={() =>
-                        recover.mutate(`sessions/${session.id}/reset`)
-                      }
-                    >
-                      {t("coworker.resetSession")}
-                    </ConfirmButton>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p>{t("common.none")}</p>
-          )}
-          {recover.error ? (
-            <ErrorState
-              title={t("common.requestFailed")}
-              error={recover.error}
-            />
-          ) : null}
-        </div>
+        </details>
       </div>
       <aside className="work-detail">
         <div className="detail-panel">
@@ -519,6 +583,6 @@ export function CoworkerScreen({ token }: { token: string }) {
           )}
         </div>
       </aside>
-    </section>
+    </div>
   );
 }

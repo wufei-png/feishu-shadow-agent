@@ -1094,6 +1094,33 @@ dd {
   font-weight: 650;
 }
 
+.coworker-hermes-entry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.coworker-hermes-entry a {
+  text-decoration: none;
+}
+
+.coworker-hermes-entry .technical-details {
+  margin: 0;
+  min-width: 0;
+}
+
+.coworker-settings > summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.coworker-settings[open] > summary,
+.coworker-settings > .policy-form-grid:first-of-type {
+  margin-bottom: 16px;
+}
+
 .copy-value {
   display: inline-flex;
   max-width: 100%;

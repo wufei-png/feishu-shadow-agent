@@ -238,7 +238,9 @@ def test_coworker_console_only_displays_runtime_for_matching_live_run(
         {
             "run_id": "run_live",
             "business_mode": "coworker",
-            "send_mode": "agent_direct",
+            "coworker_runtime": "native",
+            "reply_mode": "auto",
+            "send_mode": "project",
             "chat_id": "group",
             "provider": "codex",
         },
@@ -246,6 +248,9 @@ def test_coworker_console_only_displays_runtime_for_matching_live_run(
     running = client.get("/api/coworker", headers=_auth()).json()
     assert running["liveness"]["status"] == "live"
     assert running["runtime"]["business_mode"] == "coworker"
+    assert running["runtime"]["coworker_runtime"] == "native"
+    assert running["runtime"]["reply_mode"] == "auto"
+    assert running["runtime"]["send_mode"] == "project"
     store.set_checkpoint(
         "runtime.business_mode", {"run_id": "run_old", "business_mode": "shadow"}
     )

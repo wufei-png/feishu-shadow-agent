@@ -32,9 +32,13 @@ it("shows separate sources and saves the daily time to the policy", async () => 
       <CoworkerScreen token="token" />
     </QueryClientProvider>,
   );
-  expect(await screen.findByRole("heading", { name: "配置文件" })).toBeTruthy();
+  await screen.findByText("暂无已确认的项目运行信息");
+  const settings = screen.getByText("配置与生效策略");
+  expect(settings.closest("details")?.open).toBe(false);
+  await user.click(settings);
+  expect(screen.getByRole("heading", { name: "配置文件" })).toBeTruthy();
   expect(screen.getByRole("heading", { name: "SQLite 生效策略" })).toBeTruthy();
-  expect(screen.getByText("未运行或无法确认")).toBeTruthy();
+  expect(screen.getByRole("option", { name: "Hermes（兼容后端）" })).toBeTruthy();
   expect(
     screen.getByText("模型直发的消息和委派不一定有项目侧记录。"),
   ).toBeTruthy();
@@ -64,6 +68,7 @@ it("disables recovery while the daemon is running", async () => {
     },
   ];
   vi.mocked(api.getCoworker).mockResolvedValue(data);
+  const user = userEvent.setup();
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -79,6 +84,7 @@ it("disables recovery while the daemon is running", async () => {
       })) as HTMLButtonElement
     ).disabled,
   ).toBe(true);
+  await user.click(screen.getByText("配置与生效策略"));
   expect(
     (
       screen.getByRole("checkbox", {
@@ -180,10 +186,54 @@ it("shows a failed app server and allows discarding a queued completion", async 
     </QueryClientProvider>,
   );
   expect(await screen.findByText("failed · server stopped")).toBeTruthy();
+  expect(screen.getByText("AI 同事（运行方式未报告）")).toBeTruthy();
   expect(
     (screen.getByRole("button", { name: "丢弃事件" }) as HTMLButtonElement)
       .disabled,
   ).toBe(false);
+});
+
+it("shows the active Codex publication and reply mode before policy details", async () => {
+  await setConsoleLanguage("zh-CN");
+  const data = snapshot();
+  data.liveness.status = "live";
+  data.runtime = {
+    business_mode: "coworker",
+    coworker_runtime: "native",
+    reply_mode: "topic",
+    send_mode: "project",
+    chat_id: "group",
+    provider: "codex",
+  };
+  vi.mocked(api.getCoworker).mockResolvedValue(data);
+  const client = new QueryClient();
+  render(
+    <QueryClientProvider client={client}>
+      <CoworkerScreen token="token" />
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText("Codex 直连")).toBeTruthy();
+  expect(screen.getByText("项目长连接")).toBeTruthy();
+  expect(screen.getByText("项目发布")).toBeTruthy();
+  expect(screen.getByText("新开话题（topic）")).toBeTruthy();
+  expect(screen.getByText("配置与生效策略").closest("details")?.open).toBe(false);
+});
+
+it("keeps the native Hermes entry available when the project store is unavailable", async () => {
+  await setConsoleLanguage("zh-CN");
+  vi.mocked(api.getCoworker).mockResolvedValue({ ...snapshot(), available: false });
+  const client = new QueryClient();
+  render(
+    <QueryClientProvider client={client}>
+      <CoworkerScreen token="token" />
+    </QueryClientProvider>,
+  );
+  await screen.findByText("策略库尚不可用");
+  const entry = screen.getByRole("link", { name: "打开 Hermes Dashboard" });
+  expect(entry.getAttribute("href")).toBe(
+    "http://127.0.0.1:9119/sessions?profile=coworker",
+  );
+  expect(entry.getAttribute("target")).toBe("_blank");
 });
 
 function snapshot(): CoworkerSnapshot {
