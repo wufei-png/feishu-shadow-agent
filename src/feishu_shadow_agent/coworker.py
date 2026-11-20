@@ -750,11 +750,7 @@ class CoworkerService:
         prepared: _PreparedTurn,
         response_data: dict[str, Any] | None,
     ) -> None:
-        policy, session, peer_match = (
-            prepared.policy,
-            prepared.session,
-            prepared.peer_match,
-        )
+        policy, peer_match = prepared.policy, prepared.peer_match
         # Older resumed sessions may still emit the retired memory field.
         legacy_output = dict(response_data or {})
         legacy_output.pop("remember", None)
@@ -774,25 +770,22 @@ class CoworkerService:
             delegation = Delegation(
                 f"coworker-{uuid4().hex[:16]}", peer_id, output.partner, hop
             )
-        target_event, message, revision = event, prepared.message, prepared.revision
+        target, target_revision = prepared.message, prepared.revision
         if (
             output.reply_target_message_id
             and output.reply_target_message_id != event.message_id
         ):
-            target_event, message, revision = self._load_project_target(
+            _, target, target_revision = self._load_project_target(
                 event, output.reply_target_message_id, prepared.bot_id
             )
         self._queue_reply(
-            target_event,
-            message,
-            revision,
+            event,
+            prepared,
+            target,
+            target_revision,
             output.text,
-            policy,
-            session.agent_working_dir,
-            session_id=session.id,
             delegation=delegation,
             allow_unmentioned=peer_match is not None,
-            activation_id=prepared.activation_id,
             approval_required=output.approval_required,
             approval_reason=output.approval_reason,
         )
@@ -871,6 +864,11 @@ class CoworkerService:
         )
         if not session.backend_session_id:
             raise ValueError("subagent parent session is unavailable")
+        source_snapshot = (
+            self._load_project_target(event, source_id, bot_id)
+            if policy.send_mode == "project"
+            else None
+        )
         notice = {
             "type": "internal_subagent_completion",
             "agent_path": internal.get("agent_path"),
@@ -923,11 +921,9 @@ class CoworkerService:
         if not result.ok:
             raise RuntimeError(result.error or "subagent completion wake failed")
         self._check_current_policy(policy, event.chat_id, activation_id)
-        if policy.send_mode == "agent_direct":
+        if source_snapshot is None:
             return
-        source_event, message, revision = self._load_project_target(
-            event, source_id, bot_id
-        )
+        source_event, message, revision = source_snapshot
         prepared = _PreparedTurn(
             policy=policy,
             activation_id=activation_id,
@@ -1198,23 +1194,22 @@ class CoworkerService:
     def _queue_reply(
         self,
         event: CoworkerEvent,
-        message: NormalizedMessage,
-        revision: int,
+        prepared: _PreparedTurn,
+        target_message: NormalizedMessage,
+        target_revision: int,
         text: str,
-        policy: CoworkerConfig,
-        working_dir: str,
         *,
-        session_id: int,
         delegation: Delegation | None,
         allow_unmentioned: bool,
-        activation_id: int,
         approval_required: bool,
         approval_reason: str | None,
     ) -> None:
+        policy, session, source = prepared.policy, prepared.session, prepared.message
+        target_id = target_message.message_id
         current = self.current_policy()
         if current is None or current.chat_id != event.chat_id or current != policy:
             raise RuntimeError("coworker policy changed during the agent turn")
-        target = self.store.get_message(event.message_id)
+        target = self.store.get_message(target_id)
         if target is None:
             raise RuntimeError("coworker reply target is unavailable")
         candidate = candidate_from_message(
@@ -1225,11 +1220,11 @@ class CoworkerService:
             preferred = "thread" if "thread" in candidate.locations else "main"
             destination = candidate.destination(preferred)
         task, _ = self.store.create_task_for_message_and_audit(
-            message,
+            target_message,
             watch_until=format_instant(utc_now()),
-            agent_working_dir=working_dir,
+            agent_working_dir=session.agent_working_dir,
             reason="coworker_turn",
-            expected_group_activation_id=activation_id,
+            expected_group_activation_id=prepared.activation_id,
         )
         composer = SendComposer(owner_open_id=self.config.owner.open_id)
         composed = composer.compose(
@@ -1239,7 +1234,7 @@ class CoworkerService:
         )
         gate = PolicyResolver(self.store).resolve_reply_policy(
             task=task,
-            message=message,
+            message=target_message,
             answerability="needs_owner" if approval_required else "auto_reply",
             had_forbidden_mentions=composed.had_forbidden_mentions,
             proposed_reply=text,
@@ -1255,7 +1250,7 @@ class CoworkerService:
             )
             delegation_spec = CoworkerDelegationSpec(
                 id=delegation.id,
-                session_id=session_id,
+                session_id=session.id,
                 peer_id=delegation.peer_id,
                 hop=delegation.hop,
                 deadline=format_instant(
@@ -1266,6 +1261,26 @@ class CoworkerService:
                 rate_window_seconds=policy.delegation_rate_window_seconds,
             )
         needs_approval = destination is None or not gate.allow or gate.identity != "bot"
+        snapshots: dict[str, Any] = {
+            "coworker_snapshot_verified": source.raw.get("coworker_snapshot_verified")
+            is True,
+            "coworker_source_update_time": source.raw.get(
+                "coworker_source_update_time"
+            ),
+            "coworker_source_content_sha256": source.raw.get(
+                "coworker_source_content_sha256"
+            ),
+        }
+        if target_id != source.message_id:
+            snapshots["coworker_reply_target"] = {
+                "revision": target_revision,
+                "coworker_source_update_time": target_message.raw.get(
+                    "coworker_source_update_time"
+                ),
+                "coworker_source_content_sha256": target_message.raw.get(
+                    "coworker_source_content_sha256"
+                ),
+            }
         if needs_approval:
             approval_extra: dict[str, Any] = {
                 "identity": "bot",
@@ -1273,16 +1288,7 @@ class CoworkerService:
                 "source": "coworker_delegate_approval"
                 if delegation is not None
                 else "coworker_approval",
-                "coworker_snapshot_verified": message.raw.get(
-                    "coworker_snapshot_verified"
-                )
-                is True,
-                "coworker_source_update_time": message.raw.get(
-                    "coworker_source_update_time"
-                ),
-                "coworker_source_content_sha256": message.raw.get(
-                    "coworker_source_content_sha256"
-                ),
+                **snapshots,
             }
             if delegation is not None:
                 approval_extra.update(
@@ -1296,9 +1302,9 @@ class CoworkerService:
                 store=self.store, config=self.config, execution_mode=self.execution_mode
             ).request_send_reply(
                 task=task,
-                reply_target_message_id=event.message_id,
-                incoming_message_id=event.message_id,
-                incoming_message_revision=revision,
+                reply_target_message_id=target_id,
+                incoming_message_id=source.message_id,
+                incoming_message_revision=prepared.revision,
                 proposed_reply=text,
                 final_reply=reply_text,
                 reason="destination_unavailable"
@@ -1313,32 +1319,22 @@ class CoworkerService:
                 coworker_delegation=delegation_spec,
             )
         else:
-            source = "coworker_delegate" if delegation is not None else "coworker"
             payload = {
-                "reply_target_message_id": event.message_id,
-                "source_message_id": event.message_id,
-                "source_revision": revision,
+                "reply_target_message_id": target_id,
+                "source_message_id": source.message_id,
+                "source_revision": prepared.revision,
                 "text": reply_text,
                 "identity": "bot",
                 "business_mode": "coworker",
-                "source": source,
+                "source": "coworker_delegate" if delegation is not None else "coworker",
                 "policy_source": gate.policy_source,
                 "reply_destination": destination,
-                "coworker_snapshot_verified": message.raw.get(
-                    "coworker_snapshot_verified"
-                )
-                is True,
-                "coworker_source_update_time": message.raw.get(
-                    "coworker_source_update_time"
-                ),
-                "coworker_source_content_sha256": message.raw.get(
-                    "coworker_source_content_sha256"
-                ),
+                **snapshots,
             }
             if delegation is None:
                 self.store.create_send_reply_action(
                     task_id=task.id,
-                    target_message_id=event.message_id,
+                    target_message_id=target_id,
                     execution_mode=self.execution_mode,
                     payload=payload,
                 )
@@ -1351,7 +1347,7 @@ class CoworkerService:
                 self.store.create_coworker_delegation_action(
                     delegation=delegation_spec,
                     task_id=task.id,
-                    target_message_id=event.message_id,
+                    target_message_id=target_id,
                     payload=payload,
                     execution_mode=self.execution_mode,
                 )

@@ -4494,6 +4494,7 @@ class SQLiteStore:
                     "coworker_source_update_time",
                     "coworker_source_content_sha256",
                     "coworker_quote",
+                    "coworker_reply_target",
                     "coworker_peer_id",
                     "coworker_peer_name",
                     "coworker_delegation_id",

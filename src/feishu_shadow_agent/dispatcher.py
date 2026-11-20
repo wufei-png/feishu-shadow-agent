@@ -733,6 +733,7 @@ class Dispatcher:
             except KeyError:
                 return _local_error(action, "send_reply task is missing")
             source = str(action.payload.get("source") or "")
+            target_snapshot: dict[str, Any] | None = None
             if source.startswith("coworker"):
                 raw_policy = self.store.get_product_policy(COWORKER_POLICY_KEY)
                 try:
@@ -803,20 +804,19 @@ class Dispatcher:
                 message_ids = [source_id]
                 if isinstance(quote_id, str) and quote_id != source_id:
                     message_ids.append(quote_id)
+                saved_target = action.payload.get("coworker_reply_target")
+                if isinstance(saved_target, dict):
+                    target_snapshot = cast(dict[str, Any], saved_target)
+                    if target_message_id not in message_ids:
+                        message_ids.append(target_message_id)
                 try:
                     source_page = self.feishu.get_messages(
                         as_identity="bot", message_ids=message_ids
                     )
                 except Exception:  # noqa: BLE001
                     return _local_error(action, "coworker_source_refresh_failed")
-                source_item = next(
-                    (
-                        item
-                        for item in source_page.items
-                        if item.get("message_id") == source_id
-                    ),
-                    None,
-                )
+                fresh = {item.get("message_id"): item for item in source_page.items}
+                source_item = fresh.get(source_id)
                 if source_item is None or source_item.get("chat_id") not in (
                     None,
                     task.chat_id,
@@ -834,14 +834,7 @@ class Dispatcher:
                 ):
                     return _local_error(action, "coworker_source_changed_or_deleted")
                 if isinstance(quote, dict):
-                    quoted = next(
-                        (
-                            item
-                            for item in source_page.items
-                            if item.get("message_id") == quote_id
-                        ),
-                        None,
-                    )
+                    quoted = fresh.get(quote_id)
                     if (
                         quoted is None
                         or quoted.get("chat_id") != task.chat_id
@@ -852,6 +845,16 @@ class Dispatcher:
                         )
                     ):
                         return _local_error(action, "coworker_quote_changed_or_deleted")
+                if target_snapshot is not None:
+                    current_target = fresh.get(target_message_id)
+                    if (
+                        current_target is None
+                        or current_target.get("chat_id") not in (None, task.chat_id)
+                        or current_target.get("is_deleted")
+                        or current_target.get("deleted")
+                        or not message_snapshot_matches(current_target, target_snapshot)
+                    ):
+                        return _local_error(action, "coworker_reply_target_changed")
                 if (
                     source not in {"coworker_approval", "coworker_delegate_approval"}
                     and not PolicyResolver(self.store)
@@ -860,6 +863,12 @@ class Dispatcher:
                 ):
                     return _local_error(action, "coworker_auto_reply_disabled")
             target = self.store.get_message(target_message_id)
+            if target_snapshot is not None and (
+                target is None
+                or target["is_deleted"]
+                or target["revision"] != target_snapshot.get("revision")
+            ):
+                return _local_error(action, "coworker_reply_target_changed")
             candidate = (
                 None
                 if target is None

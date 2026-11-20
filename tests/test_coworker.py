@@ -87,19 +87,22 @@ class FakeFeishu:
 
     def get_messages(self, *, as_identity: str, message_ids: list[str]) -> MessagePage:
         self.identities.append(as_identity)
-        item = {
-            "message_id": message_ids[0],
-            "chat_id": "group",
-            "thread_id": "thread",
-            "thread_message_position": 2,
-            "msg_type": "text",
-            "content": self.sources.get(message_ids[0]),
-        }
-        if self.edited:
-            item["update_time"] = "2026-11-18T03:00:00+00:00"
-        if self.source_mentions.get(message_ids[0]):
-            item["mentions"] = self.source_mentions[message_ids[0]]
-        return MessagePage(items=[item])
+        items: list[dict[str, Any]] = []
+        for message_id in message_ids:
+            item = {
+                "message_id": message_id,
+                "chat_id": "group",
+                "thread_id": "thread",
+                "thread_message_position": 2,
+                "msg_type": "text",
+                "content": self.sources.get(message_id),
+            }
+            if self.edited:
+                item["update_time"] = "2026-11-18T03:00:00+00:00"
+            if self.source_mentions.get(message_id):
+                item["mentions"] = self.source_mentions[message_id]
+            items.append(item)
+        return MessagePage(items=items)
 
     def reply_message(self, **_kwargs: object) -> LarkCliResult:
         self.sent = True
@@ -476,10 +479,12 @@ def test_completed_child_does_not_delay_steering_active_parent(tmp_path: Path) -
         worker.join(20)
 
 
+@pytest.mark.parametrize("edited_message", [None, "m1", "m2"])
 def test_project_completion_can_select_same_topic_steered_message(
     tmp_path: Path,
+    edited_message: str | None,
 ) -> None:
-    service, db, _backend, _feishu = _service(tmp_path)
+    service, db, _backend, feishu = _service(tmp_path)
     server = FakeAppServer(service)
     service.app_server = cast(Any, server)
 
@@ -507,9 +512,28 @@ def test_project_completion_can_select_same_topic_steered_message(
     assert service.process_next()
     with db.connect() as conn:
         row = conn.execute(
-            "SELECT target_message_id FROM actions WHERE kind = 'send_reply'"
+            "SELECT id, target_message_id, source_message_id FROM actions WHERE kind = 'send_reply'"
         ).fetchone()
     assert row is not None and row["target_message_id"] == "m2"
+    assert row["source_message_id"] == "m1"
+    action = db.get_action(row["id"])
+    assert action is not None
+    if edited_message is not None:
+        feishu.sources[edited_message] = "changed"
+    dispatcher = Dispatcher(
+        store=db,
+        feishu_client=feishu,  # type: ignore[arg-type]
+        config=service.config,
+        logger=service.logger,
+    )
+    before = len(feishu.identities)
+    result = dispatcher._call_send(action, dry_run=True)
+    assert len(feishu.identities) == before + 1
+    assert result.ok is (edited_message is None)
+    if edited_message == "m1":
+        assert result.error == "coworker_source_changed_or_deleted"
+    elif edited_message == "m2":
+        assert result.error == "coworker_reply_target_changed"
 
 
 def test_worker_runs_distinct_topics_concurrently(tmp_path: Path) -> None:
