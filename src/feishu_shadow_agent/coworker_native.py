@@ -43,7 +43,11 @@ from .coworker_store import (
     CoworkerEvent,
 )
 from .dispatcher import _extract_message_id  # pyright: ignore[reportPrivateUsage]
-from .message_normalization import message_content_fingerprint, message_snapshot_matches
+from .message_normalization import (
+    mention_identifiers,
+    message_content_fingerprint,
+    message_snapshot_matches,
+)
 from .operator_commands import ApprovalCommandService
 from .paths import resolve_agent_working_dir, resolve_relative_path
 from .policy import PolicyResolver
@@ -1246,20 +1250,6 @@ class NativeCoworkerService(CoworkerService):
                     raise ValueError(
                         "private session is shared with another conversation"
                     )
-        details: dict[str, Any] = {
-            "owner_id": self.config.owner.open_id,
-            "bot_id": bot,
-            "chat_id": event.chat_id,
-            "location": "private"
-            if private
-            else "main"
-            if event.topic_key == GROUP_MAIN_KEY
-            else "thread",
-            "message": _prompt_message(message),
-            "reply_to_message_id": parent_id,
-        }
-        if batch_messages:
-            details["watched_updates"] = batch_messages
         group_main = not private and event.topic_key == GROUP_MAIN_KEY
         can_watch = (
             not private
@@ -1303,17 +1293,63 @@ class NativeCoworkerService(CoworkerService):
                 instructions += f"仅在明确要求记住时，写入私聊笔记 {notes}。"
         else:
             instructions += "\n" + self._group_instructions(policy)
-        prompt = "## 当前请求\n\n" + _code_block(
-            json.dumps(details, ensure_ascii=False), "json"
-        )
         quote_source = None
+        quoted_message = None
         if parent_id:
-            quote = self._read_quote(parent_id, event.chat_id, bot, private=private)
+            quote = self._read_quote(
+                parent_id,
+                event.chat_id,
+                bot,
+                private=private,
+                compact=not watch_trigger,
+            )
             if quote is not None:
                 quoted_message, quote_source = quote
-                prompt += "\n引用内容：\n" + _code_block(
-                    json.dumps(quoted_message, ensure_ascii=False), "json"
+
+        location = "private" if private else "main" if group_main else "thread"
+        request_message = _prompt_message(message)
+        details: dict[str, Any]
+        if watch_trigger:
+            details = {
+                "owner_id": self.config.owner.open_id,
+                "bot_id": bot,
+                "chat_id": event.chat_id,
+                "location": location,
+                "message": request_message,
+                "reply_to_message_id": parent_id,
+            }
+            if batch_messages:
+                details["watched_updates"] = batch_messages
+        else:
+            request_message["sender_role"] = message.sender_role
+            del request_message["sender_type"], request_message["is_deleted"]
+            if message.message_type in (None, "text"):
+                del request_message["message_type"]
+            for key in ("sent_at", "mention_details", "resources"):
+                if not request_message[key]:
+                    del request_message[key]
+            details = {"location": location, "message": request_message}
+            if parent_id and quoted_message is None:
+                details["reply_to_message_id"] = parent_id
+            if message.direct_mention or (
+                quoted_message is not None
+                and (
+                    quoted_message.get("sender_id") == bot
+                    or bot in mention_identifiers(quoted_message.get("mentions"))
+                    or bot in mention_identifiers(quoted_message.get("mention_details"))
                 )
+            ):
+                details["bot_id"] = bot
+
+        separators = None if watch_trigger else (",", ":")
+        prompt = "## 当前请求\n\n" + _code_block(
+            json.dumps(details, ensure_ascii=False, separators=separators), "json"
+        )
+        if quoted_message is not None:
+            prompt += "\n引用内容：\n" + _code_block(
+                json.dumps(quoted_message, ensure_ascii=False, separators=separators),
+                "json",
+            )
         self.events.mark_agent_started(event.id, quote=quote_source)
         result = server.run_turn(
             prompt,
@@ -2047,7 +2083,13 @@ class NativeCoworkerService(CoworkerService):
             )
 
     def _read_quote(
-        self, message_id: str, chat_id: str, bot: str, *, private: bool
+        self,
+        message_id: str,
+        chat_id: str,
+        bot: str,
+        *,
+        private: bool,
+        compact: bool = False,
     ) -> tuple[dict[str, Any], tuple[str, int, dict[str, Any]]] | None:
         item = next(iter(self._read_chat_messages(chat_id, [message_id])), None)
         if item is None:
@@ -2068,7 +2110,11 @@ class NativeCoworkerService(CoworkerService):
             revision = int(stored["revision"])
         else:
             return None
-        return _prompt_quote(message), (
+        quote = _prompt_quote(message)
+        if compact:
+            quote = {key: value for key, value in quote.items() if value is not None}
+            quote["sender_role"] = message.sender_role
+        return quote, (
             message_id,
             revision,
             {

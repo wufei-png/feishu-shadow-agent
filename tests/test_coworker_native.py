@@ -1380,6 +1380,47 @@ def test_group_quote_is_scoped_and_checked_before_delivery(
 
 
 @pytest.mark.parametrize(
+    ("sender", "sender_role", "with_attachment"),
+    [
+        ("person", "external_user_message", False),
+        ("owner", "owner_message", True),
+    ],
+)
+def test_native_main_prompt_keeps_only_request_context(
+    tmp_path: Path, sender: str, sender_role: str, with_attachment: bool
+) -> None:
+    service, feishu, server = _service(tmp_path)
+    parent = "unavailable-quote" if with_attachment else None
+    _receive(service, feishu, "request", sender=sender, parent=parent)
+    expected_message: dict[str, Any] = {
+        "message_id": "request",
+        "sender_id": sender,
+        "sender_role": sender_role,
+        "text": "request request",
+        "mention_details": [{"key": "@_user_1", "open_id": "bot"}],
+    }
+    expected: dict[str, Any] = {
+        "location": "main",
+        "message": expected_message,
+        "bot_id": "bot",
+    }
+    if with_attachment:
+        feishu.messages["request"].update(
+            msg_type="file",
+            content={"text": "request request", "file_key": "file_demo"},
+        )
+        expected_message.update(
+            message_type="file", resources=[{"type": "file", "file_key": "file_demo"}]
+        )
+        expected["reply_to_message_id"] = parent
+
+    assert service.process_next()
+    body = server.prompts[-1].split("```json\n", 1)[1].removesuffix("\n```")
+    assert json.loads(body) == expected
+    assert server.output_models == [NativeMainOutput]
+
+
+@pytest.mark.parametrize(
     "content",
     [
         '{"status":"failed"}',
@@ -1404,10 +1445,13 @@ def test_group_quote_preserves_own_body_and_author(
     }
     _receive(service, feishu, "request", location="thread", parent="quoted")
     assert service.process_next()
-    quote_body = server.prompts[-1].split("\n引用内容：\n```json\n", 1)[1]
+    current, quote_body = server.prompts[-1].split("\n引用内容：\n```json\n", 1)
+    details = json.loads(current.split("```json\n", 1)[1].removesuffix("\n```"))
     quote = json.loads(quote_body.removesuffix("\n```"))
+    assert "reply_to_message_id" not in details
     assert quote["message_id"] == "quoted" and quote["content"] == content
     assert quote["sender_id"] == "author" and quote["sender_name"] == "引用作者"
+    assert quote["sender_role"] == "external_user_message" and "sent_at" not in quote
     assert "file_unrelated" not in server.prompts[-1]
 
 
