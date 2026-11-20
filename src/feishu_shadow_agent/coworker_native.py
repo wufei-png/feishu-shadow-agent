@@ -1329,8 +1329,6 @@ class NativeCoworkerService(CoworkerService):
         )
         if not result.ok:
             raise RuntimeError(result.error or "Codex turn failed")
-        if result.session_id:
-            self.events.save_session_id(session.id, result.session_id)
         if private:
             if self.current_policy() != policy:
                 raise ValueError("coworker policy changed during the private turn")
@@ -1738,9 +1736,12 @@ class NativeCoworkerService(CoworkerService):
         batch: list[tuple[int, str, int]] = []
         messages: list[dict[str, Any]] = []
         snapshots: dict[str, dict[str, Any]] = {}
+        fresh = self._read_message_snapshots(
+            [str(row["message_id"]) for row, _raw in candidates]
+        )
         for row, raw in candidates:
-            enriched = self._enrich_message(
-                raw, str(row["message_id"]), event.chat_id, bot
+            enriched = self._enrich_message_from_snapshot(
+                raw, fresh.get(str(row["message_id"])), event.chat_id, bot
             )
             if (
                 self._topic_for_message(enriched, str(row["message_id"]), bot=bot)
@@ -2454,8 +2455,11 @@ class NativeCoworkerService(CoworkerService):
         chat_id: str,
         sources: list[tuple[str, int, dict[str, Any] | None]],
     ) -> None:
+        ids = list(dict.fromkeys(source_id for source_id, _, _ in sources))
+        stored = {row["message_id"]: row for row in self.store.get_messages_by_ids(ids)}
+        saved_snapshots: list[tuple[str, dict[str, Any]]] = []
         for source_id, revision, snapshot in sources:
-            source = self.store.get_message(source_id)
+            source = stored.get(source_id)
             if (
                 source is None
                 or source["chat_id"] != chat_id
@@ -2468,16 +2472,10 @@ class NativeCoworkerService(CoworkerService):
                 if snapshot is not None
                 else _mapping(json.loads(str(source["raw_json"])))
             )
-            try:
-                page = self.feishu.get_messages(
-                    as_identity="bot", message_ids=[source_id]
-                )
-            except Exception as exc:
-                raise _SourceUnavailable("reply source snapshot unavailable") from exc
-            current = next(
-                (item for item in page.items if item.get("message_id") == source_id),
-                None,
-            )
+            saved_snapshots.append((source_id, saved))
+        fresh = self._read_message_snapshots(ids)
+        for source_id, saved in saved_snapshots:
+            current = fresh.get(source_id)
             if (
                 current is None
                 or current.get("chat_id") not in (None, chat_id)
@@ -2487,7 +2485,7 @@ class NativeCoworkerService(CoworkerService):
             ):
                 raise ValueError("reply source cannot be verified")
 
-    def _validate_delivery(self, delivery: NativeDelivery) -> Any:
+    def _validate_delivery(self, delivery: NativeDelivery) -> None:
         policy = self.current_policy()
         if policy is None or not self._matches_startup_policy(policy):
             raise ValueError("coworker policy changed before delivery")
@@ -2519,7 +2517,14 @@ class NativeCoworkerService(CoworkerService):
                 owner_open_id=self.config.owner.open_id,
             ):
                 raise _WatchExpired("topic watch is no longer active")
-        source = self.store.get_message(delivery.source_message_id)
+        source_ids = [
+            delivery.source_message_id,
+            *(message_id for message_id, _, _ in delivery.context_sources),
+        ]
+        stored = {
+            row["message_id"]: row for row in self.store.get_messages_by_ids(source_ids)
+        }
+        source = stored.get(delivery.source_message_id)
         if (
             source is None
             or source["revision"] != delivery.source_revision
@@ -2535,7 +2540,7 @@ class NativeCoworkerService(CoworkerService):
         ):
             raise ValueError("reply source revision changed")
         for message_id, revision, _snapshot in delivery.context_sources:
-            context = self.store.get_message(message_id)
+            context = stored.get(message_id)
             if (
                 context is None
                 or context["chat_id"] != delivery.chat_id
@@ -2543,7 +2548,6 @@ class NativeCoworkerService(CoworkerService):
                 or context["is_deleted"]
             ):
                 raise ValueError("watch context revision changed")
-        return source
 
 
 class NativeCoworkerWorker(CoworkerWorker):

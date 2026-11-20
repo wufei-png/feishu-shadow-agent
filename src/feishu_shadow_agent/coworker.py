@@ -1038,62 +1038,89 @@ class CoworkerService:
         *,
         expected_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        fresh = self._read_message_snapshots([message_id])
+        return self._enrich_message_from_snapshot(
+            raw_message,
+            fresh.get(message_id),
+            chat_id,
+            bot_id,
+            expected_snapshot=expected_snapshot,
+        )
+
+    def _read_message_snapshots(
+        self, message_ids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        items: dict[str, dict[str, Any]] = {}
+        limit = 50  # The lark-cli messages-mget limit.
         try:
-            page = self.feishu.get_messages(as_identity="bot", message_ids=[message_id])
+            for start in range(0, len(message_ids), limit):
+                page = self.feishu.get_messages(
+                    as_identity="bot", message_ids=message_ids[start : start + limit]
+                )
+                for item in page.items:
+                    message_id = item.get("message_id")
+                    if isinstance(message_id, str):
+                        items[message_id] = item
         except Exception as exc:
             raise _SourceUnavailable("coworker source snapshot unavailable") from exc
-        for item in page.items:
-            if item.get("message_id") != message_id or item.get("chat_id") not in (
-                None,
-                chat_id,
-            ):
-                continue
-            enriched = dict(raw_message)
-            if item.get("is_deleted") or item.get("deleted"):
-                raise ValueError("coworker source message was deleted")
-            if expected_snapshot is not None and not message_snapshot_matches(
-                item, expected_snapshot
-            ):
-                raise ValueError("coworker source snapshot changed")
-            fingerprint = message_content_fingerprint(item, include_mentions=True)
-            if fingerprint is None:
-                raise ValueError("coworker source message content is unavailable")
-            # The event can already be stale. Feed the model the current content
-            # returned by the same API used to check the reply before sending.
-            enriched.pop("text", None)
-            enriched.pop("message", None)
-            if isinstance(item.get("content"), (str, dict, list)):
-                enriched["content"] = item["content"]
-                if isinstance(item["content"], str):
-                    # lark-cli renders content as text, even when the user sent
-                    # text that itself happens to be valid JSON.
-                    enriched["text"] = item["content"]
-            else:
-                enriched["content"] = {"text": item["text"]}
-            if item.get("msg_type"):
-                enriched["message_type"] = item["msg_type"]
-            snapshot_mentions = item.get("mentions", [])
-            if not isinstance(snapshot_mentions, list):
-                raise ValueError("coworker source mentions are invalid")
-            mention_items = cast(list[object], snapshot_mentions)
-            mentions = mention_identifiers(mention_items)
-            details = mention_details(mention_items)
-            for key in ("ats", "isAtMe", "at_all", "atAll", "mention_details"):
-                enriched.pop(key, None)
-            if details:
-                enriched["mention_details"] = details
-            enriched["mentions"] = mentions
-            enriched["is_at_me"] = bot_id in mentions or (
-                bool(self.app_id) and self.app_id in mentions
-            )
-            for key in ("message_position", "thread_message_position", "thread_id"):
-                if item.get(key) is not None:
-                    enriched[key] = item[key]
-            enriched["coworker_snapshot_verified"] = True
-            enriched["coworker_source_update_time"] = item.get("update_time")
-            enriched["coworker_source_content_sha256"] = fingerprint
-            return enriched
-        raise ValueError("coworker source message is unavailable")
+        return items
+
+    def _enrich_message_from_snapshot(
+        self,
+        raw_message: dict[str, Any],
+        item: dict[str, Any] | None,
+        chat_id: str,
+        bot_id: str,
+        *,
+        expected_snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if item is None or item.get("chat_id") not in (None, chat_id):
+            raise ValueError("coworker source message is unavailable")
+        enriched = dict(raw_message)
+        if item.get("is_deleted") or item.get("deleted"):
+            raise ValueError("coworker source message was deleted")
+        if expected_snapshot is not None and not message_snapshot_matches(
+            item, expected_snapshot
+        ):
+            raise ValueError("coworker source snapshot changed")
+        fingerprint = message_content_fingerprint(item, include_mentions=True)
+        if fingerprint is None:
+            raise ValueError("coworker source message content is unavailable")
+        # The event can already be stale. Feed the model the current content
+        # returned by the same API used to check the reply before sending.
+        enriched.pop("text", None)
+        enriched.pop("message", None)
+        if isinstance(item.get("content"), (str, dict, list)):
+            enriched["content"] = item["content"]
+            if isinstance(item["content"], str):
+                # lark-cli renders content as text, even when the user sent
+                # text that itself happens to be valid JSON.
+                enriched["text"] = item["content"]
+        else:
+            enriched["content"] = {"text": item["text"]}
+        if item.get("msg_type"):
+            enriched["message_type"] = item["msg_type"]
+        snapshot_mentions = item.get("mentions", [])
+        if not isinstance(snapshot_mentions, list):
+            raise ValueError("coworker source mentions are invalid")
+        mention_items = cast(list[object], snapshot_mentions)
+        mentions = mention_identifiers(mention_items)
+        details = mention_details(mention_items)
+        for key in ("ats", "isAtMe", "at_all", "atAll", "mention_details"):
+            enriched.pop(key, None)
+        if details:
+            enriched["mention_details"] = details
+        enriched["mentions"] = mentions
+        enriched["is_at_me"] = bot_id in mentions or (
+            bool(self.app_id) and self.app_id in mentions
+        )
+        for key in ("message_position", "thread_message_position", "thread_id"):
+            if item.get(key) is not None:
+                enriched[key] = item[key]
+        enriched["coworker_snapshot_verified"] = True
+        enriched["coworker_source_update_time"] = item.get("update_time")
+        enriched["coworker_source_content_sha256"] = fingerprint
+        return enriched
 
     def _sync_cache(
         self,

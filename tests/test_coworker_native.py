@@ -47,6 +47,7 @@ class FakeFeishu:
         self.topics: dict[str, list[dict[str, Any]]] = {}
         self.group_messages: list[dict[str, Any]] = []
         self.replies: list[dict[str, Any]] = []
+        self.message_reads: list[list[str]] = []
         self.fail_reply = False
         self.fail_actual = False
         self.omit_thread = False
@@ -58,8 +59,10 @@ class FakeFeishu:
 
     def get_messages(self, *, as_identity: str, message_ids: list[str]) -> MessagePage:
         assert as_identity == "bot"
+        self.message_reads.append(message_ids)
         if self.on_get is not None:
-            self.on_get(message_ids[0])
+            for message_id in message_ids:
+                self.on_get(message_id)
         return MessagePage(
             items=[
                 self.messages[value] for value in message_ids if value in self.messages
@@ -1558,19 +1561,31 @@ def test_watched_message_burst_is_judged_in_one_turn(tmp_path: Path) -> None:
     _receive(
         service, feishu, "update-two", mention=False, location="thread", parent="root"
     )
-    assert service.process_next() and service.process_next()
+    _receive(
+        service, feishu, "update-three", mention=False, location="thread", parent="root"
+    )
+    assert service.process_next() and service.process_next() and service.process_next()
     with service.store.connect() as conn:
         conn.execute("""UPDATE coworker_events SET received_at = '2000-01-01T00:00:00Z',
                      raw_json = json_remove(raw_json, '$._runtime.retry_after') WHERE status = 'queued'""")
     server.outputs.append({"action": "silent", "text": ""})
+    feishu.message_reads.clear()
     assert service.process_next()
+    assert feishu.message_reads == [
+        ["update-one"],
+        ["update-two", "update-three"],
+        ["root"],
+    ]
     assert len(server.prompts) == 2
-    assert "update-one" in server.prompts[1] and "update-two" in server.prompts[1]
+    assert all(
+        message_id in server.prompts[1]
+        for message_id in ("update-one", "update-two", "update-three")
+    )
     with service.store.connect() as conn:
         rows = conn.execute(
-            "SELECT status FROM coworker_events WHERE message_id IN ('update-one', 'update-two')"
+            "SELECT status FROM coworker_events WHERE message_id LIKE 'update-%'"
         ).fetchall()
-        assert [row[0] for row in rows] == ["completed", "completed"]
+        assert [row[0] for row in rows] == ["completed", "completed", "completed"]
 
 
 def test_independent_private_requests_continue_when_another_source_retries(
@@ -1602,7 +1617,9 @@ def test_changed_watched_context_blocks_batch_delivery(tmp_path: Path) -> None:
                      raw_json = json_remove(raw_json, '$._runtime.retry_after') WHERE status = 'queued'""")
     assert service.process_next()
     feishu.messages["update-two"]["content"] = "changed"
+    feishu.message_reads.clear()
     assert service.process_next()
+    assert feishu.message_reads == [["update-one", "update-two"]]
     assert len(feishu.replies) == 2 and all(r["dry_run"] for r in feishu.replies)
     with service.store.connect() as conn:
         assert (
