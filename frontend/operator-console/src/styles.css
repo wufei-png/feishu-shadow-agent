@@ -1121,6 +1121,21 @@ dd {
   margin-bottom: 16px;
 }
 
+.coworker-native-work h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.coworker-native-work .detail-panel > .detail-note {
+  margin-bottom: 12px;
+  overflow-wrap: anywhere;
+}
+
+.coworker-native-line {
+  display: block;
+  margin-top: 4px;
+}
+
 .copy-value {
   display: inline-flex;
   max-width: 100%;

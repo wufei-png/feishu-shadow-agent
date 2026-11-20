@@ -17,6 +17,7 @@ import {
 import { formatDateTime } from "../i18n";
 import { enumLabel } from "../presentation";
 import type { CoworkerPolicy } from "../types";
+import { CoworkerNativeWork } from "./CoworkerNativeWork";
 
 export function CoworkerScreen({ token }: { token: string }) {
   const { t } = useTranslation();
@@ -172,6 +173,7 @@ function ProjectCoworkerScreen({ token }: { token: string }) {
   const date = (value?: string) =>
     value ? formatDateTime(value) : t("common.notRecorded");
   const runtime = data.runtime;
+  const nativeSessions = data.native_sessions ?? [];
   const publication = {
     project: t("coworker.projectSend"),
     agent_direct: t("coworker.agentSend"),
@@ -254,6 +256,12 @@ function ProjectCoworkerScreen({ token }: { token: string }) {
             </label>
           ) : null}
         </div>
+        {runtime?.coworker_runtime === "native" || nativeSessions.length ? (
+          <CoworkerNativeWork
+            sessions={nativeSessions}
+            dryRun={data.runtime_mode === "dry_run"}
+          />
+        ) : null}
         <div className="queue-panel">
           <h2>{t("coworker.events")}</h2>
           <p className="detail-note">{t("coworker.listLimit")}</p>

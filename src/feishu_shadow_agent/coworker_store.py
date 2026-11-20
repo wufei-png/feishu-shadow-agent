@@ -17,6 +17,18 @@ NATIVE_LOCATING_KEY = "__native_locating__"
 SUBAGENT_EVENT_PREFIX = "internal:subagent:"
 CACHED_HISTORY_EVENT_ID = "internal:history"
 
+
+def handoff_operator_command(
+    status: str, working_dir: str | None, backend_session_id: str | None
+) -> str | None:
+    if status != "ready" or not working_dir or not backend_session_id:
+        return None
+    return (
+        f"cd {shlex.quote(working_dir)} && codex --no-daemon resume "
+        f"{shlex.quote(backend_session_id)}"
+    )
+
+
 _UNCONFIRMED_TOPIC_OPENING = """
     SELECT 1 FROM coworker_native_deliveries opening
     JOIN coworker_events origin ON origin.id = opening.event_id
@@ -385,11 +397,10 @@ class CoworkerStore:
             "native_handoffs": [
                 {
                     **dict(row),
-                    "operator_command": (
-                        f"cd {shlex.quote(str(row['agent_working_dir']))} && codex --no-daemon resume "
-                        f"{shlex.quote(str(row['backend_session_id']))}"
-                        if row["status"] == "ready"
-                        else None
+                    "operator_command": handoff_operator_command(
+                        row["status"],
+                        row["agent_working_dir"],
+                        row["backend_session_id"],
                     ),
                 }
                 for row in handoffs

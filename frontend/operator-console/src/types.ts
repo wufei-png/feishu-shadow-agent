@@ -11,8 +11,32 @@ export type CoworkerPolicy = {
   memory_maintenance_time?: string;
 };
 
+export type NativeCoworkerSession = {
+  session_id: number | null;
+  app_id: string;
+  chat_id: string;
+  topic_key: string;
+  deliveries: Array<{
+    id: number;
+    purpose: string;
+    target_message_id: string;
+    sent_message_id: string | null;
+    receipt_thread_id: string | null;
+    error: string | null;
+    updated_at: string;
+  }>;
+  handoff: {
+    status: string;
+    error: string | null;
+    updated_at: string;
+    operator_command: string | null;
+  } | null;
+  watch_expires_at: string | null;
+};
+
 export type CoworkerSnapshot = {
   available: boolean;
+  runtime_mode?: "production" | "dry_run";
   config: CoworkerPolicy | null;
   policy: CoworkerPolicy | null;
   policy_invalid?: boolean;
@@ -32,6 +56,7 @@ export type CoworkerSnapshot = {
   subagents: Array<{ child_thread_id: string; status: string; outcome: string | null }>;
   history_gaps: Array<{ topic_key: string; needs_backfill: number; has_more: number; last_error: string | null }>;
   delegations: Array<{ id: string; peer_id: string; status: string; deadline: string | null }>;
+  native_sessions?: NativeCoworkerSession[];
 };
 
 export type Tone = "neutral" | "success" | "warning" | "danger" | "info" | "muted";

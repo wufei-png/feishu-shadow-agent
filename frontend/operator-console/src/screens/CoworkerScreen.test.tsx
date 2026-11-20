@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import * as api from "../api";
 import { setConsoleLanguage } from "../i18n";
-import type { CoworkerSnapshot } from "../types";
+import type { CoworkerSnapshot, NativeCoworkerSession } from "../types";
 import { CoworkerScreen } from "./CoworkerScreen";
 
 vi.mock("../api", () => ({
@@ -235,6 +235,91 @@ it("keeps the native Hermes entry available when the project store is unavailabl
   );
   expect(entry.getAttribute("target")).toBe("_blank");
 });
+
+it("shows work by Codex session and copies the ready handoff command", async () => {
+  await setConsoleLanguage("zh-CN");
+  vi.mocked(api.getCoworker).mockResolvedValue({
+    ...snapshot(),
+    runtime_mode: "production",
+    native_sessions: [reviewSession, readySession],
+  });
+  const user = userEvent.setup();
+  const clipboard = vi.spyOn(navigator.clipboard, "writeText");
+  const client = new QueryClient();
+  render(
+    <QueryClientProvider client={client}>
+      <CoworkerScreen token="token" />
+    </QueryClientProvider>,
+  );
+  const region = await screen.findByRole("region", { name: "Codex 直连待处理" });
+  const work = within(region);
+  expect(work.getByRole("heading", { name: "会话 #1" })).toBeTruthy();
+  expect(work.getByText("投递 #7 待核对")).toBeTruthy();
+  expect(work.getByText("receipt-topic")).toBeTruthy();
+  expect(work.getByText("话题关注到期时间")).toBeTruthy();
+  expect(work.getByText("已请求暂停")).toBeTruthy();
+  expect(work.getByText("可人工接手")).toBeTruthy();
+  expect(region.compareDocumentPosition(screen.getByText("配置与生效策略"))
+    & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  await user.click(work.getByRole("button", { name: "复制接手命令" }));
+  expect(clipboard).toHaveBeenCalledWith(readySession.handoff?.operator_command);
+});
+
+it("shows dry-run handoff status without a regular resume command", async () => {
+  await setConsoleLanguage("zh-CN");
+  vi.mocked(api.getCoworker).mockResolvedValue({
+    ...snapshot(),
+    runtime_mode: "dry_run",
+    native_sessions: [readySession],
+  });
+  const client = new QueryClient();
+  render(
+    <QueryClientProvider client={client}>
+      <CoworkerScreen token="token" />
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText("可人工接手")).toBeTruthy();
+  expect(screen.getByText("预演只显示接手状态。普通接手命令会脱离预演工具隔离。")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "复制接手命令" })).toBeNull();
+});
+
+const reviewSession: NativeCoworkerSession = {
+  session_id: 1,
+  app_id: "app",
+  chat_id: "group",
+  topic_key: "topic",
+  deliveries: [{
+    id: 7,
+    purpose: "topic",
+    target_message_id: "source",
+    sent_message_id: "receipt",
+    receipt_thread_id: "receipt-topic",
+    error: "topic_not_verified",
+    updated_at: "2026-11-20T00:00:00Z",
+  }],
+  handoff: {
+    status: "pause_requested",
+    error: null,
+    updated_at: "2026-11-20T00:00:00Z",
+    operator_command: null,
+  },
+  watch_expires_at: "2099-11-20T00:00:00Z",
+};
+
+const readySession: NativeCoworkerSession = {
+  session_id: 2,
+  app_id: "app",
+  chat_id: "group",
+  topic_key: "other-topic",
+  deliveries: [],
+  handoff: {
+    status: "ready",
+    error: null,
+    updated_at: "2026-11-20T00:00:00Z",
+    operator_command: "cd '/tmp/with space' && codex --no-daemon resume thread-id",
+  },
+  watch_expires_at: null,
+};
 
 function snapshot(): CoworkerSnapshot {
   const policy = {

@@ -26,6 +26,7 @@ from .operator_queries.common import (
     readback_summary,
     task_summary_dto,
 )
+from .operator_queries.coworker import native_coworker_work
 from .operator_queries.feedback import FeedbackExecutionMode, FeedbackQuery
 from .operator_queries.health import (
     RUN_RUNTIME_COLUMNS,
@@ -90,7 +91,9 @@ class OperatorQueryService:
         """Storage footprint read model; None when no runtime config is bound."""
         return self._storage_query.storage_summary()
 
-    def coworker_status(self, *, limit: int = 50) -> dict[str, Any]:
+    def coworker_status(
+        self, *, limit: int = 50, include_handoff_command: bool = False
+    ) -> dict[str, Any]:
         """Read coworker state without initializing or changing the store."""
         result: dict[str, Any] = {
             "config": None
@@ -106,10 +109,14 @@ class OperatorQueryService:
             "subagents": [],
             "history_gaps": [],
             "delegations": [],
+            "native_sessions": [],
             "available": False,
         }
         try:
             with self._connect() as conn:
+                conn.execute("BEGIN")
+                now = self._now()
+                row_limit = coerce_limit(limit)
                 policy = conn.execute(
                     "SELECT policy_json FROM product_policies WHERE key = ?",
                     (COWORKER_POLICY_KEY,),
@@ -155,17 +162,22 @@ class OperatorQueryService:
                 }
                 for key, sql in queries.items():
                     result[key] = [
-                        dict(row)
-                        for row in conn.execute(sql, (coerce_limit(limit),)).fetchall()
+                        dict(row) for row in conn.execute(sql, (row_limit,)).fetchall()
                     ]
+                result["native_sessions"] = native_coworker_work(
+                    conn,
+                    limit=row_limit,
+                    now=now,
+                    include_handoff_command=include_handoff_command,
+                )
                 current, _ = daemon_runs(
                     conn,
-                    now=self._now(),
+                    now=now,
                     stale_after_seconds=RUN_HEARTBEAT_STALE_AFTER_SECONDS,
                 )
                 result["liveness"] = daemon_liveness(
                     run_runtime_summary(current) if current else None,
-                    now=self._now(),
+                    now=now,
                     stale_after_seconds=RUN_HEARTBEAT_STALE_AFTER_SECONDS,
                 )
                 runtime = cast(dict[str, Any] | None, result["runtime"])

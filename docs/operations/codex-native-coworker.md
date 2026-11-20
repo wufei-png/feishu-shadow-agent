@@ -83,7 +83,9 @@ owner 在真实话题中 @ 机器人并明确要求关注或取消关注。关�
 
 ## 会话接手和异常处理
 
-`coworker status` 显示会话、投递回执、关注和接手状态，不展示答复正文。暂停一个会话后，项目继续接收入队，等待当前轮、子 Agent 和待发结果，确认 App Server 中的线程卸载后显示 `ready` 和原工作目录下的接手命令：
+项目 Console 的「AI 同事」页按会话显示待核对投递、接手状态和未到期的话题关注。生产 Console 在可以接手时提供复制命令，预演只显示状态。近期投递回执可用 `coworker status` 查看。
+
+暂停一个会话后，项目继续接收入队，等待当前轮、子 Agent 和待发结果，确认 App Server 中的线程卸载后显示 `ready` 和原工作目录下的接手命令。
 
 ```bash
 uv run --locked python -m feishu_shadow_agent coworker pause --config config.yaml --session-id 1

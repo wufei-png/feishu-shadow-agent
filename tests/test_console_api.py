@@ -10,7 +10,9 @@ from fastapi.testclient import TestClient
 from feishu_shadow_agent.cli import main
 from feishu_shadow_agent.config import ConfigService
 from feishu_shadow_agent.console_api import console_static_ready, create_console_app
+from feishu_shadow_agent.coworker_store import CoworkerStore
 from feishu_shadow_agent.operator_commands import CommandResult
+from feishu_shadow_agent.operator_query import OperatorQueryService
 from feishu_shadow_agent.store.sqlite_store import SQLiteStore
 
 
@@ -255,6 +257,94 @@ def test_coworker_console_only_displays_runtime_for_matching_live_run(
         "runtime.business_mode", {"run_id": "run_old", "business_mode": "shadow"}
     )
     assert client.get("/api/coworker", headers=_auth()).json()["runtime"] is None
+
+
+def test_coworker_console_groups_native_work_and_only_copies_production_handoffs(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.initialize()
+    with store.connect() as conn:
+        conn.executescript("""
+            INSERT INTO coworker_sessions
+                (id, app_id, chat_id, thread_id, provider, backend_session_id,
+                 agent_working_dir, created_at, updated_at)
+            VALUES
+                (1, 'app', 'group', 'topic', 'codex', 'thread-one',
+                 '/tmp/first', '2026-11-20', '2026-11-20'),
+                (2, 'other-app', 'group', 'topic', 'codex', 'thread-two',
+                 '/tmp/project with space', '2026-11-20', '2026-11-20');
+            INSERT INTO coworker_events
+                (id, app_id, chat_id, topic_key, message_id, runtime, status, received_at, updated_at)
+            VALUES
+                (1, 'app', 'group', 'topic', 'source-one', 'native', 'completed',
+                 '2026-11-20', '2026-11-20'),
+                (2, 'app', 'group', 'topic', 'source-two', 'native', 'completed',
+                 '2026-11-20', '2026-11-20');
+            INSERT INTO coworker_native_deliveries
+                (id, event_id, session_id, purpose, source_revision, source_message_id,
+                 target_message_id, text, idempotency_key, status,
+                 sent_message_id, thread_id, error, created_at, updated_at)
+            VALUES
+                (1, 1, 1, 'topic', 1, 'source-one', 'target-one', 'stored reply text',
+                 'dedup-one', 'needs_review', 'receipt-one', 'receipt-topic',
+                 'topic_not_verified', '2026-11-20', '2026-11-20'),
+                (2, 2, 1, 'reply', 1, 'source-two', 'target-two', 'other stored text',
+                 'dedup-two', 'sent', 'receipt-two', NULL, NULL, '2026-11-20', '2026-11-20');
+            INSERT INTO coworker_native_handoffs (session_id, status, updated_at)
+            VALUES (1, 'pause_requested', '2026-11-20'), (2, 'ready', '2026-11-20');
+            INSERT INTO coworker_native_watches
+                (app_id, chat_id, topic_key, owner_open_id, expires_at, updated_at)
+            VALUES
+                ('app', 'group', 'topic', 'owner', '2099-11-20', '2026-11-20'),
+                ('other-app', 'group', 'topic', 'owner', '2000-11-20', '2026-11-20'),
+                ('app', 'group', 'unbound', 'owner', '2099-11-20', '2026-11-20');
+        """)
+
+    client = _client(tmp_path)
+    assert client.get("/api/coworker").status_code == 401
+    response = client.get("/api/coworker", headers=_auth())
+    assert response.status_code == 200
+    assert "stored reply text" not in response.text
+    assert "dedup-one" not in response.text
+    groups = {row["session_id"]: row for row in response.json()["native_sessions"]}
+    assert set(groups) == {1, 2, None}
+    assert groups[1]["deliveries"] == [
+        {
+            "id": 1,
+            "purpose": "topic",
+            "target_message_id": "target-one",
+            "sent_message_id": "receipt-one",
+            "receipt_thread_id": "receipt-topic",
+            "error": "topic_not_verified",
+            "updated_at": "2026-11-20",
+        }
+    ]
+    assert groups[1]["watch_expires_at"] == "2099-11-20"
+    assert groups[1]["handoff"]["status"] == "pause_requested"
+    assert groups[1]["handoff"]["operator_command"] is None
+    assert groups[2]["deliveries"] == []
+    assert groups[2]["watch_expires_at"] is None
+    assert groups[None]["topic_key"] == "unbound"
+    assert groups[None]["watch_expires_at"] == "2099-11-20"
+    command = groups[2]["handoff"]["operator_command"]
+    assert (
+        command == "cd '/tmp/project with space' && codex --no-daemon resume thread-two"
+    )
+    cli_handoffs = {
+        row["session_id"]: row
+        for row in CoworkerStore(store).status()["native_handoffs"]
+    }
+    assert command == cli_handoffs[2]["operator_command"]
+
+    dry_run = _client(tmp_path, execution_mode="dry_run")
+    dry_status = dry_run.get("/api/coworker", headers=_auth()).json()
+    assert dry_status["runtime_mode"] == "dry_run"
+    dry_groups = {row["session_id"]: row for row in dry_status["native_sessions"]}
+    assert dry_groups[2]["handoff"]["status"] == "ready"
+    assert dry_groups[2]["handoff"]["operator_command"] is None
+    bounded = OperatorQueryService(store).coworker_status(limit=1)
+    assert bounded["native_sessions"][0]["deliveries"][0]["id"] == 1
 
 
 def test_coworker_console_shows_legacy_policy_with_runtime_defaults(

@@ -346,7 +346,9 @@ def create_console_app(
 
     @api.get("/coworker")
     def coworker_status() -> dict[str, Any]:
-        return query_service().coworker_status()
+        return query_service().coworker_status(
+            include_handoff_command=app_execution_mode == "production"
+        ) | {"runtime_mode": app_execution_mode}
 
     @api.patch("/coworker/policy")
     def update_coworker_policy(body: CoworkerPolicyUpdateRequest) -> dict[str, Any]:
