@@ -1588,6 +1588,37 @@ def test_watched_message_burst_is_judged_in_one_turn(tmp_path: Path) -> None:
         assert [row[0] for row in rows] == ["completed", "completed", "completed"]
 
 
+def test_watch_batch_failure_keeps_the_boundary_at_an_edited_mention(
+    tmp_path: Path,
+) -> None:
+    service, feishu, server = _service(tmp_path)
+    server.outputs.append({"action": "watch", "text": "watching"})
+    _receive(service, feishu, "watch", location="thread", sender="owner")
+    assert service.process_next() and service.process_next()
+    for message_id in ("leader", "edited", "unavailable"):
+        _receive(service, feishu, message_id, mention=False, location="thread")
+    assert all(service.process_next() for _ in range(3))
+    with service.store.connect() as conn:
+        conn.execute("""UPDATE coworker_events SET received_at = '2000-01-01T00:00:00Z',
+                     raw_json = json_remove(raw_json, '$._runtime.retry_after') WHERE status = 'queued'""")
+    feishu.messages["edited"]["mentions"] = [{"id": "bot", "key": "@_user_1"}]
+
+    def get_message(message_id: str) -> None:
+        if message_id == "unavailable":
+            raise OSError("message unavailable")
+
+    feishu.on_get = get_message
+    server.outputs.append({"action": "silent", "text": ""})
+    assert service.process_next()
+
+    assert len(server.prompts) == 2 and "request leader" in server.prompts[-1]
+    assert "request edited" not in server.prompts[-1]
+    with service.store.connect() as conn:
+        statuses = dict(conn.execute("SELECT message_id, status FROM coworker_events"))
+    assert statuses["leader"] == "completed"
+    assert statuses["edited"] == statuses["unavailable"] == "queued"
+
+
 def test_independent_private_requests_continue_when_another_source_retries(
     tmp_path: Path,
 ) -> None:

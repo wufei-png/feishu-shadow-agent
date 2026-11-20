@@ -2487,6 +2487,7 @@ class SQLiteStore:
                 TaskStatus.CLOSED_BY_OWNER.value,
                 TaskStatus.HUMAN_TAKEN_OVER.value,
             }
+            and action.payload.get("operator_retry") is not True
         ):
             return "task_already_closed"
         if (
@@ -2516,12 +2517,21 @@ class SQLiteStore:
                 """,
                 (message_id, before_revision),
             ).fetchone()
-        if row is None:
-            return None
+            if row is None:
+                return None
+            delivery_status = row["status"]
+            if delivery_status != ActionStatus.SENT.value:
+                attempt = _latest_dispatch_attempt_locked(
+                    conn, action_id=int(row["id"])
+                )
+                # Delivery can be confirmed before the action finishes readback.
+                if attempt is not None and attempt["sent_message_id"]:
+                    delivery_status = ActionStatus.SENT.value
         payload = _loads_json_object(row["payload_json"])
         return {
             "action_id": int(row["id"]),
             "status": row["status"],
+            "delivery_status": delivery_status,
             "source_revision": int(row["source_revision"]),
             "target_message_id": row["target_message_id"],
             "text": _payload_send_text(payload),
@@ -2854,7 +2864,11 @@ class SQLiteStore:
             conn.execute(
                 """
                 UPDATE actions
-                SET status = ?, dry_run = ?, result_json = NULL, updated_at = ?
+                SET status = ?, dry_run = ?, result_json = NULL, updated_at = ?,
+                    payload_json = CASE WHEN kind = 'send_reply'
+                        THEN json_set(payload_json, '$.operator_retry', json('true'))
+                        ELSE payload_json
+                    END
                 WHERE id = ?
                 """,
                 (ActionStatus.PENDING.value, 1, now, action_id),

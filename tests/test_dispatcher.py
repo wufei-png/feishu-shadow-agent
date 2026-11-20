@@ -182,6 +182,39 @@ def test_close_during_dispatch_preserves_the_send_boundary(
         assert action.result["sent_message_id"] == "om_sent"
 
 
+def test_explicit_retry_can_send_after_owner_closes_task(tmp_path: Path) -> None:
+    store, dispatcher, fake = _dispatcher(tmp_path)
+    task_id = _insert_task(store)
+    action_id = _create_reply_action(
+        store,
+        task_id=task_id,
+        target_message_id="om_target",
+        payload={"text": "hello", "identity": "user"},
+    )
+    assert action_id is not None
+    store.finish_action(action_id, status="failed", result={"error_stage": "dry_run"})
+    store.close_task_by_operator(task_id)
+    retry = OperatorCommandService(store).retry_dispatch_action(action_id)
+    assert retry.status == "applied"
+    fake.reply_results.extend(
+        [
+            LarkCliResult(["dry"], 0, json_data={}),
+            LarkCliResult(["send"], 0, json_data={"data": {"message_id": "om_sent"}}),
+        ]
+    )
+
+    dispatcher.dispatch(
+        run_id="run_retry",
+        allow_send_reply_actual=True,
+        allow_owner_notification_actual=False,
+    )
+
+    action = store.get_action(action_id)
+    assert action is not None and action.status == "sent"
+    assert [call["dry_run"] for call in fake.reply_calls] == [True, False]
+    assert store.get_task_by_id(task_id).status == "closed_by_owner"
+
+
 def test_removed_group_keeps_tasks_and_actions_paused_after_readd(
     tmp_path: Path,
 ) -> None:

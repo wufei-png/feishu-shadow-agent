@@ -140,7 +140,7 @@ def test_revision_review_plan_distinguishes_audit_notification_and_approval() ->
     previous = {
         "text": "original",
         "action_id": 42,
-        "status": "sent",
+        "delivery_status": "sent",
         "target_message_id": "om_source",
         "payload": {"reply_destination": {"chat_id": "oc_1", "location": "main"}},
     }
@@ -1106,6 +1106,64 @@ def test_revision_identical_high_impact_notifies_instead_of_sending(
     assert pending_sends == 0
 
 
+def test_uncertain_revision_notice_names_the_non_root_reply_target(
+    tmp_path: Path,
+) -> None:
+    backend = _SessionBackend()
+    backend.session_outputs.extend(
+        [
+            _session_output(),
+            _session_output(
+                include_task_label=False, reply_target_message_id="om_followup"
+            ),
+            _session_output(
+                include_task_label=False,
+                reply_target_message_id="om_followup",
+                proposed_reply="cannot grant that",
+                answerability="needs_owner",
+                decision_reason="write_or_permission",
+            ),
+        ]
+    )
+    store, service = _processing_service(tmp_path, backend)
+    root = service.process_raw_message(
+        _raw_message("om_source", "hello"),
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_1",
+    )
+    assert root is not None and root.task is not None
+    _mark_pending_send_replies_sent(store)
+    followup = _raw_message("om_followup", "more details") | {
+        "reply_to_message_id": "om_source"
+    }
+    routed = service.process_raw_message(
+        followup, source="p2p", default_chat_type="p2p", run_id="run_2"
+    )
+    assert routed is not None and routed.task is not None
+    assert routed.task.id == root.task.id
+    with store.connect() as conn:
+        action = conn.execute(
+            "SELECT id FROM actions WHERE source_message_id = ? AND status = 'pending'",
+            ("om_followup",),
+        ).fetchone()
+    assert action is not None
+    store.finish_action(action["id"], status="failed_needs_review", result={})
+
+    service.process_raw_message(
+        followup | {"content": {"text": "please grant access"}},
+        source="p2p",
+        default_chat_type="p2p",
+        run_id="run_3",
+    )
+
+    (notification,) = _owner_notifications(store)
+    assert notification["reason"] == "revision_previous_delivery_uncertain"
+    assert "commands" not in notification
+    assert notification["reply_target_message_id"] == "om_followup"
+    assert notification["reply_destination"]["location"] == "main"
+
+
 def test_revision_no_reply_notifies_owner(tmp_path: Path) -> None:
     backend = _SessionBackend()
     backend.session_outputs.append(_session_output())
@@ -1182,7 +1240,10 @@ def test_owner_send_identical_text_on_new_revision_is_allowed(tmp_path: Path) ->
     assert "identical_correction_text" in action.payload["warnings"]
 
 
-def test_in_flight_send_counts_as_previous_reply(tmp_path: Path) -> None:
+@pytest.mark.parametrize("receipt_status", [None, "send_ok", "uncertain"])
+def test_in_flight_send_counts_as_previous_reply(
+    tmp_path: Path, receipt_status: str | None
+) -> None:
     backend = _SessionBackend()
     backend.session_outputs.append(_session_output())
     backend.session_outputs.append(_session_output(include_task_label=False))
@@ -1198,9 +1259,12 @@ def test_in_flight_send_counts_as_previous_reply(tmp_path: Path) -> None:
             "SELECT id FROM actions WHERE kind = 'send_reply' AND status = 'pending'"
         ).fetchone()
     assert row is not None
-    assert (
-        store.claim_action_for_dispatch(int(row["id"]), run_id="run_send") is not None
-    )
+    claim = store.claim_action_for_dispatch(int(row["id"]), run_id="run_send")
+    assert claim is not None
+    if receipt_status is not None:
+        store.update_dispatch_attempt(
+            claim.attempt.id, status=receipt_status, sent_message_id="om_sent"
+        )
 
     service.process_raw_message(
         _raw_message("om_source", "hello edited"),
@@ -1226,9 +1290,16 @@ def test_in_flight_send_counts_as_previous_reply(tmp_path: Path) -> None:
     assert pending == 0
     assert fenced is not None
     assert fenced["status"] == "failed_needs_review"
-    (notification,) = _owner_notifications(store)
-    assert notification["reason"] == "revision_previous_delivery_uncertain"
-    assert notification["previous_action_id"] == int(row["id"])
+    notifications = _owner_notifications(store)
+    if receipt_status is None:
+        (notification,) = notifications
+        assert notification["reason"] == "revision_previous_delivery_uncertain"
+        assert notification["previous_action_id"] == int(row["id"])
+    else:
+        assert notifications == []
+        assert (
+            "The quoted text is the reply already sent" in backend.session_prompts[-1]
+        )
 
 
 def test_concurrent_stale_poll_cannot_revive_tombstone(tmp_path: Path) -> None:

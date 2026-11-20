@@ -5,6 +5,7 @@ import sqlite3
 import time
 from _thread import RLock
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path
@@ -1736,15 +1737,24 @@ class NativeCoworkerService(CoworkerService):
         batch: list[tuple[int, str, int]] = []
         messages: list[dict[str, Any]] = []
         snapshots: dict[str, dict[str, Any]] = {}
-        fresh = self._read_message_snapshots(
-            [str(row["message_id"]) for row, _raw in candidates]
-        )
+        fresh = None
+        if len(candidates) > 1:
+            # Earlier candidates can truncate the batch before a failing read.
+            with suppress(_SourceUnavailable):
+                fresh = self._read_message_snapshots(
+                    [str(row["message_id"]) for row, _raw in candidates]
+                )
         for row, raw in candidates:
-            enriched = self._enrich_message_from_snapshot(
-                raw, fresh.get(str(row["message_id"])), event.chat_id, bot
+            message_id = str(row["message_id"])
+            enriched = (
+                self._enrich_message(raw, message_id, event.chat_id, bot)
+                if fresh is None
+                else self._enrich_message_from_snapshot(
+                    raw, fresh.get(message_id), event.chat_id, bot
+                )
             )
             if (
-                self._topic_for_message(enriched, str(row["message_id"]), bot=bot)
+                self._topic_for_message(enriched, message_id, bot=bot)
                 != event.topic_key
             ):
                 break

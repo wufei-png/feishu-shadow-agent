@@ -1194,7 +1194,7 @@ class TaskProcessingService:
             if previous_reply is None
             else RevisionReviewContext(
                 previous_reply=str(previous_reply.get("text") or ""),
-                delivery_confirmed=previous_reply.get("status") == "sent",
+                delivery_confirmed=previous_reply.get("delivery_status") == "sent",
             )
         )
         session_plan = self.task_sessions.build_plan(
@@ -1608,7 +1608,7 @@ class TaskProcessingService:
                 watch_until=watch_until,
                 attempt_count=outcome.attempt_count,
                 reason="revision_no_reply_review"
-                if previous_reply.get("status") == "sent"
+                if previous_reply.get("delivery_status") == "sent"
                 else "revision_previous_delivery_uncertain",
                 payload=plan_no_reply_review(
                     message=message,
@@ -1707,7 +1707,9 @@ class TaskProcessingService:
             payload_extra: dict[str, Any] = {}
             if previous_reply is not None:
                 payload_extra["previous_reply"] = previous_reply.get("text", "")
-                payload_extra["previous_reply_status"] = previous_reply.get("status")
+                payload_extra["previous_reply_status"] = previous_reply.get(
+                    "delivery_status"
+                )
             if p2p_resource_unavailable:
                 payload_extra["resource_statuses"] = resource_status_counts(resources)
             approval_id = self.approvals.request_send_reply(
@@ -2060,9 +2062,13 @@ class TaskProcessingService:
         payload: dict[str, Any],
     ) -> ProcessingResult:
         payload.setdefault("requires_owner_approval", False)
-        payload.setdefault("commands", [f"/send {task.short_id} <final reply>"])
         if reason == "revision_previous_delivery_uncertain":
-            payload["message"] = "核对上一条回复是否已送达，再决定是否发送。"
+            payload.pop("commands", None)
+            payload["message"] = (
+                "请先在飞书核对上一条回复。需要更正时，在对应消息处手动回复。"
+            )
+        else:
+            payload.setdefault("commands", [f"/send {task.short_id} <final reply>"])
         self.store.update_task_after_agent(
             task_id=task.id,
             task_label=output.task_label

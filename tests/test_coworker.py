@@ -479,10 +479,15 @@ def test_completed_child_does_not_delay_steering_active_parent(tmp_path: Path) -
         worker.join(20)
 
 
-@pytest.mark.parametrize("edited_message", [None, "m1", "m2"])
+@pytest.mark.parametrize(
+    ("edited_message", "source_read_fails"),
+    [(None, False), ("m1", False), ("m2", False), (None, True)],
+)
 def test_project_completion_can_select_same_topic_steered_message(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     edited_message: str | None,
+    source_read_fails: bool,
 ) -> None:
     service, db, _backend, feishu = _service(tmp_path)
     server = FakeAppServer(service)
@@ -509,6 +514,24 @@ def test_project_completion_can_select_same_topic_steered_message(
         assert service.process_next()
     _subagent_turn(service, child="child", turn="turn-1", status="completed")
     _subagent_activity(service, root="root-1", child="child", kind="completed")
+    if source_read_fails:
+
+        def unavailable(**_kwargs: Any) -> MessagePage:
+            raise OSError("message unavailable")
+
+        with monkeypatch.context() as probe:
+            probe.setattr(feishu, "get_messages", unavailable)
+            assert service.process_next()
+        assert len(server.prompts) == 2
+        with db.connect() as conn:
+            event = conn.execute(
+                "SELECT id, status FROM coworker_events WHERE message_id LIKE 'internal:subagent:%'"
+            ).fetchone()
+            assert event is not None and event["status"] == "queued"
+            conn.execute(
+                "UPDATE coworker_events SET raw_json = json_remove(raw_json, '$._runtime.retry_after') WHERE id = ?",
+                (event["id"],),
+            )
     assert service.process_next()
     with db.connect() as conn:
         row = conn.execute(

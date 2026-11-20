@@ -775,9 +775,15 @@ class CoworkerService:
             output.reply_target_message_id
             and output.reply_target_message_id != event.message_id
         ):
-            _, target, target_revision = self._load_project_target(
-                event, output.reply_target_message_id, prepared.bot_id
-            )
+            try:
+                _, target, target_revision = self._load_project_target(
+                    event, output.reply_target_message_id, prepared.bot_id
+                )
+            except _SourceUnavailable as exc:
+                # The model has already run; replaying it could duplicate tool calls.
+                raise RuntimeError(
+                    "coworker reply target snapshot unavailable"
+                ) from exc
         self._queue_reply(
             event,
             prepared,
@@ -804,12 +810,12 @@ class CoworkerService:
             ).fetchone()
         if row is None:
             raise ValueError("coworker reply target is not in this topic")
-        raw = _mapping(json.loads(str(row["raw_json"])))
-        try:
-            raw = self._enrich_message(raw, message_id, event.chat_id, bot_id)
-        except _SourceUnavailable as exc:
-            # The model has already run; replaying it could duplicate tool calls.
-            raise RuntimeError("coworker reply target snapshot unavailable") from exc
+        raw = self._enrich_message(
+            _mapping(json.loads(str(row["raw_json"]))),
+            message_id,
+            event.chat_id,
+            bot_id,
+        )
         message = self._message_normalizer(bot_id).normalize(
             raw, default_chat_type="group"
         )

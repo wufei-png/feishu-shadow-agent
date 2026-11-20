@@ -1520,7 +1520,7 @@ class IngestionService:
         self.approval_service.notify_owner(
             task=task,
             reason="source_recalled_after_send"
-            if previous.get("status") == "sent"
+            if previous.get("delivery_status") == "sent"
             else "source_recalled_delivery_uncertain",
             payload={
                 "type": "revision_correction_review",
@@ -1529,7 +1529,7 @@ class IngestionService:
                 "source_revision": message.revision,
                 "previous_reply": previous.get("text", ""),
                 "previous_action_id": previous.get("action_id"),
-                "previous_reply_status": previous.get("status"),
+                "previous_reply_status": previous.get("delivery_status"),
                 "suggested_reply": "",
                 "impact": "high",
                 "impact_reasons": ["source_message_deleted"],

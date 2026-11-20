@@ -82,7 +82,8 @@ def plan_no_reply_review(
         "source_revision": message.revision,
         "previous_reply": previous_reply.get("text", ""),
         "previous_action_id": previous_reply.get("action_id"),
-        "previous_reply_status": previous_reply.get("status"),
+        "previous_reply_status": previous_reply.get("delivery_status"),
+        "reply_target_message_id": previous_reply.get("target_message_id"),
         "suggested_reply": "",
         "impact": "uncertain",
         "impact_reasons": ["new_revision_no_reply"],
@@ -135,8 +136,9 @@ def plan_reply_review(
         "source_revision": message.revision,
         "previous_reply": previous_reply.get("text", ""),
         "previous_action_id": previous_reply.get("action_id"),
-        "previous_reply_status": previous_reply.get("status"),
+        "previous_reply_status": previous_reply.get("delivery_status"),
         "previous_reply_destination": previous_destination,
+        "reply_target_message_id": target_message_id,
         "reply_destination": destination,
         "suggested_reply": current_reply,
         "impact": assessment.impact,
@@ -151,7 +153,7 @@ def plan_reply_review(
         payload["commands"] = [
             f"/send {task_short_id} --location {destination['location']} <final reply>"
         ]
-    if previous_reply.get("status") != "sent":
+    if previous_reply.get("delivery_status") != "sent":
         action = "notify_uncertain"
     elif assessment.impact == "none":
         action = "audit"
