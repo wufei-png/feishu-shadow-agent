@@ -771,7 +771,13 @@ def test_stop_requested_during_startup_does_not_start_coworker_worker(
         assert conn.execute("SELECT status FROM runs").fetchone()[0] == "stopped"
 
 
-def test_coworker_does_not_start_without_event_connection(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("native_coworker", "running_send_mode"),
+    [(False, "agent_direct"), (True, "project")],
+)
+def test_coworker_reports_actual_send_mode_after_event_connection_is_ready(
+    tmp_path: Path, native_coworker: bool, running_send_mode: str
+) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
 
     class Worker:
@@ -822,6 +828,8 @@ def test_coworker_does_not_start_without_event_connection(tmp_path: Path) -> Non
         tick_interval_seconds=1,
         dry_run=False,
         business_mode="coworker",
+        native_coworker=native_coworker,
+        coworker_send_mode="agent_direct",
         coworker_worker=worker,  # type: ignore[arg-type]
         card_action_connection=connection,  # type: ignore[arg-type]
     )
@@ -837,6 +845,8 @@ def test_coworker_does_not_start_without_event_connection(tmp_path: Path) -> Non
     assert daemon.run_forever() == 0
     assert worker.started
     assert store.latest_health_check_status("coworker_event_connection") == "ok"
+    runtime = store.get_checkpoint("runtime.business_mode")
+    assert runtime is not None and runtime["send_mode"] == running_send_mode
 
 
 def test_unhandled_exception_marks_daemon_crashed(tmp_path: Path) -> None:

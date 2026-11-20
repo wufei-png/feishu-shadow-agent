@@ -475,12 +475,13 @@ class Daemon:
             if self._stop_is_requested():
                 finish_status = "stopped"
                 return 0
+            send_mode = "project" if self.native_coworker else self.coworker_send_mode
             self.store.set_checkpoint(
                 "runtime.business_mode",
                 {
                     "run_id": run_id,
                     "business_mode": self.business_mode,
-                    "send_mode": self.coworker_send_mode,
+                    "send_mode": send_mode,
                     "chat_id": self.coworker_chat_id,
                     "provider": self.coworker_worker.service.startup_provider
                     if self.business_mode == "coworker"
@@ -499,7 +500,7 @@ class Daemon:
                     "tick_interval_seconds": self.tick_interval_seconds,
                     "owner_notifications_allowed": not self.dry_run,
                     "business_mode": self.business_mode,
-                    "coworker_send_mode": self.coworker_send_mode,
+                    "coworker_send_mode": send_mode,
                 },
             )
             observed_wakeup = self._current_wakeup_generation()
