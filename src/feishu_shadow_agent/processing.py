@@ -243,6 +243,7 @@ class ApprovalService:
             "impact",
             "impact_reasons",
             "previous_reply",
+            "previous_reply_status",
             "resolution_options",
             "edit_supported",
             "correction_delivery",
@@ -1185,17 +1186,18 @@ class TaskProcessingService:
                 action_id=action_id,
                 reason="agent_working_dir_unavailable",
             )
-        previous_sent_reply = None
+        previous_reply = None
         if message.revision > 1:
-            previous_sent_reply = self.store.get_latest_sent_reply_for_source(
+            previous_reply = self.store.get_previous_reply_for_source(
                 message_id=message.message_id,
                 before_revision=message.revision,
             )
         revision_context = (
             None
-            if previous_sent_reply is None
+            if previous_reply is None
             else RevisionReviewContext(
-                previous_sent_reply=str(previous_sent_reply.get("text") or "")
+                previous_reply=str(previous_reply.get("text") or ""),
+                delivery_confirmed=previous_reply.get("status") == "sent",
             )
         )
         session_plan = self.task_sessions.build_plan(
@@ -1597,17 +1599,19 @@ class TaskProcessingService:
                 reason="invalid_reply_target",
             )
 
-        if previous_sent_reply is not None and output.answerability == "no_reply":
+        if previous_reply is not None and output.answerability == "no_reply":
             return self._notify_revision_review(
                 task=task,
                 message=message,
                 output=output,
                 watch_until=watch_until,
                 attempt_count=outcome.attempt_count,
-                reason="revision_no_reply_review",
+                reason="revision_no_reply_review"
+                if previous_reply.get("status") == "sent"
+                else "revision_previous_delivery_uncertain",
                 payload=plan_no_reply_review(
                     message=message,
-                    previous_reply=previous_sent_reply,
+                    previous_reply=previous_reply,
                     decision_reason=output.decision_reason,
                 ),
             )
@@ -1700,8 +1704,9 @@ class TaskProcessingService:
                 watch_until=watch_until,
             )
             payload_extra: dict[str, Any] = {}
-            if previous_sent_reply is not None:
-                payload_extra["previous_reply"] = previous_sent_reply.get("text", "")
+            if previous_reply is not None:
+                payload_extra["previous_reply"] = previous_reply.get("text", "")
+                payload_extra["previous_reply_status"] = previous_reply.get("status")
             if p2p_resource_unavailable:
                 payload_extra["resource_statuses"] = resource_status_counts(resources)
             approval_id = self.approvals.request_send_reply(
@@ -1843,11 +1848,11 @@ class TaskProcessingService:
             composed=composed,
             proposed_reply=postprocess.reply,
         )
-        if previous_sent_reply is not None:
+        if previous_reply is not None:
             revision_plan = plan_reply_review(
                 message=message,
                 task_short_id=task.short_id,
-                previous_reply=previous_sent_reply,
+                previous_reply=previous_reply,
                 current_reply=composed.text,
                 answerability=output.answerability,
                 decision_reason=output.decision_reason,
@@ -1895,14 +1900,16 @@ class TaskProcessingService:
                     reason="revision_identical_text_review",
                     payload=revision_payload,
                 )
-            if revision_plan.action == "notify_low":
+            if revision_plan.action in {"notify_low", "notify_uncertain"}:
                 return self._notify_revision_review(
                     task=task,
                     message=message,
                     output=output,
                     watch_until=watch_until,
                     attempt_count=outcome.attempt_count,
-                    reason="revision_low_impact_correction_review",
+                    reason="revision_previous_delivery_uncertain"
+                    if revision_plan.action == "notify_uncertain"
+                    else "revision_low_impact_correction_review",
                     payload=revision_payload,
                 )
             approval_id = self.approvals.request_send_reply(
@@ -2052,6 +2059,8 @@ class TaskProcessingService:
     ) -> ProcessingResult:
         payload.setdefault("requires_owner_approval", False)
         payload.setdefault("commands", [f"/send {task.short_id} <final reply>"])
+        if reason == "revision_previous_delivery_uncertain":
+            payload["message"] = "核对上一条回复是否已送达，再决定是否发送。"
         self.store.update_task_after_agent(
             task_id=task.id,
             task_label=output.task_label

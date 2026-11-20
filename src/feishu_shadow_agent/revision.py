@@ -62,7 +62,9 @@ class RevisionAssessment:
 
 @dataclass(frozen=True)
 class RevisionReviewPlan:
-    action: Literal["audit", "notify_identical", "notify_low", "approval"]
+    action: Literal[
+        "audit", "notify_identical", "notify_low", "notify_uncertain", "approval"
+    ]
     assessment: RevisionAssessment
     payload: dict[str, Any]
 
@@ -80,6 +82,7 @@ def plan_no_reply_review(
         "source_revision": message.revision,
         "previous_reply": previous_reply.get("text", ""),
         "previous_action_id": previous_reply.get("action_id"),
+        "previous_reply_status": previous_reply.get("status"),
         "suggested_reply": "",
         "impact": "uncertain",
         "impact_reasons": ["new_revision_no_reply"],
@@ -132,6 +135,7 @@ def plan_reply_review(
         "source_revision": message.revision,
         "previous_reply": previous_reply.get("text", ""),
         "previous_action_id": previous_reply.get("action_id"),
+        "previous_reply_status": previous_reply.get("status"),
         "previous_reply_destination": previous_destination,
         "reply_destination": destination,
         "suggested_reply": current_reply,
@@ -147,7 +151,9 @@ def plan_reply_review(
         payload["commands"] = [
             f"/send {task_short_id} --location {destination['location']} <final reply>"
         ]
-    if assessment.impact == "none":
+    if previous_reply.get("status") != "sent":
+        action = "notify_uncertain"
+    elif assessment.impact == "none":
         action = "audit"
     elif not assessment.reply_changed:
         action = "notify_identical"

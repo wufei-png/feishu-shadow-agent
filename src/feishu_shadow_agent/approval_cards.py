@@ -70,7 +70,13 @@ def build_approval_card(payload: dict[str, Any]) -> dict[str, Any]:
             details.append("无法确认回复位置，请检查原消息并手动处理。")
     previous_reply = _string(payload.get("previous_reply"))
     if previous_reply:
-        details.append(f"旧回复：{previous_reply}")
+        status = payload.get("previous_reply_status")
+        label = (
+            "旧回复（投递待核实）"
+            if status in ("sending", "failed_needs_review")
+            else "旧回复"
+        )
+        details.append(f"{label}：{previous_reply}")
     details.append(f"建议回复：{display_suggestion or '<无>'}")
 
     buttons: list[dict[str, Any]] = []

@@ -1377,7 +1377,7 @@ class IngestionService:
             if not eligibility.eligible:
                 hanging_reply = None
                 if upsert.changed and message.revision > 1:
-                    hanging_reply = self.store.get_latest_sent_reply_for_source(
+                    hanging_reply = self.store.get_previous_reply_for_source(
                         message_id=message.message_id,
                         before_revision=message.revision,
                     )
@@ -1399,7 +1399,7 @@ class IngestionService:
                         run_id=run_id,
                     )
                     return result
-                # A new revision already has a sent-like reply. Eligibility
+                # The previous revision has a confirmed or uncertain reply. Eligibility
                 # still describes why this would not start work, but dropping
                 # here would cancel stale side effects and never offer a
                 # correction. Keep routing so revision review can attach.
@@ -1504,7 +1504,7 @@ class IngestionService:
     def _notify_tombstone_hanging_reply(self, message: NormalizedMessage) -> None:
         if self.approval_service is None:
             return
-        previous = self.store.get_latest_sent_reply_for_source(
+        previous = self.store.get_previous_reply_for_source(
             message_id=message.message_id,
             before_revision=message.revision,
         )
@@ -1519,7 +1519,9 @@ class IngestionService:
             return
         self.approval_service.notify_owner(
             task=task,
-            reason="source_recalled_after_send",
+            reason="source_recalled_after_send"
+            if previous.get("status") == "sent"
+            else "source_recalled_delivery_uncertain",
             payload={
                 "type": "revision_correction_review",
                 "message_id": message.message_id,
@@ -1527,6 +1529,7 @@ class IngestionService:
                 "source_revision": message.revision,
                 "previous_reply": previous.get("text", ""),
                 "previous_action_id": previous.get("action_id"),
+                "previous_reply_status": previous.get("status"),
                 "suggested_reply": "",
                 "impact": "high",
                 "impact_reasons": ["source_message_deleted"],

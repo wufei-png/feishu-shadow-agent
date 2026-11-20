@@ -398,7 +398,7 @@ def test_followup_task_session_prompt_omits_task_label_and_rejects_extra_label()
         )
 
 
-def test_revision_contract_is_exposed_only_with_a_previous_sent_reply() -> None:
+def test_revision_contract_is_exposed_only_with_a_previous_reply() -> None:
     task = TaskRecord(
         id=1,
         short_id="t_abc",
@@ -425,7 +425,7 @@ def test_revision_contract_is_exposed_only_with_a_previous_sent_reply() -> None:
     revision_prompt = build_task_session_prompt(
         **common,
         output_model=FollowupRevisionTaskSessionOutput,
-        previous_sent_reply="旧回复",
+        previous_reply="旧回复",
     )
 
     assert "## Revision Review" not in normal_prompt

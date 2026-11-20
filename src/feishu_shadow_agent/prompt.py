@@ -101,7 +101,8 @@ def build_task_session_prompt(
     context_access: dict[str, Any] | None = None,
     chat_type: str | None = None,
     task_background: str | None = None,
-    previous_sent_reply: str | None = None,
+    previous_reply: str | None = None,
+    previous_reply_confirmed: bool = True,
 ) -> str:
     sections = [
         "# Task Session",
@@ -138,13 +139,17 @@ def build_task_session_prompt(
         )
     if context_access is not None:
         sections.append(_markdown_json_section("Context Access", context_access))
-    if previous_sent_reply is not None:
+    if previous_reply is not None:
+        delivery = (
+            "The quoted text is the reply already sent for this source message."
+            if previous_reply_confirmed
+            else "The quoted text is an earlier reply whose delivery is unconfirmed."
+        )
         sections.append(
             _markdown_text_section(
                 "Revision Review",
-                "The quoted text is the reply already sent for this source message. "
-                "Treat Messages as the current source and produce a normal evaluation "
-                "against it.\n\n" + _markdown_blockquote(previous_sent_reply),
+                f"{delivery} Treat Messages as the current source and produce a normal "
+                "evaluation against it.\n\n" + _markdown_blockquote(previous_reply),
             )
         )
     sections.append(

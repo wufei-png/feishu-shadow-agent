@@ -287,7 +287,7 @@ def test_revision_task_session_uses_provider_structured_output_schema() -> None:
         prompt_message_ids=[],
         output_model=InitialRevisionTaskSessionOutput,
         reply_target_message_ids=[],
-        revision_context=RevisionReviewContext(previous_sent_reply="old reply"),
+        revision_context=RevisionReviewContext(previous_reply="old reply"),
     )
 
     result = runner._invoke_task_session(prompt="revision", plan=plan, cwd=None)
@@ -367,7 +367,7 @@ def test_revision_task_session_prefers_provider_task_session_setup() -> None:
         prompt_message_ids=[],
         output_model=InitialRevisionTaskSessionOutput,
         reply_target_message_ids=[],
-        revision_context=RevisionReviewContext(previous_sent_reply="old reply"),
+        revision_context=RevisionReviewContext(previous_reply="old reply"),
     )
 
     result = runner._invoke_task_session(prompt="revision", plan=plan, cwd=None)

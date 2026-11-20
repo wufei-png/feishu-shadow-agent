@@ -2497,14 +2497,14 @@ class SQLiteStore:
             return "stale_revision_before_send"
         return None
 
-    def get_latest_sent_reply_for_source(
+    def get_previous_reply_for_source(
         self, *, message_id: str, before_revision: int
     ) -> dict[str, Any] | None:
         self.initialize()
         with self.connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, source_revision, target_message_id, payload_json, result_json
+                SELECT id, status, source_revision, target_message_id, payload_json, result_json
                 FROM actions
                 WHERE kind = 'send_reply'
                   AND status IN ('sent', 'sending', 'failed_needs_review')
@@ -2521,6 +2521,7 @@ class SQLiteStore:
         payload = _loads_json_object(row["payload_json"])
         return {
             "action_id": int(row["id"]),
+            "status": row["status"],
             "source_revision": int(row["source_revision"]),
             "target_message_id": row["target_message_id"],
             "text": _payload_send_text(payload),

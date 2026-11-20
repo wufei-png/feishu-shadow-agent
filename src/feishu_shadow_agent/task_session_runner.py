@@ -39,9 +39,10 @@ def _empty_reply_candidates() -> list[ReplyCandidate]:
 
 @dataclass(frozen=True)
 class RevisionReviewContext:
-    """Prompt-only context used when a prior reply for this source was sent."""
+    """Prompt context for an earlier reply with confirmed or uncertain delivery."""
 
-    previous_sent_reply: str
+    previous_reply: str
+    delivery_confirmed: bool = True
 
 
 @dataclass(frozen=True)
@@ -277,9 +278,11 @@ class TaskSessionRunner:
             context_access=self.context_access.task_session_context_access(task=task),
             chat_type=task.chat_type or message.chat_type,
             task_background=plan.task_background,
-            previous_sent_reply=None
+            previous_reply=None
             if plan.revision_context is None
-            else plan.revision_context.previous_sent_reply,
+            else plan.revision_context.previous_reply,
+            previous_reply_confirmed=plan.revision_context is None
+            or plan.revision_context.delivery_confirmed,
         )
         outcome = self.agent_invoker.call_with_retries(
             lambda: self._invoke_task_session(

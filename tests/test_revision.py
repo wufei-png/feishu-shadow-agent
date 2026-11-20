@@ -7,6 +7,8 @@ from pathlib import Path
 from threading import Event, Thread
 from typing import Any
 
+import pytest
+
 from feishu_shadow_agent.agent_backend import AgentRunResult
 from feishu_shadow_agent.config import AppConfig, ChatPolicyConfig, OwnerConfig
 from feishu_shadow_agent.ingestion import IngestionService, MessageNormalizer
@@ -138,6 +140,7 @@ def test_revision_review_plan_distinguishes_audit_notification_and_approval() ->
     previous = {
         "text": "original",
         "action_id": 42,
+        "status": "sent",
         "target_message_id": "om_source",
         "payload": {"reply_destination": {"chat_id": "oc_1", "location": "main"}},
     }
@@ -521,7 +524,7 @@ def test_completed_send_is_preserved_when_revision_fence_wins(
     assert finished.result["sent_message_id"] == "om_sent"
     assert finished.result["reason"] == "stale_revision"
     assert (
-        store.get_latest_sent_reply_for_source(
+        store.get_previous_reply_for_source(
             message_id=source.message_id,
             before_revision=edited.revision,
         )
@@ -556,11 +559,13 @@ class _SessionBackend:
 
     def __init__(self) -> None:
         self.session_outputs: list[dict[str, Any]] = []
+        self.session_prompts: list[str] = []
 
     def task_router(self, prompt: str, **kwargs: object) -> AgentRunResult:
         raise AssertionError("p2p revision tests must not call the task router")
 
     def task_session(self, prompt: str, **kwargs: object) -> AgentRunResult:
+        self.session_prompts.append(prompt)
         output = dict(self.session_outputs.pop(0))
         session_id = output.pop("_session_id", "sid_1")
         return AgentRunResult(["hermes"], 0, json_data=output, session_id=session_id)
@@ -779,7 +784,10 @@ def test_owner_send_after_source_recall_is_not_revision_fenced(
     assert store.action_revision_is_current(action) is True
 
 
-def test_revision_none_does_not_auto_reply_or_notify(tmp_path: Path) -> None:
+@pytest.mark.parametrize("previous_status", ["sent", "failed_needs_review"])
+def test_unchanged_revision_still_reports_uncertain_delivery(
+    tmp_path: Path, previous_status: str
+) -> None:
     backend = _SessionBackend()
     backend.session_outputs.append(_session_output())
     backend.session_outputs.append(_session_output(include_task_label=False))
@@ -790,7 +798,14 @@ def test_revision_none_does_not_auto_reply_or_notify(tmp_path: Path) -> None:
         default_chat_type="p2p",
         run_id="run_1",
     )
-    _mark_pending_send_replies_sent(store)
+    if previous_status == "sent":
+        _mark_pending_send_replies_sent(store)
+    else:
+        with store.connect() as conn:
+            conn.execute(
+                "UPDATE actions SET status = ? WHERE kind = 'send_reply'",
+                (previous_status,),
+            )
     service.process_raw_message(
         _raw_message("om_source", "hello edited"),
         source="p2p",
@@ -803,9 +818,17 @@ def test_revision_none_does_not_auto_reply_or_notify(tmp_path: Path) -> None:
             "SELECT status FROM actions WHERE kind = 'send_reply'"
         ).fetchall()
         approvals = conn.execute("SELECT COUNT(*) AS c FROM approvals").fetchone()["c"]
-    assert [row["status"] for row in send_replies] == ["sent"]
+    assert [row["status"] for row in send_replies] == [previous_status]
     assert approvals == 0
-    assert _owner_notifications(store) == []
+    notifications = _owner_notifications(store)
+    if previous_status == "sent":
+        assert notifications == []
+        assert "reply already sent" in backend.session_prompts[-1]
+    else:
+        (notification,) = notifications
+        assert notification["reason"] == "revision_previous_delivery_uncertain"
+        assert notification["previous_reply_status"] == previous_status
+        assert "delivery is unconfirmed" in backend.session_prompts[-1]
 
 
 def _raw_group_mention(message_id: str, text: str, **extra: Any) -> dict[str, Any]:
@@ -1203,7 +1226,9 @@ def test_in_flight_send_counts_as_previous_reply(tmp_path: Path) -> None:
     assert pending == 0
     assert fenced is not None
     assert fenced["status"] == "failed_needs_review"
-    assert _owner_notifications(store) == []
+    (notification,) = _owner_notifications(store)
+    assert notification["reason"] == "revision_previous_delivery_uncertain"
+    assert notification["previous_action_id"] == int(row["id"])
 
 
 def test_concurrent_stale_poll_cannot_revive_tombstone(tmp_path: Path) -> None:

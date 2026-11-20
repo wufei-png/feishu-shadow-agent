@@ -1298,6 +1298,7 @@ def _owner_notification_text(payload: dict[str, Any]) -> str:
         "impact",
         "impact_reasons",
         "previous_reply",
+        "previous_reply_status",
         "resolution_options",
         "edit_supported",
         "correction_delivery",
