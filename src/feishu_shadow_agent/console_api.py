@@ -751,6 +751,15 @@ def create_console_app(
             .as_dict()
         )
 
+    @api.get("/maintenance/doctor-target")
+    def doctor_target() -> dict[str, Any]:
+        owner = loaded_config.config.owner
+        return {
+            "open_id": owner.open_id,
+            "name": owner.name,
+            "can_send_test": app_execution_mode == "production",
+        }
+
     @api.post("/maintenance/doctor")
     def run_doctor(
         body: Annotated[MaintenanceDoctorRequest | None, Body()] = None,

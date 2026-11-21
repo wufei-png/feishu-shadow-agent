@@ -1133,6 +1133,22 @@ def test_approval_command_api_requires_and_enforces_target_binding(
     assert statuses == {first_id: "approved", second_id: "pending"}
 
 
+def test_maintenance_doctor_target_uses_loaded_owner(tmp_path: Path) -> None:
+    client = _client(tmp_path, execution_mode="dry_run")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(config_path.read_text().replace("ou_owner", "ou_other"))
+
+    assert client.get("/api/maintenance/doctor-target").status_code == 401
+    response = client.get("/api/maintenance/doctor-target", headers=_auth())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "open_id": "ou_owner",
+        "name": "Owner",
+        "can_send_test": False,
+    }
+
+
 def test_maintenance_and_dispatch_command_routes_return_command_results(
     tmp_path: Path,
 ) -> None:

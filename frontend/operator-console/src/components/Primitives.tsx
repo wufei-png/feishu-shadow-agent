@@ -246,7 +246,7 @@ export function QueueControls({
   );
 }
 
-export function CommandResultPanel({ result }: { result: CommandResult | null }) {
+export function CommandResultPanel({ result, summary }: { result: CommandResult | null; summary?: ReactNode }) {
   const { t } = useTranslation();
   if (!result) {
     return null;
@@ -268,11 +268,8 @@ export function CommandResultPanel({ result }: { result: CommandResult | null })
         <span title={result.command}>{commandLabel(t, result.command)}</span>
         <Badge tone={tone}>{enumLabel(t, "status", result.status)}</Badge>
       </div>
-      <dl className="compact-facts">
-        <Fact label={t("common.changed")} value={result.changed ? t("common.yes") : t("common.no")} />
-        <Fact label={t("common.actor")} value={result.actor} />
-        {result.reason ? <Fact label={t("common.reason")} value={result.reason} /> : null}
-      </dl>
+      {summary}
+      {typeof result.result.error === "string" ? <p className="detail-note">{result.result.error}</p> : null}
       {result.warnings.length ? (
         <ul className="warning-list">
           {result.warnings.map((warning) => (
@@ -281,7 +278,12 @@ export function CommandResultPanel({ result }: { result: CommandResult | null })
         </ul>
       ) : null}
       <TechnicalDetails>
-        <p className="detail-note"><strong>{t("common.rawCommand")}:</strong> <code>{result.command}</code></p>
+        <dl className="compact-facts">
+          <Fact label={t("common.changed")} value={result.changed ? t("common.yes") : t("common.no")} />
+          <Fact label={t("common.actor")} value={result.actor} />
+          {result.reason ? <Fact label={t("common.reason")} value={result.reason} /> : null}
+          <Fact label={t("common.rawCommand")} value={<code>{result.command}</code>} />
+        </dl>
         <JsonBlock value={result.result} />
       </TechnicalDetails>
     </m.section>

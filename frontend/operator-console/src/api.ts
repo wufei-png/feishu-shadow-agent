@@ -256,6 +256,10 @@ export function previewDeleteChatPolicy(token: string, chatId: string): Promise<
   return postPreview(`/api/policy/chats/${encodeURIComponent(chatId)}/delete-preview`, token, {});
 }
 
+export function getDoctorTarget(token: string): Promise<{ open_id: string; name: string | null; can_send_test: boolean }> {
+  return fetchApi("/api/maintenance/doctor-target", token);
+}
+
 export function runDoctor(token: string, body: MaintenanceDoctorBody): Promise<CommandResult> {
   return postCommand("/api/maintenance/doctor", token, body);
 }
