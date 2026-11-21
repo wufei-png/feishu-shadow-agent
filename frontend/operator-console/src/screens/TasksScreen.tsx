@@ -193,7 +193,6 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
       <div className="work-main">
         <div className="queue-panel">
           <SectionHeader
-            eyebrow={t("tasks.eyebrow")}
             title={t("tasks.title")}
             badge={<Badge tone={rows.length ? "info" : "muted"}>{rows.length}</Badge>}
           />
@@ -208,12 +207,14 @@ export function TasksScreen({ token, selectedId, initialFilter }: { token: strin
           />
           <QueueControls
             error={tasks.error}
-            hasNext={hasNextPage}
             isFetching={tasks.isFetching}
-            onNext={() => setPage((current) => current + 1)}
-            onPrevious={() => setPage((current) => Math.max(0, current - 1))}
             onRefresh={() => void tasks.refetch()}
-            page={page}
+            pagination={{
+              page,
+              hasNext: hasNextPage,
+              onNext: () => setPage((current) => current + 1),
+              onPrevious: () => setPage((current) => Math.max(0, current - 1))
+            }}
             updatedAt={tasks.dataUpdatedAt}
           />
           {rows.length ? (

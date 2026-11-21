@@ -5,7 +5,7 @@ import type { Transition, Variants } from "motion/react";
  *
  * Motion here is spatial continuity, not decoration: it shows that a panel
  * replaced another panel, or that a selection moved rather than restarted. The
- * library owns mount/unmount and layout; hover, press, colour, and focus stay in
+ * library owns panel and route transitions; hover, press, colour, and focus stay in
  * CSS. Durations stay under 300ms and every movement is paired with opacity so
  * `prefers-reduced-motion` can drop the movement and keep the state change.
  */

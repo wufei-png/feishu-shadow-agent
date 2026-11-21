@@ -92,9 +92,9 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
         <div className="work-main">
           {dashboard.error ? <p className="detail-note danger">{t("common.cachedRefreshError", { code: "" })}</p> : null}
           <div aria-label={t("dashboard.index")} className="decision-index" role="group">
-            <DecisionLink count={sendAttention} hint={t("dashboard.viewDispatch")} label={t("dashboard.dispatchAttention")} onClick={() => navigate("dispatch", undefined, "attention")} tone="danger" />
-            <DecisionLink count={attention?.pending_approval_count ?? 0} hint={t("dashboard.viewApproval")} label={t("dashboard.pendingApproval")} onClick={() => navigate("approvals")} tone="warning" />
-            <DecisionLink count={blockedOrFailed} hint={t("dashboard.viewTasks")} label={t("dashboard.blockedTasks")} onClick={() => navigate("tasks", undefined, "all")} tone="danger" />
+            <DecisionLink count={sendAttention} label={t("dashboard.dispatchAttention")} onClick={() => navigate("dispatch", undefined, "attention")} tone="danger" />
+            <DecisionLink count={attention?.pending_approval_count ?? 0} label={t("dashboard.pendingApproval")} onClick={() => navigate("approvals")} tone="warning" />
+            <DecisionLink count={blockedOrFailed} label={t("dashboard.blockedTasks")} onClick={() => navigate("tasks", undefined, "all")} tone="danger" />
           </div>
           {nextStep ? <NextStepPanel navigate={navigate} snapshot={snapshot} step={nextStep} /> : null}
           {actionCount === 0 && !nextStep ? <EmptyState title={t("dashboard.emptyTitle")} detail={t("dashboard.emptyDetail")} /> : null}
@@ -315,9 +315,8 @@ function policyDiffSummary(t: ReturnType<typeof useTranslation>["t"], status: st
   return t("policy.diffUnknown");
 }
 
-function DecisionLink({ count, hint, label, onClick, tone }: {
+function DecisionLink({ count, label, onClick, tone }: {
   count: number;
-  hint: string;
   label: string;
   onClick: () => void;
   tone: "danger" | "warning";
@@ -326,7 +325,6 @@ function DecisionLink({ count, hint, label, onClick, tone }: {
     <button className={`decision-link ${count ? tone : "quiet"}`} onClick={onClick} type="button">
       <span className="decision-label">{label}</span>
       <strong>{count}</strong>
-      <span className="decision-hint">{hint}</span>
       <ArrowUpRight aria-hidden="true" size={15} />
     </button>
   );

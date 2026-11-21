@@ -1,13 +1,14 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { m } from "motion/react";
 import { AlertTriangle, Check, CheckCircle2, CircleHelp, Copy, Loader2, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import i18n, { formatDateTime } from "../i18n";
-import { groupTransition, listItemVariants, panelTransition, panelVariants } from "../motionTokens";
+import { listItemVariants, panelTransition, panelVariants } from "../motionTokens";
 import { commandLabel, enumLabel } from "../presentation";
 import type { CommandResult, Tone } from "../types";
+import { useSelectionSlide } from "./useSelectionSlide";
 
 export function Badge({ children, tone = "neutral" }: { children: ReactNode; tone?: Tone }) {
   return <span className={`status-pill ${tone}`}>{children}</span>;
@@ -164,7 +165,7 @@ export function EmptyState({
   tone = "muted"
 }: {
   title: string;
-  detail: string;
+  detail?: string;
   tone?: Tone;
 }) {
   return (
@@ -172,7 +173,7 @@ export function EmptyState({
       <RotateCcw aria-hidden="true" className={tone} size={18} />
       <div>
         <h2>{title}</h2>
-        <p>{detail}</p>
+        {detail ? <p>{detail}</p> : null}
       </div>
     </div>
   );
@@ -207,34 +208,39 @@ export function ErrorState({ title, error }: { title: string; error: unknown }) 
 }
 
 export function QueueControls({
-  page,
-  hasNext,
+  pagination,
   isFetching,
   updatedAt,
   error,
-  onPrevious,
-  onNext,
   onRefresh
 }: {
-  page: number;
-  hasNext: boolean;
+  pagination?: {
+    page: number;
+    hasNext: boolean;
+    onPrevious: () => void;
+    onNext: () => void;
+  };
   isFetching: boolean;
   updatedAt: number;
   error: unknown;
-  onPrevious: () => void;
-  onNext: () => void;
   onRefresh: () => void;
 }) {
   const { t } = useTranslation();
   return (
-    <div aria-live="polite">
+    <div aria-live="polite" className="queue-controls">
       <div className="command-buttons">
-        <Button disabled={page === 0 || isFetching} onClick={onPrevious}>{t("common.previousPage")}</Button>
-        <Badge tone="muted">{t("common.page", { page: page + 1 })}</Badge>
-        <Button disabled={!hasNext || isFetching} onClick={onNext}>{t("common.nextPage")}</Button>
+        {pagination && (pagination.page > 0 || pagination.hasNext) ? (
+          <>
+            <Button disabled={pagination.page === 0 || isFetching} onClick={pagination.onPrevious}>{t("common.previousPage")}</Button>
+            <Badge tone="muted">{t("common.page", { page: pagination.page + 1 })}</Badge>
+            <Button disabled={!pagination.hasNext || isFetching} onClick={pagination.onNext}>{t("common.nextPage")}</Button>
+          </>
+        ) : null}
         <Button disabled={isFetching} onClick={onRefresh}>{isFetching ? t("common.refreshing") : t("common.refresh")}</Button>
+        <span className="queue-updated">
+          {updatedAt ? t("common.updatedAt", { time: formatDateTime(updatedAt) }) : t("common.notUpdated")}
+        </span>
       </div>
-      <p className="detail-note">{t("common.updatedAt", { time: updatedAt ? formatDateTime(updatedAt) : t("common.notUpdated") })}</p>
       {error ? <p className="detail-note danger">{t("common.cachedRefreshError", { code: requestError(error)?.code ?? "request_failed" })}</p> : null}
     </div>
   );
@@ -283,12 +289,14 @@ export function CommandResultPanel({ result }: { result: CommandResult | null })
 }
 
 export function SectionHeader({
+  as: Heading = "h1",
   eyebrow,
   title,
   badge,
   children
 }: {
-  eyebrow: string;
+  as?: "h1" | "h2";
+  eyebrow?: string;
   title: string;
   badge?: ReactNode;
   children?: ReactNode;
@@ -296,8 +304,8 @@ export function SectionHeader({
   return (
     <div className="section-header">
       <div>
-        <p className="eyebrow">{eyebrow}</p>
-        <h1>{title}</h1>
+        {eyebrow ? <p className="eyebrow">{eyebrow}</p> : null}
+        <Heading>{title}</Heading>
         {children}
       </div>
       {badge}
@@ -367,14 +375,12 @@ export function SegmentedControl<T extends string>({
 }: {
   label: string;
   value: T;
-  options: Array<{ value: T; label: string }>;
+  options: Array<{ value: T; label: string; leading?: ReactNode }>;
   onChange: (value: T) => void;
 }) {
-  // Unique per instance: several controls share a screen, and a shared id would
-  // make the indicator fly between unrelated controls.
-  const indicatorId = useId();
+  const indicator = useSelectionSlide(value);
   return (
-    <div className="segmented-control" aria-label={label}>
+    <div className="segmented-control" aria-label={label} role="group">
       {options.map((option) => {
         const selected = value === option.value;
         return (
@@ -385,14 +391,11 @@ export function SegmentedControl<T extends string>({
             type="button"
           >
             {selected ? (
-              <m.span
-                aria-hidden="true"
-                className="segmented-indicator"
-                layoutId={indicatorId}
-                transition={groupTransition}
-              />
+              <span aria-hidden="true" className="segmented-indicator" ref={indicator}>
+                <span className="selection-rim"><span className="selection-rim-glint" /></span>
+              </span>
             ) : null}
-            <span className="segmented-option">{option.label}</span>
+            <span className="segmented-option">{option.leading}{option.label}</span>
           </button>
         );
       })}

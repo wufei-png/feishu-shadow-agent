@@ -129,17 +129,19 @@ Visual rules:
   the default material. Graphite uses opaque surfaces and a neutral palette.
 - Design tokens must be semantic. Do not hard-code theme-only token names such as
   `--dark-bg`.
-- Use a quiet cool tint for Clear Glass and neutral greys for Graphite. Keep
-  semantic status colors consistent across materials.
+- Clear Glass starts with a pale cyan tint. Settings offers six background
+  presets, a custom color, and a transparency adjustment. Store these locally
+  and keep semantic status colors consistent across materials.
 - Use status colors only for state, command feedback, and attention.
 - Avoid decorative gradients, glowing backgrounds, large hero surfaces, and
   ornamental animation.
-- Give the clear floating surfaces a curved rim with directional reflections.
-  Chromium also displaces the backdrop along the bevel. Keep content panels and
-  form controls opaque.
-- Limit glass to the desktop runtime capsule or compact navigation bar.
-  Use opaque surfaces with reduced transparency, increased contrast, forced colors, or absent
-  `backdrop-filter` support.
+- Give the desktop sidebar and floating controls a lightly tinted surface with a
+  curved rim and directional reflections. Chromium displaces the moving
+  backdrop along the bevel of the runtime capsule and compact navigation bar.
+- Carry the edge lighting into selection indicators, command buttons, and
+  the dashboard action index. Reading panels and form fields use opaque fills.
+- Use opaque surfaces with reduced transparency, increased contrast, forced
+  colors, or absent `backdrop-filter` support.
 - Use small, tool-like radius values, and keep nested radii concentric: an inner
   radius is the outer radius minus the gap between them.
 - Use tabular numbers for counters, timings, and metrics.

@@ -2,7 +2,10 @@ import { createContext, useContext, useMemo } from "react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { normalizeLanguage, setConsoleLanguage, type ConsoleLanguage } from "./i18n";
-import { useMaterialPreference, useThemePreference, type MaterialPreference, type ThemePreference } from "./theme";
+import {
+  useGlassPreference, useMaterialPreference, useThemePreference,
+  type GlassPreference, type MaterialPreference, type ThemePreference
+} from "./theme";
 
 /**
  * Console preferences are the operator's own settings, not runtime state. They
@@ -15,6 +18,8 @@ export type ConsolePreferences = {
   setTheme: (preference: ThemePreference) => void;
   material: MaterialPreference;
   setMaterial: (preference: MaterialPreference) => void;
+  glass: GlassPreference;
+  setGlass: (preference: GlassPreference) => void;
   language: ConsoleLanguage;
   setLanguage: (language: ConsoleLanguage) => void;
 };
@@ -25,6 +30,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
   const { i18n } = useTranslation();
   const [theme, setTheme] = useThemePreference();
   const [material, setMaterial] = useMaterialPreference();
+  const [glass, setGlass] = useGlassPreference();
   const language = normalizeLanguage(i18n.resolvedLanguage);
 
   const value = useMemo<ConsolePreferences>(
@@ -33,10 +39,12 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       setTheme,
       material,
       setMaterial,
+      glass,
+      setGlass,
       language,
       setLanguage: (next) => void setConsoleLanguage(next)
     }),
-    [language, material, setMaterial, setTheme, theme]
+    [glass, language, material, setGlass, setMaterial, setTheme, theme]
   );
 
   return <PreferencesContext.Provider value={value}>{children}</PreferencesContext.Provider>;

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
 import { ArrowUpRight, Database, LockKeyhole, Search, Settings2, ShieldCheck, SlidersHorizontal, SunMoon } from "lucide-react";
@@ -14,7 +14,6 @@ import {
   FieldList,
   HelpTooltip,
   LoadingState,
-  SectionHeader,
   SegmentedControl
 } from "../components/Primitives";
 import { catalogText, formatSettingValue } from "../catalogPresentation";
@@ -23,16 +22,16 @@ import { groupTransition, groupVariants } from "../motionTokens";
 import { usePreferences } from "../preferences";
 import { enumLabel } from "../presentation";
 import { queryKeys } from "../queryKeys";
-import type { MaterialPreference, ThemePreference } from "../theme";
+import { GLASS_PALETTE, GLASS_TRANSPARENCY, type MaterialPreference, type ThemePreference } from "../theme";
 import type { SettingsCatalogEntry, SettingsRuntime } from "../types";
 
 type SettingsGroup = "normal" | "advanced" | "policy" | "diagnostics";
 
-const groupLabels: Record<SettingsGroup, { eyebrowKey: string; titleKey: string; labelKey: string; icon: typeof Settings2 }> = {
-  normal: { eyebrowKey: "settings.group.normal.eyebrow", titleKey: "settings.group.normal.title", labelKey: "settings.group.normal", icon: Settings2 },
-  advanced: { eyebrowKey: "settings.group.advanced.eyebrow", titleKey: "settings.group.advanced.title", labelKey: "settings.group.advanced", icon: SlidersHorizontal },
-  policy: { eyebrowKey: "settings.group.policy.eyebrow", titleKey: "settings.group.policy.title", labelKey: "settings.group.policy", icon: ShieldCheck },
-  diagnostics: { eyebrowKey: "settings.group.diagnostics.eyebrow", titleKey: "settings.group.diagnostics.title", labelKey: "settings.group.diagnostics", icon: Database }
+const groupLabels: Record<SettingsGroup, { titleKey: string; labelKey: string; icon: typeof Settings2 }> = {
+  normal: { titleKey: "settings.group.normal.title", labelKey: "settings.group.normal", icon: Settings2 },
+  advanced: { titleKey: "settings.group.advanced.title", labelKey: "settings.group.advanced", icon: SlidersHorizontal },
+  policy: { titleKey: "settings.group.policy.title", labelKey: "settings.group.policy", icon: ShieldCheck },
+  diagnostics: { titleKey: "settings.group.diagnostics.title", labelKey: "settings.group.diagnostics", icon: Database }
 };
 
 const settingsGroups: SettingsGroup[] = ["normal", "advanced", "policy", "diagnostics"];
@@ -101,21 +100,15 @@ export function SettingsScreen({ token }: { token: string }) {
 
   return (
     <section className="settings-screen" aria-label={t("settings.aria")}>
-      <div className="queue-panel">
-        <SectionHeader
-          eyebrow={t("settings.eyebrow")}
-          title={t("settings.title")}
-          badge={<Badge tone="info">{t("settings.itemCount", { count: visibleEntries.length })}</Badge>}
-        >
-          <p className="section-note">
-            {t("settings.intro")}
-          </p>
-        </SectionHeader>
-      </div>
+      <h1>{t("settings.title")}</h1>
 
       <SettingsPreferences />
 
-      <div className="settings-toolbar queue-panel">
+      <section aria-labelledby="settings-catalog-title" className="settings-toolbar queue-panel">
+        <div className="settings-catalog-heading">
+          <h2 id="settings-catalog-title">{t("settings.catalogTitle")}</h2>
+          <span>{t("settings.itemCount", { count: visibleEntries.length })}</span>
+        </div>
         <SegmentedControl
           label={t("settings.groupLabel")}
           onChange={setActiveGroup}
@@ -129,7 +122,7 @@ export function SettingsScreen({ token }: { token: string }) {
             <input onChange={(event) => setSearch(event.target.value)} placeholder={t("settings.searchPlaceholder")} type="search" value={search} />
           </span>
         </label>
-      </div>
+      </section>
 
       <div className="settings-groups">
         {/*
@@ -162,7 +155,7 @@ export function SettingsScreen({ token }: { token: string }) {
  */
 function SettingsPreferences() {
   const { t } = useTranslation();
-  const { theme, setTheme, material, setMaterial, language, setLanguage } = usePreferences();
+  const { theme, setTheme, material, setMaterial, glass, setGlass, language, setLanguage } = usePreferences();
 
   const themeOptions: Array<{ value: ThemePreference; label: string }> = [
     { value: "system", label: t("app.themeSystem") },
@@ -177,24 +170,62 @@ function SettingsPreferences() {
     { value: "zh-CN", label: t("language.chinese") },
     { value: "en-US", label: t("language.english") }
   ];
+  const paletteOptions = GLASS_PALETTE.map(({ color, labelKey }) => ({
+    value: color,
+    label: t(labelKey),
+    leading: <span aria-hidden="true" className="glass-swatch" style={{ "--swatch": color } as CSSProperties} />
+  }));
+  const transparencyLabel = t("settings.appearance.transparencyValue", { value: glass.transparency });
+  const transparencyProgress = 100 * (glass.transparency - GLASS_TRANSPARENCY.min) /
+    (GLASS_TRANSPARENCY.max - GLASS_TRANSPARENCY.min);
 
   return (
     <section className="queue-panel settings-preferences" aria-label={t("settings.appearance.title")}>
       <div className="subsection-title">
         <SunMoon aria-hidden="true" size={16} />
-        <div>
-          <p className="eyebrow">{t("settings.appearance.eyebrow")}</p>
-          <h2>{t("settings.appearance.title")}</h2>
-        </div>
+        <h2>{t("settings.appearance.title")}</h2>
       </div>
       <div className="preference-list">
-        <PreferenceRow description={t("settings.appearance.materialDetail")} label={t("settings.appearance.material")}>
+        <PreferenceRow label={t("settings.appearance.material")}>
           <SegmentedControl label={t("settings.appearance.material")} onChange={setMaterial} options={materialOptions} value={material} />
         </PreferenceRow>
-        <PreferenceRow description={t("settings.appearance.themeDetail")} label={t("app.appearanceLabel")}>
+        {material === "glass" ? (
+          <>
+            <PreferenceRow label={t("settings.appearance.palette")}>
+              <div className="glass-palette">
+                <SegmentedControl
+                  label={t("settings.appearance.palette")}
+                  onChange={(color) => setGlass({ ...glass, color })}
+                  options={paletteOptions}
+                  value={glass.color}
+                />
+                <label className="glass-color-picker">
+                  <input type="color" value={glass.color} onChange={(event) => setGlass({ ...glass, color: event.currentTarget.value })} />
+                  <span>{t("settings.appearance.customColor")}</span>
+                </label>
+              </div>
+            </PreferenceRow>
+            <PreferenceRow label={t("settings.appearance.transparency")}>
+              <div className="glass-density">
+                <input
+                  aria-label={t("settings.appearance.transparency")}
+                  aria-valuetext={transparencyLabel}
+                  type="range"
+                  min={GLASS_TRANSPARENCY.min}
+                  max={GLASS_TRANSPARENCY.max}
+                  value={glass.transparency}
+                  style={{ "--range-progress": `${transparencyProgress}%` } as CSSProperties}
+                  onChange={(event) => setGlass({ ...glass, transparency: event.currentTarget.valueAsNumber })}
+                />
+                <output aria-hidden="true">{transparencyLabel}</output>
+              </div>
+            </PreferenceRow>
+          </>
+        ) : null}
+        <PreferenceRow label={t("app.appearanceLabel")}>
           <SegmentedControl label={t("app.appearanceLabel")} onChange={setTheme} options={themeOptions} value={theme} />
         </PreferenceRow>
-        <PreferenceRow description={t("settings.appearance.languageDetail")} label={t("language.label")}>
+        <PreferenceRow label={t("language.label")}>
           <SegmentedControl label={t("language.label")} onChange={setLanguage} options={languageOptions} value={language} />
         </PreferenceRow>
       </div>
@@ -202,13 +233,10 @@ function SettingsPreferences() {
   );
 }
 
-function PreferenceRow({ label, description, children }: { label: string; description: string; children: ReactNode }) {
+function PreferenceRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="preference-row">
-      <div className="preference-copy">
-        <h3>{label}</h3>
-        <p>{description}</p>
-      </div>
+      <h3>{label}</h3>
       {children}
     </div>
   );
@@ -230,10 +258,7 @@ function SettingsCatalogSection({
     <section className="queue-panel settings-section" aria-label={t(meta.titleKey)}>
       <div className="subsection-title">
         <Icon aria-hidden="true" size={16} />
-        <div>
-          <p className="eyebrow">{t(meta.eyebrowKey)}</p>
-          <h2>{t(meta.titleKey)}</h2>
-        </div>
+        <h2>{t(meta.titleKey)}</h2>
       </div>
       {entries.length ? (
         <div className="settings-field-grid">

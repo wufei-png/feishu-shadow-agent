@@ -92,27 +92,32 @@ the backdrop along the bevel. Graphite uses an opaque fill. Reduced transparency
 increased contrast, forced colors, and browsers without backdrop filtering also
 get an opaque fill.
 
-On desktop the runtime capsule floats over scrolling content and the sidebar uses
-a solid tone. At 900px and below only the navigation bar remains pinned. The
-runtime summary scrolls in the page. Reading surfaces, menus, and tooltips use
-opaque fills at every width.
+On desktop the runtime capsule floats over scrolling content. The sidebar has
+its own tinted background and reflected edge. At 900px and below only the
+navigation bar remains pinned and the runtime summary scrolls in the page.
+Navigation and filter selection indicators, buttons, and dashboard shortcuts
+share a smaller highlight. Menus and tooltips use a higher-opacity fill for
+reading. Evidence, drafts, and form fields use opaque fills at every width.
 
-Motion expresses spatial continuity, not decoration. The animation library owns
-mount, unmount, and layout; CSS owns hover, press, colour, and focus.
+Motion expresses spatial continuity. The animation library owns panel and route
+transitions. Selection indicators use the positions of their options to slide.
+CSS owns hover, press, colour, and focus.
 
 ```text
 Route change        140ms opacity fade, no travel, no exit animation
 Settings group      180ms cross-fade in, 80ms out, no overlap between grids
 Detail panel        200ms, 6px rise, keyed on the selected item
 List row / result   fade in with a 4px rise on mount
-Selection           one shared indicator that travels between options
+Selection           Damped spring between options sharing an edge in the same group
+                    The spring carries its velocity into an interrupted slide
+                    Glass stretches and lights the rim in proportion to its speed
 ```
 
 A route change does not animate its exit. Holding the outgoing screen for even
 100ms makes a high-frequency sidebar click feel slow, and a true cross-fade would
 require overlapping both screens in the layout. Under `prefers-reduced-motion` the
 library drops transforms and keeps opacity, so the state change is still reported
-without movement.
+without movement. Selections across a gap or between groups update in place.
 
 ## Shared Screen States
 

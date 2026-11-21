@@ -27,19 +27,35 @@
   --warning-wash: rgb(134 84 16 / 8%);
   --danger-wash: rgb(161 50 68 / 8%);
 
-  --glass-tint: rgb(246 251 255 / 25%);
+  --glass-color: #72b7cb;
+  --glass-transparency: 82%;
+  --glass-opacity: calc(100% - var(--glass-transparency));
+  --glass-dark-bias: 0%;
+  --glass-selection-bias: 40%;
+  --glass-neutral: color-mix(in srgb, var(--surface-chrome) 94%, var(--glass-color));
+  --glass-scene-pigment: color-mix(in srgb, var(--glass-color) 46%, var(--surface-chrome));
+  --glass-tint: color-mix(in srgb, var(--glass-neutral) calc(var(--glass-opacity) + var(--glass-dark-bias)), transparent);
   --glass-specular: rgb(255 255 255 / 97%);
   --glass-surface-glint: rgb(255 255 255 / 57%);
   --glass-face: rgb(255 255 255 / 17%);
-  --glass-reflection: rgb(198 235 255 / 29%);
+  --glass-reflection: color-mix(in srgb, color-mix(in srgb, var(--glass-color) 61%, #fff) 31%, transparent);
   --glass-rim: rgb(80 123 150 / 32%);
   --glass-top-edge: rgb(255 255 255 / 95%);
   --glass-bottom-edge: rgb(61 105 138 / 27%);
   --glass-contact: rgb(35 70 101 / 18%);
   --glass-ambient: rgb(39 79 111 / 20%);
-  --glass-scene-blue: rgb(99 172 224 / 41%);
-  --glass-scene-mint: rgb(112 201 184 / 31%);
+  --glass-scene-color: color-mix(in srgb, var(--glass-scene-pigment) 61%, transparent);
+  --glass-scene-bounce: color-mix(in srgb, color-mix(in srgb, var(--glass-color) 30%, var(--surface-chrome)) 40%, transparent);
   --glass-warm-reflection: rgb(255 230 204 / 58%);
+  --glass-rail-tint: color-mix(in srgb, var(--glass-neutral) calc(24% + var(--glass-opacity) + var(--glass-dark-bias)), transparent);
+  --glass-rail-light: color-mix(in srgb, var(--glass-scene-pigment) 48%, transparent);
+  --glass-control-tint: color-mix(in srgb, var(--glass-neutral) calc(40% + var(--glass-opacity)), transparent);
+  --glass-selection-tint: color-mix(
+    in srgb,
+    color-mix(in srgb, var(--glass-color) 28%, var(--surface-chrome)) calc(var(--glass-selection-bias) + var(--glass-opacity)),
+    transparent
+  );
+  --glass-overlay-tint: rgb(252 253 254 / 94%);
   --glass-saturation: 139%;
   --glass-brightness: 1.03;
   --control-light: rgb(255 255 255 / 86%);
@@ -88,19 +104,20 @@
   --warning-wash: rgb(235 194 128 / 10%);
   --danger-wash: rgb(255 162 169 / 10%);
 
-  --glass-tint: rgb(15 24 35 / 37%);
+  --glass-dark-bias: 9%;
+  --glass-selection-bias: 15%;
+  --glass-neutral: color-mix(in srgb, var(--surface-canvas) 94%, var(--glass-color));
   --glass-specular: rgb(232 245 255 / 55%);
   --glass-surface-glint: rgb(210 236 255 / 27%);
   --glass-face: rgb(222 240 255 / 13%);
-  --glass-reflection: rgb(122 184 226 / 35%);
+  --glass-reflection: color-mix(in srgb, var(--glass-color) 35%, transparent);
   --glass-rim: rgb(166 207 244 / 29%);
   --glass-top-edge: rgb(222 242 255 / 55%);
   --glass-bottom-edge: rgb(2 9 18 / 66%);
   --glass-contact: rgb(0 0 0 / 50%);
   --glass-ambient: rgb(0 0 0 / 53%);
-  --glass-scene-blue: rgb(63 122 187 / 49%);
-  --glass-scene-mint: rgb(36 129 120 / 39%);
   --glass-warm-reflection: rgb(233 174 138 / 31%);
+  --glass-overlay-tint: rgb(32 39 48 / 96%);
   --glass-saturation: 139%;
   --glass-brightness: 0.91;
   --control-light: rgb(255 255 255 / 8%);

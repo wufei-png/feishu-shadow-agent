@@ -7,8 +7,9 @@ import { LazyMotion, MotionConfig, m } from "motion/react";
 import { getDashboard } from "./api";
 import { GlassLens } from "./components/GlassLens";
 import { Badge, EmptyState, LoadingState } from "./components/Primitives";
+import { useSelectionSlide } from "./components/useSelectionSlide";
 import { bootstrapTokenFromHash, decodeHashSegment } from "./consoleSession";
-import { panelTransition, routeTransition, routeVariants } from "./motionTokens";
+import { routeTransition, routeVariants } from "./motionTokens";
 import { enumLabel } from "./presentation";
 import { PreferencesProvider } from "./preferences";
 import { queryKeys } from "./queryKeys";
@@ -16,12 +17,7 @@ import type { DashboardSnapshot, RouteKey, Tone } from "./types";
 
 const TOKEN_STORAGE_KEY = "feishu_shadow_agent_console_token";
 
-/*
- * Loading the feature set as a function keeps it in its own chunk instead of the
- * initial bundle. `domMax` is the only set that includes layout projection, which
- * the sliding selection indicators need; everything else is unused here.
- */
-const loadMotionFeatures = () => import("motion/react").then((module) => module.domMax);
+const loadMotionFeatures = () => import("motion/react").then((module) => module.domAnimation);
 
 type NavItem = { key: RouteKey; labelKey: string; icon: typeof Home };
 
@@ -80,7 +76,7 @@ const TasksScreen = lazy(() => import("./screens/TasksScreen").then((module) => 
 export function App() {
   return (
     /*
-     * LazyMotion keeps the layout-animation feature set lazily loaded, and
+     * LazyMotion keeps the animation feature set lazily loaded, and
      * `reducedMotion="user"` makes the OS setting authoritative: transform
      * animations are dropped while opacity transitions still report that state
      * changed. Both live here rather than in the entry point so tests exercise
@@ -196,6 +192,7 @@ function ConsoleNavigation({ route, mode }: { route: RouteKey; mode: DashboardSn
   const [touchPressed, setTouchPressed] = useState(false);
   const sidebar = useRef<HTMLElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
+  const indicator = useSelectionSlide(route);
   const page = t(navItems.find((item) => item.key === route)?.labelKey ?? "navigation.console");
 
   useEffect(() => {
@@ -276,7 +273,9 @@ function ConsoleNavigation({ route, mode }: { route: RouteKey; mode: DashboardSn
                 onClick={open ? closeMenu : undefined}
               >
                 {route === item.key ? (
-                  <m.span aria-hidden="true" className="nav-active-pill" layoutId="nav-active-pill" transition={panelTransition} />
+                  <span aria-hidden="true" className="nav-active-pill" ref={indicator}>
+                    <span className="selection-rim"><span className="selection-rim-glint" /></span>
+                  </span>
                 ) : null}
                 <item.icon aria-hidden="true" size={17} strokeWidth={1.8} />
                 <span className="nav-item-label">{t(item.labelKey)}</span>

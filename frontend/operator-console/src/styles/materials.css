@@ -1,4 +1,5 @@
 :root {
+  --shell-fill: var(--surface-canvas);
   --chrome-fill: var(--surface-chrome);
   --chrome-sheen: none;
   --chrome-border: var(--border-subtle);
@@ -8,10 +9,21 @@
   --chrome-scene: none;
   --chrome-glint: transparent;
   --chrome-type-shadow: none;
+  --rail-fill: var(--surface-nav);
+  --rail-scene: none;
+  --control-fill: var(--surface-raised);
+  --control-sheen: none;
+  --control-depth: inset 0 1px 0 var(--control-light);
+  --selection-fill: var(--surface-panel);
+  --selection-rim: var(--border-subtle);
+  --selection-glass-motion: 0;
+  --selection-glint-display: none;
+  --overlay-fill: var(--surface-panel);
 }
 
-@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+@supports (color: color-mix(in srgb, black, white)) and ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   :root:where(:not([data-material="solid"])) {
+    --shell-fill: color-mix(in srgb, var(--surface-canvas) 94%, var(--glass-color));
     --chrome-fill: var(--glass-tint);
     --chrome-sheen:
       linear-gradient(158deg, var(--glass-face), transparent 44% 71%, var(--glass-reflection));
@@ -25,13 +37,26 @@
     --chrome-filter: saturate(var(--glass-saturation)) brightness(var(--glass-brightness)) blur(2.5px);
     --chrome-type-shadow: 0 0 5px var(--surface-chrome);
     --chrome-scene:
-      radial-gradient(ellipse 41% 122px at 28% 0, var(--glass-scene-blue), transparent 100%),
-      radial-gradient(ellipse 43% 145px at 59% -22px, var(--glass-scene-mint), transparent 95%);
+      radial-gradient(ellipse 53% 176px at 28% 0, var(--glass-scene-color), transparent 100%),
+      radial-gradient(ellipse 49% 220px at 69% -30px, var(--glass-scene-bounce), transparent 100%);
+    --rail-fill: var(--glass-rail-tint);
+    --rail-scene: radial-gradient(ellipse 260px 610px at 0 170px, var(--glass-rail-light), transparent 90%);
+    --control-fill: var(--glass-control-tint);
+    --control-sheen: linear-gradient(174deg, color-mix(in srgb, var(--glass-top-edge) 48%, transparent), transparent 51%, var(--glass-face));
+    --control-depth:
+      inset 0 1px 0 var(--glass-top-edge),
+      inset 0 -1px 0 var(--glass-bottom-edge),
+      0 2px 4px -2px var(--glass-contact);
+    --selection-fill: var(--glass-selection-tint);
+    --selection-rim: var(--accent-outline);
+    --selection-glass-motion: 1;
+    --overlay-fill: var(--glass-overlay-tint);
   }
 
   @supports ((mask-composite: exclude) or (-webkit-mask-composite: xor)) {
     :root:where(:not([data-material="solid"])) {
       --chrome-rim-content: "";
+      --selection-glint-display: block;
     }
   }
 }
@@ -42,6 +67,7 @@
 
 @media (prefers-reduced-transparency: reduce), (prefers-contrast: more), (forced-colors: active) {
   :root {
+    --shell-fill: var(--surface-canvas);
     --chrome-fill: var(--surface-chrome);
     --chrome-sheen: none;
     --chrome-border: var(--border-strong);
@@ -51,6 +77,16 @@
     --chrome-scene: none;
     --chrome-glint: transparent;
     --chrome-type-shadow: none;
+    --rail-fill: var(--surface-nav);
+    --rail-scene: none;
+    --control-fill: var(--surface-raised);
+    --control-sheen: none;
+    --control-depth: inset 0 1px 0 var(--control-light);
+    --selection-fill: var(--surface-panel);
+    --selection-rim: var(--border-strong);
+    --selection-glass-motion: 0;
+    --selection-glint-display: none;
+    --overlay-fill: var(--surface-panel);
   }
 
   :root .floating-surface[data-glass-refraction] {
@@ -74,12 +110,53 @@
   pointer-events: none;
 }
 
+.nav-active-pill,
+.segmented-indicator {
+  z-index: 0;
+  background-color: var(--selection-fill);
+  background-image: var(--control-sheen);
+  box-shadow: inset 0 0 0 1px var(--selection-rim), var(--control-depth);
+  pointer-events: none;
+  transform-origin: center;
+}
+
+.selection-rim {
+  display: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .nav-item,
+  .nav-item > svg,
+  .segmented-control button {
+    transition: color var(--duration-quick) var(--ease-out);
+  }
+
+  [data-selection-moving] > .selection-rim {
+    position: absolute;
+    inset: 0;
+    display: var(--selection-glint-display);
+    padding: 1.5px;
+    border-radius: inherit;
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+  }
+}
+
+.selection-rim-glint {
+  position: absolute;
+  inset: -42% -18%;
+  background: radial-gradient(ellipse closest-side, var(--glass-specular) 22%, var(--glass-surface-glint) 54%, transparent);
+  opacity: 0;
+}
+
 /* Fade the strip of content that would otherwise peek above a pinned surface. */
 .floating-surface::before {
   position: absolute;
   inset: calc(-1px - var(--chrome-clearance, 0px)) calc(-1 * var(--chrome-gutter, 0px)) auto;
   height: calc(1px + var(--chrome-clearance, 0px));
-  background: linear-gradient(var(--surface-canvas) 52%, transparent);
+  background: linear-gradient(var(--shell-fill) 52%, transparent);
   opacity: var(--glass-scroll-opacity, 0);
   pointer-events: none;
   content: var(--chrome-scroll-edge, none);

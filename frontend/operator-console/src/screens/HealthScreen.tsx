@@ -52,29 +52,24 @@ export function HealthScreen({ token }: { token: string }) {
   if (!health.data) {
     return <EmptyState title={t("health.unavailable")} detail={t("health.unavailableDetail")} />;
   }
+  const { open_issue_count: openIssueCount, highest_severity: highestSeverity } = health.data.summary;
 
   return (
     <section className="work-grid health-layout" aria-label={t("health.aria")}>
       <div className="work-main">
-        <HealthSummaryPanel data={health.data} refreshing={health.isFetching && !health.isLoading} />
-        <QueueControls
-          error={health.error}
-          hasNext={false}
-          isFetching={health.isFetching}
-          onNext={() => undefined}
-          onPrevious={() => undefined}
-          onRefresh={() => void health.refetch()}
-          page={0}
-          updatedAt={health.dataUpdatedAt}
-        />
         <div className="queue-panel">
           <SectionHeader
-            eyebrow={t("health.currentIssues")}
-            title={t("health.needsAttention")}
-            badge={<Badge tone={issues.length ? issueTone(health.data.summary.highest_severity) : "success"}>{issues.length}</Badge>}
-          >
-            <p className="section-note">{t("health.intro")}</p>
-          </SectionHeader>
+            title={t("health.diagnostics")}
+            badge={openIssueCount ? (
+              <Badge tone={issueTone(highestSeverity)}>{t("health.openIssueCount", { count: openIssueCount })}</Badge>
+            ) : null}
+          />
+          <QueueControls
+            error={health.error}
+            isFetching={health.isFetching}
+            onRefresh={() => void health.refetch()}
+            updatedAt={health.dataUpdatedAt}
+          />
           {issues.length ? (
             <div className="list-stack">
               {issues.map((issue) => (
@@ -91,13 +86,13 @@ export function HealthScreen({ token }: { token: string }) {
               ))}
             </div>
           ) : (
-            <EmptyState title={t("health.noIssues")} detail={t("health.noIssuesDetail")} />
+            <EmptyState title={t("health.noIssues")} />
           )}
         </div>
       </div>
 
       <aside className="work-detail">
-        <IssueDetailPanel issue={selectedIssue} />
+        {selectedIssue ? <IssueDetailPanel issue={selectedIssue} /> : null}
         <RuntimePanel data={health.data} />
         <FailedCommandsPanel data={health.data} />
         <FailedDispatchPanel data={health.data} onSelect={setSelectedIssueId} />
@@ -106,32 +101,8 @@ export function HealthScreen({ token }: { token: string }) {
   );
 }
 
-function HealthSummaryPanel({ data, refreshing }: { data: HealthIssuesResponse; refreshing: boolean }) {
+function IssueDetailPanel({ issue }: { issue: HealthIssue }) {
   const { t } = useTranslation();
-  return (
-    <div className="queue-panel">
-      <SectionHeader
-        eyebrow={t("health.status")}
-        title={t("health.diagnostics")}
-        badge={<Badge tone={refreshing ? "info" : data.summary.open_issue_count ? issueTone(data.summary.highest_severity) : "success"}>{refreshing ? t("health.refreshing") : enumLabel(t, "severity", data.summary.highest_severity)}</Badge>}
-      >
-        <p className="section-note">{t("health.summaryNote")}</p>
-      </SectionHeader>
-      <div className="metric-row health-metrics">
-        <Metric label={t("health.openIssues")} value={String(data.summary.open_issue_count)} tone={data.summary.open_issue_count ? issueTone(data.summary.highest_severity) : "success"} />
-        <Metric label={t("health.storage")} value={enumLabel(t, "status", String(data.runtime.store?.status ?? "unknown"))} tone={data.runtime.store?.status === "available" ? "success" : "danger"} />
-        <Metric label={t("health.daemon")} value={enumLabel(t, "status", String(data.runtime.daemon_liveness?.status ?? "unknown"))} tone={runtimeTone(data.runtime.daemon_liveness?.status)} />
-        <Metric label={t("health.generatedAt")} value={formatDate(data.generated_at)} tone="neutral" />
-      </div>
-    </div>
-  );
-}
-
-function IssueDetailPanel({ issue }: { issue: HealthIssue | null }) {
-  const { t } = useTranslation();
-  if (!issue) {
-    return <EmptyState title={t("health.select")} detail={t("health.selectDetail")} />;
-  }
   const copy = issueCopy(t, issue);
   return (
     <div className="detail-panel health-issue-detail">
@@ -201,17 +172,20 @@ function RuntimePanel({ data }: { data: HealthIssuesResponse }) {
   const { t } = useTranslation();
   const liveness = data.runtime.daemon_liveness ?? {};
   const lastRun = data.runtime.last_run ?? {};
+  const store = data.runtime.store;
+  const daemonStatus = String(liveness.status ?? "unknown");
+  const storageStatus = String(store?.status ?? (store?.available === true ? "available" : store?.available === false ? "unavailable" : "unknown"));
   return (
     <div className="detail-panel">
-      <p className="eyebrow">{t("health.liveness")}</p>
-      <h2>{t("health.daemonAndStore")}</h2>
-      <FieldList>
-        <Fact label={t("health.daemonStatus")} value={enumLabel(t, "status", String(liveness.status ?? "unknown"))} />
+      <h2>{t("health.runtimeOverview")}</h2>
+      <dl className="overview-facts">
+        <Fact label={t("health.daemon")} value={<Badge tone={runtimeTone(daemonStatus)}>{enumLabel(t, "status", daemonStatus)}</Badge>} />
+        <Fact label={t("health.storage")} value={<Badge tone={storageStatus === "available" ? "success" : storageStatus === "unknown" ? "muted" : "danger"}>{enumLabel(t, "status", storageStatus)}</Badge>} />
         <Fact label={t("health.lastHeartbeat")} value={formatSeconds(t, liveness.heartbeat_age_seconds)} />
         <Fact label={t("health.runStatus")} value={enumLabel(t, "status", String(liveness.run_status ?? lastRun.status ?? "unknown"))} />
         <Fact label={t("health.lastTick")} value={formatDate(String(lastRun.last_tick_finished_at ?? ""))} />
-        <Fact label={t("health.storeAvailable")} value={data.runtime.store?.available ? t("common.yes") : t("common.no")} />
-      </FieldList>
+        <Fact label={t("health.generatedAt")} value={formatDate(data.generated_at)} />
+      </dl>
     </div>
   );
 }
@@ -291,16 +265,6 @@ function FailedDispatchPanel({
     </div>
   );
 }
-
-function Metric({ label, value, tone }: { label: string; value: string; tone: Tone }) {
-  return (
-    <div className={`metric-card ${tone}`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
-
 
 function linkTarget(t: TFunction, link: HealthIssueLink): { label: string; href: string | null } {
   if (link.type === "dispatch_action") {

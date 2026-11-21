@@ -177,7 +177,6 @@ export function DispatchScreen({ token, selectedId, initialFilter }: { token: st
       <div className="work-main">
         <div className="queue-panel">
           <SectionHeader
-            eyebrow={t("dispatch.eyebrow")}
             title={t("dispatch.title")}
             badge={<Badge tone={rows.length ? "warning" : "success"}>{rows.length}</Badge>}
           />
@@ -192,12 +191,14 @@ export function DispatchScreen({ token, selectedId, initialFilter }: { token: st
           />
           <QueueControls
             error={actions.error}
-            hasNext={hasNextPage}
             isFetching={actions.isFetching}
-            onNext={() => setPage((current) => current + 1)}
-            onPrevious={() => setPage((current) => Math.max(0, current - 1))}
             onRefresh={() => void actions.refetch()}
-            page={page}
+            pagination={{
+              page,
+              hasNext: hasNextPage,
+              onNext: () => setPage((current) => current + 1),
+              onPrevious: () => setPage((current) => Math.max(0, current - 1))
+            }}
             updatedAt={actions.dataUpdatedAt}
           />
           {rows.length ? (

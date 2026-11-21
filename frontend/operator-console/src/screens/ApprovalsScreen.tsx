@@ -230,12 +230,14 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
             <>
               <QueueControls
                 error={approvals.error}
-                hasNext={hasNextPage}
                 isFetching={approvals.isFetching}
-                onNext={() => setPage((current) => current + 1)}
-                onPrevious={() => setPage((current) => Math.max(0, current - 1))}
                 onRefresh={() => void approvals.refetch()}
-                page={page}
+                pagination={{
+                  page,
+                  hasNext: hasNextPage,
+                  onNext: () => setPage((current) => current + 1),
+                  onPrevious: () => setPage((current) => Math.max(0, current - 1))
+                }}
                 updatedAt={approvals.dataUpdatedAt}
               />
               {visibleApprovals.length ? (
@@ -306,28 +308,6 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
                 ) : null}
               </section>
 
-              {taskId ? (
-                <section className="approval-section approval-context">
-                  <div className="subsection-title">
-                    <MessageSquareText aria-hidden="true" size={16} />
-                    <h3>{t("approvals.relatedMessages")}</h3>
-                    <a className="approval-task-link" href={`#tasks/${encodeURIComponent(taskId)}`}>{t("approvals.openTask")}</a>
-                  </div>
-                  {task.isLoading ? <p className="detail-note">{t("approvals.taskContextLoading")}</p> : null}
-                  {task.error ? <p className="detail-note danger">{t("approvals.taskContextUnavailable")}</p> : null}
-                  {task.data?.recent_messages.length ? (
-                    <ul className="approval-messages">
-                      {task.data.recent_messages.slice(-4).map((message) => (
-                        <li key={message.message_id}>
-                          <span>{shortText(message.text, message.message_id)}</span>
-                          <small>{enumLabel(t, "role", message.sender_role)}</small>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : task.data ? <p className="detail-note">{t("approvals.noRelatedMessages")}</p> : null}
-                </section>
-              ) : null}
-
               <section className="approval-section approval-destination">
                 <h3>{t("approvals.destination")}</h3>
                 <FieldList>
@@ -363,6 +343,28 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
                   <JsonBlock value={detail.data.payload ?? {}} />
                 </TechnicalDetails>
               </section>
+
+              {taskId ? (
+                <section className="approval-section approval-context">
+                  <div className="subsection-title">
+                    <MessageSquareText aria-hidden="true" size={16} />
+                    <h3>{t("approvals.relatedMessages")}</h3>
+                    <a className="approval-task-link" href={`#tasks/${encodeURIComponent(taskId)}`}>{t("approvals.openTask")}</a>
+                  </div>
+                  {task.isLoading ? <p className="detail-note">{t("approvals.taskContextLoading")}</p> : null}
+                  {task.error ? <p className="detail-note danger">{t("approvals.taskContextUnavailable")}</p> : null}
+                  {task.data?.recent_messages.length ? (
+                    <ul className="approval-messages">
+                      {task.data.recent_messages.slice(-4).map((message) => (
+                        <li key={message.message_id}>
+                          <span>{shortText(message.text, message.message_id)}</span>
+                          <small>{enumLabel(t, "role", message.sender_role)}</small>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : task.data ? <p className="detail-note">{t("approvals.noRelatedMessages")}</p> : null}
+                </section>
+              ) : null}
 
               <section className="approval-section approval-operations">
                 <h3>{t("approvals.handle")}</h3>

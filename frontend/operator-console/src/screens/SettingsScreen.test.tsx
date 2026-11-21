@@ -2,7 +2,7 @@
 
 import { TooltipProvider } from "@radix-ui/react-tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../api";
@@ -29,6 +29,8 @@ beforeEach(async () => {
 afterEach(() => {
   cleanup();
   delete document.documentElement.dataset.material;
+  document.documentElement.style.removeProperty("--glass-color");
+  document.documentElement.style.removeProperty("--glass-transparency");
   vi.clearAllMocks();
   vi.unstubAllGlobals();
 });
@@ -92,6 +94,30 @@ describe("SettingsScreen", () => {
 
     expect(await screen.findByText("Appearance and language")).toBeTruthy();
     expect(document.documentElement.lang).toBe("en-US");
+  });
+
+  it("applies the glass palette and transparency as independent local preferences", async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    const range = await screen.findByRole("slider", { name: "玻璃透明度" });
+    expect(range.getAttribute("aria-valuetext")).toBe("82%");
+    await user.click(screen.getByRole("button", { name: "藤紫" }));
+    expect(document.documentElement.style.getPropertyValue("--glass-color")).toBe("#afa0cc");
+
+    fireEvent.change(screen.getByLabelText("自定义"), { target: { value: "#d78f79" } });
+    fireEvent.change(range, { target: { value: "90" } });
+    expect(range.getAttribute("aria-valuetext")).toBe("90%");
+    expect(document.documentElement.style.getPropertyValue("--glass-transparency")).toBe("90%");
+    expect(JSON.parse(localStorage.getItem("feishu_shadow_agent_console_glass") ?? "{}")).toEqual({
+      color: "#d78f79", transparency: 90
+    });
+
+    await user.click(screen.getByRole("button", { name: "石墨实底" }));
+    expect(screen.queryByRole("slider", { name: "玻璃透明度" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "透明玻璃" }));
+    expect(screen.getByRole("slider", { name: "玻璃透明度" }).getAttribute("aria-valuetext")).toBe("90%");
+    expect((screen.getByLabelText("自定义") as HTMLInputElement).value).toBe("#d78f79");
   });
 
   it("keeps policy-owned fields out of the default group and links them to Policy", async () => {

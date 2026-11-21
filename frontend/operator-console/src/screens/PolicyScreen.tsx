@@ -1,5 +1,4 @@
 import { useEffect, useId, useMemo, useState } from "react";
-import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
 import { FileDiff, History, Save, Trash2, Upload } from "lucide-react";
@@ -260,9 +259,7 @@ export function PolicyScreen({ token, selectedId }: { token: string; selectedId:
 
       <aside className="work-detail">
         <div className="detail-panel">
-          <p className="eyebrow">{t("policy.commandNote")}</p>
-          <h2>{t("policy.changeReason")}</h2>
-          <TextareaField label={t("common.reason")} onChange={setReason} placeholder={t("policy.reasonPlaceholder")} rows={2} value={reason} />
+          <TextareaField label={t("policy.changeReason")} onChange={setReason} placeholder={t("policy.reasonPlaceholder")} rows={2} value={reason} />
         </div>
 
         {scope === "global" ? (
@@ -335,28 +332,35 @@ function PolicyStatusPanel({
 }) {
   const { t } = useTranslation();
   const diff = data.policy_status.policy_import_diff;
+  const matches = diff?.status === "matches";
   return (
     <div className="queue-panel">
       <SectionHeader
-        eyebrow={t("policy.productPolicy")}
         title={t("policy.runtimeStatus")}
-        badge={<Badge tone={data.policy_status.initialized ? "success" : "warning"}>{data.policy_status.initialized ? t("policy.initialized") : t("policy.missing")}</Badge>}
-      >
-        <p className="section-note">{t("policy.sourceBoundary")}</p>
-      </SectionHeader>
-      <div className="policy-diff-grid">
-        <FactTile label={t("policy.importDiff")} value={<Badge tone={statusTone(diff?.status)}>{enumLabel(t, "status", diff?.status)}</Badge>} />
-        <FactTile label={t("policy.chatPolicyCount")} value={String(data.policy_status.chat_policy_count ?? data.chat_policies.length)} />
-        <FactTile label={t("policy.globalUpdatedAt")} value={formatDate(data.policy_status.global_policy_updated_at)} />
-      </div>
-      <p className="detail-note">{diff?.status === "matches" ? t("policy.diffMatches") : diff?.status === "differs" ? (data.policy_status.initialized ? t("policy.diffDiffers") : t("policy.diffUninitialized")) : t("policy.diffUnknown")}</p>
-      {diff?.message ? (
+        badge={
+          <div className="inline-badges policy-status-badges">
+            <Badge tone={data.policy_status.initialized ? "success" : "warning"}>{data.policy_status.initialized ? t("policy.initialized") : t("policy.missing")}</Badge>
+            <Badge tone={statusTone(diff?.status)}>{matches ? t("policy.importMatches") : t("policy.importStatus", { status: enumLabel(t, "status", diff?.status) })}</Badge>
+          </div>
+        }
+      />
+      <dl className="overview-facts">
+        <Fact label={t("policy.chatPolicyCount")} value={data.policy_status.chat_policy_count ?? data.chat_policies.length} />
+        <Fact label={t("policy.globalUpdatedAt")} value={formatDate(data.policy_status.global_policy_updated_at)} />
+      </dl>
+      {diff?.status === "differs" ? (
+        <>
+          {!data.policy_status.initialized ? <p className="detail-note">{t("policy.diffUninitialized")}</p> : null}
+          <ImportDiffDetails diff={diff} />
+        </>
+      ) : !matches ? <p className="detail-note">{t("policy.diffUnknown")}</p> : null}
+      {!matches && diff?.message ? (
         <details className="technical-details">
           <summary>{t("policy.technicalMessage")}</summary>
           <p className="detail-note">{diff.message}</p>
         </details>
       ) : null}
-      <ImportDiffDetails diff={diff} />
+      <p className="detail-note policy-import-boundary">{t("policy.sourceBoundary")}</p>
       <div className="command-buttons">
         <Button disabled={importPending} onClick={() => onImport(false)} tone="info">
           <Upload aria-hidden="true" size={15} />
@@ -384,7 +388,7 @@ function PolicyScopeList({
   return (
     <div className="queue-panel">
       <SectionHeader
-        eyebrow={t("policy.scope")}
+        as="h2"
         title={t("policy.globalAndChat")}
         badge={<Badge tone={data.chat_policies.length ? "info" : "muted"}>{t("policy.chatCount", { count: data.chat_policies.length })}</Badge>}
       />
@@ -760,22 +764,29 @@ function ImpactSummary({ summary }: { summary: Record<string, unknown> }) {
   );
 }
 
-function ImportDiffDetails({ diff }: { diff: SettingsRuntime["policy_status"]["policy_import_diff"] }) {
+function ImportDiffDetails({ diff }: { diff: NonNullable<SettingsRuntime["policy_status"]["policy_import_diff"]> }) {
   const { t } = useTranslation();
+  const changes = [
+    [t("policy.missingGlobal"), diff.missing_global],
+    [t("policy.changedGlobal"), diff.changed_global],
+    [t("coworker.missingPolicy"), diff.missing_coworker],
+    [t("coworker.changedPolicy"), diff.changed_coworker],
+    [t("policy.missingChats"), diff.missing_chats?.join(", ")],
+    [t("policy.changedChats"), diff.changed_chats?.join(", ")]
+  ] as const;
+  const entries = changes.filter(([, value]) => value);
+  if (!entries.length) return null;
   return (
     <div className="policy-import-detail">
       <div className="subsection-title">
         <FileDiff aria-hidden="true" size={16} />
         <h2>{t("policy.importDetails")}</h2>
       </div>
-      <FieldList>
-        <Fact label={t("policy.missingGlobal")} value={diff?.missing_global ? t("common.yes") : t("common.no")} />
-        <Fact label={t("policy.changedGlobal")} value={diff?.changed_global ? t("common.yes") : t("common.no")} />
-        <Fact label={t("coworker.missingPolicy")} value={diff?.missing_coworker === undefined ? t("common.unknown") : diff.missing_coworker ? t("common.yes") : t("common.no")} />
-        <Fact label={t("coworker.changedPolicy")} value={diff?.changed_coworker === undefined ? t("common.unknown") : diff.changed_coworker ? t("common.yes") : t("common.no")} />
-        <Fact label={t("policy.missingChats")} value={(diff?.missing_chats ?? []).join(", ") || t("common.none")} />
-        <Fact label={t("policy.changedChats")} value={(diff?.changed_chats ?? []).join(", ") || t("common.none")} />
-      </FieldList>
+      <ul className="policy-import-changes">
+        {entries.map(([label, value]) => (
+          <li key={label}>{label}{typeof value === "string" ? <span>{value}</span> : null}</li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -855,16 +866,6 @@ function PolicyAuditHistory({
     </div>
   );
 }
-
-function FactTile({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div className="metric-card neutral compact">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
-
 
 function entryFor(entries: SettingsCatalogEntry[], key: string, t: TFunction): SettingsCatalogEntry {
   return (

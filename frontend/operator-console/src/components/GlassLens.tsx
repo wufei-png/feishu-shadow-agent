@@ -53,7 +53,7 @@ export function GlassLens() {
     };
     const moveLight = (event: PointerEvent) => {
       if (!reflection.matches || event.pointerType === "touch" || document.documentElement.dataset.material === "solid") return;
-      if (getComputedStyle(surface).getPropertyValue("--glass-lens-slot").trim() === "0") return;
+      if (getComputedStyle(surface, "::after").content === "none") return;
       const bounds = surface.getBoundingClientRect();
       const x = Math.round((event.clientX - bounds.left) / bounds.width * 100);
       const y = Math.round((event.clientY - bounds.top) / bounds.height * 100);

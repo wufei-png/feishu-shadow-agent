@@ -44,29 +44,36 @@
 .decision-index {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 1px;
+  gap: 5px;
+  padding: 5px;
   overflow: hidden;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-panel);
-  background: var(--border-subtle);
+  border-radius: calc(var(--radius-panel) + 5px);
+  background-color: var(--rail-fill);
+  background-image: var(--control-sheen);
+  box-shadow: var(--control-depth);
 }
 
 .decision-link {
   display: grid;
-  grid-template: "count label arrow" auto "count hint arrow" auto / auto minmax(0, 1fr) auto;
+  grid-template: "count label arrow" / auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 3px 10px;
   min-width: 0;
-  min-height: 67px;
+  min-height: 54px;
   padding: 11px 13px;
-  border: 0;
-  background: var(--surface-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-panel);
+  background-color: var(--control-fill);
+  background-image: var(--control-sheen);
+  box-shadow: var(--control-depth);
   cursor: pointer;
   text-align: left;
 }
 
 .decision-link:hover {
-  background: var(--surface-hover);
+  border-color: var(--selection-rim);
+  background-color: var(--selection-fill);
 }
 
 .decision-index .decision-link:focus-visible {
@@ -94,15 +101,29 @@
   font-weight: 650;
 }
 
-.decision-hint {
-  grid-area: hint;
-  color: var(--text-muted);
-  font-size: var(--text-label);
-}
-
 .decision-link svg {
   grid-area: arrow;
+  width: 23px;
+  height: 23px;
+  padding: 4px;
+  border-radius: 50%;
+  background: var(--surface-inset);
   color: var(--text-muted);
+}
+
+.decision-link:hover svg {
+  background: var(--accent-wash);
+  color: var(--accent-primary);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .decision-link {
+    transition: transform var(--duration-press) var(--ease-out);
+  }
+
+  .decision-link:active {
+    transform: scale(0.98);
+  }
 }
 
 .next-step-panel {
@@ -271,15 +292,10 @@
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 7px;
   padding: 10px;
-  background: transparent;
 }
 
-.approval-queue .list-row:hover {
-  background: var(--surface-hover);
-}
-
-.approval-queue .list-row[data-selected="true"] {
-  background: color-mix(in srgb, var(--surface-panel) 91%, var(--accent-primary));
+.approval-queue :where(.list-row:not([data-selected])) {
+  background-color: transparent;
 }
 
 .approval-queue .list-row > .status-pill {
@@ -474,7 +490,7 @@
   }
 
   .decision-link {
-    min-height: 53px;
+    min-height: 48px;
     padding: 9px 13px;
   }
 

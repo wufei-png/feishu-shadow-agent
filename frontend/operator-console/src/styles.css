@@ -153,6 +153,15 @@ button {
   margin-bottom: 18px;
 }
 
+.section-header h2 {
+  margin-bottom: 0;
+}
+
+.health-layout .section-header {
+  align-items: center;
+  flex-direction: row;
+}
+
 .section-note,
 .detail-note {
   margin: 6px 0 0;
@@ -235,26 +244,6 @@ h2 {
   font-variant-numeric: tabular-nums;
   font-weight: 700;
   line-height: 1;
-}
-
-.metric-card.compact {
-  min-height: 78px;
-}
-
-.metric-card.compact strong {
-  font-size: 15px;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
-.health-metrics .metric-card {
-  min-height: 84px;
-}
-
-.health-metrics .metric-card strong {
-  font-size: 15px;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
 }
 
 .metric-card.warning strong,
@@ -391,8 +380,9 @@ h2 {
 
 .list-row[data-selected="true"] {
   border-color: var(--accent-outline);
-  background: color-mix(in srgb, var(--surface-panel) 91%, var(--accent-primary));
-  box-shadow: inset 0 1px 0 var(--control-light);
+  background-color: color-mix(in srgb, var(--surface-panel) 91%, var(--accent-primary));
+  background-image: var(--control-sheen);
+  box-shadow: var(--control-depth);
 }
 
 .list-row > .status-pill {
@@ -436,6 +426,7 @@ h2 {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+  isolation: isolate;
   /* Sized to its options: a track stretched across a grid column reads as an
    * empty trough next to the buttons it is supposed to contain. */
   width: fit-content;
@@ -452,9 +443,9 @@ h2 {
   display: inline-flex;
   align-items: center;
   min-height: 40px;
+  margin: 0;
   padding: 0 10px;
   border: 0;
-  /* Concentric with the 12px track: 12px outer minus the 4px track padding. */
   border-radius: var(--radius-inset);
   background: transparent;
   color: var(--text-muted);
@@ -463,21 +454,18 @@ h2 {
   font-weight: 650;
 }
 
-/*
- * The selected thumb is one shared element that travels between options, so the
- * track reads as a control with a moving selection rather than as buttons
- * toggling their own backgrounds.
- */
 .segmented-indicator {
   position: absolute;
   inset: 0;
   border-radius: var(--radius-inset);
-  background: var(--surface-panel);
-  box-shadow: inset 0 0 0 1px var(--border-subtle), inset 0 1px 0 var(--control-light), var(--elevation-1);
 }
 
 .segmented-option {
   position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
 }
 
 .segmented-control button:hover,
@@ -672,11 +660,38 @@ dd {
   box-shadow: 0 0 0 3px var(--accent-wash);
 }
 
-.policy-diff-grid {
+.overview-facts {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-  margin-bottom: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 16px;
+  margin: 0;
+}
+
+.overview-facts > div {
+  display: grid;
+  align-content: start;
+  gap: 3px;
+}
+
+.inline-badges.policy-status-badges {
+  margin-top: 0;
+}
+
+.policy-import-boundary {
+  margin-top: 12px;
+}
+
+.policy-import-changes {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding-inline-start: 18px;
+}
+
+.policy-import-changes span {
+  display: block;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
 }
 
 .policy-import-detail,
@@ -787,8 +802,9 @@ dd {
   padding: 9px 11px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-inset);
-  box-shadow: var(--elevation-2);
-  background: var(--surface-panel);
+  box-shadow: var(--control-depth), var(--elevation-2);
+  background-color: var(--overlay-fill);
+  background-image: var(--control-sheen);
   color: var(--text-secondary);
   font-size: var(--text-label);
   line-height: 1.5;
@@ -797,7 +813,7 @@ dd {
 }
 
 .tooltip-arrow {
-  fill: var(--surface-panel);
+  fill: var(--overlay-fill);
 }
 
 @keyframes tooltip-in {
@@ -935,10 +951,6 @@ dd {
   gap: 16px;
 }
 
-/*
- * Preference rows. Label and explanation on the left, control on the right,
- * divided by space and a hairline.
- */
 .settings-preferences {
   display: grid;
   gap: 2px;
@@ -946,6 +958,12 @@ dd {
 
 .preference-list {
   display: grid;
+}
+
+.settings-preferences,
+.preference-list {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
 }
 
 .preference-row {
@@ -971,25 +989,131 @@ dd {
   margin-bottom: 0;
 }
 
-.preference-copy {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-
-.preference-copy h3 {
+.preference-row > h3 {
   margin: 0;
   color: var(--text-primary);
   font-size: var(--text-h4);
   font-weight: 650;
 }
 
-.preference-copy p {
+.glass-palette {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  max-width: 100%;
+}
+
+.glass-palette .segmented-control {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  width: max-content;
+  min-width: 0;
+}
+
+.glass-palette .segmented-control button {
+  justify-content: center;
+}
+
+.glass-swatch {
+  flex: 0 0 12px;
+  height: 12px;
+  border: 1px solid rgb(0 0 0 / 14%);
+  border-radius: 50%;
+  background: linear-gradient(rgb(255 255 255 / 42%), transparent 68%), var(--swatch);
+}
+
+.glass-color-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 5px 10px 5px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-inset);
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  font-size: var(--text-label);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.glass-color-picker input {
+  width: 27px;
+  height: 27px;
+  padding: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 50%;
+  background: none;
+  cursor: inherit;
+}
+
+.glass-color-picker input::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.glass-color-picker input::-webkit-color-swatch {
+  border: 0;
+  border-radius: 50%;
+}
+
+.glass-color-picker input::-moz-color-swatch {
+  border: 0;
+  border-radius: 50%;
+}
+
+.glass-density {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 4ch;
+  align-items: center;
+  gap: 12px;
+  width: min(100%, 240px);
+}
+
+.glass-density input {
+  width: 100%;
+  min-height: 34px;
   margin: 0;
-  color: var(--text-muted);
+  accent-color: var(--accent-primary);
+  cursor: pointer;
+}
+
+@media (forced-colors: none) {
+  .glass-density input {
+    --range-fill: color-mix(in srgb, var(--accent-primary) 56%, var(--shell-fill));
+    --thumb-shadow: inset 0 0 0 1px var(--selection-rim), var(--control-depth);
+    appearance: none;
+    padding: 0;
+    background:
+      linear-gradient(to right, var(--range-fill) var(--range-progress), var(--surface-inset) 0)
+      center / 100% 5px no-repeat;
+  }
+
+  .glass-density input::-webkit-slider-thumb {
+    width: 20px;
+    height: 20px;
+    appearance: none;
+    border: 0;
+    border-radius: 50%;
+    background: var(--control-sheen), var(--selection-fill);
+    box-shadow: var(--thumb-shadow);
+  }
+
+  .glass-density input::-moz-range-thumb {
+    width: 20px;
+    height: 20px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--control-sheen), var(--selection-fill);
+    box-shadow: var(--thumb-shadow);
+  }
+}
+
+.glass-density output {
+  color: var(--text-secondary);
   font-size: var(--text-body);
-  line-height: 1.45;
-  text-wrap: pretty;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .settings-groups {
@@ -1001,6 +1125,21 @@ dd {
   grid-template-columns: minmax(0, 1fr) minmax(260px, 0.65fr);
   gap: 14px;
   align-items: end;
+}
+
+.settings-catalog-heading {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  color: var(--text-muted);
+  font-size: var(--text-label);
+}
+
+.settings-catalog-heading h2 {
+  margin: 0;
+  color: var(--text-primary);
 }
 
 .settings-toolbar .segmented-control {
@@ -1148,8 +1287,9 @@ dd {
   padding: 0 12px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-small);
-  background: var(--surface-raised);
-  box-shadow: inset 0 1px 0 var(--control-light);
+  background-color: var(--control-fill);
+  background-image: var(--control-sheen);
+  box-shadow: var(--control-depth);
   color: var(--text-secondary);
   cursor: pointer;
   font-size: 13px;
@@ -1160,7 +1300,7 @@ dd {
 .button:hover,
 .button:focus-visible {
   border-color: var(--border-strong);
-  background: var(--surface-hover);
+  background-color: var(--surface-hover);
   color: var(--text-primary);
 }
 
@@ -1193,6 +1333,20 @@ dd {
   flex-wrap: wrap;
   gap: 8px;
   margin: 12px 0;
+}
+
+.queue-controls {
+  margin-bottom: 10px;
+}
+
+.queue-controls .command-buttons {
+  margin: 0;
+}
+
+.queue-updated {
+  color: var(--text-muted);
+  font-size: var(--text-label);
+  font-variant-numeric: tabular-nums;
 }
 
 /*
@@ -1513,7 +1667,6 @@ dd {
 
   .metric-row,
   .split-panels,
-  .policy-diff-grid,
   .policy-form-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1543,7 +1696,6 @@ dd {
   .metric-row,
   .split-panels,
   .compact-facts,
-  .policy-diff-grid,
   .policy-form-grid,
   .audit-filter-row {
     grid-template-columns: 1fr;
@@ -1558,6 +1710,12 @@ dd {
   .timeline-button,
   .change-list li {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 370px) {
+  .glass-palette .segmented-control {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
