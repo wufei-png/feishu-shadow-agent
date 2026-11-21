@@ -59,7 +59,7 @@ describe("TasksScreen processing recovery", () => {
       </QueryClientProvider>
     );
 
-    await screen.findByRole("heading", { name: "处理恢复" });
+    await user.click(await screen.findByText("处理恢复", { selector: "summary" }));
     const buttons = screen.getAllByRole("button", { name: "重试" });
     expect(buttons).toHaveLength(1);
     expect(screen.getByRole("button", { name: "已排队" }).hasAttribute("disabled")).toBe(true);
@@ -97,7 +97,7 @@ describe("TasksScreen processing recovery", () => {
       </QueryClientProvider>
     );
 
-    await screen.findByRole("heading", { name: "任务背景" });
+    await user.click(await screen.findByText("任务背景", { selector: "summary" }));
     expect(screen.getByText(/下次新会话重建生效/)).toBeTruthy();
     await user.type(screen.getByLabelText("所有者补充背景"), "客户只接受周五发布");
     await user.click(screen.getByRole("button", { name: "保存背景" }));
@@ -126,6 +126,7 @@ describe("TasksScreen processing recovery", () => {
         <TasksScreen selectedId="t_retry" token="token" />
       </QueryClientProvider>
     );
+    await user.click(await screen.findByText("处理恢复", { selector: "summary" }));
     const resume = await screen.findByRole("button", { name: "恢复重试" });
     expect(resume.hasAttribute("disabled")).toBe(false);
     await user.click(resume);

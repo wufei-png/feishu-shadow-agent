@@ -343,7 +343,7 @@ export function ListRow({
   title: ReactNode;
   meta?: ReactNode;
   badge?: ReactNode;
-  onClick: () => void;
+  onClick: React.MouseEventHandler<HTMLButtonElement>;
   children?: ReactNode;
 }) {
   return (

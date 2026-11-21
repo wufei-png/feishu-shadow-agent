@@ -301,6 +301,11 @@ Layout:
 task list -> task timeline/detail -> message detail drawer/panel
 ```
 
+Desktop keeps two columns. Message evidence replaces task detail in the right
+column and keeps the task list visible. Compact screens show one step at a
+time. Returning restores the originating row or timeline position. Technical
+fields, message evidence, and audits remain available in named disclosures.
+
 List fields:
 
 ```text

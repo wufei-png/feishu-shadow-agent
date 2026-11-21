@@ -1,7 +1,7 @@
 import { useMutation } from "@tanstack/react-query";
 import { useQuery } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
-import { Bot, FileText, GitBranch, PackageSearch, RotateCcw, Send } from "lucide-react";
+import { FileText, GitBranch, PackageSearch, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { getMessageDetail, replayMessage, retryMessageProcessing } from "../api";
 import {
@@ -16,7 +16,6 @@ import {
   formatDate,
   JsonBlock,
   LoadingState,
-  shortText,
   statusTone,
   TechnicalDetails
 } from "../components/Primitives";
@@ -60,7 +59,12 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
     return <LoadingState title={t("message.loading")} />;
   }
   if (detail.error) {
-    return <ErrorState title={t("message.error")} error={detail.error} />;
+    return (
+      <div className="detail-panel">
+        <ErrorState title={t("message.error")} error={detail.error} />
+        <Button onClick={() => void detail.refetch()}>{t("common.refresh")}</Button>
+      </div>
+    );
   }
   if (!detail.data) {
     return <EmptyState title={t("message.notFound")} detail={t("message.notFoundDetail")} />;
@@ -69,55 +73,20 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
   return (
     <div className="message-detail-stack">
       <div className="detail-panel">
-        <p className="eyebrow">{t("message.detail")}</p>
         <div className="detail-title-row">
-          <h2><CopyValue label={t("message.messageId")} value={detail.data.message.message_id} /></h2>
+          <h2>{t("message.body")}</h2>
           <Badge tone={statusTone(detail.data.message.sender_role)}>{enumLabel(t, "role", detail.data.message.sender_role)}</Badge>
         </div>
-        <p className="preview-copy">{shortText(detail.data.message.text, t("message.noBody"))}</p>
-        <FieldList>
-          <Fact label={t("message.chat")} value={detail.data.message.chat_id ?? t("common.notRecorded")} />
-          <Fact label={t("message.sentAt")} value={formatDate(detail.data.message.sent_at)} />
-          <Fact label={t("message.thread")} value={detail.data.message.thread_id ?? t("common.none")} />
-          <Fact label={t("message.replyTo")} value={detail.data.message.reply_to_message_id ?? t("common.none")} />
-        </FieldList>
-      </div>
-
-      <div className="detail-panel">
-        <div className="subsection-title">
-          <GitBranch aria-hidden="true" size={16} />
-          <h2>{t("message.routing")}</h2>
-        </div>
-        <ul className="timeline-list">
-          {detail.data.routing_audits.map((audit, index) => (
-            <li key={`${String(audit.id ?? index)}`}>
-              <GitBranch aria-hidden="true" size={14} />
-              <span>{String(audit.route ?? "route")}</span>
-              <small>{String(audit.route_reason ?? "")}</small>
-            </li>
-          ))}
-        </ul>
-        {detail.data.task_summaries.length ? (
-          <div className="inline-badges">
-            {detail.data.task_summaries.map((task) => (
-              <Badge key={task.task_id} tone={statusTone(task.status)}>
-                {task.task_id}
-              </Badge>
-            ))}
-          </div>
-        ) : null}
-      </div>
-
-      <div className="detail-panel">
-        <div className="subsection-title">
-          <RotateCcw aria-hidden="true" size={16} />
-          <h2>{t("message.replay")}</h2>
-        </div>
-        <Button disabled={replay.isPending} onClick={() => replay.mutate(messageId)} tone="info">
-          <RotateCcw aria-hidden="true" size={15} />
-          {t("message.previewReplay")}
-        </Button>
-        <CommandResultPanel result={replayResult} />
+        <p className="preview-copy">{detail.data.message.text?.trim() || t("message.noBody")}</p>
+        <p className="detail-note">{formatDate(detail.data.message.sent_at)}</p>
+        <TechnicalDetails>
+          <FieldList>
+            <Fact label={t("message.messageId")} value={<CopyValue label={t("message.messageId")} value={detail.data.message.message_id} />} />
+            <Fact label={t("message.chat")} value={detail.data.message.chat_id ?? t("common.notRecorded")} />
+            <Fact label={t("message.thread")} value={detail.data.message.thread_id ?? t("common.none")} />
+            <Fact label={t("message.replyTo")} value={detail.data.message.reply_to_message_id ?? t("common.none")} />
+          </FieldList>
+        </TechnicalDetails>
       </div>
 
       <div className="detail-panel">
@@ -154,11 +123,36 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
         <CommandResultPanel result={retryResult} />
       </div>
 
-      <div className="detail-panel">
-        <div className="subsection-title">
-          <PackageSearch aria-hidden="true" size={16} />
-          <h2>{t("message.resources")}</h2>
-        </div>
+      <TechnicalDetails summary={t("message.routing")}>
+        <ul className="timeline-list">
+          {detail.data.routing_audits.map((audit, index) => (
+            <li key={`${String(audit.id ?? index)}`}>
+              <GitBranch aria-hidden="true" size={14} />
+              <span>{String(audit.route ?? "route")}</span>
+              <small>{String(audit.route_reason ?? "")}</small>
+            </li>
+          ))}
+        </ul>
+        {detail.data.task_summaries.length ? (
+          <div className="inline-badges">
+            {detail.data.task_summaries.map((task) => (
+              <Badge key={task.task_id} tone={statusTone(task.status)}>
+                {task.task_id}
+              </Badge>
+            ))}
+          </div>
+        ) : null}
+      </TechnicalDetails>
+
+      <TechnicalDetails summary={t("message.replay")}>
+        <Button disabled={replay.isPending} onClick={() => replay.mutate(messageId)} tone="info">
+          <RotateCcw aria-hidden="true" size={15} />
+          {t("message.previewReplay")}
+        </Button>
+        <CommandResultPanel result={replayResult} />
+      </TechnicalDetails>
+
+      <TechnicalDetails summary={t("message.resources")}>
         {detail.data.resources.length ? (
           <ul className="audit-list">
             {detail.data.resources.map((resource) => (
@@ -189,27 +183,19 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
         ) : (
           <p className="detail-note">{t("message.noResources")}</p>
         )}
-      </div>
+      </TechnicalDetails>
 
-      <div className="detail-panel">
-        <div className="subsection-title">
-          <Bot aria-hidden="true" size={16} />
-          <h2>{t("message.agentAudit")}</h2>
-        </div>
+      <TechnicalDetails summary={t("message.agentAudit")}>
         <AgentAuditList audits={detail.data.agent_audits} compact />
-      </div>
+      </TechnicalDetails>
 
-      <div className="detail-panel">
-        <div className="subsection-title">
-          <FileText aria-hidden="true" size={16} />
-          <h2>{t("message.approvals")}</h2>
-        </div>
+      <TechnicalDetails summary={t("message.approvals")}>
         {detail.data.approvals.length ? (
           <ul className="timeline-list">
             {detail.data.approvals.map((approval) => (
               <li key={approval.approval_id}>
                 <FileText aria-hidden="true" size={14} />
-                <span>{approval.approval_id}</span>
+                <a href={`#approvals/${encodeURIComponent(approval.approval_id)}`}>{approval.approval_id}</a>
                 <small title={approval.status}>{enumLabel(t, "status", approval.status)}</small>
               </li>
             ))}
@@ -217,21 +203,15 @@ export function MessageDetailPanel({ token, messageId }: { token: string; messag
         ) : (
           <p className="detail-note">{t("message.noApprovals")}</p>
         )}
-      </div>
+      </TechnicalDetails>
 
-      <div className="detail-panel">
-        <div className="subsection-title">
-          <Send aria-hidden="true" size={16} />
-          <h2>{t("message.dispatchOutcomes")}</h2>
-        </div>
+      <TechnicalDetails summary={t("message.dispatchOutcomes")}>
         {detail.data.recorded_dispatch_outcomes.length ? (
-          <TechnicalDetails>
-            <JsonBlock value={detail.data.recorded_dispatch_outcomes} />
-          </TechnicalDetails>
+          <JsonBlock value={detail.data.recorded_dispatch_outcomes} />
         ) : (
           <p className="detail-note">{t("message.noDispatchOutcomes")}</p>
         )}
-      </div>
+      </TechnicalDetails>
     </div>
   );
 }

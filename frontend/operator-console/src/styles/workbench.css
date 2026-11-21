@@ -1,3 +1,20 @@
+.workbench-pane[hidden],
+.workbench-back:not(.workbench-back-always) {
+  display: none;
+}
+
+@media (max-width: 1180px) {
+  .workbench-back:not(.workbench-back-always) {
+    display: inline-flex;
+  }
+
+  .workbench[data-pane="list"] .workbench-pane:not([data-pane="list"]),
+  .workbench[data-pane="detail"] .workbench-pane:not([data-pane="detail"]),
+  .workbench[data-pane="evidence"] .workbench-pane:not([data-pane="evidence"]) {
+    display: none;
+  }
+}
+
 .workbench-header {
   display: flex;
   align-items: flex-end;
@@ -8,6 +25,7 @@
 }
 
 .workbench-header h1 {
+  scroll-margin-block-start: 72px;
   font-size: clamp(26px, 3vw, 34px);
 }
 

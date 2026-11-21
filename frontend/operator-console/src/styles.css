@@ -108,10 +108,6 @@ button {
   align-items: start;
 }
 
-.work-grid.tasks-layout {
-  grid-template-columns: minmax(0, 0.9fr) minmax(340px, 0.75fr) minmax(320px, 0.75fr);
-}
-
 .work-main,
 .work-detail,
 .message-drawer,
@@ -1654,8 +1650,7 @@ dd {
 }
 
 @media (max-width: 1180px) {
-  .work-grid,
-  .work-grid.tasks-layout {
+  .work-grid {
     grid-template-columns: 1fr;
   }
 

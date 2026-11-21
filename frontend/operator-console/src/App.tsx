@@ -162,7 +162,7 @@ function ConsoleShell() {
             ) : location.route === "approvals" ? (
               <ApprovalsScreen selectedId={location.selectedId} token={token} />
             ) : location.route === "tasks" ? (
-              <TasksScreen initialFilter={location.view === "all" ? "all" : undefined} selectedId={location.selectedId} token={token} />
+              <TasksScreen initialFilter={location.view === "all" ? "all" : undefined} selectedId={location.selectedId} selectedMessageId={location.messageId} token={token} />
             ) : location.route === "dispatch" ? (
               <DispatchScreen initialFilter={location.view === "attention" ? "attention" : undefined} selectedId={location.selectedId} token={token} />
             ) : location.route === "feedback" ? (
@@ -341,15 +341,17 @@ function FollowUpScreen({ route }: { route: RouteKey }) {
   );
 }
 
-function currentLocation(): { route: RouteKey; selectedId: string | null; view: string | null } {
+function currentLocation() {
   const hash = window.location.hash.replace("#", "");
   const [path, query] = hash.split("?");
   const [routeText, selectedId] = path.split("/");
   const route = navItems.some((item) => item.key === routeText) ? (routeText as RouteKey) : "dashboard";
+  const params = new URLSearchParams(query);
   return {
     route,
     selectedId: decodeHashSegment(selectedId),
-    view: new URLSearchParams(query).get("view")
+    view: params.get("view"),
+    messageId: params.get("message")
   };
 }
 
