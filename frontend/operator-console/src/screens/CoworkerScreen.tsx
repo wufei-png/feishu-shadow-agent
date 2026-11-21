@@ -16,16 +16,18 @@ import {
 } from "../components/Primitives";
 import { formatDateTime } from "../i18n";
 import { enumLabel } from "../presentation";
-import type { CoworkerPolicy } from "../types";
+import type { CoworkerPolicy, CoworkerSnapshot } from "../types";
 import { CoworkerNativeWork } from "./CoworkerNativeWork";
 
 export function CoworkerScreen({ token }: { token: string }) {
   const { t } = useTranslation();
   return (
     <section className="work-main" aria-label={t("coworker.title")}>
-      <div className="queue-panel">
-        <h1>{t("coworker.title")}</h1>
-        <p className="section-note">{t("coworker.hermesProfile")}</p>
+      <header className="workbench-header"><h1>{t("coworker.title")}</h1></header>
+      <ProjectCoworkerScreen token={token} />
+      <TechnicalDetails summary={t("coworker.hermesAccess")}>
+        <p className="detail-note">{t("coworker.hermesProfile")}</p>
+        <p className="detail-note">{t("coworker.hermesLoopback")}</p>
         <div className="coworker-hermes-entry">
           <a
             className="button"
@@ -42,8 +44,7 @@ export function CoworkerScreen({ token }: { token: string }) {
             />
           </TechnicalDetails>
         </div>
-      </div>
-      <ProjectCoworkerScreen token={token} />
+      </TechnicalDetails>
     </section>
   );
 }
@@ -68,6 +69,10 @@ function ProjectCoworkerScreen({ token }: { token: string }) {
   const [provider, setProvider] = useState("codex");
   const [sendMode, setSendMode] = useState("agent_direct");
   const [confirmedStopped, setConfirmedStopped] = useState(false);
+  const liveness = snapshot.data?.liveness.status;
+  useEffect(() => {
+    setConfirmedStopped(false);
+  }, [liveness]);
   const policy = snapshot.data?.policy;
   const policyTrigger = policy?.trigger_mode;
   const policyHistory = policy?.history_source;
@@ -150,7 +155,10 @@ function ProjectCoworkerScreen({ token }: { token: string }) {
   if (snapshot.isLoading) return <LoadingState />;
   if (snapshot.error && !snapshot.data)
     return (
-      <ErrorState title={t("coworker.unavailable")} error={snapshot.error} />
+      <div>
+        <ErrorState title={t("coworker.unavailable")} error={snapshot.error} />
+        <Button onClick={() => void snapshot.refetch()}>{t("common.refresh")}</Button>
+      </div>
     );
   const data = snapshot.data;
   if (!data?.available)
@@ -182,6 +190,27 @@ function ProjectCoworkerScreen({ token }: { token: string }) {
   if (runtime?.business_mode === "shadow") runtimeLabel = t("coworker.shadowMode");
   if (runtime?.coworker_runtime === "legacy") runtimeLabel = t("coworker.legacyMode");
   if (runtime?.coworker_runtime === "native") runtimeLabel = t("coworker.codexDirect");
+  const activeSessions = data.sessions.filter((session) => session.state === "active");
+  const inactiveSessions = data.sessions.filter((session) => session.state !== "active");
+  const canDiscardEvent = (event: CoworkerSnapshot["events"][number]) =>
+    ["processing", "needs_review"].includes(event.status) ||
+    (event.status === "queued" && event.message_id.startsWith("internal:subagent:"));
+  const hasRecoveryActions = data.events.some(canDiscardEvent) || activeSessions.length > 0;
+  const memoryNeedsRecovery = ["failed", "needs_review", "in_progress"].includes(data.memory_maintenance?.state ?? "");
+  const confirmStopped = liveness === "stale" ? (
+    <label className="coworker-stop-confirmation">
+      <input
+        type="checkbox"
+        checked={confirmedStopped}
+        onChange={(event) => setConfirmedStopped(event.target.checked)}
+      />
+      <span>{t("coworker.confirmStopped")}</span>
+    </label>
+  ) : null;
+  const recoveryFeedback = recover.error
+    ? <ErrorState title={t("common.requestFailed")} error={recover.error} />
+    : recover.isSuccess ? <p className="detail-note" role="status">{t("coworker.recovered")}</p> : null;
+
   return (
     <div className="work-grid">
       <div className="work-main">
@@ -245,16 +274,6 @@ function ProjectCoworkerScreen({ token }: { token: string }) {
           ) : (
             <p className="detail-note">{t("coworker.runtimeUnknown")}</p>
           )}
-          {data.liveness.status === "stale" ? (
-            <label>
-              <input
-                type="checkbox"
-                checked={confirmedStopped}
-                onChange={(event) => setConfirmedStopped(event.target.checked)}
-              />{" "}
-              {t("coworker.confirmStopped")}
-            </label>
-          ) : null}
         </div>
         {runtime?.coworker_runtime === "native" || nativeSessions.length ? (
           <CoworkerNativeWork
@@ -263,67 +282,66 @@ function ProjectCoworkerScreen({ token }: { token: string }) {
           />
         ) : null}
         <div className="queue-panel">
-          <h2>{t("coworker.events")}</h2>
-          <p className="detail-note">{t("coworker.listLimit")}</p>
-          <p className="detail-note">{t("coworker.recoveryNote")}</p>
+          {hasRecoveryActions ? confirmStopped : null}
           {data.events.length ? (
-            <ul className="timeline-list">
-              {data.events.map((event) => (
-                <li key={event.id}>
-                  <span>
-                    {event.topic_key} · {event.message_id} · {event.status}{" "}
-                    {event.error ?? ""}
-                  </span>
-                  {["processing", "needs_review"].includes(event.status) ||
-                  (event.status === "queued" &&
-                    event.message_id.startsWith("internal:subagent:")) ? (
-                    <ConfirmButton
-                      disabled={!canRecover || recover.isPending}
-                      confirmLabel={t("coworker.confirmDiscard")}
-                      onConfirm={() =>
-                        recover.mutate(`events/${event.id}/discard`)
-                      }
-                    >
-                      {t("coworker.discard")}
-                    </ConfirmButton>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p>{t("common.none")}</p>
-          )}
-          <h2>{t("coworker.sessions")}</h2>
-          {data.sessions.length ? (
-            <ul className="timeline-list">
-              {data.sessions.map((session) => (
-                <li key={session.id}>
-                  <span>
-                    {session.thread_id} · {session.provider} · {session.state}
-                  </span>
-                  {session.state === "active" ? (
+            <>
+              <h2>{t("coworker.events")}</h2>
+              <ul className="timeline-list coworker-activity">
+                {data.events.map((event) => (
+                  <li key={event.id}>
+                    <div>
+                      <strong>{enumLabel(t, "status", event.status)}</strong>
+                      {event.error ? <p className="detail-note danger">{event.error}</p> : null}
+                      <TechnicalDetails>
+                        <code>{event.topic_key} · {event.message_id}</code>
+                      </TechnicalDetails>
+                    </div>
+                    {canDiscardEvent(event) ? (
+                      <ConfirmButton
+                        disabled={!canRecover || recover.isPending}
+                        confirmLabel={t("coworker.confirmDiscard")}
+                        onConfirm={() => recover.mutate(`events/${event.id}/discard`)}
+                      >
+                        {t("coworker.discard")}
+                      </ConfirmButton>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : null}
+          {activeSessions.length ? (
+            <>
+              <h2>{t("coworker.sessions")}</h2>
+              <ul className="timeline-list coworker-activity">
+                {activeSessions.map((session) => (
+                  <li key={session.id}>
+                    <span>{session.thread_id} · {session.provider} · {enumLabel(t, "status", session.state)}</span>
                     <ConfirmButton
                       disabled={!canRecover || recover.isPending}
                       confirmLabel={t("coworker.confirmSession")}
-                      onConfirm={() =>
-                        recover.mutate(`sessions/${session.id}/reset`)
-                      }
+                      onConfirm={() => recover.mutate(`sessions/${session.id}/reset`)}
                     >
                       {t("coworker.resetSession")}
                     </ConfirmButton>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p>{t("common.none")}</p>
-          )}
-          {recover.error ? (
-            <ErrorState
-              title={t("common.requestFailed")}
-              error={recover.error}
-            />
+                  </li>
+                ))}
+              </ul>
+            </>
           ) : null}
+          {!data.events.length && !activeSessions.length ? <p className="detail-note">{t("coworker.activityEmpty")}</p> : null}
+          {inactiveSessions.length ? (
+            <TechnicalDetails summary={t("coworker.historicalSessions")}>
+              <ul className="timeline-list">
+                {inactiveSessions.map((session) => <li key={session.id}>{session.thread_id} · {session.provider} · {session.state}</li>)}
+              </ul>
+            </TechnicalDetails>
+          ) : null}
+          <TechnicalDetails summary={t("coworker.recoveryHelp")}>
+            <p className="detail-note">{t("coworker.listLimit")}</p>
+            <p className="detail-note">{t("coworker.recoveryNote")}</p>
+          </TechnicalDetails>
+          {recover.variables !== "memory/reset" ? recoveryFeedback : null}
         </div>
         <details className="queue-panel coworker-settings">
           <summary>{t("coworker.settings")}</summary>
@@ -393,6 +411,7 @@ function ProjectCoworkerScreen({ token }: { token: string }) {
           </div>
           <h2>{t("coworker.edit")}</h2>
           <p className="section-note">{t("coworker.editDetail")}</p>
+          {policy ? confirmStopped : null}
           {policy ? (
             <div className="policy-form-grid">
               <label>
@@ -506,8 +525,8 @@ function ProjectCoworkerScreen({ token }: { token: string }) {
         </details>
       </div>
       <aside className="work-detail">
-        <div className="detail-panel">
-          <h2>{t("coworker.memory")}</h2>
+        <details className="technical-details" open={memoryNeedsRecovery || recover.variables === "memory/reset"}>
+          <summary>{t("coworker.memory")}{data.memory_maintenance?.state ? ` · ${enumLabel(t, "status", data.memory_maintenance.state)}` : ""}</summary>
           <FieldList>
             <Fact
               label={t("common.status")}
@@ -533,20 +552,21 @@ function ProjectCoworkerScreen({ token }: { token: string }) {
             />
           </FieldList>
           <p className="detail-note">{t("coworker.fileChangedDetail")}</p>
-          {["failed", "needs_review", "in_progress"].includes(
-            data.memory_maintenance?.state ?? "",
-          ) ? (
-            <ConfirmButton
-              disabled={!canRecover || recover.isPending}
-              confirmLabel={t("coworker.confirmMemory")}
-              onConfirm={() => recover.mutate("memory/reset")}
-            >
-              {t("coworker.resetMemory")}
-            </ConfirmButton>
+          {memoryNeedsRecovery ? (
+            <>
+              {confirmStopped}
+              <ConfirmButton
+                disabled={!canRecover || recover.isPending}
+                confirmLabel={t("coworker.confirmMemory")}
+                onConfirm={() => recover.mutate("memory/reset")}
+              >
+                {t("coworker.resetMemory")}
+              </ConfirmButton>
+            </>
           ) : null}
-        </div>
-        <div className="detail-panel">
-          <h2>{t("coworker.children")}</h2>
+          {recover.variables === "memory/reset" ? recoveryFeedback : null}
+        </details>
+        <TechnicalDetails summary={t("coworker.children")}>
           {data.subagents.length ? (
             <ul className="timeline-list">
               {data.subagents.map((child) => (
@@ -558,9 +578,8 @@ function ProjectCoworkerScreen({ token }: { token: string }) {
           ) : (
             <p>{t("common.none")}</p>
           )}
-        </div>
-        <div className="detail-panel">
-          <h2>{t("coworker.gaps")}</h2>
+        </TechnicalDetails>
+        <TechnicalDetails summary={t("coworker.gaps")}>
           {data.history_gaps.length ? (
             <ul className="timeline-list">
               {data.history_gaps.map((gap) => (
@@ -574,9 +593,8 @@ function ProjectCoworkerScreen({ token }: { token: string }) {
           ) : (
             <p>{t("common.none")}</p>
           )}
-        </div>
-        <div className="detail-panel">
-          <h2>{t("coworker.delegations")}</h2>
+        </TechnicalDetails>
+        <TechnicalDetails summary={t("coworker.delegations")}>
           <p className="detail-note">{t("coworker.directNote")}</p>
           {data.delegations.length ? (
             <ul className="timeline-list">
@@ -589,7 +607,7 @@ function ProjectCoworkerScreen({ token }: { token: string }) {
           ) : (
             <p>{t("common.none")}</p>
           )}
-        </div>
+        </TechnicalDetails>
       </aside>
     </div>
   );

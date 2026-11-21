@@ -570,6 +570,22 @@ dd {
   font-weight: 650;
 }
 
+.coworker-stop-confirmation,
+.coworker-activity li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.coworker-stop-confirmation {
+  margin-block: 8px;
+}
+
+.coworker-activity li {
+  flex-wrap: wrap;
+  justify-content: space-between;
+}
+
 .coworker-settings[open] > summary,
 .coworker-settings > .policy-form-grid:first-of-type {
   margin-bottom: 16px;

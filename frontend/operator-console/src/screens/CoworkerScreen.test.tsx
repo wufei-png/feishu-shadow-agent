@@ -114,8 +114,10 @@ it("allows stale-run recovery only after the operator confirms shutdown", async 
     name: "解除记忆整理异常",
   });
   expect((action as HTMLButtonElement).disabled).toBe(true);
+  const memoryPanel = action.closest("details");
+  if (!memoryPanel) throw new Error("missing memory panel");
   await user.click(
-    screen.getByRole("checkbox", {
+    within(memoryPanel).getByRole("checkbox", {
       name: "心跳已过期，我已确认守护进程及相关后台任务停止",
     }),
   );
@@ -229,6 +231,8 @@ it("keeps the native Hermes entry available when the project store is unavailabl
     </QueryClientProvider>,
   );
   await screen.findByText("策略库尚不可用");
+  await userEvent.setup().click(screen.getByText("Hermes Dashboard 本机入口"));
+  expect(screen.getByText(/当前浏览器所在机器/)).toBeTruthy();
   const entry = screen.getByRole("link", { name: "打开 Hermes Dashboard" });
   expect(entry.getAttribute("href")).toBe(
     "http://127.0.0.1:9119/sessions?profile=coworker",
@@ -255,6 +259,7 @@ it("shows work by Codex session and copies the ready handoff command", async () 
   const work = within(region);
   expect(work.getByRole("heading", { name: "会话 #1" })).toBeTruthy();
   expect(work.getByText("投递 #7 待核对")).toBeTruthy();
+  await user.click(work.getByText("投递证据", { selector: "summary" }));
   expect(work.getByText("receipt-topic")).toBeTruthy();
   expect(work.getByText("话题关注到期时间")).toBeTruthy();
   expect(work.getByText("已请求暂停")).toBeTruthy();

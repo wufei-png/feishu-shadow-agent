@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import { Badge, CopyValue, Fact, FieldList } from "../components/Primitives";
+import { Badge, CopyValue, Fact, FieldList, TechnicalDetails } from "../components/Primitives";
 import { formatDateTime } from "../i18n";
 import type { NativeCoworkerSession } from "../types";
 
@@ -29,10 +29,9 @@ export function CoworkerNativeWork({
                 ])}
               >
                 <h3>{title}</h3>
-                <p className="detail-note">
-                  {session.chat_id} · {session.topic_key}
-                  <small> · {session.app_id}</small>
-                </p>
+                <TechnicalDetails summary={t("coworker.sessionReference")}>
+                  <p className="detail-note">{session.chat_id} · {session.topic_key} · {session.app_id}</p>
+                </TechnicalDetails>
                 <FieldList>
                   {session.deliveries.map((delivery) => (
                     <Fact
@@ -46,20 +45,14 @@ export function CoworkerNativeWork({
                             })}
                           </Badge>
                           <span className="detail-note"> {formatDateTime(delivery.updated_at)}</span>
-                          <span className="coworker-native-line">
-                            {t("coworker.deliveryTarget")} <code>{delivery.target_message_id}</code>
-                          </span>
-                          {delivery.sent_message_id ? (
-                            <span className="coworker-native-line">
-                              {t("coworker.deliveryReceipt")} <code>{delivery.sent_message_id}</code>
-                            </span>
-                          ) : null}
-                          {delivery.receipt_thread_id ? (
-                            <span className="coworker-native-line">
-                              {t("coworker.deliveryThread")} <code>{delivery.receipt_thread_id}</code>
-                            </span>
-                          ) : null}
                           {delivery.error ? <code className="coworker-native-line">{delivery.error}</code> : null}
+                          <TechnicalDetails summary={t("coworker.deliveryEvidence")}>
+                            <FieldList>
+                              <Fact label={t("coworker.deliveryTarget")} value={<code>{delivery.target_message_id}</code>} />
+                              {delivery.sent_message_id ? <Fact label={t("coworker.deliveryReceipt")} value={<code>{delivery.sent_message_id}</code>} /> : null}
+                              {delivery.receipt_thread_id ? <Fact label={t("coworker.deliveryThread")} value={<code>{delivery.receipt_thread_id}</code>} /> : null}
+                            </FieldList>
+                          </TechnicalDetails>
                         </>
                       }
                     />
