@@ -74,7 +74,7 @@
 
 .decision-link {
   display: grid;
-  grid-template: "count label arrow" / auto minmax(0, 1fr) auto;
+  grid-template: "count label" / auto minmax(0, 1fr);
   align-items: center;
   gap: 3px 10px;
   min-width: 0;
@@ -89,7 +89,8 @@
   text-align: left;
 }
 
-.decision-link:hover {
+.decision-link:hover,
+.decision-link[aria-pressed="true"] {
   border-color: var(--selection-rim);
   background-color: var(--selection-fill);
 }
@@ -117,21 +118,6 @@
   color: var(--text-primary);
   font-size: var(--text-body);
   font-weight: 650;
-}
-
-.decision-link svg {
-  grid-area: arrow;
-  width: 23px;
-  height: 23px;
-  padding: 4px;
-  border-radius: 50%;
-  background: var(--surface-inset);
-  color: var(--text-muted);
-}
-
-.decision-link:hover svg {
-  background: var(--accent-wash);
-  color: var(--accent-primary);
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -194,20 +180,8 @@
   overflow-wrap: anywhere;
 }
 
-.dashboard-queue h2,
-.dashboard-context h2 {
+.dashboard-queue h2 {
   font-size: var(--text-h4);
-}
-
-.dashboard-queue > section + section,
-.dashboard-context > section + section {
-  margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border-subtle);
-}
-
-.dashboard-queue .subsection-title {
-  margin-bottom: 6px;
 }
 
 .dashboard-queue .list-stack {
@@ -235,8 +209,9 @@
 }
 
 .dashboard-context {
+  display: grid;
+  gap: 8px;
   min-width: 0;
-  background: var(--surface-raised);
 }
 
 .dashboard-context .fact-list {
@@ -286,10 +261,6 @@
 
 .dashboard-context .command-buttons {
   margin-bottom: 0;
-}
-
-.dashboard-context .rail-action {
-  margin-top: 14px;
 }
 
 .approval-layout {

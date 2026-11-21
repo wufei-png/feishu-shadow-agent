@@ -347,6 +347,7 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
                 <TechnicalDetails>
                   <FieldList>
                     <Fact label={t("approvals.approvalId")} value={<CopyValue label={t("approvals.approvalId")} value={detail.data.approval_id} />} />
+                    <Fact label={t("approvals.sourceMessage")} value={detail.data.source_message_id ? <CopyValue label={t("approvals.sourceMessage")} value={detail.data.source_message_id} /> : t("common.notRecorded")} />
                     <Fact label={t("approvals.replyTarget")} value={replyTarget(detail.data.payload) ?? t("common.notRecorded")} />
                     <Fact label={t("approvals.linkedTask")} value={taskId ?? t("common.notLinked")} />
                     <Fact label={t("approvals.createdAt")} value={formatDate(detail.data.created_at)} />

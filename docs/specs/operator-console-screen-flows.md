@@ -187,8 +187,8 @@ decorative trend charts
 Required sections:
 
 - Runtime strip summary.
-- Compact Action Queue summary with links in priority order, followed by concrete
-  dispatch and approval previews.
+- Compact Action Queue with counters that filter a single list. The list can
+  group the same entries by task. Each filtered view links to its full queue.
 - A next-step panel when policy is missing, startup failed, daemon state needs attention, or a running daemon has not recorded its first message. Pending work remains visible alongside this guidance.
 - Secondary context area with Policy Import Diff, health, and recent signals.
 
@@ -197,7 +197,7 @@ Primary interactions:
 - Select an approval and open approval detail.
 - Select a dispatch action and open dispatch detail.
 - Jump to Policy when policy is uninitialized or import diff exists.
-- Run maintenance expiry for overdue approvals through explicit command.
+- Open the approval queue for explicit overdue expiry.
 
 Primary API needs:
 
@@ -207,7 +207,6 @@ GET /api/approvals
 GET /api/dispatch/actions
 GET /api/policy/status
 GET /api/health/issues
-POST /api/maintenance/expire-approvals
 ```
 
 ## Approvals

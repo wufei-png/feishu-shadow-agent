@@ -1,29 +1,32 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
-import { AlertTriangle, CheckCircle2, ExternalLink, HeartPulse, Send } from "lucide-react";
+import { AlertTriangle, ArrowLeft, CheckCircle2, ExternalLink, Send } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { getHealthIssues } from "../api";
 import {
   QueueControls,
   Fact,
   Badge,
+  CopyValue,
   EmptyState,
   ErrorState,
   FieldList,
   formatDate,
   ListRow,
   LoadingState,
-  SectionHeader,
-  shortText
+  TechnicalDetails
 } from "../components/Primitives";
+import { useWorkbenchNavigation } from "../components/useWorkbenchNavigation";
 import { queryKeys } from "../queryKeys";
 import { enumLabel } from "../presentation";
 import type { HealthIssue, HealthIssueLink, HealthIssuesResponse, Tone } from "../types";
 
-export function HealthScreen({ token }: { token: string }) {
+export function HealthScreen({ token, selectedId }: { token: string; selectedId: string | null }) {
   const { t } = useTranslation();
-  const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
+  const [openedIssueId, setOpenedIssueId] = useState(selectedId);
+  const pane = openedIssueId ? "detail" : "list";
+  const { heading, rememberPosition } = useWorkbenchNavigation(pane);
   const health = useQuery({
     queryKey: queryKeys.healthIssues(),
     queryFn: () => getHealthIssues(token),
@@ -31,72 +34,75 @@ export function HealthScreen({ token }: { token: string }) {
     refetchInterval: 15_000
   });
   const issues = useMemo(() => health.data?.issues ?? [], [health.data]);
-  const selectedIssue = issues.find((issue) => issue.id === selectedIssueId) ?? issues[0] ?? null;
+  const selectedIssue = openedIssueId ? issues.find((issue) => issue.id === openedIssueId) : issues[0];
 
   useEffect(() => {
-    if (!issues.length) {
-      setSelectedIssueId(null);
-      return;
-    }
-    if (selectedIssueId === null || !issues.some((issue) => issue.id === selectedIssueId)) {
-      setSelectedIssueId(issues[0].id);
-    }
-  }, [issues, selectedIssueId]);
+    setOpenedIssueId(selectedId);
+  }, [selectedId]);
 
-  if (health.isLoading) {
-    return <LoadingState title={t("health.loading")} />;
+  function openIssue(issueId: string | null): void {
+    setOpenedIssueId(issueId);
+    window.location.hash = issueId ? `health/${encodeURIComponent(issueId)}` : "health";
   }
-  if (health.error) {
-    return <ErrorState title={t("health.error")} error={health.error} />;
-  }
-  if (!health.data) {
-    return <EmptyState title={t("health.unavailable")} detail={t("health.unavailableDetail")} />;
-  }
-  const { open_issue_count: openIssueCount, highest_severity: highestSeverity } = health.data.summary;
+
+  const data = health.data;
+  const openIssueCount = data?.summary.open_issue_count;
+  const highestSeverity = data?.summary.highest_severity;
 
   return (
-    <section className="work-grid health-layout" aria-label={t("health.aria")}>
-      <div className="work-main">
-        <div className="queue-panel">
-          <SectionHeader
-            title={t("health.diagnostics")}
-            badge={openIssueCount ? (
-              <Badge tone={issueTone(highestSeverity)}>{t("health.openIssueCount", { count: openIssueCount })}</Badge>
+    <section className="workbench" data-pane={pane} aria-label={t("health.aria")}>
+      <header className="workbench-header">
+        <h1 ref={heading} tabIndex={-1}>{t("health.diagnostics")}</h1>
+        {openedIssueId ? (
+          <button className="button workbench-back" onClick={() => openIssue(null)} type="button">
+            <ArrowLeft aria-hidden="true" size={16} />
+            {t("health.backToIssues")}
+          </button>
+        ) : null}
+      </header>
+      {health.isLoading ? <LoadingState title={t("health.loading")} /> : null}
+      {health.error && !data ? <ErrorState title={t("health.error")} error={health.error} /> : null}
+      <div className="work-grid health-layout">
+        <div className="work-main workbench-pane" data-pane="list">
+          <div className="queue-panel">
+            {openIssueCount ? <Badge tone={issueTone(highestSeverity)}>{t("health.openIssueCount", { count: openIssueCount })}</Badge> : null}
+            <QueueControls
+              error={health.error}
+              isFetching={health.isFetching}
+              onRefresh={() => void health.refetch()}
+              updatedAt={health.dataUpdatedAt}
+            />
+            {issues.length ? (
+              <div className="list-stack">
+                {issues.map((issue) => (
+                  <ListRow
+                    badge={<Badge tone={issueTone(issue.severity)}>{enumLabel(t, "severity", issue.severity)}</Badge>}
+                    key={issue.id}
+                    onClick={(event) => {
+                      rememberPosition(event.currentTarget, "list");
+                      openIssue(issue.id);
+                    }}
+                    selected={issue.id === selectedIssue?.id}
+                    title={issueCopy(t, issue).title}
+                  />
+                ))}
+              </div>
+            ) : data ? (
+              <EmptyState title={t("health.noIssues")} />
             ) : null}
-          />
-          <QueueControls
-            error={health.error}
-            isFetching={health.isFetching}
-            onRefresh={() => void health.refetch()}
-            updatedAt={health.dataUpdatedAt}
-          />
-          {issues.length ? (
-            <div className="list-stack">
-              {issues.map((issue) => (
-                <ListRow
-                  badge={<Badge tone={issueTone(issue.severity)}>{enumLabel(t, "severity", issue.severity)}</Badge>}
-                  key={issue.id}
-                  meta={`${enumLabel(t, "category", issue.category)} · ${formatDate(issue.detected_at)}`}
-                  onClick={() => setSelectedIssueId(issue.id)}
-                  selected={issue.id === selectedIssue?.id}
-                  title={issueCopy(t, issue).title}
-                >
-                  <span className="row-preview">{shortText(issueCopy(t, issue).detail, t("health.noDetail"))}</span>
-                </ListRow>
-              ))}
-            </div>
-          ) : (
-            <EmptyState title={t("health.noIssues")} />
-          )}
+          </div>
+          {data ? <RuntimePanel data={data} /> : null}
+          {data ? <FailedCommandsPanel data={data} /> : null}
+          {data ? <FailedDispatchPanel data={data} /> : null}
         </div>
-      </div>
 
-      <aside className="work-detail">
-        {selectedIssue ? <IssueDetailPanel issue={selectedIssue} /> : null}
-        <RuntimePanel data={health.data} />
-        <FailedCommandsPanel data={health.data} />
-        <FailedDispatchPanel data={health.data} onSelect={setSelectedIssueId} />
-      </aside>
+        <aside className="work-detail workbench-pane" data-pane="detail">
+          {selectedIssue ? <IssueDetailPanel issue={selectedIssue} /> : openedIssueId && data ? <EmptyState title={t("health.issueResolved")} /> : null}
+          {openedIssueId && health.error ? (
+            <QueueControls error={health.error} isFetching={health.isFetching} onRefresh={() => void health.refetch()} updatedAt={health.dataUpdatedAt} />
+          ) : null}
+        </aside>
+      </div>
     </section>
   );
 }
@@ -106,7 +112,6 @@ function IssueDetailPanel({ issue }: { issue: HealthIssue }) {
   const copy = issueCopy(t, issue);
   return (
     <div className="detail-panel health-issue-detail">
-      <p className="eyebrow">{t("health.issueDetail")}</p>
       <div className="detail-title-row">
         <h2>{copy.title}</h2>
         <Badge tone={issueTone(issue.severity)}>{enumLabel(t, "severity", issue.severity)}</Badge>
@@ -122,39 +127,33 @@ function IssueDetailPanel({ issue }: { issue: HealthIssue }) {
           <p className="detail-note">{issue.title}: {issue.detail}</p>
         </details>
       ) : null}
-      {issue.recommended_actions.length ? (
-        <div className="inline-badges" aria-label={t("health.actions")}>
-          {issue.recommended_actions.map((action) => (
-            <Badge key={action} tone="info">
-              {enumLabel(t, "action", action)}
-            </Badge>
-          ))}
-        </div>
-      ) : null}
       <IssueLinks links={issue.links} />
+      {issue.recommended_actions.length ? (
+        <ul className="warning-list" aria-label={t("health.actions")}>
+          {issue.recommended_actions.map((action) => {
+            const href = action === "run_doctor" ? "#maintenance" : action === "inspect_settings" ? "#settings" : action === "inspect_policy" || action === "import_config" ? "#policy" : undefined;
+            const label = enumLabel(t, "action", action);
+            return <li key={action}>{href ? <a href={href}>{label}</a> : action === "inspect_runtime" ? t("health.inspectRuntimeStep") : label}</li>;
+          })}
+        </ul>
+      ) : null}
     </div>
   );
 }
 
 function IssueLinks({ links }: { links: HealthIssueLink[] }) {
   const { t } = useTranslation();
-  if (!links.length) {
-    return (
-      <div className="quiet-empty">
-        <HeartPulse aria-hidden="true" size={18} />
-        <span>{t("health.noLinks")}</span>
-      </div>
-    );
-  }
+  if (!links.length) return null;
+  const task = links.find((link) => link.type === "task");
   return (
     <div className="health-link-list">
       {links.map((link) => {
-        const target = linkTarget(t, link);
+        const target = linkTarget(t, link, task?.id);
         if (!target.href) {
           return (
-            <span className="button disabled-action" key={`${link.type}-${link.id}`}>
-              {target.label}
-            </span>
+            <div className="detail-note" key={`${link.type}-${link.id}`}>
+              {target.label} <CopyValue label={t("message.messageId")} value={link.id} />
+            </div>
           );
         }
         return (
@@ -176,8 +175,7 @@ function RuntimePanel({ data }: { data: HealthIssuesResponse }) {
   const daemonStatus = String(liveness.status ?? "unknown");
   const storageStatus = String(store?.status ?? (store?.available === true ? "available" : store?.available === false ? "unavailable" : "unknown"));
   return (
-    <div className="detail-panel">
-      <h2>{t("health.runtimeOverview")}</h2>
+    <TechnicalDetails summary={t("health.runtimeOverview")}>
       <dl className="overview-facts">
         <Fact label={t("health.daemon")} value={<Badge tone={runtimeTone(daemonStatus)}>{enumLabel(t, "status", daemonStatus)}</Badge>} />
         <Fact label={t("health.storage")} value={<Badge tone={storageStatus === "available" ? "success" : storageStatus === "unknown" ? "muted" : "danger"}>{enumLabel(t, "status", storageStatus)}</Badge>} />
@@ -186,7 +184,7 @@ function RuntimePanel({ data }: { data: HealthIssuesResponse }) {
         <Fact label={t("health.lastTick")} value={formatDate(String(lastRun.last_tick_finished_at ?? ""))} />
         <Fact label={t("health.generatedAt")} value={formatDate(data.generated_at)} />
       </dl>
-    </div>
+    </TechnicalDetails>
   );
 }
 
@@ -194,9 +192,7 @@ function FailedCommandsPanel({ data }: { data: HealthIssuesResponse }) {
   const { t } = useTranslation();
   const commands = data.recent_failed_commands ?? [];
   return (
-    <div className="detail-panel">
-      <p className="eyebrow">{t("health.failedCommands")}</p>
-      <h2>{t("health.failedApprovals")}</h2>
+    <TechnicalDetails summary={t("health.failedApprovals")}>
       {commands.length ? (
         <ul className="timeline-list">
           {commands.slice(0, 5).map((command, index) => (
@@ -213,17 +209,11 @@ function FailedCommandsPanel({ data }: { data: HealthIssuesResponse }) {
           <span>{t("health.noFailedApprovals")}</span>
         </div>
       )}
-    </div>
+    </TechnicalDetails>
   );
 }
 
-function FailedDispatchPanel({
-  data,
-  onSelect
-}: {
-  data: HealthIssuesResponse;
-  onSelect: (issueId: string) => void;
-}) {
+function FailedDispatchPanel({ data }: { data: HealthIssuesResponse }) {
   const { t } = useTranslation();
   const dispatchIssues = data.issues.filter((issue) => issue.category === "dispatch");
   const failedActions = data.recent_failed_dispatch_actions ?? [];
@@ -232,20 +222,9 @@ function FailedDispatchPanel({
   );
   const actionSummaries = failedActions.filter((action) => !issueActionIds.has(String(action.action_id)));
   return (
-    <div className="detail-panel">
-      <p className="eyebrow">{t("health.dispatchRecovery")}</p>
-      <h2>{t("health.failedDispatch")}</h2>
-      {dispatchIssues.length || actionSummaries.length ? (
+    <TechnicalDetails summary={t("health.failedDispatch")}>
+      {actionSummaries.length ? (
         <ul className="timeline-list">
-          {dispatchIssues.slice(0, 6).map((issue) => (
-            <li key={issue.id}>
-              <button className="timeline-button" onClick={() => onSelect(issue.id)} type="button">
-                <Send aria-hidden="true" size={14} />
-                <span>{issueCopy(t, issue).title}</span>
-                <small>{enumLabel(t, "severity", issue.severity)}</small>
-              </button>
-            </li>
-          ))}
           {actionSummaries.slice(0, 6).map((action) => (
             <li key={`dispatch-action-summary-${action.action_id}`}>
               <a className="timeline-button" href={`#dispatch/${encodeURIComponent(String(action.action_id))}`}>
@@ -262,11 +241,11 @@ function FailedDispatchPanel({
           <span>{t("health.noFailedDispatch")}</span>
         </div>
       )}
-    </div>
+    </TechnicalDetails>
   );
 }
 
-function linkTarget(t: TFunction, link: HealthIssueLink): { label: string; href: string | null } {
+function linkTarget(t: TFunction, link: HealthIssueLink, taskId?: string): { label: string; href: string | null } {
   if (link.type === "dispatch_action") {
     return { label: t("health.viewDispatch", { id: link.id }), href: `#dispatch/${encodeURIComponent(link.id)}` };
   }
@@ -282,7 +261,9 @@ function linkTarget(t: TFunction, link: HealthIssueLink): { label: string; href:
   if (link.type === "settings") {
     return { label: t("health.openSettings"), href: "#settings" };
   }
-  return { label: t("health.openMessageFromTask"), href: null };
+  return taskId
+    ? { label: t("tasks.messageDetail"), href: `#tasks/${encodeURIComponent(taskId)}?message=${encodeURIComponent(link.id)}` }
+    : { label: t("health.openMessageFromTask"), href: null };
 }
 
 function issueCopy(t: TFunction, issue: HealthIssue): { title: string; detail: string; localized: boolean } {

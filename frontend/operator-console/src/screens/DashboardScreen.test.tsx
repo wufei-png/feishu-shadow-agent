@@ -9,7 +9,6 @@ import type { DashboardSnapshot, RouteKey } from "../types";
 import { DashboardScreen } from "./DashboardScreen";
 
 vi.mock("../api", () => ({
-  expireApprovals: vi.fn(),
   getDashboard: vi.fn()
 }));
 
@@ -31,9 +30,10 @@ describe("DashboardScreen", () => {
     );
 
     await screen.findByRole("heading", { name: "待我处理" });
-    expect(screen.getByText("待审批").parentElement?.textContent).toContain("23");
+    expect(screen.getByText("待审批", { selector: ".decision-label" }).parentElement?.textContent).toContain("23");
     expect(screen.getByRole("button", { name: /发送待核实或失败/ }).textContent).toContain("4");
     expect(screen.getByText("涉及 4 个任务")).toBeTruthy();
+    await user.click(screen.getByText("机器当前状态", { selector: "summary" }));
     expect(screen.getByRole("heading", { name: "消息积压" })).toBeTruthy();
     const backlog = screen.getByText("ingest.p2p").parentElement;
     expect(backlog?.textContent).toContain("已达到单次抓取页数上限");
@@ -41,14 +41,20 @@ describe("DashboardScreen", () => {
     expect(screen.getByText("oc_absent").parentElement?.textContent).toContain("已离群");
 
     await user.click(screen.getByRole("button", { name: /发送待核实或失败/ }));
+    expect(screen.getByRole("button", { name: /发送待核实或失败/ }).getAttribute("aria-pressed")).toBe("true");
+    await user.click(screen.getByRole("button", { name: "打开完整队列" }));
     expect(navigate).toHaveBeenCalledWith("dispatch", undefined, "attention");
 
     await user.click(screen.getByRole("button", { name: /处理阻塞或失败/ }));
+    await user.click(screen.getByRole("button", { name: "打开完整队列" }));
     expect(navigate).toHaveBeenCalledWith("tasks", undefined, "all");
 
-    await user.click(screen.getByRole("button", { name: /需要处理的任务/ }));
+    await user.click(screen.getByRole("button", { name: "查看全部待办" }));
+    await user.click(screen.getByRole("button", { name: "按任务" }));
+    await user.click(screen.getByText(/需要处理的任务/, { selector: "summary" }));
+    await user.click(screen.getByRole("button", { name: "打开任务" }));
     expect(navigate).toHaveBeenCalledWith("tasks", "t_attention");
-    await user.click(screen.getByRole("button", { name: /a_attention/ }));
+    await user.click(screen.getByRole("button", { name: /建议内容/ }));
     expect(navigate).toHaveBeenCalledWith("approvals", "a_attention");
   });
 
@@ -114,7 +120,7 @@ describe("DashboardScreen", () => {
     renderDashboard(navigate);
 
     expect(await screen.findByRole("heading", { name: "最近一次启动失败" })).toBeTruthy();
-    expect(screen.getByText("待审批").parentElement?.textContent).toContain("23");
+    expect(screen.getByText("待审批", { selector: ".decision-label" }).parentElement?.textContent).toContain("23");
     await user.click(screen.getByRole("button", { name: "检查健康状态" }));
     expect(navigate).toHaveBeenCalledWith("health");
   });

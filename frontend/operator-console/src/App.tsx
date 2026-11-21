@@ -96,6 +96,7 @@ function ConsoleShell() {
   const { i18n, t } = useTranslation();
   const [token, setToken] = useState(() => sessionStorage.getItem(TOKEN_STORAGE_KEY) ?? "");
   const [location, setLocation] = useState(() => currentLocation());
+  const main = useRef<HTMLElement>(null);
   const dashboard = useQuery({
     queryKey: queryKeys.dashboard(),
     queryFn: () => getDashboard(token),
@@ -139,10 +140,15 @@ function ConsoleShell() {
 
   return (
     <div className="app-shell">
-      <ConsoleNavigation route={location.route} mode={dashboard.data?.runtime_mode} />
+      <a className="skip-link" href="#console-main" onClick={(event) => {
+        event.preventDefault();
+        main.current?.focus({ preventScroll: true });
+        main.current?.scrollIntoView?.({ block: "start" });
+      }}>{t("app.skipToMain")}</a>
+      <ConsoleNavigation route={location.route} />
       <div className="workspace">
-        <RuntimeStrip status={runtimeStatus} />
-        <main className="main-surface">
+        <RuntimeStrip mode={dashboard.data?.runtime_mode} status={runtimeStatus} storeAvailable={dashboard.data?.store_status?.available} />
+        <main className="main-surface" id="console-main" ref={main} tabIndex={-1}>
           {/*
             Keyed so each destination mounts fresh and fades in. There is no
             exit animation: holding the outgoing screen on screen for even 100ms
@@ -172,7 +178,7 @@ function ConsoleShell() {
             ) : location.route === "settings" ? (
               <SettingsScreen token={token} />
             ) : location.route === "health" ? (
-              <HealthScreen token={token} />
+              <HealthScreen token={token} selectedId={location.selectedId} />
             ) : location.route === "maintenance" ? (
               <MaintenanceScreen token={token} />
             ) : (
@@ -186,7 +192,7 @@ function ConsoleShell() {
   );
 }
 
-function ConsoleNavigation({ route, mode }: { route: RouteKey; mode: DashboardSnapshot["runtime_mode"] }) {
+function ConsoleNavigation({ route }: { route: RouteKey }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [touchPressed, setTouchPressed] = useState(false);
@@ -234,13 +240,6 @@ function ConsoleNavigation({ route, mode }: { route: RouteKey; mode: DashboardSn
             <span className="brand-subtitle">{t("app.brandSubtitle")}</span>
           </div>
         </div>
-        {mode ? (
-          <div className="shell-mode">
-            <Badge tone={mode === "dry_run" ? "info" : "success"}>
-              {t(mode === "dry_run" ? "app.modeDryRun" : "app.modeProduction")}
-            </Badge>
-          </div>
-        ) : null}
         <button
           aria-controls="console-navigation"
           aria-expanded={open}
@@ -288,34 +287,52 @@ function ConsoleNavigation({ route, mode }: { route: RouteKey; mode: DashboardSn
   );
 }
 
-/**
- * Reports the machine, and only reports. Appearance and language are the
- * operator's own preferences, so they live in Settings instead of competing with
- * live system state for the top of every screen.
- *
- * Each reading is a tell-tale lamp plus its value in text: the lamp is redundant
- * reinforcement of what the words already say, so it stays out of the
- * accessibility tree.
- */
-function RuntimeStrip({ status }: { status: Array<{ label: string; value: string; tone: Tone }> }) {
+type RuntimeReading = { label: string; value: string; tone: Tone; href?: string };
+
+function RuntimeStrip({ mode, status, storeAvailable }: {
+  mode: DashboardSnapshot["runtime_mode"];
+  status: RuntimeReading[];
+  storeAvailable?: boolean;
+}) {
   const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const primary: RuntimeReading = storeAvailable === false
+    ? { label: t("health.storage"), value: enumLabel(t, "status", "unavailable"), tone: "danger", href: "#health" }
+    : status.find((item) => item.href && item.tone === "danger") ?? status.find((item) => item.href) ?? status[3];
   return (
     <header aria-label={t("app.runtime")} className="runtime-strip floating-surface">
       <GlassLens />
-      <div className="runtime-heading">
+      <button
+        aria-controls="runtime-readings"
+        aria-expanded={expanded}
+        className="runtime-heading"
+        onClick={() => setExpanded((current) => !current)}
+        type="button"
+      >
         <Activity aria-hidden="true" size={16} />
         <span>{t("app.runtime")}</span>
-      </div>
-      <div className="runtime-items">
-        {status.map((item) => (
-          <div className="runtime-item" key={item.label}>
-            <span aria-hidden="true" className={`tell-tale ${item.tone}`} />
-            <span className="runtime-label">{item.label}</span>
-            <span className="runtime-value">{item.value}</span>
-          </div>
-        ))}
+        <ChevronDown aria-hidden="true" size={13} />
+      </button>
+      {mode ? (
+        <Badge tone={mode === "dry_run" ? "info" : "success"}>
+          {t(mode === "dry_run" ? "app.modeDryRun" : "app.modeProduction")}
+        </Badge>
+      ) : null}
+      <RuntimeItem item={primary} />
+      <div className="runtime-items" hidden={!expanded} id="runtime-readings">
+        {status.map((item) => <RuntimeItem item={item} key={item.label} />)}
       </div>
     </header>
+  );
+}
+
+function RuntimeItem({ item }: { item: RuntimeReading }) {
+  return (
+    <div className="runtime-item">
+      <span aria-hidden="true" className={`tell-tale ${item.tone}`} />
+      <span className="runtime-label">{item.label}</span>
+      {item.href ? <a className="runtime-value" href={item.href}>{item.value}</a> : <span className="runtime-value">{item.value}</span>}
+    </div>
   );
 }
 
@@ -355,15 +372,36 @@ function currentLocation() {
   };
 }
 
-function runtimeStripStatus(t: TFunction, snapshot: DashboardSnapshot | undefined, error: unknown, updatedAt: number) {
-  const daemon = String(snapshot?.daemon_liveness?.status ?? "unknown");
+function runtimeStripStatus(t: TFunction, snapshot: DashboardSnapshot | undefined, error: unknown, updatedAt: number): RuntimeReading[] {
+  const daemon = snapshot?.daemon_liveness?.status ?? "unknown";
   const initialized = snapshot?.policy_status?.initialized;
   const importDiff = snapshot?.policy_status?.policy_import_diff?.status ?? "unknown";
   const dataStale = updatedAt > 0 && Date.now() - updatedAt > 30_000;
+  const daemonTone = daemon === "live" ? "success" : daemon === "startup_failed" || daemon === "stale" ? "danger" : daemon === "starting" ? "info" : daemon === "unknown" ? "muted" : "warning";
   return [
-    { label: t("runtime.daemon"), value: enumLabel(t, "status", daemon), tone: daemon === "live" ? "success" : daemon === "startup_failed" || daemon === "stale" ? "danger" : daemon === "starting" ? "info" : daemon === "unknown" ? "muted" : "warning" },
-    { label: t("runtime.policy"), value: initialized ? t("runtime.initialized") : t("runtime.missing"), tone: initialized ? "success" : "warning" },
-    { label: t("runtime.importDiff"), value: importDiff === "matches" ? t("runtime.matches") : importDiff === "differs" ? t("runtime.differs") : t("common.unknown"), tone: importDiff === "matches" ? "success" : "info" },
-    { label: t("runtime.data"), value: error ? t("runtime.readFailed") : dataStale ? t("runtime.stale") : updatedAt ? t("runtime.latest") : t("runtime.waiting"), tone: error ? "danger" : dataStale ? "warning" : updatedAt ? "success" : "muted" }
-  ] satisfies Array<{ label: string; value: string; tone: Tone }>;
+    {
+      label: t("runtime.daemon"),
+      value: enumLabel(t, "status", daemon),
+      tone: daemonTone,
+      href: daemonTone === "danger" || daemonTone === "warning" ? `#health/daemon-${daemon.replace(/_/g, "-")}` : undefined
+    },
+    {
+      label: t("runtime.policy"),
+      value: initialized === true ? t("runtime.initialized") : initialized === false ? t("runtime.missing") : t("common.unknown"),
+      tone: initialized === true ? "success" : initialized === false ? "warning" : "muted",
+      href: initialized === false ? "#policy" : undefined
+    },
+    {
+      label: t("runtime.importDiff"),
+      value: importDiff === "matches" ? t("runtime.matches") : importDiff === "differs" ? t("runtime.differs") : t("common.unknown"),
+      tone: importDiff === "matches" ? "success" : importDiff === "differs" ? "warning" : "muted",
+      href: importDiff === "differs" ? "#policy" : undefined
+    },
+    {
+      label: t("runtime.data"),
+      value: error ? t("runtime.readFailed") : dataStale ? t("runtime.stale") : updatedAt ? t("runtime.latest") : t("runtime.waiting"),
+      tone: error ? "danger" : dataStale ? "warning" : updatedAt ? "success" : "muted",
+      href: error || dataStale ? "#health" : undefined
+    }
+  ];
 }
