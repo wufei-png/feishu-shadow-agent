@@ -124,9 +124,10 @@ export function getHealthIssues(token: string): Promise<HealthIssuesResponse> {
 
 export function getFeedbackOverview(
   token: string,
-  executionMode: FeedbackExecutionMode
+  executionMode: FeedbackExecutionMode,
+  recentDays: number
 ): Promise<FeedbackOverview> {
-  return fetchApi(`/api/feedback/overview?execution_mode=${encodeURIComponent(executionMode)}`, token);
+  return fetchApi(`/api/feedback/overview${queryString({ execution_mode: executionMode, recent_days: recentDays })}`, token);
 }
 
 export function listApprovals(

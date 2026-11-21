@@ -273,6 +273,9 @@ def test_feedback_overview_has_7_and_30_day_metrics_and_reply_diff(
         "final_reply": None,
         "diff": [],
     }
+    recent = query.feedback_overview(recent_days=7)
+    assert len(recent["recent"]) == seven["total"]
+    assert all(item["approval_id"] != "a_older" for item in recent["recent"])
 
 
 def test_feedback_query_can_explicitly_include_dry_run(tmp_path: Path) -> None:

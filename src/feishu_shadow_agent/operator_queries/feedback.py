@@ -33,17 +33,21 @@ class FeedbackQuery:
         execution_mode: FeedbackExecutionMode = "production",
     ) -> dict[str, Any]:
         normalized_windows = tuple(_days(value) for value in windows)
+        generated_at = self._now()
         return {
-            "generated_at": self._now(),
+            "generated_at": generated_at,
             "execution_mode": _execution_mode(execution_mode),
             "windows": [
-                self.metrics(days=days, execution_mode=execution_mode)
+                self.metrics(
+                    days=days, execution_mode=execution_mode, as_of=generated_at
+                )
                 for days in normalized_windows
             ],
             "recent": self.list_feedback(
                 days=recent_days,
                 limit=recent_limit,
                 execution_mode=execution_mode,
+                as_of=generated_at,
             ),
         }
 
@@ -52,10 +56,11 @@ class FeedbackQuery:
         *,
         days: int,
         execution_mode: FeedbackExecutionMode = "production",
+        as_of: str | None = None,
     ) -> dict[str, Any]:
         normalized_days = _days(days)
         mode = _execution_mode(execution_mode)
-        since = _since(self._now(), normalized_days)
+        since = _since(as_of or self._now(), normalized_days)
         mode_sql, mode_params = _mode_filter(mode)
         try:
             with self._connect() as conn:
@@ -149,10 +154,11 @@ class FeedbackQuery:
         limit: int = 50,
         offset: int = 0,
         execution_mode: FeedbackExecutionMode = "production",
+        as_of: str | None = None,
     ) -> list[dict[str, Any]]:
         normalized_days = _days(days)
         mode = _execution_mode(execution_mode)
-        since = _since(self._now(), normalized_days)
+        since = _since(as_of or self._now(), normalized_days)
         mode_sql, mode_params = _mode_filter(mode)
         try:
             with self._connect() as conn:

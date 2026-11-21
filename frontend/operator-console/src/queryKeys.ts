@@ -6,7 +6,7 @@ export type ApprovalFilter = "all" | "pending" | "expired" | "resolved";
 export const queryKeys = {
   dashboard: () => ["dashboard"] as const,
   healthIssues: () => ["health-issues"] as const,
-  feedbackOverview: (executionMode: FeedbackExecutionMode) => ["feedback-overview", executionMode] as const,
+  feedbackOverview: (executionMode: FeedbackExecutionMode, recentDays: number) => ["feedback-overview", executionMode, recentDays] as const,
   approvals: (filters: { status?: ApprovalStatus | ApprovalStatus[] | ApprovalFilter; limit?: number; offset?: number }) =>
     ["approvals", filters] as const,
   approval: (approvalId: string | null) => ["approval", approvalId] as const,

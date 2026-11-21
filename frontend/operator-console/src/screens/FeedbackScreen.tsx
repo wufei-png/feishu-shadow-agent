@@ -1,21 +1,24 @@
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
-import { MessageSquareDiff } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { getFeedbackOverview } from "../api";
 import {
   Fact,
   Badge,
+  Button,
+  CopyValue,
   EmptyState,
   ErrorState,
   FieldList,
   formatDate,
   ListRow,
   LoadingState,
+  QueueControls,
   SectionHeader,
   SegmentedControl,
-  shortText
+  shortText,
+  TechnicalDetails
 } from "../components/Primitives";
 import { queryKeys } from "../queryKeys";
 import { enumLabel } from "../presentation";
@@ -39,54 +42,25 @@ export function FeedbackScreen({ token, runtimeMode = "production" }: { token: s
   const [outcomeFilter, setOutcomeFilter] = useState<OutcomeFilter>("all");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const overview = useQuery({
-    queryKey: queryKeys.feedbackOverview(effectiveMode),
-    queryFn: () => getFeedbackOverview(token, effectiveMode),
+    queryKey: queryKeys.feedbackOverview(effectiveMode, windowDays),
+    queryFn: () => getFeedbackOverview(token, effectiveMode, windowDays),
     enabled: Boolean(token),
     refetchInterval: 30_000
   });
   const metrics = overview.data?.windows.find((item) => item.days === windowDays) ?? null;
-  const records = useMemo(
-    () =>
-      (overview.data?.recent ?? []).filter(
-        (item) => outcomeFilter === "all" || item.outcome === outcomeFilter
-      ),
-    [overview.data?.recent, outcomeFilter]
+  const records = (overview.data?.recent ?? []).filter(
+    (item) => outcomeFilter === "all" || item.outcome === outcomeFilter
   );
-  const selected = records.find((item) => item.id === selectedId) ?? records[0] ?? null;
-
-  useEffect(() => {
-    if (!records.length) {
-      setSelectedId(null);
-      return;
-    }
-    if (selectedId === null || !records.some((item) => item.id === selectedId)) {
-      setSelectedId(records[0].id);
-    }
-  }, [records, selectedId]);
-
-  if (overview.isLoading) {
-    return <LoadingState title={t("feedback.loading")} />;
-  }
-  if (overview.error) {
-    return <ErrorState title={t("feedback.error")} error={overview.error} />;
-  }
-  if (!overview.data) {
-    return <EmptyState title={t("feedback.unavailable")} detail={t("feedback.unavailableDetail")} />;
-  }
+  const selected = records.find((item) => item.id === selectedId) ?? records[0];
 
   return (
     <section className="work-grid feedback-layout" aria-label={t("feedback.aria")}>
       <div className="work-main">
         <div className="queue-panel">
           <SectionHeader
-            eyebrow={t("feedback.eyebrow")}
             title={t("feedback.title")}
-            badge={<Badge tone={effectiveMode === "production" ? "success" : "info"}>{effectiveMode === "production" ? t("feedback.production") : effectiveMode === "dry_run" ? t("feedback.dryRun") : t("feedback.all")}</Badge>}
-          >
-            <p className="section-note">
-              {t("feedback.intro")}
-            </p>
-          </SectionHeader>
+            badge={runtimeMode === "dry_run" ? <Badge tone="info">{t("feedback.dryRun")}</Badge> : null}
+          />
           <div className="feedback-controls">
             {runtimeMode !== "dry_run" ? <SegmentedControl
               label={t("feedback.executionMode")}
@@ -108,24 +82,26 @@ export function FeedbackScreen({ token, runtimeMode = "production" }: { token: s
               ]}
             />
           </div>
-          {metrics ? (
-            <MetricSummary metrics={metrics} />
-          ) : (
-            <EmptyState title={t("feedback.noMetrics")} detail={t("feedback.noMetricsDetail")} />
-          )}
+          {overview.isLoading ? <LoadingState title={t("feedback.loading")} /> : null}
+          {overview.error && !overview.data ? (
+            <div>
+              <ErrorState title={t("feedback.error")} error={overview.error} />
+              <Button disabled={overview.isFetching} onClick={() => void overview.refetch()}>{t("common.refresh")}</Button>
+            </div>
+          ) : null}
+          {metrics ? <MetricSummary metrics={metrics} /> : null}
+          {metrics && (metrics.by_decision_reason.length > 0 || metrics.by_feedback_reason.length > 0) ? (
+            <TechnicalDetails summary={t("feedback.distribution")}>
+              <div className="split-panels feedback-breakdowns">
+                <Breakdown title={t("feedback.decisionReasons")} values={metrics.by_decision_reason} />
+                <Breakdown title={t("feedback.feedbackReasons")} values={metrics.by_feedback_reason} />
+              </div>
+            </TechnicalDetails>
+          ) : null}
         </div>
 
-        <div className="split-panels feedback-breakdowns">
-          <Breakdown title={t("feedback.decisionReasons")} values={metrics?.by_decision_reason ?? []} />
-          <Breakdown title={t("feedback.feedbackReasons")} values={metrics?.by_feedback_reason ?? []} />
-        </div>
-
-        <div className="queue-panel">
-          <SectionHeader
-            eyebrow={t("feedback.recent")}
-            title={t("feedback.records")}
-            badge={<Badge tone="muted">{records.length}</Badge>}
-          />
+        {overview.data ? <div className="queue-panel">
+          <SectionHeader as="h2" title={t("feedback.records")} badge={<Badge tone="muted">{records.length}</Badge>} />
           <SegmentedControl
             label={t("feedback.outcomeFilter")}
             value={outcomeFilter}
@@ -138,32 +114,32 @@ export function FeedbackScreen({ token, runtimeMode = "production" }: { token: s
               { value: "no_send_end_task", label: t("feedback.endTask") }
             ]}
           />
+          <QueueControls
+            error={overview.error}
+            isFetching={overview.isFetching}
+            onRefresh={() => void overview.refetch()}
+            updatedAt={overview.dataUpdatedAt}
+          />
           {records.length ? (
             <div className="list-stack">
               {records.map((record) => (
                 <ListRow
                   badge={<Badge tone={outcomeTone(record.outcome)}>{outcomeLabel(t, record.outcome)}</Badge>}
                   key={record.id}
-                  meta={`${record.approval_id} · ${formatDate(record.created_at)}`}
+                  meta={`${record.task_id ?? t("common.notLinked")} · ${formatDate(record.created_at)}`}
                   onClick={() => setSelectedId(record.id)}
                   selected={record.id === selected?.id}
-                  title={record.task_id ?? t("common.notLinked")}
-                >
-                  <span className="row-preview">
-                    {shortText(record.reply_comparison.final_reply ?? record.reply_comparison.suggested_reply, outcomeLabel(t, record.outcome))}
-                  </span>
-                </ListRow>
+                  title={shortText(record.reply_comparison.final_reply ?? record.reply_comparison.suggested_reply, outcomeLabel(t, record.outcome))}
+                />
               ))}
             </div>
           ) : (
             <EmptyState title={t("feedback.empty")} detail={t("feedback.emptyDetail")} />
           )}
-        </div>
+        </div> : null}
       </div>
 
-      <aside className="work-detail">
-        <FeedbackDetail record={selected} />
-      </aside>
+      {selected ? <aside className="work-detail"><FeedbackDetail record={selected} /></aside> : null}
     </section>
   );
 }
@@ -193,9 +169,8 @@ function Breakdown({ title, values }: { title: string; values: FeedbackCount[] }
   const { t } = useTranslation();
   const maximum = Math.max(...values.map((item) => item.count), 1);
   return (
-    <div className="queue-panel feedback-breakdown">
-      <p className="eyebrow">{t("feedback.distribution")}</p>
-      <h2>{title}</h2>
+    <div className="feedback-breakdown">
+      <h3>{title}</h3>
       {values.length ? (
         <ul className="breakdown-list">
           {values.map((item) => (
@@ -212,7 +187,6 @@ function Breakdown({ title, values }: { title: string; values: FeedbackCount[] }
         </ul>
       ) : (
         <div className="quiet-empty">
-          <MessageSquareDiff aria-hidden="true" size={18} />
           <span>{t("feedback.noClassified")}</span>
         </div>
       )}
@@ -220,27 +194,23 @@ function Breakdown({ title, values }: { title: string; values: FeedbackCount[] }
   );
 }
 
-function FeedbackDetail({ record }: { record: FeedbackRecord | null }) {
+function FeedbackDetail({ record }: { record: FeedbackRecord }) {
   const { t } = useTranslation();
-  if (!record) {
-    return <EmptyState title={t("feedback.select")} detail={t("feedback.selectDetail")} />;
-  }
   return (
     <div className="detail-panel feedback-detail">
-      <p className="eyebrow">{t("feedback.detail")}</p>
-      <div className="detail-title-row">
-        <h2>{record.approval_id}</h2>
-        <Badge tone={outcomeTone(record.outcome)}>{outcomeLabel(t, record.outcome)}</Badge>
-      </div>
-      <FieldList>
-        <Fact label={t("feedback.task")} value={record.task_id ?? t("common.notRecorded")} />
-        <Fact label={t("feedback.decisionReasons")} value={reasonLabel(t, record.decision_reason)} />
-        <Fact label={t("feedback.feedbackReasons")} value={reasonLabel(t, record.feedback_reason)} />
-        <Fact label={t("common.actor")} value={record.actor} />
-        <Fact label={t("feedback.recordedAt")} value={formatDate(record.created_at)} />
-      </FieldList>
-      {record.note ? <p className="detail-note">{record.note}</p> : null}
+      <h2>{outcomeLabel(t, record.outcome)}</h2>
       <ReplyComparison record={record} />
+      {record.note ? <p className="detail-note">{record.note}</p> : null}
+      <TechnicalDetails summary={t("feedback.detail")}>
+        <FieldList>
+          <Fact label={t("approvals.approvalId")} value={<CopyValue label={t("approvals.approvalId")} value={record.approval_id} />} />
+          <Fact label={t("feedback.task")} value={record.task_id ?? t("common.notRecorded")} />
+          <Fact label={t("feedback.decisionReasons")} value={reasonLabel(t, record.decision_reason)} />
+          <Fact label={t("feedback.feedbackReasons")} value={reasonLabel(t, record.feedback_reason)} />
+          <Fact label={t("common.actor")} value={record.actor} />
+          <Fact label={t("feedback.recordedAt")} value={formatDate(record.created_at)} />
+        </FieldList>
+      </TechnicalDetails>
     </div>
   );
 }
@@ -260,14 +230,14 @@ function ReplyComparison({ record }: { record: FeedbackRecord }) {
   return (
     <div className="reply-comparison">
       <div className="subsection-title">
-        <h2>{t("feedback.comparison")}</h2>
+        <h3>{t("feedback.comparison")}</h3>
         <Badge tone={comparison.status === "changed" ? "info" : "success"}>{enumLabel(t, "status", comparison.status)}</Badge>
       </div>
+      {comparison.status === "changed" ? <InlineDiff parts={comparison.diff} /> : null}
       <div className="reply-columns">
         <ReplyText label={t("feedback.suggested")} value={comparison.suggested_reply ?? ""} tone="before" />
         <ReplyText label={t("feedback.final")} value={comparison.final_reply ?? ""} tone="after" />
       </div>
-      {comparison.status === "changed" ? <InlineDiff parts={comparison.diff} /> : null}
     </div>
   );
 }

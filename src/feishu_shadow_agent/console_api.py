@@ -525,12 +525,14 @@ def create_console_app(
     def feedback_overview(
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
         execution_mode: Literal["production", "dry_run", "all"] = "production",
+        recent_days: Annotated[int, Query(ge=1, le=3650)] = 30,
     ) -> dict[str, Any]:
         return query_service().feedback_overview(
             execution_mode="dry_run"
             if app_execution_mode == "dry_run"
             else execution_mode,
             recent_limit=limit,
+            recent_days=recent_days,
         )
 
     @api.get("/feedback")

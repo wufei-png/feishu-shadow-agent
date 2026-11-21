@@ -565,10 +565,11 @@ class OperatorQueryService:
         *,
         execution_mode: FeedbackExecutionMode = "production",
         recent_limit: int = 50,
+        recent_days: int = 30,
     ) -> dict[str, Any]:
         return self._feedback_query.overview(
             windows=(7, 30),
-            recent_days=30,
+            recent_days=recent_days,
             recent_limit=recent_limit,
             execution_mode=execution_mode,
         )
