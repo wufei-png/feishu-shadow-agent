@@ -616,6 +616,8 @@ export const consoleCopy = {
   "policy.changeReason": ["策略变更原因", "Reason for policy change"],
   "policy.reasonPlaceholder": ["可选，记入审计", "Optional audit note"],
   "policy.runtimeStatus": ["运行策略", "Runtime policy"],
+  "policy.backToScopes": ["返回策略范围", "Back to policy scopes"],
+  "policy.importSource": ["配置导入与差异", "Config import and differences"],
   "policy.initialized": ["已初始化", "Initialized"],
   "policy.missing": ["缺失", "Missing"],
   "policy.sourceBoundary": ["运行时使用已保存的策略。config.yaml 仅用于导入。", "The runtime uses saved policy. config.yaml is used only for imports."],

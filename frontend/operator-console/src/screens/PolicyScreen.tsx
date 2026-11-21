@@ -1,7 +1,8 @@
 import { useEffect, useId, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
-import { FileDiff, History, Save, Trash2, Upload } from "lucide-react";
+import { ArrowLeft, FileDiff, Save, Trash2, Upload } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
   deleteChatPolicy,
@@ -31,8 +32,10 @@ import {
   SectionHeader,
   shortText,
   statusTone,
+  TechnicalDetails,
   TextareaField
 } from "../components/Primitives";
+import { useWorkbenchNavigation } from "../components/useWorkbenchNavigation";
 import { catalogText, formatSettingValue } from "../catalogPresentation";
 import { enumLabel } from "../presentation";
 import { invalidateAfterPolicyCommand, queryKeys } from "../queryKeys";
@@ -87,7 +90,10 @@ const chatFields: Array<{ key: keyof ChatPolicyForm; catalogKey: string; type: "
 export function PolicyScreen({ token, selectedId }: { token: string; selectedId: string | null }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
-  const [scope, setScope] = useState<PolicyScope>("global");
+  const [scope, setScope] = useState<PolicyScope>(selectedId ? `chat:${selectedId}` : "global");
+  const [editorOpen, setEditorOpen] = useState(Boolean(selectedId));
+  const pane = editorOpen ? "detail" : "list";
+  const { heading, rememberPosition } = useWorkbenchNavigation(pane);
   const [reason, setReason] = useState("");
   const [commandResult, setCommandResult] = useState<CommandResult | null>(null);
   const [globalForm, setGlobalForm] = useState<GlobalPolicyForm>(() => globalFormFromPolicy(null));
@@ -128,8 +134,8 @@ export function PolicyScreen({ token, selectedId }: { token: string; selectedId:
   );
   const globalBaseline = globalFormFromPolicy(runtime.data?.global_policy ?? null);
   const chatBaseline = chatFormFromPolicy(selectedChat);
-  const globalChanges = diffObject(globalBaseline, globalForm);
-  const chatChanges = scope === "new-chat" ? { ...chatForm } : diffObject(chatBaseline, chatForm);
+  const globalChanges = globalDirty ? diffObject(globalBaseline, globalForm) : {};
+  const chatChanges = scope === "new-chat" ? { ...chatForm } : chatDirty ? diffObject(chatBaseline, chatForm) : {};
   const policyInitialized = runtime.data?.policy_status.initialized === true;
   const activeChatId = scope === "new-chat" ? chatIdDraft.trim() : selectedChat?.chat_id ?? "";
   const hasGlobalChanges = Object.keys(globalChanges).length > 0;
@@ -152,6 +158,7 @@ export function PolicyScreen({ token, selectedId }: { token: string; selectedId:
 
   useEffect(() => {
     setScope(selectedId ? `chat:${selectedId}` : "global");
+    setEditorOpen(Boolean(selectedId));
   }, [selectedId]);
 
   useEffect(() => {
@@ -227,96 +234,127 @@ export function PolicyScreen({ token, selectedId }: { token: string; selectedId:
     onError: (error) => setCommandResult(errorResult("policy.delete_chat", error, t))
   });
 
-  if (runtime.isLoading || catalog.isLoading) {
+  if (runtime.isLoading) {
     return <LoadingState title={t("policy.loading")} />;
   }
-  if (runtime.error) {
-    return <ErrorState title={t("policy.runtimeError")} error={runtime.error} />;
-  }
-  if (catalog.error) {
-    return <ErrorState title={t("policy.catalogError")} error={catalog.error} />;
-  }
-
   const data = runtime.data;
+  if (runtime.error && !data) {
+    return (
+      <div>
+        <ErrorState title={t("policy.runtimeError")} error={runtime.error} />
+        <Button onClick={() => void runtime.refetch()}>{t("common.refresh")}</Button>
+      </div>
+    );
+  }
   if (!data) {
     return <EmptyState title={t("policy.unavailable")} detail={t("policy.unavailableDetail")} />;
   }
 
-  return (
-    <section className="work-grid policy-layout" aria-label={t("policy.aria")}>
-      <div className="work-main">
-        <PolicyStatusPanel
-          data={data}
-          importPending={importConfig.isPending}
-          onImport={(replace) => importConfig.mutate(replace)}
-        />
-        <PolicyScopeList
-          data={data}
-          scope={scope}
-          setScope={setScope}
-        />
-      </div>
+  const reasonField = <TextareaField label={t("policy.changeReason")} onChange={setReason} rows={2} value={reason} />;
+  const importResult = commandResult?.command === "policy.import_config" ? commandResult : null;
 
-      <aside className="work-detail">
-        <div className="detail-panel">
-          <TextareaField label={t("policy.changeReason")} onChange={setReason} placeholder={t("policy.reasonPlaceholder")} rows={2} value={reason} />
+  return (
+    <section className="workbench" data-pane={pane} aria-label={t("policy.aria")}>
+      <header className="workbench-header">
+        <h1 ref={heading} tabIndex={-1}>{t("policy.aria")}</h1>
+        {editorOpen ? (
+          <button className="button workbench-back" onClick={() => setEditorOpen(false)} type="button">
+            <ArrowLeft aria-hidden="true" size={16} />
+            {t("policy.backToScopes")}
+          </button>
+        ) : null}
+      </header>
+      {runtime.error ? (
+        <div>
+          <ErrorState title={t("policy.runtimeError")} error={runtime.error} />
+          <Button onClick={() => void runtime.refetch()}>{t("common.refresh")}</Button>
+        </div>
+      ) : null}
+      <div className="work-grid policy-layout">
+        <div className="work-main workbench-pane" data-pane="list">
+          <PolicyScopeList
+            data={data}
+            scope={scope}
+            setScope={(next, trigger) => {
+              rememberPosition(trigger, "list");
+              setScope(next);
+              setEditorOpen(true);
+            }}
+          />
+          <PolicyStatusPanel
+            data={data}
+            importPending={importConfig.isPending}
+            onImport={(replace) => importConfig.mutate(replace)}
+            reasonField={reasonField}
+            result={importResult}
+          />
+          <PolicyAuditHistory
+            audits={audits.data ?? data.policy_audit_history}
+            error={audits.error}
+            filterKey={auditPolicyKey}
+            filterScope={auditScope}
+            isLoading={audits.isLoading}
+            onFilterKeyChange={setAuditPolicyKey}
+            onFilterScopeChange={setAuditScope}
+            usingFallback={!audits.data && !audits.error}
+          />
         </div>
 
-        {scope === "global" ? (
-          <GlobalPolicyEditor
-            changes={globalChanges}
-            disabled={!policyInitialized || saveGlobal.isPending}
-            entries={entries}
-            form={globalForm}
-            onChange={(next) => {
-              setGlobalDirty(true);
-              setGlobalForm(next);
-            }}
-            onSave={() => saveGlobal.mutate()}
-            preview={globalPreview.data ?? null}
-            previewError={globalPreview.error}
-            previewLoading={globalPreview.isFetching}
-          />
-        ) : (
-          <ChatPolicyEditor
-            changes={chatChanges}
-            deleteDisabled={!activeChatId || deleteChat.isPending}
-            deletePreview={deletePreview.data ?? null}
-            deletePreviewError={deletePreview.error}
-            deletePreviewLoading={deletePreview.isFetching}
-            entries={entries}
-            form={chatForm}
-            isNew={scope === "new-chat"}
-            onChange={(next) => {
-              setChatDirty(true);
-              setChatForm(next);
-            }}
-            onChatIdChange={(value) => {
-              setChatDirty(true);
-              setChatIdDraft(value);
-            }}
-            onDelete={() => deleteChat.mutate()}
-            onSave={() => saveChat.mutate()}
-            saveDisabled={!policyInitialized || !activeChatId || saveChat.isPending}
-            selectedChatId={activeChatId}
-            updatePreview={chatPreview.data ?? null}
-            updatePreviewError={chatPreview.error}
-            updatePreviewLoading={chatPreview.isFetching}
-          />
-        )}
+        <aside className="work-detail workbench-pane" data-pane="detail">
+          {catalog.error ? (
+            <div>
+              <ErrorState title={t("policy.catalogError")} error={catalog.error} />
+              <Button onClick={() => void catalog.refetch()}>{t("common.refresh")}</Button>
+            </div>
+          ) : null}
+          {scope === "global" ? (
+            <GlobalPolicyEditor
+              changes={globalChanges}
+              disabled={!policyInitialized || saveGlobal.isPending}
+              entries={entries}
+              form={globalForm}
+              onChange={(next) => {
+                setGlobalDirty(true);
+                setGlobalForm(next);
+              }}
+              onSave={() => saveGlobal.mutate()}
+              preview={globalPreview.data ?? null}
+              previewError={globalPreview.error}
+              previewLoading={globalPreview.isFetching}
+              reasonField={reasonField}
+            />
+          ) : (
+            <ChatPolicyEditor
+              changes={chatChanges}
+              deleteDisabled={!activeChatId || deleteChat.isPending}
+              deletePreview={deletePreview.data ?? null}
+              deletePreviewError={deletePreview.error}
+              deletePreviewLoading={deletePreview.isFetching}
+              entries={entries}
+              form={chatForm}
+              isNew={scope === "new-chat"}
+              onChange={(next) => {
+                setChatDirty(true);
+                setChatForm(next);
+              }}
+              onChatIdChange={(value) => {
+                setChatDirty(true);
+                setChatIdDraft(value);
+              }}
+              onDelete={() => deleteChat.mutate()}
+              onSave={() => saveChat.mutate()}
+              saveDisabled={!policyInitialized || !activeChatId || saveChat.isPending}
+              reasonField={reasonField}
+              selectedChatId={activeChatId}
+              updatePreview={chatPreview.data ?? null}
+              updatePreviewError={chatPreview.error}
+              updatePreviewLoading={chatPreview.isFetching}
+            />
+          )}
 
-        <CommandResultPanel result={commandResult} />
-        <PolicyAuditHistory
-          audits={audits.data ?? data.policy_audit_history}
-          error={audits.error}
-          filterKey={auditPolicyKey}
-          filterScope={auditScope}
-          isLoading={audits.isLoading}
-          onFilterKeyChange={setAuditPolicyKey}
-          onFilterScopeChange={setAuditScope}
-          usingFallback={!audits.data}
-        />
-      </aside>
+          <CommandResultPanel result={importResult ? null : commandResult} />
+        </aside>
+      </div>
     </section>
   );
 }
@@ -324,11 +362,15 @@ export function PolicyScreen({ token, selectedId }: { token: string; selectedId:
 function PolicyStatusPanel({
   data,
   importPending,
-  onImport
+  onImport,
+  reasonField,
+  result
 }: {
   data: SettingsRuntime;
   importPending: boolean;
   onImport: (replace: boolean) => void;
+  reasonField: ReactNode;
+  result: CommandResult | null;
 }) {
   const { t } = useTranslation();
   const diff = data.policy_status.policy_import_diff;
@@ -336,6 +378,7 @@ function PolicyStatusPanel({
   return (
     <div className="queue-panel">
       <SectionHeader
+        as="h2"
         title={t("policy.runtimeStatus")}
         badge={
           <div className="inline-badges policy-status-badges">
@@ -344,33 +387,37 @@ function PolicyStatusPanel({
           </div>
         }
       />
-      <dl className="overview-facts">
-        <Fact label={t("policy.chatPolicyCount")} value={data.policy_status.chat_policy_count ?? data.chat_policies.length} />
-        <Fact label={t("policy.globalUpdatedAt")} value={formatDate(data.policy_status.global_policy_updated_at)} />
-      </dl>
-      {diff?.status === "differs" ? (
-        <>
-          {!data.policy_status.initialized ? <p className="detail-note">{t("policy.diffUninitialized")}</p> : null}
-          <ImportDiffDetails diff={diff} />
-        </>
-      ) : !matches ? <p className="detail-note">{t("policy.diffUnknown")}</p> : null}
-      {!matches && diff?.message ? (
-        <details className="technical-details">
-          <summary>{t("policy.technicalMessage")}</summary>
-          <p className="detail-note">{diff.message}</p>
-        </details>
-      ) : null}
-      <p className="detail-note policy-import-boundary">{t("policy.sourceBoundary")}</p>
-      <div className="command-buttons">
-        <Button disabled={importPending} onClick={() => onImport(false)} tone="info">
-          <Upload aria-hidden="true" size={15} />
-          {t("policy.importMissing")}
-        </Button>
-        <Button disabled={importPending} onClick={() => onImport(true)} tone="warning">
-          <FileDiff aria-hidden="true" size={15} />
-          {t("policy.replaceListed")}
-        </Button>
-      </div>
+      <TechnicalDetails summary={t("policy.importSource")}>
+        <dl className="overview-facts">
+          <Fact label={t("policy.chatPolicyCount")} value={data.policy_status.chat_policy_count ?? data.chat_policies.length} />
+          <Fact label={t("policy.globalUpdatedAt")} value={formatDate(data.policy_status.global_policy_updated_at)} />
+        </dl>
+        {diff?.status === "differs" ? (
+          <>
+            {!data.policy_status.initialized ? <p className="detail-note">{t("policy.diffUninitialized")}</p> : null}
+            <ImportDiffDetails diff={diff} />
+          </>
+        ) : !matches ? <p className="detail-note">{t("policy.diffUnknown")}</p> : null}
+        {!matches && diff?.message ? (
+          <details className="technical-details">
+            <summary>{t("policy.technicalMessage")}</summary>
+            <p className="detail-note">{diff.message}</p>
+          </details>
+        ) : null}
+        <p className="detail-note policy-import-boundary">{t("policy.sourceBoundary")}</p>
+        {reasonField}
+        <div className="command-buttons">
+          <Button disabled={importPending} onClick={() => onImport(false)} tone="info">
+            <Upload aria-hidden="true" size={15} />
+            {t("policy.importMissing")}
+          </Button>
+          <Button disabled={importPending} onClick={() => onImport(true)} tone="warning">
+            <FileDiff aria-hidden="true" size={15} />
+            {t("policy.replaceListed")}
+          </Button>
+        </div>
+      </TechnicalDetails>
+      <CommandResultPanel result={result} />
     </div>
   );
 }
@@ -382,7 +429,7 @@ function PolicyScopeList({
 }: {
   data: SettingsRuntime;
   scope: PolicyScope;
-  setScope: (scope: PolicyScope) => void;
+  setScope: (scope: PolicyScope, trigger: HTMLButtonElement) => void;
 }) {
   const { t } = useTranslation();
   return (
@@ -396,14 +443,13 @@ function PolicyScopeList({
         <ListRow
           badge={<Badge tone={data.global_policy ? "success" : "warning"}>{data.global_policy ? t("policy.ready") : t("policy.missing")}</Badge>}
           meta={t("policy.globalMeta")}
-          onClick={() => setScope("global")}
+          onClick={(event) => setScope("global", event.currentTarget)}
           selected={scope === "global"}
           title={t("policy.global")}
         />
         <ListRow
-          badge={<Badge tone="info">{t("policy.new")}</Badge>}
           meta={t("policy.newChatMeta")}
-          onClick={() => setScope("new-chat")}
+          onClick={(event) => setScope("new-chat", event.currentTarget)}
           selected={scope === "new-chat"}
           title={t("policy.newChat")}
         />
@@ -413,12 +459,10 @@ function PolicyScopeList({
               badge={<Badge tone={policy.auto_reply ? "success" : "muted"}>{policy.auto_reply ? t("policy.auto") : t("policy.manual")}</Badge>}
               key={policy.chat_id}
               meta={`${enumLabel(t, "identity", policy.reply_identity)} · ${formatDate(policy.updated_at)}`}
-              onClick={() => setScope(`chat:${policy.chat_id}`)}
+              onClick={(event) => setScope(`chat:${policy.chat_id}`, event.currentTarget)}
               selected={scope === `chat:${policy.chat_id}`}
               title={policy.name || policy.chat_id}
-            >
-              <span className="row-preview">{policy.chat_id}</span>
-            </ListRow>
+            />
           ))
         ) : (
           <EmptyState title={t("policy.noChats")} detail={t("policy.noChatsDetail")} />
@@ -437,7 +481,8 @@ function GlobalPolicyEditor({
   onSave,
   preview,
   previewError,
-  previewLoading
+  previewLoading,
+  reasonField
 }: {
   changes: Record<string, unknown>;
   disabled: boolean;
@@ -448,11 +493,11 @@ function GlobalPolicyEditor({
   preview: PolicyImpactPreview | null;
   previewError: unknown;
   previewLoading: boolean;
+  reasonField: ReactNode;
 }) {
   const { t } = useTranslation();
   return (
     <div className="detail-panel">
-      <p className="eyebrow">{t("policy.globalEditor")}</p>
       <div className="detail-title-row">
         <h2>{t("policy.defaultRuntime")}</h2>
         <Badge tone={Object.keys(changes).length ? "warning" : "success"}>{Object.keys(changes).length ? t("policy.unsaved") : t("policy.synced")}</Badge>
@@ -475,6 +520,7 @@ function GlobalPolicyEditor({
         preview={preview}
         title={t("policy.runtimeImpact")}
       />
+      {reasonField}
       <Button disabled={disabled || Object.keys(changes).length === 0} onClick={onSave} tone="success">
         <Save aria-hidden="true" size={15} />
         {t("policy.saveGlobal")}
@@ -498,6 +544,7 @@ function ChatPolicyEditor({
   onDelete,
   onSave,
   saveDisabled,
+  reasonField,
   selectedChatId,
   updatePreview,
   updatePreviewError,
@@ -516,6 +563,7 @@ function ChatPolicyEditor({
   onDelete: () => void;
   onSave: () => void;
   saveDisabled: boolean;
+  reasonField: ReactNode;
   selectedChatId: string;
   updatePreview: PolicyImpactPreview | null;
   updatePreviewError: unknown;
@@ -524,7 +572,6 @@ function ChatPolicyEditor({
   const { t } = useTranslation();
   return (
     <div className="detail-panel">
-      <p className="eyebrow">{t("policy.chatEditor")}</p>
       <div className="detail-title-row">
         <h2>{isNew ? t("policy.newChat") : selectedChatId}</h2>
         <Badge tone={Object.keys(changes).length ? "warning" : "success"}>{Object.keys(changes).length ? t("policy.unsaved") : t("policy.synced")}</Badge>
@@ -553,26 +600,26 @@ function ChatPolicyEditor({
         preview={updatePreview}
         title={t("policy.saveImpact")}
       />
-      {!isNew ? (
-        <PolicyImpactPreviewPanel
-          error={deletePreviewError}
-          isLoading={deletePreviewLoading}
-          preview={deletePreview}
-          title={t("policy.deleteImpact")}
-        />
-      ) : null}
+      {reasonField}
       <div className="command-buttons">
         <Button disabled={saveDisabled || Object.keys(changes).length === 0} onClick={onSave} tone="success">
           <Save aria-hidden="true" size={15} />
           {t("policy.saveChat")}
         </Button>
-        {!isNew ? (
+      </div>
+      {!isNew ? (
+        <TechnicalDetails summary={t("policy.deleteImpact")}>
+          <PolicyImpactPreviewPanel
+            error={deletePreviewError}
+            isLoading={deletePreviewLoading}
+            preview={deletePreview}
+          />
           <Button disabled={deleteDisabled} onClick={onDelete} tone="danger">
             <Trash2 aria-hidden="true" size={15} />
             {t("policy.deleteChat")}
           </Button>
-        ) : null}
-      </div>
+        </TechnicalDetails>
+      ) : null}
       {!saveDisabled ? null : <p className="detail-note">{t("policy.chatRequirements")}</p>}
     </div>
   );
@@ -649,13 +696,13 @@ function ChangePreview({
 }) {
   const { t } = useTranslation();
   const rows = Object.entries(changes);
+  if (!rows.length) return null;
   return (
     <div className="policy-change-preview">
       <div className="subsection-title">
         <FileDiff aria-hidden="true" size={16} />
-        <h2>{t("policy.unsavedChanges")}</h2>
+        <h3>{t("policy.unsavedChanges")}</h3>
       </div>
-      {rows.length ? (
         <ul className="change-list">
           {rows.map(([key, value]) => {
             const catalogKey = fieldDefs.find((field) => field.key === key)?.catalogKey ?? key;
@@ -667,9 +714,6 @@ function ChangePreview({
             );
           })}
         </ul>
-      ) : (
-        <p className="detail-note">{t("policy.noChanges")}</p>
-      )}
     </div>
   );
 }
@@ -680,7 +724,7 @@ function PolicyImpactPreviewPanel({
   isLoading,
   error
 }: {
-  title: string;
+  title?: string;
   preview: PolicyImpactPreview | null;
   isLoading: boolean;
   error: unknown;
@@ -691,10 +735,10 @@ function PolicyImpactPreviewPanel({
   }
   return (
     <div className="policy-impact-preview">
-      <div className="subsection-title">
+      {title ? <div className="subsection-title">
         <FileDiff aria-hidden="true" size={16} />
-        <h2>{title}</h2>
-      </div>
+        <h3>{title}</h3>
+      </div> : null}
       {isLoading ? <p className="detail-note">{t("policy.calculating")}</p> : null}
       {error ? <p className="detail-note">{t("policy.previewError", { error: errorMessage(error, t) })}</p> : null}
       {preview ? (
@@ -816,11 +860,7 @@ function PolicyAuditHistory({
 }) {
   const { t } = useTranslation();
   return (
-    <div className="detail-panel">
-      <div className="subsection-title">
-        <History aria-hidden="true" size={16} />
-        <h2>{t("policy.auditHistory")}</h2>
-      </div>
+    <TechnicalDetails summary={t("policy.auditHistory")}>
       <div className="audit-filter-row" aria-label={t("policy.auditFilters")}>
         <label>
           <span>{t("policy.filterScope")}</span>
@@ -863,7 +903,7 @@ function PolicyAuditHistory({
       ) : (
         <EmptyState title={t("policy.noAudits")} detail={t("policy.noAuditsDetail")} />
       )}
-    </div>
+    </TechnicalDetails>
   );
 }
 
