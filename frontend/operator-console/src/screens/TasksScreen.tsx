@@ -244,17 +244,7 @@ export function TasksScreen({ token, selectedId, selectedMessageId, initialFilte
                     }}
                     selected={task.task_id === selectedTaskId}
                     title={task.task_label || task.task_id}
-                  >
-                    {(task.recommended_actions ?? []).length ? (
-                      <span className="inline-badges row-actions">
-                        {(task.recommended_actions ?? []).slice(0, 2).map((action) => (
-                          <Badge key={action} tone="warning">
-                            {enumLabel(t, "action", action)}
-                          </Badge>
-                        ))}
-                      </span>
-                    ) : null}
-                  </ListRow>
+                  />
                 ))}
               </div>
             ) : tasks.data ? (
@@ -307,13 +297,13 @@ export function TasksScreen({ token, selectedId, selectedMessageId, initialFilte
                   </FieldList>
                 </TechnicalDetails>
                 {detail.data.recommended_actions.length ? (
-                  <div className="inline-badges">
-                    {detail.data.recommended_actions.map((action) => (
-                      <Badge key={action} tone="warning">
-                        {enumLabel(t, "action", action)}
-                      </Badge>
-                    ))}
-                  </div>
+                  <TechnicalDetails summary={t("tasks.recommendations")}>
+                    <ul className="warning-list">
+                      {detail.data.recommended_actions.map((action) => (
+                        <li key={action}>{enumLabel(t, "action", action, action)}</li>
+                      ))}
+                    </ul>
+                  </TechnicalDetails>
                 ) : null}
               </div>
 

@@ -128,7 +128,6 @@ export function DashboardScreen({ token, navigate }: { token: string; navigate: 
         </div>
 
         <aside className="dashboard-context">
-          {healthIssueCount ? <Button tone="warning" onClick={() => navigate("health")}>{t("dashboard.healthIssues", { count: healthIssueCount })}</Button> : null}
           <TechnicalDetails summary={t("dashboard.runtimePolicy")}>
             <dl className="fact-list">
               <div><dt>{t("dashboard.initialization")}</dt><dd>{policyStatus?.initialized === true ? t("dashboard.initialized") : policyStatus?.initialized === false ? t("runtime.missing") : t("common.unknown")}</dd></div>

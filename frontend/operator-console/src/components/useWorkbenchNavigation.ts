@@ -2,7 +2,7 @@ import { useLayoutEffect, useRef } from "react";
 
 type WorkbenchPane = "list" | "detail" | "evidence";
 
-export function useWorkbenchNavigation(pane: WorkbenchPane) {
+export function useWorkbenchNavigation(pane: WorkbenchPane, compactQuery = "(max-width: 1180px)") {
   const heading = useRef<HTMLHeadingElement>(null);
   const previousPane = useRef<WorkbenchPane>("list");
   const positions = useRef<Partial<Record<WorkbenchPane, { trigger: HTMLElement; scrollY: number }>>>({});
@@ -14,7 +14,7 @@ export function useWorkbenchNavigation(pane: WorkbenchPane) {
   useLayoutEffect(() => {
     const previous = previousPane.current;
     previousPane.current = pane;
-    const compact = window.matchMedia?.("(max-width: 1180px)").matches;
+    const compact = window.matchMedia?.(compactQuery).matches;
     if (previous === pane || (!compact && previous !== "evidence" && pane !== "evidence")) return;
 
     const returning = pane === "list" || (previous === "evidence" && pane === "detail");
@@ -27,7 +27,7 @@ export function useWorkbenchNavigation(pane: WorkbenchPane) {
       heading.current?.focus({ preventScroll: true });
       heading.current?.scrollIntoView?.({ block: "start" });
     }
-  }, [pane]);
+  }, [compactQuery, pane]);
 
   return { heading, rememberPosition };
 }

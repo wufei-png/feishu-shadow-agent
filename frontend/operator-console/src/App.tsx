@@ -147,7 +147,12 @@ function ConsoleShell() {
       }}>{t("app.skipToMain")}</a>
       <ConsoleNavigation route={location.route} />
       <div className="workspace">
-        <RuntimeStrip mode={dashboard.data?.runtime_mode} status={runtimeStatus} storeAvailable={dashboard.data?.store_status?.available} />
+        <RuntimeStrip
+          health={dashboard.data?.health_issue_summary}
+          mode={dashboard.data?.runtime_mode}
+          status={runtimeStatus}
+          storeAvailable={dashboard.data?.store_status?.available}
+        />
         <main className="main-surface" id="console-main" ref={main} tabIndex={-1}>
           {/*
             Keyed so each destination mounts fresh and fades in. There is no
@@ -289,16 +294,27 @@ function ConsoleNavigation({ route }: { route: RouteKey }) {
 
 type RuntimeReading = { label: string; value: string; tone: Tone; href?: string };
 
-function RuntimeStrip({ mode, status, storeAvailable }: {
+function RuntimeStrip({ health, mode, status, storeAvailable }: {
+  health: DashboardSnapshot["health_issue_summary"];
   mode: DashboardSnapshot["runtime_mode"];
   status: RuntimeReading[];
   storeAvailable?: boolean;
 }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
+  const issueReading: RuntimeReading | undefined = health?.open_issue_count ? {
+    label: t("runtime.health"),
+    value: t("runtime.openIssues", { count: health.open_issue_count }),
+    tone: health.highest_severity === "critical" || health.highest_severity === "error" ? "danger" : "warning",
+    href: "#health"
+  } : undefined;
   const primary: RuntimeReading = storeAvailable === false
     ? { label: t("health.storage"), value: enumLabel(t, "status", "unavailable"), tone: "danger", href: "#health" }
-    : status.find((item) => item.href && item.tone === "danger") ?? status.find((item) => item.href) ?? status[3];
+    : status.find((item) => item.href && item.tone === "danger")
+      ?? (issueReading?.tone === "danger" ? issueReading : undefined)
+      ?? status.find((item) => item.href)
+      ?? issueReading
+      ?? status[3];
   return (
     <header aria-label={t("app.runtime")} className="runtime-strip floating-surface">
       <GlassLens />

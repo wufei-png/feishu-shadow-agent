@@ -51,6 +51,21 @@ describe("dashboard attention navigation", () => {
     expect(await screen.findByText("本地预演")).toBeTruthy();
   });
 
+  it("surfaces an open health issue even when routine runtime readings are synced", async () => {
+    vi.mocked(getDashboard).mockResolvedValueOnce({
+      runtime_mode: "dry_run",
+      daemon_liveness: { status: "live" },
+      policy_status: { initialized: true, policy_import_diff: { status: "matches" } },
+      health_issue_summary: { highest_severity: "error", open_issue_count: 1 }
+    });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><App /></QueryClientProvider>);
+
+    expect((await screen.findByRole("link", { name: "1 项异常" })).getAttribute("href")).toBe("#health");
+    await userEvent.setup().click(screen.getByRole("button", { name: "运行状态" }));
+    expect(screen.getByText("已同步")).toBeTruthy();
+  });
+
   it("preserves the requested list view in the URL and destination", async () => {
     const user = userEvent.setup();
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });

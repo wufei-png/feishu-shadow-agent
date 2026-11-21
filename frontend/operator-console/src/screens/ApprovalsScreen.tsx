@@ -26,6 +26,7 @@ import {
   TechnicalDetails,
   TextareaField
 } from "../components/Primitives";
+import { useWorkbenchNavigation } from "../components/useWorkbenchNavigation";
 import { invalidateAfterApprovalCommand, invalidateAfterMaintenanceCommand, queryKeys, type ApprovalFilter } from "../queryKeys";
 import { panelTransition, panelVariants } from "../motionTokens";
 import { enumLabel } from "../presentation";
@@ -55,12 +56,12 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
   const [filter, setFilter] = useState<ApprovalFilter>("pending");
   const [page, setPage] = useState(0);
   const [openedApprovalId, setOpenedApprovalId] = useState(selectedId);
+  const { heading, rememberPosition } = useWorkbenchNavigation(openedApprovalId ? "detail" : "list", "(max-width: 900px)");
   const [drafts, setDrafts] = useState<Record<string, ApprovalDraft>>({});
   const [commandResults, setCommandResults] = useState<Record<string, CommandResult>>({});
   const [expiryReason, setExpiryReason] = useState("");
   const busyApprovalIdsRef = useRef(new Set<string>());
   const [busyApprovalIds, setBusyApprovalIds] = useState<Set<string>>(new Set());
-  const heading = useRef<HTMLHeadingElement>(null);
   const approvals = useQuery({
     queryKey: queryKeys.approvals({ status: approvalStatuses(filter), limit: pageSize + 1, offset: page * pageSize }),
     queryFn: () => listApprovalsForFilter(token, filter, page),
@@ -89,12 +90,6 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
   useEffect(() => {
     setOpenedApprovalId(selectedId);
   }, [selectedId]);
-
-  useEffect(() => {
-    if (window.matchMedia?.("(max-width: 900px)").matches) {
-      heading.current?.focus();
-    }
-  }, [openedApprovalId]);
 
   const approvalCommand = useMutation({
     mutationFn: (input: ApprovalCommandInput) => {
@@ -262,7 +257,10 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
                       badge={<Badge tone={approval.is_overdue ? "danger" : statusTone(approval.status)}>{approval.is_overdue ? t("approvals.overdue") : enumLabel(t, "status", approval.status)}</Badge>}
                       key={approval.approval_id}
                       meta={`${enumLabel(t, "kind", approval.kind)} · ${approval.task_short_id ?? t("common.notLinked")} · ${formatDate(approval.created_at)}`}
-                      onClick={() => openApproval(approval.approval_id)}
+                      onClick={(event) => {
+                        rememberPosition(event.currentTarget, "list");
+                        openApproval(approval.approval_id);
+                      }}
                       selected={approval.approval_id === selectedApprovalId}
                       title={shortText(approval.preview, approval.task_short_id ?? t("approvals.noApprovalPreview"))}
                     >

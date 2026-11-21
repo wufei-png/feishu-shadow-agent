@@ -241,6 +241,12 @@
   transform: none;
 }
 
+.main-surface:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: -2px;
+  border-radius: var(--radius-panel);
+}
+
 .runtime-item {
   gap: 5px;
   min-width: 0;
