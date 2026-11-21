@@ -734,8 +734,7 @@ dd {
 }
 
 .toggle-field,
-.select-field,
-.settings-field {
+.select-field {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-small);
   background: var(--surface-raised);
@@ -899,8 +898,7 @@ dd {
   overflow-wrap: anywhere;
 }
 
-.audit-list > li,
-.settings-field {
+.audit-list > li {
   padding: 14px;
 }
 
@@ -1137,6 +1135,11 @@ dd {
   font-size: var(--text-label);
 }
 
+.settings-catalog-state,
+.settings-toolbar > .empty-state {
+  grid-column: 1 / -1;
+}
+
 .settings-catalog-heading h2 {
   margin: 0;
   color: var(--text-primary);
@@ -1189,7 +1192,9 @@ dd {
 
 .settings-field {
   display: grid;
-  gap: 10px;
+  gap: 6px;
+  padding: 8px 0 10px;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .settings-field-head {
@@ -1255,8 +1260,7 @@ dd {
 }
 
 .settings-technical-details {
-  padding-top: 8px;
-  border-top: 1px solid var(--border-subtle);
+  min-width: 0;
 }
 
 .settings-technical-details summary {

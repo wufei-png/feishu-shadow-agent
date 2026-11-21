@@ -7,12 +7,11 @@ import { AnimatePresence, m } from "motion/react";
 import { useTranslation } from "react-i18next";
 import { getSettingsCatalog, getSettingsRuntime } from "../api";
 import {
-  Badge,
+  Button,
   EmptyState,
   ErrorState,
   Fact,
   FieldList,
-  HelpTooltip,
   LoadingState,
   SegmentedControl
 } from "../components/Primitives";
@@ -85,63 +84,68 @@ export function SettingsScreen({ token }: { token: string }) {
     }
   }, [activeGroup, grouped, search]);
 
-  if (catalog.isLoading || runtime.isLoading) {
-    return <LoadingState title={t("settings.loading")} />;
-  }
-  if (catalog.error) {
-    return <ErrorState title={t("settings.catalogError")} error={catalog.error} />;
-  }
-  if (runtime.error) {
-    return <ErrorState title={t("settings.runtimeError")} error={runtime.error} />;
-  }
-  if (!catalog.data || !runtime.data) {
-    return <EmptyState title={t("settings.unavailable")} detail={t("settings.unavailableDetail")} />;
-  }
-
   return (
     <section className="settings-screen" aria-label={t("settings.aria")}>
-      <h1>{t("settings.title")}</h1>
+      <header className="workbench-header">
+        <h1>{t("settings.title")}</h1>
+        <a className="button" href="#settings/catalog">{t("settings.catalogTitle")}</a>
+      </header>
 
       <SettingsPreferences />
 
-      <section aria-labelledby="settings-catalog-title" className="settings-toolbar queue-panel">
+      <section aria-labelledby="settings/catalog" className="settings-toolbar queue-panel">
         <div className="settings-catalog-heading">
-          <h2 id="settings-catalog-title">{t("settings.catalogTitle")}</h2>
-          <span>{t("settings.itemCount", { count: visibleEntries.length })}</span>
+          <h2 id="settings/catalog" tabIndex={-1}>{t("settings.catalogTitle")}</h2>
+          {catalog.data ? <span>{t("settings.itemCount", { count: visibleEntries.length })}</span> : null}
         </div>
-        <SegmentedControl
-          label={t("settings.groupLabel")}
-          onChange={setActiveGroup}
-          options={settingsGroups.map((group) => ({ value: group, label: `${t(groupLabels[group].labelKey)} (${grouped[group].length})` }))}
-          value={activeGroup}
-        />
-        <label className="settings-search">
-          <span>{t("settings.searchLabel")}</span>
-          <span className="settings-search-input">
-            <Search aria-hidden="true" size={15} />
-            <input onChange={(event) => setSearch(event.target.value)} placeholder={t("settings.searchPlaceholder")} type="search" value={search} />
-          </span>
-        </label>
+        {catalog.isLoading ? <LoadingState title={t("settings.loading")} /> : null}
+        {catalog.error ? (
+          <div className="settings-catalog-state">
+            <ErrorState title={t("settings.catalogError")} error={catalog.error} />
+            <Button disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>{t("settings.retryCatalog")}</Button>
+          </div>
+        ) : null}
+        {catalog.data ? (
+          <>
+            <SegmentedControl
+              label={t("settings.groupLabel")}
+              onChange={setActiveGroup}
+              options={settingsGroups.map((group) => ({ value: group, label: `${t(groupLabels[group].labelKey)} (${grouped[group].length})` }))}
+              value={activeGroup}
+            />
+            <label className="settings-search">
+              <span>{t("settings.searchLabel")}</span>
+              <span className="settings-search-input">
+                <Search aria-hidden="true" size={15} />
+                <input onChange={(event) => setSearch(event.target.value)} placeholder={t("settings.searchPlaceholder")} type="search" value={search} />
+              </span>
+            </label>
+          </>
+        ) : null}
       </section>
 
-      <div className="settings-groups">
-        {/*
-          Cross-fade between groups: the outgoing group clears first so the two
-          field grids never overlap and reflow against each other.
-        */}
-        <AnimatePresence initial={false} mode="wait">
-          <m.div
-            animate="visible"
-            exit="exit"
-            initial="hidden"
-            key={activeGroup}
-            transition={groupTransition}
-            variants={groupVariants}
-          >
-            <SettingsCatalogSection entries={grouped[activeGroup]} group={activeGroup} runtime={runtime.data} />
-          </m.div>
-        </AnimatePresence>
-      </div>
+      {catalog.data ? (
+        <div className="settings-groups">
+          {runtime.error ? (
+            <div className="settings-catalog-state">
+              <ErrorState title={t("settings.runtimeError")} error={runtime.error} />
+              <Button disabled={runtime.isFetching} onClick={() => void runtime.refetch()}>{t("settings.retryRuntime")}</Button>
+            </div>
+          ) : null}
+          <AnimatePresence initial={false} mode="wait">
+            <m.div
+              animate="visible"
+              exit="exit"
+              initial="hidden"
+              key={activeGroup}
+              transition={groupTransition}
+              variants={groupVariants}
+            >
+              <SettingsCatalogSection entries={grouped[activeGroup]} group={activeGroup} runtime={runtime.data} />
+            </m.div>
+          </AnimatePresence>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -249,7 +253,7 @@ function SettingsCatalogSection({
 }: {
   entries: SettingsCatalogEntry[];
   group: SettingsGroup;
-  runtime: SettingsRuntime;
+  runtime?: SettingsRuntime;
 }) {
   const { t } = useTranslation();
   const meta = groupLabels[group];
@@ -273,9 +277,9 @@ function SettingsCatalogSection({
   );
 }
 
-function SettingsField({ entry, runtime }: { entry: SettingsCatalogEntry; runtime: SettingsRuntime }) {
+function SettingsField({ entry, runtime }: { entry: SettingsCatalogEntry; runtime?: SettingsRuntime }) {
   const { t } = useTranslation();
-  const value = settingValue(t, entry, runtime);
+  const value = runtime ? formatSettingValue(t, settingValue(t, entry, runtime)) : t("common.unknown");
   const readonlyReason = readonlyNote(t, entry);
   const label = catalogText(t, entry, "label");
   const description = catalogText(t, entry, "description");
@@ -283,31 +287,23 @@ function SettingsField({ entry, runtime }: { entry: SettingsCatalogEntry; runtim
   return (
     <article className="settings-field">
       <div className="settings-field-head">
-        <span className="field-label-row">
+        <div className="settings-current-value">
           <h3>{label}</h3>
-          <HelpTooltip label={t("settings.helpFor", { label })}>
-            <span>{description}</span>
-            {help ? <><br />{help}</> : null}
-          </HelpTooltip>
-        </span>
+          <strong aria-label={t("settings.currentValue")}>{value}</strong>
+        </div>
         {isPolicyOwned(entry) ? (
-          // A card whose only content is "edit this elsewhere" is a dead end, so
-          // the badge becomes the route to the screen that owns the write path.
           <a className="settings-field-link" href="#policy">
             {t("settings.editPolicy")}
             <ArrowUpRight aria-hidden="true" size={13} />
           </a>
-        ) : (
-          <Badge tone={entry.editable_v1 ? "info" : "muted"}>{editableLabel(t, entry)}</Badge>
-        )}
-      </div>
-      <div className="settings-current-value">
-        <span>{t("settings.currentValue")}</span>
-        <strong>{formatSettingValue(t, value)}</strong>
+        ) : null}
       </div>
       <details className="settings-technical-details">
         <summary>{t("settings.technicalDetails")}</summary>
+        <p className="detail-note">{description}</p>
+        {help ? <p className="detail-note">{help}</p> : null}
         <FieldList>
+          {!isPolicyOwned(entry) ? <Fact label={t("settings.writeAccess")} value={editableLabel(t, entry)} /> : null}
           <Fact label={t("settings.settingKey")} value={entry.key} />
           <Fact label={t("settings.source")} value={enumLabel(t, "source", entry.source)} />
           <Fact label={t("settings.scope")} value={entry.scope} />

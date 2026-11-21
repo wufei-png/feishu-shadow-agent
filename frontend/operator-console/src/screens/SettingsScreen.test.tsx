@@ -51,6 +51,23 @@ function renderSettings(overrides: { entries?: SettingsCatalogEntry[]; runtime?:
 }
 
 describe("SettingsScreen", () => {
+  it("keeps appearance and language usable when the catalog fails and retries the catalog alone", async () => {
+    vi.mocked(api.getSettingsCatalog).mockRejectedValueOnce(new Error("503"));
+    const user = userEvent.setup();
+    renderSettings();
+
+    await screen.findByRole("heading", { name: "无法读取设置目录" });
+    await user.click(screen.getByRole("button", { name: "石墨实底" }));
+    expect(document.documentElement.dataset.material).toBe("solid");
+    await user.click(screen.getByRole("button", { name: "English" }));
+    await user.click(await screen.findByRole("button", { name: "Retry catalog" }));
+
+    await screen.findByRole("searchbox");
+    expect(api.getSettingsCatalog).toHaveBeenCalledTimes(2);
+    expect(api.getSettingsRuntime).toHaveBeenCalledTimes(1);
+    expect(document.documentElement.dataset.material).toBe("solid");
+  });
+
   it("shows one group, searches localized catalog copy, and reveals technical details on demand", async () => {
     const user = userEvent.setup();
     renderSettings();
