@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, MessageSquareText, Send } from "lucide-react";
+import { ArrowLeft, Send } from "lucide-react";
 import { m } from "motion/react";
 import { failedCommandResult } from "../commandResult";
 import { useTranslation } from "react-i18next";
@@ -10,6 +10,7 @@ import {
   Badge,
   Button,
   CommandResultPanel,
+  ConfirmButton,
   CopyValue,
   EmptyState,
   ErrorState,
@@ -56,6 +57,7 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
   const [openedApprovalId, setOpenedApprovalId] = useState(selectedId);
   const [drafts, setDrafts] = useState<Record<string, ApprovalDraft>>({});
   const [commandResults, setCommandResults] = useState<Record<string, CommandResult>>({});
+  const [expiryReason, setExpiryReason] = useState("");
   const busyApprovalIdsRef = useRef(new Set<string>());
   const [busyApprovalIds, setBusyApprovalIds] = useState<Set<string>>(new Set());
   const heading = useRef<HTMLHeadingElement>(null);
@@ -131,22 +133,15 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
     }
   });
   const expire = useMutation({
-    mutationFn: (input: { approvalId: string | null; reason?: string }) => expireApprovals(token, { reason: input.reason }),
-    onSuccess: async (result, input) => {
-      if (input.approvalId) {
-        setCommandResults((current) => ({ ...current, [input.approvalId as string]: result }));
-      }
+    mutationFn: (reason?: string) => expireApprovals(token, { reason }),
+    onSuccess: async () => {
       await invalidateAfterMaintenanceCommand(queryClient);
-    },
-    onError: (error, input) => {
-      if (input.approvalId) {
-        setCommandResults((current) => ({
-          ...current,
-          [input.approvalId as string]: failedCommandResult("maintenance.expire_approvals", error, t("common.requestFailed"))
-        }));
-      }
     }
   });
+  const expiryResult = expire.data ?? (expire.error
+    ? failedCommandResult("maintenance.expire_approvals", expire.error, t("common.requestFailed"))
+    : null);
+  const expiredCount = expiryResult?.result.expired_approvals;
   const selectedDraft = selectedApprovalId ? (drafts[selectedApprovalId] ?? emptyDraft) : emptyDraft;
   const selectedCommandResult = selectedApprovalId ? (commandResults[selectedApprovalId] ?? null) : null;
   const selectedApprovalBusy = selectedApprovalId ? busyApprovalIds.has(selectedApprovalId) : false;
@@ -215,17 +210,37 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
 
       <div className="approval-layout">
         <section aria-label={t("approvals.title")} className="queue-panel approval-queue">
-          <SegmentedControl
-            label={t("approvals.filterLabel")}
-            onChange={(nextFilter) => {
-              setFilter(nextFilter);
-              setPage(0);
-            }}
-            options={approvalFilters}
-            value={filter}
-          />
+          <div className="approval-queue-toolbar">
+            <SegmentedControl
+              label={t("approvals.filterLabel")}
+              onChange={(nextFilter) => {
+                setFilter(nextFilter);
+                setPage(0);
+              }}
+              options={approvalFilters}
+              value={filter}
+            />
+            <ConfirmButton
+              confirmLabel={t("approvals.expireScope")}
+              disabled={expire.isPending || busyApprovalIds.size > 0}
+              onConfirm={() => expire.mutate(clean(expiryReason))}
+              tone="warning"
+            >
+              {t("approvals.expire")}
+            </ConfirmButton>
+          </div>
+          <TechnicalDetails summary={t("approvals.expiryReason")}>
+            <TextareaField label={t("approvals.expiryReason")} onChange={setExpiryReason} rows={2} value={expiryReason} />
+          </TechnicalDetails>
+          {typeof expiredCount === "number" ? <p className="detail-note" role="status">{t("approvals.expiredCount", { count: expiredCount })}</p> : null}
+          <CommandResultPanel result={expiryResult} />
           {approvals.isLoading ? <LoadingState title={t("approvals.loading")} /> : null}
-          {approvals.error && !approvals.data ? <ErrorState title={t("approvals.unavailable")} error={approvals.error} /> : null}
+          {approvals.error && !approvals.data ? (
+            <div>
+              <ErrorState title={t("approvals.unavailable")} error={approvals.error} />
+              <Button onClick={() => void approvals.refetch()}>{t("common.refresh")}</Button>
+            </div>
+          ) : null}
           {approvals.data ? (
             <>
               <QueueControls
@@ -249,9 +264,8 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
                       meta={`${enumLabel(t, "kind", approval.kind)} · ${approval.task_short_id ?? t("common.notLinked")} · ${formatDate(approval.created_at)}`}
                       onClick={() => openApproval(approval.approval_id)}
                       selected={approval.approval_id === selectedApprovalId}
-                      title={approval.approval_id}
+                      title={shortText(approval.preview, approval.task_short_id ?? t("approvals.noApprovalPreview"))}
                     >
-                      <span className="row-preview">{shortText(approval.preview)}</span>
                       {postprocessBadge(approval) ? (
                         <span className="inline-badges row-actions">
                           <Badge tone={approval.postprocess_status === "needs_owner" ? "warning" : "danger"}>
@@ -278,12 +292,17 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
           variants={panelVariants}
         >
           {selectedApprovalId && detail.isLoading ? <LoadingState title={t("approvals.detailLoading")} /> : null}
-          {detail.error ? <ErrorState title={t("approvals.detailUnavailable")} error={detail.error} /> : null}
+          {detail.error ? (
+            <div>
+              <ErrorState title={t("approvals.detailUnavailable")} error={detail.error} />
+              <Button onClick={() => void detail.refetch()}>{t("common.refresh")}</Button>
+            </div>
+          ) : null}
           {detail.data ? (
             <article className="detail-panel approval-review">
               <div className="approval-review-heading">
                 <div>
-                  <h2><CopyValue label={t("approvals.approvalId")} value={detail.data.approval_id} /></h2>
+                  <h2>{t("approvals.suggestedReply")}</h2>
                   <p className="detail-note">{t("approvals.reviewWindow", { time: formatDate(detail.data.expires_at) })}</p>
                 </div>
                 <Badge tone={detail.data.is_overdue ? "danger" : statusTone(detail.data.status)}>
@@ -292,7 +311,6 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
               </div>
 
               <section className="approval-section">
-                <h3>{t("approvals.suggestedReply")}</h3>
                 <p className="approval-reply">{suggestedReply?.trim() ? suggestedReply : t("approvals.noApprovalPreview")}</p>
                 {approvalPostprocess ? (
                   <div className="approval-postprocess">
@@ -311,7 +329,7 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
               <section className="approval-section approval-destination">
                 <h3>{t("approvals.destination")}</h3>
                 <FieldList>
-                  <Fact label={t("approvals.replyTarget")} value={replyTarget(detail.data.payload) ?? t("common.notRecorded")} />
+                  <Fact label={t("approvals.linkedTask")} value={taskId ? <a href={`#tasks/${encodeURIComponent(taskId)}`}>{task.data?.task_label || taskId}</a> : t("common.notLinked")} />
                   <Fact label={t("approvals.replyLocation")} value={chosenLocation ? t(chosenLocation === "thread" ? "approvals.locationThread" : "approvals.locationMain") : t("approvals.locationUnconfirmed")} />
                 </FieldList>
                 {!existingLocation && locationChoices.length ? (
@@ -328,6 +346,8 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
                 {!existingLocation && !locationChoices.length ? <p className="detail-note">{t("approvals.locationUnavailable")}</p> : null}
                 <TechnicalDetails>
                   <FieldList>
+                    <Fact label={t("approvals.approvalId")} value={<CopyValue label={t("approvals.approvalId")} value={detail.data.approval_id} />} />
+                    <Fact label={t("approvals.replyTarget")} value={replyTarget(detail.data.payload) ?? t("common.notRecorded")} />
                     <Fact label={t("approvals.linkedTask")} value={taskId ?? t("common.notLinked")} />
                     <Fact label={t("approvals.createdAt")} value={formatDate(detail.data.created_at)} />
                     <Fact label={t("approvals.recommendedAction")} value={enumLabel(t, "action", detail.data.recommended_action)} />
@@ -345,12 +365,7 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
               </section>
 
               {taskId ? (
-                <section className="approval-section approval-context">
-                  <div className="subsection-title">
-                    <MessageSquareText aria-hidden="true" size={16} />
-                    <h3>{t("approvals.relatedMessages")}</h3>
-                    <a className="approval-task-link" href={`#tasks/${encodeURIComponent(taskId)}`}>{t("approvals.openTask")}</a>
-                  </div>
+                <TechnicalDetails summary={t("approvals.relatedMessages")}>
                   {task.isLoading ? <p className="detail-note">{t("approvals.taskContextLoading")}</p> : null}
                   {task.error ? <p className="detail-note danger">{t("approvals.taskContextUnavailable")}</p> : null}
                   {task.data?.recent_messages.length ? (
@@ -363,7 +378,7 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
                       ))}
                     </ul>
                   ) : task.data ? <p className="detail-note">{t("approvals.noRelatedMessages")}</p> : null}
-                </section>
+                </TechnicalDetails>
               ) : null}
 
               <section className="approval-section approval-operations">
@@ -390,13 +405,6 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
                   >
                     {t("approvals.reject")}
                   </Button>
-                  <Button
-                    disabled={expire.isPending || busyApprovalIds.size > 0}
-                    onClick={() => expire.mutate({ approvalId: selectedApprovalId, reason: clean(selectedDraft.reason) })}
-                    tone="warning"
-                  >
-                    {t("approvals.expire")}
-                  </Button>
                 </div>
                 <TextareaField
                   label={t("approvals.finalReply")}
@@ -418,8 +426,6 @@ export function ApprovalsScreen({ token, selectedId }: { token: string; selected
                 <CommandResultPanel result={selectedCommandResult} />
               </section>
             </article>
-          ) : !selectedApprovalId ? (
-            <EmptyState title={t("approvals.selectTitle")} detail={t("approvals.selectDetail")} />
           ) : null}
         </m.div>
       </div>

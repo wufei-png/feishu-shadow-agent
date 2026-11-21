@@ -266,6 +266,9 @@ Rules:
 
 - Overdue pending approvals remain pending in the read model until explicit
   expiry.
+- The approval queue toolbar expires every overdue pending approval across
+  filters and pages. It states the scope before execution and shows the count
+  returned by the command beside the toolbar.
 - Approve/reject/send must use `OperatorCommandService`.
 - `send final reply` must preserve user input on failure.
 - If a task has multiple pending approvals, conflict output should be shown as a

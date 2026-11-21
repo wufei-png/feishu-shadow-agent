@@ -307,6 +307,13 @@
   display: none;
 }
 
+.approval-queue-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
 .approval-review {
   padding: clamp(16px, 2.1vw, 28px);
 }

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../api";
@@ -48,12 +48,12 @@ describe("ApprovalsScreen", () => {
   it("keeps drafts isolated by approval while switching", async () => {
     const user = userEvent.setup();
     renderScreen();
-    await screen.findByRole("heading", { name: approvalA.approval_id });
+    await screen.findByText(approvalA.preview ?? "", { selector: ".approval-reply" });
 
     await user.type(screen.getByLabelText("原因"), "reason for A");
     await user.type(screen.getByLabelText("最终回复"), "reply for A");
     await user.click(screen.getByRole("button", { name: new RegExp(approvalB.approval_id) }));
-    await screen.findByRole("heading", { name: approvalB.approval_id });
+    await screen.findByText(approvalB.preview ?? "", { selector: ".approval-reply" });
 
     expect(window.location.hash).toBe(`#approvals/${approvalB.approval_id}`);
     expect((screen.getByLabelText("原因") as HTMLTextAreaElement).value).toBe("");
@@ -61,7 +61,7 @@ describe("ApprovalsScreen", () => {
     await user.type(screen.getByLabelText("原因"), "reason for B");
     await user.type(screen.getByLabelText("最终回复"), "reply for B");
     await user.click(screen.getByRole("button", { name: new RegExp(approvalA.approval_id) }));
-    await screen.findByRole("heading", { name: approvalA.approval_id });
+    await screen.findByText(approvalA.preview ?? "", { selector: ".approval-reply" });
 
     expect((screen.getByLabelText("原因") as HTMLTextAreaElement).value).toBe("reason for A");
     expect((screen.getByLabelText("最终回复") as HTMLTextAreaElement).value).toBe("reply for A");
@@ -72,7 +72,7 @@ describe("ApprovalsScreen", () => {
     vi.mocked(api.approveApproval).mockReturnValue(pending.promise);
     const user = userEvent.setup();
     renderScreen();
-    await screen.findByRole("heading", { name: approvalA.approval_id });
+    await screen.findByText(approvalA.preview ?? "", { selector: ".approval-reply" });
     await user.type(screen.getByLabelText("原因"), "checked A");
 
     await user.dblClick(screen.getByRole("button", { name: "批准" }));
@@ -89,7 +89,7 @@ describe("ApprovalsScreen", () => {
     expect((screen.getByRole("button", { name: "发送最终回复" }) as HTMLButtonElement).disabled).toBe(true);
 
     await user.click(screen.getByRole("button", { name: new RegExp(approvalB.approval_id) }));
-    await screen.findByRole("heading", { name: approvalB.approval_id });
+    await screen.findByText(approvalB.preview ?? "", { selector: ".approval-reply" });
     pending.resolve(commandResult("approval.approve", "result-for-A"));
     await waitFor(() => expect(screen.queryByText(/result-for-A/)).toBeNull());
 
@@ -100,14 +100,14 @@ describe("ApprovalsScreen", () => {
   it("keeps a deep-linked detail selected when it is outside the current page", async () => {
     renderScreen(deepLinkedApproval.approval_id);
 
-    await screen.findByRole("heading", { name: deepLinkedApproval.approval_id });
+    await screen.findByText(deepLinkedApproval.preview ?? "", { selector: ".approval-reply" });
     expect(api.getApproval).toHaveBeenCalledWith("token", deepLinkedApproval.approval_id);
   });
 
   it("returns to the queue and reopens the approval with its draft", async () => {
     const user = userEvent.setup();
     renderScreen();
-    await screen.findByRole("heading", { name: approvalA.approval_id });
+    await screen.findByText(approvalA.preview ?? "", { selector: ".approval-reply" });
     await user.type(screen.getByLabelText("最终回复"), "draft to keep");
 
     await user.click(screen.getByRole("button", { name: "返回队列" }));
@@ -129,7 +129,7 @@ describe("ApprovalsScreen", () => {
     });
     const user = userEvent.setup();
     renderScreen();
-    await screen.findByRole("heading", { name: approvalA.approval_id });
+    await screen.findByText(approvalA.preview ?? "", { selector: ".approval-reply" });
     expect(screen.getByText("om_root")).toBeTruthy();
     expect(screen.getByText("未确认")).toBeTruthy();
     await user.type(screen.getByLabelText("最终回复"), "owner reply");
@@ -168,6 +168,25 @@ describe("ApprovalsScreen", () => {
     await waitFor(() => {
       expect(api.listApprovals).toHaveBeenCalledWith("token", { status: "expired", limit: 51, offset: 0 });
     });
+  });
+
+  it("expires the entire queue and reports the server count beside the queue controls", async () => {
+    vi.mocked(api.expireApprovals).mockResolvedValue({
+      ...commandResult("maintenance.expire_approvals"),
+      result: { expired_approvals: 3 }
+    });
+    const user = userEvent.setup();
+    renderScreen();
+    const queue = screen.getByRole("region", { name: "审批队列" });
+    await screen.findByText(approvalA.preview ?? "", { selector: ".approval-reply" });
+    await user.click(within(queue).getByRole("button", { name: "已处理" }));
+    await user.click(within(queue).getByRole("button", { name: "批量标记超时审批" }));
+
+    expect(within(queue).getByText(/当前筛选和分页之外/)).toBeTruthy();
+    expect(api.expireApprovals).not.toHaveBeenCalled();
+    await user.click(within(queue).getByRole("button", { name: "确认执行" }));
+    expect(api.expireApprovals).toHaveBeenCalledWith("token", { reason: undefined });
+    expect(await within(queue).findByText("已标记 3 条超时审批")).toBeTruthy();
   });
 });
 
