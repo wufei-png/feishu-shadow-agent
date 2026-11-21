@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { RotateCcw, Send, ShieldCheck, XCircle } from "lucide-react";
+import { ArrowLeft, RotateCcw, Send, ShieldCheck, XCircle } from "lucide-react";
 import { m } from "motion/react";
 import { useTranslation } from "react-i18next";
 import { cancelDispatchAction, getDispatchAction, listDispatchActions, markDispatchSent, retryDispatchAction } from "../api";
@@ -18,7 +18,6 @@ import {
   ListRow,
   LoadingState,
   QueueControls,
-  SectionHeader,
   SegmentedControl,
   shortText,
   statusTone,
@@ -26,6 +25,7 @@ import {
   TextareaField,
   TextField
 } from "../components/Primitives";
+import { useWorkbenchNavigation } from "../components/useWorkbenchNavigation";
 import { invalidateAfterDispatchCommand, queryKeys } from "../queryKeys";
 import { panelTransition, panelVariants } from "../motionTokens";
 import { enumLabel } from "../presentation";
@@ -51,9 +51,11 @@ const pageSize = 50;
 export function DispatchScreen({ token, selectedId, initialFilter }: { token: string; selectedId: string | null; initialFilter?: DispatchFilter }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
-  const [filter, setFilter] = useState<DispatchFilter>(initialFilter ?? "failed_needs_review");
+  const [filter, setFilter] = useState<DispatchFilter>(initialFilter ?? (selectedId ? "all" : "failed_needs_review"));
   const [page, setPage] = useState(0);
-  const [selectedActionId, setSelectedActionId] = useState<number | null>(numberOrNull(selectedId));
+  const [openedActionId, setOpenedActionId] = useState(numberOrNull(selectedId));
+  const pane = openedActionId === null ? "list" : "detail";
+  const { heading, rememberPosition } = useWorkbenchNavigation(pane);
   const [drafts, setDrafts] = useState<Record<number, DispatchDraft>>({});
   const [commandResults, setCommandResults] = useState<Record<number, CommandResult>>({});
   const busyActionIdsRef = useRef(new Set<number>());
@@ -65,6 +67,7 @@ export function DispatchScreen({ token, selectedId, initialFilter }: { token: st
     refetchInterval: 15_000
   });
   const rows = useMemo(() => (actions.data ?? []).slice(0, pageSize), [actions.data]);
+  const selectedActionId = openedActionId ?? rows[0]?.action_id ?? null;
   const hasNextPage = (actions.data?.length ?? 0) > pageSize;
   const detail = useQuery({
     queryKey: queryKeys.dispatchAction(selectedActionId),
@@ -74,29 +77,22 @@ export function DispatchScreen({ token, selectedId, initialFilter }: { token: st
   });
 
   useEffect(() => {
-    setFilter(initialFilter ?? "failed_needs_review");
-    setPage(0);
+    if (initialFilter) {
+      setFilter(initialFilter);
+      setPage(0);
+    }
   }, [initialFilter]);
 
   useEffect(() => {
-    const routeActionId = numberOrNull(selectedId);
-    setSelectedActionId(routeActionId);
-    if (routeActionId !== null) {
-      setFilter("all");
-    }
+    setOpenedActionId(numberOrNull(selectedId));
   }, [selectedId]);
 
-  useEffect(() => {
-    if (selectedId) {
-      return;
-    }
-    if (selectedActionId === null && rows[0]) {
-      setSelectedActionId(rows[0].action_id);
-    }
-    if (selectedActionId !== null && rows.length && !rows.some((action) => action.action_id === selectedActionId)) {
-      setSelectedActionId(rows[0].action_id);
-    }
-  }, [rows, selectedActionId, selectedId]);
+  function openAction(actionId: number | null): void {
+    setOpenedActionId(actionId);
+    const query = window.location.hash.split("?")[1];
+    const path = actionId === null ? "dispatch" : `dispatch/${actionId}`;
+    window.location.hash = query ? `${path}?${query}` : path;
+  }
 
   const dispatchCommand = useMutation({
     mutationFn: (input: DispatchCommandInput) => {
@@ -129,16 +125,18 @@ export function DispatchScreen({ token, selectedId, initialFilter }: { token: st
   const selectedDraft = selectedActionId === null ? emptyDraft : (drafts[selectedActionId] ?? emptyDraft);
   const commandResult = selectedActionId === null ? null : (commandResults[selectedActionId] ?? null);
   const selectedActionBusy = selectedActionId === null ? false : busyActionIds.has(selectedActionId);
-  const dispatchFilters: Array<{ value: DispatchFilter; label: string }> = [
-    { value: "attention", label: t("dispatch.filters.attention") },
-    { value: "failed_needs_review", label: t("dispatch.filters.failed_needs_review") },
-    { value: "failed", label: t("dispatch.filters.failed") },
-    { value: "sending", label: t("dispatch.filters.sending") },
-    { value: "pending", label: t("dispatch.filters.pending") },
-    { value: "sent", label: t("dispatch.filters.sent") },
-    { value: "cancelled", label: t("dispatch.filters.cancelled") },
-    { value: "all", label: t("dispatch.filters.all") }
-  ];
+  const action = detail.data?.action;
+  const postprocess = action ? postprocessInfo(action.payload) : null;
+  const recommendations = detail.data?.recommended_actions ?? [];
+  const canRetry = hasRecommendedCommand(recommendations, "dispatch retry");
+  const canCancel = hasRecommendedCommand(recommendations, "dispatch cancel");
+  const canMarkSent = hasRecommendedCommand(recommendations, "dispatch mark-sent");
+  const mainFilters: DispatchFilter[] = ["failed_needs_review", "failed", "all"];
+  const moreFilters: DispatchFilter[] = ["attention", "sending", "pending", "sent", "cancelled"];
+  const changeFilter = (next: DispatchFilter) => {
+    setFilter(next);
+    setPage(0);
+  };
 
   function updateDraft(change: Partial<DispatchDraft>): void {
     if (selectedActionId === null) {
@@ -165,211 +163,209 @@ export function DispatchScreen({ token, selectedId, initialFilter }: { token: st
     });
   }
 
-  if (actions.isLoading) {
-    return <LoadingState title={t("dispatch.loading")} />;
-  }
-  if (actions.error && !actions.data) {
-    return <ErrorState title={t("dispatch.unavailable")} error={actions.error} />;
-  }
-
   return (
-    <section className="work-grid" aria-label={t("dispatch.aria")}>
-      <div className="work-main">
-        <div className="queue-panel">
-          <SectionHeader
-            title={t("dispatch.title")}
-            badge={<Badge tone={rows.length ? "warning" : "success"}>{rows.length}</Badge>}
-          />
-          <SegmentedControl
-            label={t("dispatch.filterLabel")}
-            onChange={(nextFilter) => {
-              setFilter(nextFilter);
-              setPage(0);
-            }}
-            options={dispatchFilters}
-            value={filter}
-          />
-          <QueueControls
-            error={actions.error}
-            isFetching={actions.isFetching}
-            onRefresh={() => void actions.refetch()}
-            pagination={{
-              page,
-              hasNext: hasNextPage,
-              onNext: () => setPage((current) => current + 1),
-              onPrevious: () => setPage((current) => Math.max(0, current - 1))
-            }}
-            updatedAt={actions.dataUpdatedAt}
-          />
-          {rows.length ? (
-            <div className="list-stack">
-              {rows.map((action) => (
-                <ListRow
-                  badge={<Badge tone={statusTone(action.status)}>{enumLabel(t, "status", action.status)}</Badge>}
-                  key={action.action_id}
-                  meta={`${enumLabel(t, "kind", action.kind)} · ${action.task_short_id ?? t("dispatch.noTask")} · ${formatDate(action.updated_at)}`}
-                  onClick={() => selectAction(action.action_id, setSelectedActionId)}
-                  selected={action.action_id === selectedActionId}
-                  title={t("dispatch.record", { id: action.action_id })}
-                >
-                  <span className="row-preview">{action.target_message_id ?? t("dispatch.noTarget")}</span>
-                  {(action.recommended_actions ?? []).length ? (
-                    <span className="inline-badges row-actions">
-                      {(action.recommended_actions ?? []).slice(0, 2).map((recommendedAction) => (
-                        <Badge key={recommendedAction} tone="warning">
-                          {enumLabel(t, "action", recommendedAction, shortText(recommendedAction, recommendedAction))}
-                        </Badge>
-                      ))}
-                    </span>
-                  ) : null}
-                </ListRow>
-              ))}
-            </div>
-          ) : (
-            <EmptyState title={t("dispatch.noItems")} detail={t("dispatch.noItemsDetail")} />
-          )}
+    <section className="workbench" data-pane={pane} aria-label={t("dispatch.aria")}>
+      <header className="workbench-header">
+        <h1 ref={heading} tabIndex={-1}>{t("dispatch.title")}</h1>
+        {openedActionId !== null ? (
+          <button className="button workbench-back" onClick={() => openAction(null)} type="button">
+            <ArrowLeft aria-hidden="true" size={16} />
+            {t("dispatch.backToList")}
+          </button>
+        ) : null}
+      </header>
+      <div className="work-grid">
+        <div className="work-main workbench-pane" data-pane="list">
+          <div className="queue-panel">
+            <SegmentedControl
+              label={t("dispatch.filterLabel")}
+              onChange={changeFilter}
+              options={mainFilters.map((value) => ({ value, label: t(`dispatch.filters.${value}`) }))}
+              value={filter}
+            />
+            <TechnicalDetails summary={moreFilters.includes(filter) ? t("dispatch.moreSelected", { status: t(`dispatch.filters.${filter}`) }) : t("dispatch.moreFilters")}>
+              <SegmentedControl
+                label={t("dispatch.moreFilters")}
+                onChange={changeFilter}
+                options={moreFilters.map((value) => ({ value, label: t(`dispatch.filters.${value}`) }))}
+                value={filter}
+              />
+            </TechnicalDetails>
+            <QueueControls
+              error={actions.error}
+              isFetching={actions.isFetching}
+              onRefresh={() => void actions.refetch()}
+              pagination={{
+                page,
+                hasNext: hasNextPage,
+                onNext: () => setPage((current) => current + 1),
+                onPrevious: () => setPage((current) => Math.max(0, current - 1))
+              }}
+              updatedAt={actions.dataUpdatedAt}
+            />
+            {actions.isLoading ? <LoadingState title={t("dispatch.loading")} /> : null}
+            {actions.error && !actions.data ? <ErrorState title={t("dispatch.unavailable")} error={actions.error} /> : null}
+            {rows.length ? (
+              <div className="list-stack">
+                {rows.map((action) => (
+                  <ListRow
+                    badge={<Badge tone={statusTone(action.status)}>{enumLabel(t, "status", action.status)}</Badge>}
+                    key={action.action_id}
+                    meta={`${enumLabel(t, "kind", action.kind)} · ${action.task_short_id ?? t("dispatch.noTask")} · ${formatDate(action.updated_at)}`}
+                    onClick={(event) => {
+                      rememberPosition(event.currentTarget);
+                      openAction(action.action_id);
+                    }}
+                    selected={action.action_id === selectedActionId}
+                    title={t("dispatch.record", { id: action.action_id })}
+                  />
+                ))}
+              </div>
+            ) : actions.data ? (
+              <EmptyState title={t("dispatch.noItems")} detail={t("dispatch.noItemsDetail")} />
+            ) : null}
+          </div>
         </div>
-      </div>
 
-      {/*
-        Keyed on the selection so switching rows reads as the detail being
-        replaced rather than as every field changing at once.
-      */}
-      <m.aside
-        animate="visible"
-        className="work-detail"
-        key={selectedActionId ?? "none"}
-        initial="hidden"
-        transition={panelTransition}
-        variants={panelVariants}
-      >
-        {selectedActionId !== null && detail.isLoading ? <LoadingState title={t("dispatch.detailLoading")} /> : null}
-        {detail.error ? <ErrorState title={t("dispatch.detailUnavailable")} error={detail.error} /> : null}
-        {detail.data ? (
-          <>
-            <div className="detail-panel">
-              <p className="eyebrow">{t("dispatch.detailEyebrow")}</p>
-              <div className="detail-title-row">
-                <h2>{t("dispatch.recordLabel")} <CopyValue label={t("dispatch.actionId")} value={String(detail.data.action.action_id)} /></h2>
-                <Badge tone={statusTone(detail.data.action.status)}>{enumLabel(t, "status", detail.data.action.status)}</Badge>
-              </div>
-              <FieldList>
-                <Fact label={t("dispatch.kind")} value={enumLabel(t, "kind", detail.data.action.kind)} />
-                <Fact label={t("dispatch.linkedTask")} value={detail.data.action.task_short_id ?? t("common.notLinked")} />
-                <Fact label={t("dispatch.targetMessage")} value={detail.data.action.target_message_id ? <CopyValue label={t("dispatch.targetMessage")} value={detail.data.action.target_message_id} /> : t("common.notRecorded")} />
-                <Fact label={t("dispatch.updatedAt")} value={formatDate(detail.data.action.updated_at)} />
-              </FieldList>
-              {postprocessInfo(detail.data.action.payload) ? (
-                <div className="subsection">
-                  <p className="eyebrow">{t("dispatch.postprocess")}</p>
+        {/*
+          Keyed on the selection so switching rows reads as the detail being
+          replaced rather than as every field changing at once.
+        */}
+        <m.aside
+          animate="visible"
+          className="work-detail workbench-pane"
+          data-pane="detail"
+          key={selectedActionId ?? "none"}
+          initial="hidden"
+          transition={panelTransition}
+          variants={panelVariants}
+        >
+          {selectedActionId !== null && detail.isLoading ? <LoadingState title={t("dispatch.detailLoading")} /> : null}
+          {detail.error ? (
+            <div>
+              <ErrorState title={t("dispatch.detailUnavailable")} error={detail.error} />
+              <Button onClick={() => void detail.refetch()}>{t("common.refresh")}</Button>
+            </div>
+          ) : null}
+          {detail.data && action ? (
+            <>
+              <div className="detail-panel">
+                <div className="detail-title-row">
+                  <h2>{t("dispatch.record", { id: action.action_id })}</h2>
+                  <Badge tone={statusTone(action.status)}>{enumLabel(t, "status", action.status)}</Badge>
+                </div>
+                <FieldList>
+                  <Fact label={t("dispatch.kind")} value={enumLabel(t, "kind", action.kind)} />
+                  <Fact label={t("dispatch.linkedTask")} value={action.task_short_id ? <a href={`#tasks/${encodeURIComponent(action.task_short_id)}`}>{action.task_short_id}</a> : t("common.notLinked")} />
+                  <Fact label={t("dispatch.latestStatus")} value={enumLabel(t, "status", String(detail.data.readback_summary.latest_status ?? ""), t("common.none"))} />
+                  <Fact label={t("dispatch.readback")} value={detail.data.readback_summary.readback_message_id ? t("dispatch.readbackRecorded") : t("common.notRecorded")} />
+                </FieldList>
+                <TechnicalDetails>
                   <FieldList>
-                    <Fact label={t("dispatch.applied")} value={postprocessInfo(detail.data.action.payload)?.applied ?? t("common.unknown")} />
-                    <Fact label={t("dispatch.guidance")} value={postprocessInfo(detail.data.action.payload)?.guidance || t("common.none")} />
-                    <Fact label={t("dispatch.original")} value={shortText(postprocessInfo(detail.data.action.payload)?.original, t("common.notRecorded"))} />
-                    <Fact label={t("dispatch.final")} value={shortText(postprocessInfo(detail.data.action.payload)?.final, t("common.notRecorded"))} />
+                    <Fact label={t("dispatch.actionId")} value={<CopyValue label={t("dispatch.actionId")} value={String(action.action_id)} />} />
+                    <Fact label={t("dispatch.targetMessage")} value={action.target_message_id ? <CopyValue label={t("dispatch.targetMessage")} value={action.target_message_id} /> : t("common.notRecorded")} />
+                    <Fact label={t("dispatch.updatedAt")} value={formatDate(action.updated_at)} />
                   </FieldList>
-                </div>
-              ) : null}
-              <TechnicalDetails>
-                <JsonBlock value={detail.data.action.payload} />
-              </TechnicalDetails>
-            </div>
-
-            <div className="detail-panel">
-              <p className="eyebrow">{t("dispatch.readback")}</p>
-              <h2>{t("dispatch.attempts")}</h2>
-              <FieldList>
-                <Fact label={t("dispatch.attemptCount")} value={String(detail.data.readback_summary.attempt_count ?? 0)} />
-                <Fact label={t("dispatch.latestStatus")} value={enumLabel(t, "status", String(detail.data.readback_summary.latest_status ?? ""), t("common.none"))} />
-                <Fact label={t("dispatch.sentMessage")} value={detail.data.readback_summary.sent_message_id ? <CopyValue label={t("dispatch.sentMessage")} value={String(detail.data.readback_summary.sent_message_id)} /> : t("common.notRecorded")} />
-                <Fact label={t("dispatch.readbackMessage")} value={detail.data.readback_summary.readback_message_id ? <CopyValue label={t("dispatch.readbackMessage")} value={String(detail.data.readback_summary.readback_message_id)} /> : t("common.notRecorded")} />
-              </FieldList>
-              {detail.data.attempts.length ? (
-                <ul className="timeline-list">
-                  {detail.data.attempts.map((attempt) => (
-                    <li key={attempt.id}>
-                      <Send aria-hidden="true" size={14} />
-                      <span>{enumLabel(t, "status", attempt.status)}</span>
-                      <small>{attempt.error_stage ? enumLabel(t, "stage", attempt.error_stage) : attempt.sent_message_id ?? t("dispatch.noErrorStage")}</small>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="detail-note">{t("dispatch.noAttempts")}</p>
-              )}
-            </div>
-
-            <div className="detail-panel">
-              <p className="eyebrow">{t("dispatch.recovery")}</p>
-              <h2>{t("dispatch.handle")}</h2>
-              {detail.data.action.policy_held ? <p className="detail-note">{t("dispatch.policyHeld")}</p> : null}
-              <TextareaField
-                label={t("common.reason")}
-                onChange={(reason) => updateDraft({ reason })}
-                placeholder={t("dispatch.reasonPlaceholder")}
-                rows={2}
-                value={selectedDraft.reason}
-              />
-              <div className="command-buttons">
-                <Button
-                  disabled={!hasRecommendedCommand(detail.data.recommended_actions, "dispatch retry") || selectedActionBusy}
-                  onClick={() => runDispatchCommand("retry")}
-                  tone="warning"
-                >
-                  <RotateCcw aria-hidden="true" size={15} />
-                  {t("dispatch.retry")}
-                </Button>
-                <Button
-                  disabled={!hasRecommendedCommand(detail.data.recommended_actions, "dispatch cancel") || selectedActionBusy}
-                  onClick={() => runDispatchCommand("cancel")}
-                  tone="danger"
-                >
-                  <XCircle aria-hidden="true" size={15} />
-                  {t("dispatch.cancel")}
-                </Button>
+                  {postprocess ? (
+                    <div className="subsection">
+                      <h3>{t("dispatch.postprocess")}</h3>
+                      <FieldList>
+                        <Fact label={t("dispatch.applied")} value={postprocess.applied} />
+                        <Fact label={t("dispatch.guidance")} value={postprocess.guidance || t("common.none")} />
+                        <Fact label={t("dispatch.original")} value={shortText(postprocess.original, t("common.notRecorded"))} />
+                        <Fact label={t("dispatch.final")} value={shortText(postprocess.final, t("common.notRecorded"))} />
+                      </FieldList>
+                    </div>
+                  ) : null}
+                  <JsonBlock value={action.payload} />
+                </TechnicalDetails>
               </div>
-              <TextField
-                label={t("dispatch.sentMessageId")}
-                onChange={(sentMessageId) => updateDraft({ sentMessageId })}
-                placeholder={t("dispatch.sentMessagePlaceholder")}
-                value={selectedDraft.sentMessageId}
-              />
-              <Button
-                disabled={
-                  !selectedDraft.sentMessageId.trim() ||
-                  !hasRecommendedCommand(detail.data.recommended_actions, "dispatch mark-sent") ||
-                  selectedActionBusy
-                }
-                onClick={() => runDispatchCommand("mark_sent")}
-                tone="success"
-              >
-                <ShieldCheck aria-hidden="true" size={15} />
-                {t("dispatch.markSent")}
-              </Button>
-              <CommandResultPanel result={commandResult} />
-            </div>
 
-            <div className="detail-panel">
-              <p className="eyebrow">{t("dispatch.recordedResult")}</p>
-              <h2>{t("dispatch.persistedOutcome")}</h2>
-              <TechnicalDetails>
-                <JsonBlock value={detail.data.action.result} />
+              <TechnicalDetails summary={t("dispatch.readbackEvidence")}>
+                <FieldList>
+                  <Fact label={t("dispatch.attemptCount")} value={String(detail.data.readback_summary.attempt_count ?? 0)} />
+                  <Fact label={t("dispatch.sentMessage")} value={detail.data.readback_summary.sent_message_id ? <CopyValue label={t("dispatch.sentMessage")} value={String(detail.data.readback_summary.sent_message_id)} /> : t("common.notRecorded")} />
+                  <Fact label={t("dispatch.readbackMessage")} value={detail.data.readback_summary.readback_message_id ? <CopyValue label={t("dispatch.readbackMessage")} value={String(detail.data.readback_summary.readback_message_id)} /> : t("common.notRecorded")} />
+                </FieldList>
+                <h3>{t("dispatch.attempts")}</h3>
+                {detail.data.attempts.length ? (
+                  <ul className="timeline-list">
+                    {detail.data.attempts.map((attempt) => (
+                      <li key={attempt.id}>
+                        <Send aria-hidden="true" size={14} />
+                        <span>{enumLabel(t, "status", attempt.status)}</span>
+                        <small>{attempt.error_stage ? enumLabel(t, "stage", attempt.error_stage) : attempt.sent_message_id ?? t("dispatch.noErrorStage")}</small>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="detail-note">{t("dispatch.noAttempts")}</p>
+                )}
               </TechnicalDetails>
-              {(detail.data.recommended_actions ?? []).length ? (
-                <div className="inline-badges">
-                  {(detail.data.recommended_actions ?? []).map((action) => (
-                    <Badge key={action} tone="warning">
-                      {enumLabel(t, "action", action, shortText(action, action))}
-                    </Badge>
-                  ))}
+
+              {canRetry || canCancel || canMarkSent || commandResult || action.policy_held ? <div className="detail-panel">
+                <h2>{t("dispatch.handle")}</h2>
+                {action.policy_held ? <p className="detail-note">{t("dispatch.policyHeld")}</p> : null}
+                <TextareaField
+                  label={t("common.reason")}
+                  onChange={(reason) => updateDraft({ reason })}
+                  placeholder={t("dispatch.reasonPlaceholder")}
+                  rows={2}
+                  value={selectedDraft.reason}
+                />
+                <div className="command-buttons">
+                  {canRetry ? <Button
+                    disabled={selectedActionBusy}
+                    onClick={() => runDispatchCommand("retry")}
+                    tone="warning"
+                  >
+                    <RotateCcw aria-hidden="true" size={15} />
+                    {t("dispatch.retry")}
+                  </Button> : null}
+                  {canCancel ? <Button
+                    disabled={selectedActionBusy}
+                    onClick={() => runDispatchCommand("cancel")}
+                    tone="danger"
+                  >
+                    <XCircle aria-hidden="true" size={15} />
+                    {t("dispatch.cancel")}
+                  </Button> : null}
                 </div>
+                {canMarkSent ? <div className="work-main">
+                  <TextField
+                    label={t("dispatch.sentMessageId")}
+                    onChange={(sentMessageId) => updateDraft({ sentMessageId })}
+                    placeholder={t("dispatch.sentMessagePlaceholder")}
+                    value={selectedDraft.sentMessageId}
+                  />
+                  <Button
+                    disabled={
+                      !selectedDraft.sentMessageId.trim() || selectedActionBusy
+                    }
+                    onClick={() => runDispatchCommand("mark_sent")}
+                    tone="success"
+                  >
+                    <ShieldCheck aria-hidden="true" size={15} />
+                    {t("dispatch.markSent")}
+                  </Button>
+                </div> : null}
+                <CommandResultPanel result={commandResult} />
+              </div> : null}
+
+              <TechnicalDetails summary={t("dispatch.persistedOutcome")}>
+                <JsonBlock value={action.result} />
+              </TechnicalDetails>
+              {recommendations.length ? (
+                <TechnicalDetails summary={t("dispatch.recommendations")}>
+                  <ul className="warning-list">
+                    {recommendations.map((item) => <li key={item}>{enumLabel(t, "action", item)} <code>{item}</code></li>)}
+                  </ul>
+                </TechnicalDetails>
               ) : null}
-            </div>
-          </>
-        ) : (
-          <EmptyState title={t("dispatch.selectTitle")} detail={t("dispatch.selectDetail")} />
-        )}
-      </m.aside>
+            </>
+          ) : null}
+        </m.aside>
+      </div>
     </section>
   );
 }
@@ -424,9 +420,4 @@ function errorResult(command: string, error: unknown): CommandResult {
     warnings: [],
     next_actions: []
   };
-}
-
-function selectAction(actionId: number, setSelectedActionId: (actionId: number) => void): void {
-  setSelectedActionId(actionId);
-  window.location.hash = `dispatch/${actionId}`;
 }
