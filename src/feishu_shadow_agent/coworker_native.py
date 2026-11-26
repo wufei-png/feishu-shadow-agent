@@ -67,6 +67,18 @@ _CLARIFICATION_GUIDANCE = (
     "缺少会影响结果的信息时，集中提出必要的澄清问题。"
     "能独立推进的部分先做，并说明采用的假设。"
 )
+_EVIDENCE_GUIDANCE = (
+    "以当前消息和引用为准；旧话题、同名缩写和以前的回答只作线索。含义不明且影响结论时先查证。"
+    "需要查项目文档或代码时，优先使用用户指定的仓库；归属不明确时按需使用 docmate 定位。"
+    "问题涉及多个相关组件时分别查证；涉及实现、指标、默认值或配置优先级时，核对定义及使用路径。"
+    "无法确定原消息或查询失败时如实说明，不要猜测；缺少用户授权时提示 owner 完成授权，不反复发起登录。"
+)
+_PRIVATE_HISTORY_GUIDANCE = (
+    "owner 要求处理转发或引用的工作对话时，以当前请求和引用为准，先用 lark-im 和 "
+    "lark-cli --as user 根据原文或其他消息线索检索用户可见的历史和上下文；"
+    "确定来源后再缩小范围，不默认限定当前私聊或 owner 为发送者。"
+    "用户只要求翻译、改写或整理已有文字时，可直接处理。"
+)
 _RECENT_SUPPLEMENTS = 4
 
 
@@ -486,6 +498,7 @@ class NativeCoworkerService(CoworkerService):
             _DRY_RUN_GUIDANCE
             if self.execution_mode == "dry_run"
             else "按需使用原生工具完成请求。任务适合拆分时可使用子 Agent。"
+            + _EVIDENCE_GUIDANCE
         )
         return (
             "你是飞书 AI 同事。"
@@ -497,12 +510,11 @@ class NativeCoworkerService(CoworkerService):
 
     def _group_instructions(self, policy: CoworkerConfig) -> str:
         if self.execution_mode == "dry_run":
-            return "本轮仅使用本群资料。"
+            return ""
         return (
-            "本轮聊天记录和群记忆仅使用本群资料；可以查阅与任务相关且允许在本群使用的文档和代码，"
-            "回复仅包含允许向本群分享的信息。明确要求记住时，写入本群专用记忆 "
+            "可用时按需调用 read_feishu_topic 或 read_feishu_group_history 查看本群讨论；"
+            "其他资料可按需使用已授权的工具查询。明确要求记住时，写入本群专用记忆 "
             f"{self.shared_memory(policy).path}。"
-            "可用时按需调用 read_feishu_topic 或 read_feishu_group_history 查看本群讨论。"
         )
 
     def run_memory_task(
@@ -1289,6 +1301,7 @@ class NativeCoworkerService(CoworkerService):
         if private:
             instructions += "\n这是 owner 私聊。不要向转发来源发送消息。"
             if self.execution_mode != "dry_run":
+                instructions += _PRIVATE_HISTORY_GUIDANCE
                 notes = resolve_relative_path(policy.shared_memory_path, self.base_dir)
                 notes = notes.with_name(notes.name + ".private")
                 instructions += f"仅在明确要求记住时，写入私聊笔记 {notes}。"

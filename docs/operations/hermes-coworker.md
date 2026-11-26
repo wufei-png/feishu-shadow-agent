@@ -111,9 +111,21 @@ git -C /path/to/hermes-agent apply --check /path/to/feishu-shadow-agent/docs/pat
 git -C /path/to/hermes-agent apply /path/to/feishu-shadow-agent/docs/patches/hermes-0.23.2-busy-reply-context.patch
 ```
 
+## 按需加载技能
+
+Hermes v0.23.2 的技能索引默认要求加载部分相关的技能。[可选补丁](../patches/hermes-0.23.2-on-demand-skills.patch)保留技能索引和 `skill_view`，允许按 profile 和平台将这段说明改为按需加载；未配置的平台仍沿用原文。确认补丁适用当前版本后，在所需 profile 中设置：
+
+```yaml
+skills:
+  prompt_guidance:
+    feishu: on_demand
+```
+
+补丁基于 `f5765e51`，升级 Hermes 时需重新核对。运行中的网关不会自动加载修改过的 Python 代码；维护窗口重启共享网关后，新会话使用新代码，已有会话需按下文刷新提示词。其他 profile 和未配置的平台保留原有技能说明。
+
 ## 飞书历史检索
 
-需要机器人根据转发内容补全工作上下文时，将 `lark-im` 与 `lark-shared` 的技能目录合并到 `coworker` profile 的 `skills.external_dirs`。在 profile 的 `platform_hints.feishu.append` 说明：按需检索并核实上下文；经飞书身份校验的 owner 私聊可使用 `--as user`，群聊使用 `--as bot` 查询机器人可见的信息；不能确定来源或遇到授权错误时如实说明。技能注册和提示词约束不等于权限硬隔离，终端完全访问模式下也不能阻止 Agent 自行访问主机可读的凭据。
+需要机器人根据转发内容补全工作上下文时，将 `lark-im` 与 `lark-shared` 的技能目录合并到 `coworker` profile 的 `skills.external_dirs`。在 profile 的 `platform_hints.feishu.append` 说明：按需检索并核实上下文；经飞书身份校验的 owner 私聊可使用 `--as user`，其他场景按授权选择查询身份；不能确定来源或遇到授权错误时如实说明。技能注册和提示词约束不等于权限硬隔离，终端完全访问模式下也不能阻止 Agent 自行访问主机可读的凭据。
 
 `lark-cli` 在 Hermes 环境中使用 Hermes 绑定的飞书应用，其用户授权与其他 CLI 应用独立。按 `lark-shared` 的身份和授权流程，为该应用授予消息搜索、消息只读、个人与群聊历史及会话只读所需 scope；需要可续期时检查 `offline_access` 与登录结果中的 refresh-token 状态。不得复制其他应用的 token，也不要把密钥或登录结果写入仓库。配置技能或提示词后，可运行 `hermes --profile coworker sessions refresh-prompts --json`，让既有会话在下次对话时重建提示；运行中 Gateway 的生效状态仍需检查。
 

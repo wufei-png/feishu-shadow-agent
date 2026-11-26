@@ -541,7 +541,7 @@ def test_main_and_topic_sessions_and_dry_run_receipts(tmp_path: Path) -> None:
     ]
     assert all("子 Agent" not in prompt for prompt in server.prompts)
     assert all("本轮为只读预演" in prompt for prompt in server.prompts)
-    assert all("本轮仅使用本群资料" in prompt for prompt in server.prompts)
+    assert all("本轮仅使用本群资料" not in prompt for prompt in server.prompts)
     assert all("写入本群专用记忆" not in prompt for prompt in server.prompts)
     assert feishu.replies[-1]["reply_in_thread"] is True
     with service.store.connect() as conn:
@@ -551,7 +551,7 @@ def test_main_and_topic_sessions_and_dry_run_receipts(tmp_path: Path) -> None:
         ] == ["previewed", "previewed", "previewed"]
 
 
-def test_live_group_instructions_scope_context_and_allow_task_sources(
+def test_live_group_instructions_allow_authorized_task_sources(
     tmp_path: Path,
 ) -> None:
     service, feishu, server = _service(tmp_path, dry_run=False)
@@ -559,11 +559,23 @@ def test_live_group_instructions_scope_context_and_allow_task_sources(
 
     assert service.process_next()
     prompt = server.prompts[0]
-    assert "聊天记录和群记忆仅使用本群资料" in prompt
-    assert "允许在本群使用的文档和代码" in prompt
-    assert "回复仅包含允许向本群分享的信息" in prompt
+    assert "仅使用本群资料" not in prompt
+    assert "其他资料可按需使用已授权的工具查询" in prompt
+    assert "涉及实现、指标、默认值或配置优先级时，核对定义及使用路径" in prompt
     assert "明确要求记住时，写入本群专用记忆" in prompt
     assert "禁止用工具发送或回复飞书消息" in prompt
+
+
+def test_live_private_instructions_find_forwarded_work_context(tmp_path: Path) -> None:
+    service, feishu, server = _service(tmp_path, dry_run=False)
+    _private(service, feishu, "request", text="处理这个转发")
+
+    assert service.process_next()
+    prompt = server.prompts[0]
+    assert "lark-cli --as user" in prompt
+    assert "不默认限定当前私聊或 owner 为发送者" in prompt
+    assert "用户只要求翻译、改写或整理已有文字时，可直接处理" in prompt
+    assert "不要向转发来源发送消息" in prompt
 
 
 @pytest.mark.parametrize(

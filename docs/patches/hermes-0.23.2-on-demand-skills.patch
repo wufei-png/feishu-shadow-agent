@@ -1,0 +1,90 @@
+diff --git a/agent/prompt_builder.py b/agent/prompt_builder.py
+index f3210b9b..9c02ea17 100644
+--- a/agent/prompt_builder.py
++++ b/agent/prompt_builder.py
+@@ -1305,2 +1305,3 @@ def _render_skills_index(
+     compact_categories: frozenset[str] | None, available_tools: set[str] | None, unloadable: list[str] = (),
++    on_demand_guidance: bool = False,
+ ) -> str:
+@@ -1346,2 +1347,9 @@ def _render_skills_index(
+         )
++    if on_demand_guidance:
++        return (
++            "## Skills\n"
++            "Load a relevant skill with skill_view(name) when needed.\n\n"
++            "<available_skills>\n" + "\n".join(index_lines) + "\n</available_skills>"
++            + hidden_note
++        )
+     return (
+@@ -1381,2 +1389,8 @@ def _build_skills_system_prompt_inner(
+     disabled = get_disabled_skill_names(_platform_hint or None)
++    skills_config = _config_readonly("skills").get("skills")
++    guidance_config = skills_config.get("prompt_guidance") if isinstance(skills_config, dict) else None
++    on_demand_guidance = (
++        isinstance(guidance_config, dict)
++        and guidance_config.get(_platform_hint) == "on_demand"
++    )
+     # Plugin-registered skills (ctx.register_skill) are registry state, not files under any scanned
+@@ -1395,3 +1409,3 @@ def _build_skills_system_prompt_inner(
+         _platform_hint, tuple(sorted(disabled)), tuple(sorted(compact_categories or ())),
+-        _oneshot_prompt_variant(), tuple(plugin_rows),
++        _oneshot_prompt_variant(), tuple(plugin_rows), on_demand_guidance,
+     )
+@@ -1460,3 +1474,5 @@ def _build_skills_system_prompt_inner(
+     unloadable = sorted({e["name"] for e in visible_entries if not e["load_name"]})
+-    result = _render_skills_index(skills_by_category, compact_categories, available_tools, unloadable)
++    result = _render_skills_index(
++        skills_by_category, compact_categories, available_tools, unloadable, on_demand_guidance
++    )
+     with _SKILLS_PROMPT_CACHE_LOCK:
+diff --git a/tests/agent/test_bot_profile_prompt_isolation.py b/tests/agent/test_bot_profile_prompt_isolation.py
+index ffcbb315..a941bad8 100644
+--- a/tests/agent/test_bot_profile_prompt_isolation.py
++++ b/tests/agent/test_bot_profile_prompt_isolation.py
+@@ -67,1 +67,46 @@ def test_skills_prompt_scoped_to_override_not_ambient_home(tmp_path, monkeypatch
++def test_skills_guidance_is_profile_scoped_and_cached_by_setting(tmp_path, monkeypatch):
++    from agent import prompt_builder
++
++    default_home = tmp_path / "default"
++    coworker_home = tmp_path / "profiles" / "coworker"
++    for home in (default_home, coworker_home):
++        skill = home / "skills" / "general" / "example"
++        skill.mkdir(parents=True)
++        (skill / "SKILL.md").write_text(
++            "---\nname: example\ndescription: Example workflow\n---\nbody\n",
++            encoding="utf-8",
++        )
++    monkeypatch.setenv("HERMES_HOME", str(default_home))
++    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "feishu")
++    (coworker_home / "config.yaml").write_text(
++        "skills:\n  prompt_guidance:\n    feishu: on_demand\n", encoding="utf-8"
++    )
++    prompt_builder.clear_skills_system_prompt_cache(clear_snapshot=False)
++
++    default_prompt = prompt_builder.build_skills_system_prompt(
++        skills_dir_override=default_home / "skills"
++    )
++    coworker_prompt = prompt_builder.build_skills_system_prompt(
++        skills_dir_override=coworker_home / "skills"
++    )
++    assert "you MUST load" in default_prompt
++    assert "you MUST load" not in coworker_prompt
++    assert _skills_body(default_prompt) == _skills_body(coworker_prompt)
++
++    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "cron")
++    cron_prompt = prompt_builder.build_skills_system_prompt(
++        skills_dir_override=coworker_home / "skills"
++    )
++    assert "you MUST load" in cron_prompt
++
++    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "feishu")
++    (coworker_home / "config.yaml").write_text(
++        "skills:\n  prompt_guidance:\n    feishu: default\n", encoding="utf-8"
++    )
++    rebuilt = prompt_builder.build_skills_system_prompt(
++        skills_dir_override=coworker_home / "skills"
++    )
++    assert "you MUST load" in rebuilt
++
++
+ def test_agent_home_resolves_from_session_db_path(tmp_path):
