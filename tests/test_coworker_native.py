@@ -541,6 +541,7 @@ def test_main_and_topic_sessions_and_dry_run_receipts(tmp_path: Path) -> None:
     ]
     assert all("子 Agent" not in prompt for prompt in server.prompts)
     assert all("本轮为只读预演" in prompt for prompt in server.prompts)
+    assert all("本轮仅使用本群资料" in prompt for prompt in server.prompts)
     assert all("写入本群专用记忆" not in prompt for prompt in server.prompts)
     assert feishu.replies[-1]["reply_in_thread"] is True
     with service.store.connect() as conn:
@@ -548,6 +549,21 @@ def test_main_and_topic_sessions_and_dry_run_receipts(tmp_path: Path) -> None:
             row[0]
             for row in conn.execute("SELECT status FROM coworker_native_deliveries")
         ] == ["previewed", "previewed", "previewed"]
+
+
+def test_live_group_instructions_scope_context_and_allow_task_sources(
+    tmp_path: Path,
+) -> None:
+    service, feishu, server = _service(tmp_path, dry_run=False)
+    _receive(service, feishu, "request", text="请查文档和代码")
+
+    assert service.process_next()
+    prompt = server.prompts[0]
+    assert "聊天记录和群记忆仅使用本群资料" in prompt
+    assert "允许在本群使用的文档和代码" in prompt
+    assert "回复仅包含允许向本群分享的信息" in prompt
+    assert "明确要求记住时，写入本群专用记忆" in prompt
+    assert "禁止用工具发送或回复飞书消息" in prompt
 
 
 @pytest.mark.parametrize(

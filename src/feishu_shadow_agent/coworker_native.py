@@ -499,7 +499,8 @@ class NativeCoworkerService(CoworkerService):
         if self.execution_mode == "dry_run":
             return "本轮仅使用本群资料。"
         return (
-            "本轮仅使用本群资料。明确要求记住时，写入本群专用记忆 "
+            "本轮聊天记录和群记忆仅使用本群资料；可以查阅与任务相关且允许在本群使用的文档和代码，"
+            "回复仅包含允许向本群分享的信息。明确要求记住时，写入本群专用记忆 "
             f"{self.shared_memory(policy).path}。"
             "可用时按需调用 read_feishu_topic 或 read_feishu_group_history 查看本群讨论。"
         )
