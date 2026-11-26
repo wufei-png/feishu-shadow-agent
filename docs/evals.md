@@ -4,9 +4,45 @@
 完整设计和决策见
 [`docs/plans/p20-production-parity-model-evals.md`](plans/p20-production-parity-model-evals.md)。
 
+## AI 同事对比数据集审核
+
+Codex 直连和 Hermes Gateway 使用各自的原生消息与会话路径，下面的影子助手
+runner 不能直接代表它们的对比结果。双模式数据集可先用以下命令做本地审核检查：
+
+```bash
+uv run --locked python -m feishu_shadow_agent eval inspect-coworker-review \
+  --dataset <dataset_dir>/dataset.review.yaml
+```
+
+命令检查场景结构、审核稿与案例内容的一致性、上下文时间、附件和只读证据的
+SHA-256、路径边界及审核快照。它不会调用模型、连接飞书或发送消息，输出中的
+`real_model_authorized: false` 表示检查本身不是人工审核或模型运行授权。
+同一分钟内的消息先后、来源会话关系及事实标签仍需人工核对。
+新版审核稿可记录代码仓库的 commit、tree 及时间依据；检查器只检查这些声明及
+时间边界，不访问仓库或导出文件。固定资料条件的回放须单独核对 commit 与 tree；
+实际使用效果的回放也可按授权使用当前工作区和网络，并记录当时的版本和工作树状态。
+
+审核稿可为全部案例固定共用技能和风格档案，并逐例记录仅供审核的技能预期。
+检查器校验共用文件的 SHA-256，回放输入只包含共用文件的安装元数据，不包含
+逐例预期或理由。配置了技能不等于实际加载：回放器须分别记录原生技能调用与
+直接读取技能文件的轨迹。检查器不实施安装或挂载。使用实际环境时应记录技能和
+风格文件的实际摘要；使用冻结资料时须验证安装路径，避免覆盖宿主文件。
+
+`materialize_coworker_repositories` 会核对审核声明的 commit 和 tree，在新的临时目录建立独立的浅
+Git 副本，不读取源工作树中的未提交改动；越出副本的符号链接会被移除并列出，
+子模块只记录提交指针，不自动初始化。因移除符号链接导致的工作树差异需要在
+评测记录中说明。准备副本本身不会提供只读挂载或网络隔离，不能直接作为运行器。
+实际环境回放不必使用这些副本，也不能把其结果描述为固定资料条件下的结果。
+
+审核快照只描述数据；它不能保证 Agent 自身工具的权限、外部写入或真实飞书投递
+已经限制，也不能替代两种原生运行时的评测和端到端验证。实际运行前须由审核人
+确认对应快照，并另行验证测试环境与允许发送的目标。回放器必须调用快照审批
+检查：审批记录中的 dataset id、快照 SHA-256 和双方通过状态均须匹配当前检查
+结果；审批文件是本地防误用记录，不是密码学签名。
+
 ## 1. 核心边界
 
-- `capture` 和 live `run-ingress` 可以访问飞书；`--snapshot`、golden replay 和全部 model runner 不访问飞书。
+- 影子助手的 `capture` 和 live `run-ingress` 可以访问飞书；`--snapshot`、golden replay 和下述影子助手 model runner 不访问飞书。
 - Router、Task Session、Full Chain 每个 trial 都从空的文件型 SQLite 重建状态，不复制、不修改生产 DB。
 - case 内 `config.yaml` 是不可变的 Case Baseline Config；命令行 `--config` 是唯一 Evaluation Run Config，两者不合并。
 - Task Session 和 Full Chain 的 model candidate 与 semantic judge 使用同一 run config/backend；judge 始终以 `session_id: null` 运行。

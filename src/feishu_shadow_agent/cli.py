@@ -43,6 +43,7 @@ from .daemon import Daemon
 from .dispatcher import Dispatcher
 from .evals import EvalError
 from .evals.config import load_evaluation_config
+from .evals.coworker_dataset import inspect_coworker_review
 from .evals.service import EvalService
 from .feishu.lark_cli import LarkCliClient, LarkCliCommandError
 from .health import HealthSuite, has_critical_failure, summarize_results
@@ -247,6 +248,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     eval_parser = subparsers.add_parser("eval", help="evaluation helpers")
     eval_subparsers = eval_parser.add_subparsers(dest="eval_command")
+    coworker_review = eval_subparsers.add_parser(
+        "inspect-coworker-review",
+        help="verify a coworker dataset review without running an Agent",
+    )
+    coworker_review.add_argument("--dataset", required=True, type=Path)
+    coworker_review.set_defaults(handler=_handle_eval_inspect_coworker_review)
     eval_capture = eval_subparsers.add_parser("capture", help="capture eval cases")
     _add_config_arg(eval_capture)
     eval_capture.add_argument("--lookback-days", type=int, default=2)
@@ -1130,6 +1137,12 @@ def _handle_replay(args: argparse.Namespace) -> int:
         print(f"message not found: {args.message_id}", file=sys.stderr)
         return 2
     print(yaml.safe_dump(output, allow_unicode=True, sort_keys=False), end="")
+    return 0
+
+
+def _handle_eval_inspect_coworker_review(args: argparse.Namespace) -> int:
+    review = inspect_coworker_review(args.dataset)
+    print(yaml.safe_dump(review.summary(), allow_unicode=True, sort_keys=False), end="")
     return 0
 
 
