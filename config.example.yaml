@@ -126,6 +126,16 @@ coworker:
   #     open_id: ou_partner
   #     description: 处理委派的子任务并反馈结果。
 
+# Used only by the optional Hermes Gateway partner integration.
+hermes_gateway_coworker:
+  groups: {}
+  # groups:
+  #   oc_example_group:
+  #     partners:
+  #       构建伙伴:
+  #         open_id: ou_partner
+  #         description: 检查构建和测试结果
+
 tool_permissions: read_only
 
 retention:

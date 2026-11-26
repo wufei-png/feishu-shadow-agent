@@ -1,0 +1,118 @@
+diff --git a/gateway/authz_mixin.py b/gateway/authz_mixin.py
+index d1bdea4..26c28fa 100644
+--- a/gateway/authz_mixin.py
++++ b/gateway/authz_mixin.py
+@@ -762,2 +762,7 @@ class GatewayAuthorizationMixin:
+                     return True
++        if source.platform == Platform.FEISHU and is_group and getattr(source, "is_bot", False):
++            adapter = self._delivery_adapter_for(source)
++            partners = getattr(adapter, "_shadow_partners", None)
++            if partners and partners.accepts(source.chat_id or "", source.user_id or ""):
++                return True
+         # Bots admitted by the platform's ``allow_bots_env`` (scoped env → the routed adapter's YAML
+diff --git a/gateway/run_busy.py b/gateway/run_busy.py
+index e7137ea..f640c8d 100644
+--- a/gateway/run_busy.py
++++ b/gateway/run_busy.py
+@@ -972,2 +972,6 @@ class GatewayBusySessionMixin:
+             return True
++        if (getattr(event.source.platform, "value", None) == "feishu" and event.source.is_bot
++                and not event.allow_gateway_control):
++            self._queue_or_replace_pending_event(session_key, event)
++            return True
+         if await self._route_plaintext_approval_while_busy(event, session_key):
+diff --git a/gateway/run_inbound.py b/gateway/run_inbound.py
+index 4bd5f80..1abc072 100644
+--- a/gateway/run_inbound.py
++++ b/gateway/run_inbound.py
+@@ -822,2 +822,5 @@ class GatewayInboundMixin(
+         a demotion, or an interrupt — the ended turn lets the FIFO run the follow-up next)."""
++        if (getattr(source.platform, "value", None) == "feishu" and source.is_bot
++                and not event.allow_gateway_control):
++            return False
+         from gateway.run import _AGENT_PENDING_SENTINEL
+@@ -846,2 +849,6 @@ class GatewayInboundMixin(
+         busy_input_mode queue/steer, subagent and compression protection demote to queue."""
++        if (getattr(source.platform, "value", None) == "feishu" and source.is_bot
++                and not event.allow_gateway_control):
++            self._queue_or_replace_pending_event(_quick_key, event)
++            return None
+         from gateway.run import _AGENT_PENDING_SENTINEL
+diff --git a/plugins/platforms/feishu/adapter.py b/plugins/platforms/feishu/adapter.py
+index 4781b37..265522b 100644
+--- a/plugins/platforms/feishu/adapter.py
++++ b/plugins/platforms/feishu/adapter.py
+@@ -33,2 +33,3 @@ import os
+ import re
++import sys
+ import threading
+@@ -1306,2 +1307,25 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
+         self._apply_settings(self._settings)
++        self._shadow_partners = None
++        extra = config.extra or {}
++        partner_config = extra.get("shadow_agent_config")
++        partner_source = extra.get("shadow_agent_source")
++        partner_python = extra.get("shadow_agent_python")
++        if partner_config or partner_source or partner_python:
++            if not all(isinstance(path, str) and Path(path).is_absolute()
++                       for path in (partner_config, partner_source, partner_python)):
++                raise ValueError("absolute shadow_agent_config, shadow_agent_source, and shadow_agent_python are required")
++            import importlib
++            source_path = str(Path(partner_source).resolve())
++            sys.path.insert(0, source_path)
++            module = importlib.import_module("feishu_shadow_agent.hermes_gateway_partners")
++            if Path(module.__file__).resolve() != Path(source_path, "feishu_shadow_agent", "hermes_gateway_partners.py"):
++                raise ValueError("shadow agent source does not match the loaded partner module")
++            self._shadow_partners = module.GatewayPartners(partner_config)
++            if not Path(partner_python).is_file():
++                raise ValueError("shadow_agent_python must be an existing Python interpreter")
++            self._shadow_python = partner_python
++            home = get_hermes_home()
++            self._shadow_transport_profile = home.name if home.parent.name == "profiles" else "default"
++            config.extra["allow_bots"] = "mentions"
++            self._allow_bots = "mentions"
+         self._client: Optional[Any] = None
+@@ -2590,2 +2614,3 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
+         chat_id = getattr(message, "chat_id", "") or ""
++        partner_message = bool(is_bot and getattr(self, "_shadow_partners", None))
+         logger.info(
+@@ -2602,3 +2627,3 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
+             chat_type=self._resolve_source_chat_type(chat_info=chat_info, event_chat_type=chat_type),
+-            user_id=sender_profile["user_id"],
++            user_id=(getattr(sender_id, "open_id", None) if partner_message else sender_profile["user_id"]),
+             user_name=sender_profile["user_name"],
+@@ -2609,4 +2634,11 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
+         )
++        channel_prompt = self._resolve_channel_prompt(chat_id, thread_id or None)
++        if getattr(self, "_shadow_partners", None):
++            channel_prompt = self._shadow_partners.append_prompt(
++                channel_prompt, chat_id=chat_id, is_group=chat_type != "p2p",
++                profile=self._shadow_transport_profile, python=self._shadow_python,
++            )
+         normalized = MessageEvent(
+-            text=text, message_type=inbound_type, source=source, raw_message=data,
++            text=text, message_type=MessageType.TEXT if partner_message and inbound_type == MessageType.COMMAND else inbound_type,
++            source=source, raw_message=data, allow_gateway_control=not partner_message,
+             message_id=message_id, media_urls=media_urls, media_types=media_types,
+@@ -2614,3 +2646,3 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
+             reply_to_message_id=reply_to_message_id, reply_to_text=reply_to_text,
+-            channel_prompt=self._resolve_channel_prompt(chat_id, thread_id or None),
++            channel_prompt=channel_prompt,
+             timestamp=datetime.now(),
+@@ -2885,2 +2917,4 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
+             and existing.source.thread_id == incoming.source.thread_id
++            and existing.allow_gateway_control == incoming.allow_gateway_control
++            and (existing.allow_gateway_control or existing.source.user_id == incoming.source.user_id)
+         )
+@@ -3335,2 +3369,11 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
+         chat_id = getattr(message, "chat_id", "") or ""
++        partners = getattr(self, "_shadow_partners", None)
++        if is_bot and partners:
++            open_id = getattr(getattr(sender, "sender_id", None), "open_id", "") or ""
++            if not is_group or not partners.accepts(chat_id, open_id):
++                return "bots_disabled"
++            mentions = getattr(message, "mentions", None) or []
++            normalized = self._normalize(getattr(message, "message_type", "") or "", getattr(message, "content", "") or "", mentions)
++            if not (self._message_mentions_bot(mentions) or self._post_mentions_bot(normalized.mentions)):
++                return "bot_not_mentioned"
+         if require_mention is None:

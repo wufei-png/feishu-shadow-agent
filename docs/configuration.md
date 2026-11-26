@@ -1,6 +1,6 @@
 # 配置参考
 
-本文描述影子助手和项目接入的 AI 同事使用的 `config.yaml`。配置模型位于 `src/feishu_shadow_agent/config.py`；`schemas/config.schema.json` 由模型生成，可供编辑器和 CI 使用。Hermes Gateway 不读取此文件，见 [Hermes Gateway 配置](operations/hermes-coworker.md)。
+本文描述影子助手和 AI 同事使用的 `config.yaml`。配置模型位于 `src/feishu_shadow_agent/config.py`；`schemas/config.schema.json` 由模型生成，可供编辑器和 CI 使用。Hermes Gateway 可选读取 `hermes_gateway_coworker` 中的群聊伙伴配置，其余设置仍由 Hermes profile 管理，见 [Hermes Gateway 配置](operations/hermes-coworker.md)。
 
 `reply_policy`、`chats` 和 `coworker` 是 Product Policy Store 的策略导入来源。运行 `policy import-config` 后，项目运行时从 SQLite 读取生效策略；全局策略未初始化时，`doctor` 和 daemon 的健康检查会失败。
 
@@ -42,6 +42,7 @@ python -m feishu_shadow_agent console --config config.yaml --host 127.0.0.1 --po
 | `coworker` | object | 默认关闭 | 项目 AI 同事的策略导入来源；包括 Codex 直连和兼容 `daemon` 路径。 |
 | `coworker.send_mode` | `agent_direct`/`project` | `agent_direct` | 兼容 `daemon` 路径的发送方式。Codex 直连使用自己的项目发布路径；该字段仍参与启动策略一致性检查。修改后需导入策略并重启。 |
 | `coworker.partner_bots` | map | `{}` | 兼容 `daemon` 路径中按名称配置飞书伙伴的 `open_id` 和可选 `description`。 |
+| `hermes_gateway_coworker.groups` | map | `{}` | Hermes Gateway 的群聊伙伴名单，按群 `chat_id` 配置；需要安装集成补丁。 |
 | `coworker.memory_maintenance` | bool | `false` | 启用独立后台记忆整理。已导入 SQLite 的设置保持原值。 |
 | `coworker.memory_maintenance_time` | `HH:MM` | `00:00` | 每日本机时区的整理时间。错过定时点后，下次启动 AI 同事时合并补跑一次。 |
 | `reply_policy` | object | 见下表 | Policy Import Source 中的全局自动回复策略。 |

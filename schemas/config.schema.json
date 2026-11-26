@@ -674,6 +674,58 @@
       "title": "HermesConfig",
       "type": "object"
     },
+    "HermesGatewayCoworkerConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "groups": {
+          "additionalProperties": {
+            "$ref": "#/$defs/HermesGatewayGroupConfig"
+          },
+          "description": "Gateway partner rosters keyed by Feishu group chat ID.",
+          "title": "Groups",
+          "type": "object"
+        }
+      },
+      "title": "HermesGatewayCoworkerConfig",
+      "type": "object"
+    },
+    "HermesGatewayGroupConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "partners": {
+          "additionalProperties": {
+            "$ref": "#/$defs/HermesGatewayPartnerConfig"
+          },
+          "title": "Partners",
+          "type": "object"
+        }
+      },
+      "title": "HermesGatewayGroupConfig",
+      "type": "object"
+    },
+    "HermesGatewayPartnerConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "open_id": {
+          "description": "Partner bot open ID in the Gateway application's identity space.",
+          "pattern": "^ou_[A-Za-z0-9_]+$",
+          "title": "Open Id",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "description": "Brief responsibilities of this partner.",
+          "maxLength": 300,
+          "title": "Description",
+          "type": "string"
+        }
+      },
+      "required": [
+        "open_id"
+      ],
+      "title": "HermesGatewayPartnerConfig",
+      "type": "object"
+    },
     "InteractiveCardsConfig": {
       "additionalProperties": false,
       "properties": {
@@ -1090,6 +1142,10 @@
     "coworker": {
       "$ref": "#/$defs/CoworkerConfig",
       "description": "Single-group AI coworker policy import source, disabled by default."
+    },
+    "hermes_gateway_coworker": {
+      "$ref": "#/$defs/HermesGatewayCoworkerConfig",
+      "description": "Optional per-group partner roster for Hermes Gateway."
     },
     "reply_policy": {
       "$ref": "#/$defs/ReplyPolicyConfig",

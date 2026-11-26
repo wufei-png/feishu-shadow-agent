@@ -1,6 +1,6 @@
 # Hermes Gateway AI 同事
 
-Hermes Gateway 使用独立的 `coworker` profile，负责飞书连接、会话和原生子 Agent；项目的 `coworker run --runtime hermes` 只调用 `hermes -p coworker gateway start`，不加载项目配置或数据库。旧的 `daemon` 搭配 `coworker.provider: hermes` 仍使用项目接入和单轮 Hermes 调用。
+Hermes Gateway 使用独立的 `coworker` profile，负责飞书连接、会话和原生子 Agent；项目的 `coworker run --runtime hermes` 只调用 `hermes -p coworker gateway start`，不加载项目配置或数据库。可选的群聊伙伴集成由 Hermes 飞书适配器直接读取项目配置中的 `hermes_gateway_coworker`。旧的 `daemon` 搭配 `coworker.provider: hermes` 仍使用项目接入和单轮 Hermes 调用。
 
 ## 升级与迁移
 
@@ -145,6 +145,48 @@ hermes -p coworker dashboard --host 127.0.0.1 --port 9119 --no-open
 项目 Console 的「AI 同事」页提供「打开 Hermes Dashboard」，在新标签页打开 `127.0.0.1:9119` 并预选 `coworker`。需要远程操作时，使用 SSH 转发 9119。Hermes 的 Dashboard、CLI、TUI 或 Desktop 显示和续接其原生会话。
 
 项目启动入口不接受 `--config`、`--mode` 或 `--reply-mode`；这些设置由 Hermes profile 管理。`SOUL.md` 定义飞书同事的职责、资料范围和协作方式，新会话读取该文件。建议保持简短，把可选流程放在按需读取的技能中。飞书会话使用 `platform_toolsets.feishu`。独立定时任务默认使用 `platform_toolsets.cron`，任务自选工具组仍受 `agent.disabled_toolsets` 限制。技能索引可通过 `skills.disabled` 精简。
+
+## 群聊伙伴
+
+需要 Hermes 与同群其他机器人协作时，在项目 `config.yaml` 单独配置名单。`open_id` 必须是 **Hermes 飞书应用看到的**伙伴机器人 ID；名称和 `description` 供模型选择伙伴。一个群内不得重复配置同一个 ID：
+
+```yaml
+hermes_gateway_coworker:
+  groups:
+    oc_test_group:
+      partners:
+        构建伙伴:
+          open_id: ou_partner
+          description: 检查构建和测试
+```
+
+运行 `uv sync --locked --extra cards` 准备项目环境，并用 `uv run --locked python -m feishu_shadow_agent config validate --config /absolute/path/to/config.yaml` 校验配置。Hermes 应用需订阅 `im.message.receive_v1`，并具备接收其他机器人 @ 当前机器人的 `im:message.group_at_msg.include_bot:readonly` 权限；普通的仅用户群消息权限不包含该事件。参见[飞书接收消息事件及权限](https://open.larkenterprise.com/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/events/receive)。应用权限变更须按飞书流程发布生效。
+
+在已安装上述话题补丁的 Hermes v0.23.2 上应用[群聊伙伴补丁](../patches/hermes-0.23.2-feishu-group-partners.patch)。补丁也验证过可应用于 `f5765e51`。先检查，再执行：
+
+```bash
+git -C /path/to/hermes-agent apply --check /path/to/feishu-shadow-agent/docs/patches/hermes-0.23.2-feishu-group-partners.patch
+git -C /path/to/hermes-agent apply /path/to/feishu-shadow-agent/docs/patches/hermes-0.23.2-feishu-group-partners.patch
+```
+
+将以下绝对路径加入接收飞书消息的 Hermes profile 的 `platforms.feishu.extra`，路径分别指向项目配置、项目源码目录和项目虚拟环境解释器：
+
+```yaml
+platforms:
+  feishu:
+    extra:
+      shadow_agent_config: /path/to/feishu-shadow-agent/config.yaml
+      shadow_agent_source: /path/to/feishu-shadow-agent/src
+      shadow_agent_python: /path/to/feishu-shadow-agent/.venv/bin/python
+```
+
+不要另外启用 `FEISHU_ALLOW_BOTS` 或 `feishu.allow_bots`，可保持 `none`；集成成功加载后适配器才启用机器人 @ 消息，并在合批前按群和伙伴 `open_id` 过滤。仅接收明确 @ 当前机器人的伙伴消息，`@所有人` 不作为伙伴触发。项目名单为空或没有当前群时不接收其他机器人；人的消息仍使用 Hermes 原有群策略。必须保持上述 `group_sessions_per_user: false`、`thread_sessions_per_user: false`，才能让人和伙伴在同一个群/话题会话中协作。
+
+适配器在启动时加载名单；修改名单、增加或撤销伙伴后需重启承载该 profile 的 Gateway。发送命令会再次读取项目配置，修改后未重启可能暂时出现收发名单不一致。配置错误会阻止飞书适配器启动。终端需能访问项目路径及同一 Hermes 安装；容器或远程终端需自行保证路径与凭据可用。
+
+只有当前群配置了伙伴时，Hermes 才会把伙伴名称、描述和委派命令追加到该群的 `channel_prompt`；没有伙伴的群或私聊保持原提示词。模型调用命令时，从当前会话取得群和话题，使用接入该群的 Hermes profile 发送带 @ 的消息；命令返回发送结果，不创建任务 ID，也不等待伙伴完成。伙伴消息在当前会话忙时排队到下一轮，不用于中断、插话或确认审批。伙伴结果仍须从后续会话上下文理解。
+
+沿用 Hermes `gateway.bot_loop_guard`；默认情况下，频率、重复内容、连续跳数及对机器人回复的再次回复可能被拦截。发生发送超时或投递结果不明时先检查群消息，再决定是否重发。要验证端到端行为，应在有授权的测试群观察 @、原话题路由、伙伴回传和 Gateway 日志；本地测试不发送飞书消息。
 
 Hermes 默认使用 `display.busy_input_mode: interrupt`。需要后续输入依次执行时，可在 profile 中设为 `queue`。飞书撤回事件目前由适配器记录，已入队的快照和已运行的任务由 Gateway 管理。可用原生 `/stop` 终止当前会话的工作。
 

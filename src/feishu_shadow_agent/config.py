@@ -21,6 +21,8 @@ from pydantic import (
 from yaml.constructor import ConstructorError
 from yaml.nodes import MappingNode
 
+from .hermes_gateway_partners import HermesGatewayCoworkerConfig
+
 CONFIG_ENV_VAR = "FEISHU_SHADOW_AGENT_CONFIG"
 SKILL_NAME_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
 ENV_VAR_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -828,6 +830,10 @@ class AppConfig(StrictModel):
     coworker: CoworkerConfig = Field(
         default_factory=CoworkerConfig,
         description="Single-group AI coworker policy import source, disabled by default.",
+    )
+    hermes_gateway_coworker: HermesGatewayCoworkerConfig = Field(
+        default_factory=HermesGatewayCoworkerConfig,
+        description="Optional per-group partner roster for Hermes Gateway.",
     )
     reply_policy: ReplyPolicyConfig = Field(
         default_factory=ReplyPolicyConfig,
