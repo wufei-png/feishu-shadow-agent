@@ -1,0 +1,100 @@
+diff --git a/gateway/run_busy.py b/gateway/run_busy.py
+index e7137ea6..1f6e16ac 100644
+--- a/gateway/run_busy.py
++++ b/gateway/run_busy.py
+@@ -579,6 +579,8 @@ class GatewayBusySessionMixin:
+         text = label_shared_sender(
+             source, text, group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
+             thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False))
++        # Busy injections bypass the normal inbound preparation that carries reply context.
++        text = self._prepend_inbound_reply_context(event, source, text)
+         origin = {
+             "platform": source.platform.value,
+             **{key: getattr(source, key) for key in (
+@@ -1265,6 +1267,10 @@ class GatewayBusySessionMixin:
+                 text=steer_text, message_type=MessageType.TEXT, source=event.source,
+                 message_id=event.message_id, channel_prompt=event.channel_prompt,
+                 channel_context=event.channel_context, edit_revision=event.edit_revision,
++                reply_to_message_id=event.reply_to_message_id, reply_to_text=event.reply_to_text,
++                reply_to_author_id=event.reply_to_author_id,
++                reply_to_author_name=event.reply_to_author_name,
++                reply_to_is_own_message=event.reply_to_is_own_message,
+             ), adapter, reply):
+                 return None  # its commit sends the reply
+             return reply
+diff --git a/tests/gateway/test_busy_steer_origin.py b/tests/gateway/test_busy_steer_origin.py
+index 7bd1e928..c30e8dcd 100644
+--- a/tests/gateway/test_busy_steer_origin.py
++++ b/tests/gateway/test_busy_steer_origin.py
+@@ -87,3 +87,71 @@ def test_origin_is_lossless_data_not_new_prompt_lines_or_a_guessed_target():
+     assert rendered.endswith("\n\nrequest")
+     assert runner._steer_text_with_origin("", event) == ""
+     assert runner._steer_text_with_origin("  ", event) == "  "
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("mode", ["interrupt", "steer"])
++@pytest.mark.parametrize("platform", [Platform.FEISHU, Platform.TELEGRAM])
++@pytest.mark.parametrize("own_message", [False, True])
++async def test_busy_followup_carries_quoted_message(mode, platform, own_message):
++    runner = GatewayRunner(config=GatewayConfig())
++    source = SessionSource(platform=platform, chat_id="dm", user_id="owner", chat_type="dm")
++    event = MessageEvent(
++        text="Please handle this question",
++        source=source,
++        message_id="followup",
++        reply_to_message_id="quoted",
++        reply_to_text="Task B: inspect @file:/literal-not-a-local-file",
++        reply_to_is_own_message=own_message,
++    )
++
++    class Receiver:
++        _supports_active_turn_redirect = True
++        payload = ""
++
++        def steer(self, text):
++            self.payload = text
++            return True
++
++        redirect = steer
++
++    receiver = Receiver()
++    runner._session_state("key").turn.agent = receiver
++    outcome = await runner._resolve_busy_steer_or_redirect(event, "key", mode, receiver)
++
++    assert outcome.redirected if mode == "interrupt" else outcome.steered
++    assert receiver.payload.count(event.reply_to_text) == 1
++    assert "Please handle this question" in receiver.payload
++    assert ("your previous message" in receiver.payload) is own_message
++    assert event.text == "Please handle this question"
++
++
++@pytest.mark.asyncio
++async def test_steer_queue_fallback_keeps_reply_context(monkeypatch):
++    from gateway.run import _AGENT_PENDING_SENTINEL
++
++    runner = GatewayRunner(config=GatewayConfig())
++    source = SessionSource(platform=Platform.FEISHU, chat_id="dm", user_id="owner", chat_type="dm")
++    event = MessageEvent(
++        text="/steer Please handle this question", source=source, message_id="followup",
++        reply_to_message_id="quoted", reply_to_text="Task B", reply_to_author_id="other",
++        reply_to_author_name="colleague", reply_to_is_own_message=True,
++    )
++    runner._session_state("key").turn.agent = _AGENT_PENDING_SENTINEL
++    queued = []
++    monkeypatch.setattr(runner, "_delivery_adapter_for", lambda _source: object())
++
++    async def capture_queue(_key, _event, pending, _adapter, _reply):
++        queued.append(pending)
++        return True
++
++    monkeypatch.setattr(runner, "_queue_command_turn", capture_queue)
++    await runner._busy_steer_command(event, "key", source)
++
++    assert len(queued) == 1
++    assert queued[0].text == "Please handle this question"
++    assert queued[0].reply_to_message_id == event.reply_to_message_id
++    assert queued[0].reply_to_text == event.reply_to_text
++    assert queued[0].reply_to_author_id == event.reply_to_author_id
++    assert queued[0].reply_to_author_name == event.reply_to_author_name
++    assert queued[0].reply_to_is_own_message is True

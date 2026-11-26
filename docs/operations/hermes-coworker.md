@@ -102,6 +102,25 @@ git -C /path/to/hermes-agent apply --check /path/to/feishu-shadow-agent/docs/pat
 git -C /path/to/hermes-agent apply /path/to/feishu-shadow-agent/docs/patches/hermes-0.23.2-feishu-topic-replies.patch
 ```
 
+运行中收到带引用的追加消息时，Hermes 的 steer/redirect 还需要保留引用对象；`/steer` 回退排队时也需保留引用字段。本项目参考上游 [PR #118296](https://github.com/NousResearch/hermes-agent/pull/118296) 提供[兼容补丁](../patches/hermes-0.23.2-busy-reply-context.patch)，包含适配当前版本的实现和回归用例。该补丁在已应用上述话题补丁的 `f5765e51` 上验证；升级后先确认上游是否已修复，避免重复应用。补丁中的 Hermes 代码遵循其 [MIT 许可证](../patches/hermes-agent-MIT.txt)。
+
+这不覆盖 Agent 尚在初始化时收到的追加消息：此时补充内容可能作为下一轮排队，造成两次答复。上游跟踪见 [issue #154296](https://github.com/NousResearch/hermes-agent/issues/154296)；不要把运行中引用补丁视为该问题的修复。
+
+```bash
+git -C /path/to/hermes-agent apply --check /path/to/feishu-shadow-agent/docs/patches/hermes-0.23.2-busy-reply-context.patch
+git -C /path/to/hermes-agent apply /path/to/feishu-shadow-agent/docs/patches/hermes-0.23.2-busy-reply-context.patch
+```
+
+## 飞书历史检索
+
+需要机器人根据转发内容补全工作上下文时，将 `lark-im` 与 `lark-shared` 的技能目录合并到 `coworker` profile 的 `skills.external_dirs`。在 profile 的 `platform_hints.feishu.append` 说明：按需检索并核实上下文；经飞书身份校验的 owner 私聊可使用 `--as user`，群聊使用 `--as bot` 查询机器人可见的信息；不能确定来源或遇到授权错误时如实说明。技能注册和提示词约束不等于权限硬隔离，终端完全访问模式下也不能阻止 Agent 自行访问主机可读的凭据。
+
+`lark-cli` 在 Hermes 环境中使用 Hermes 绑定的飞书应用，其用户授权与其他 CLI 应用独立。按 `lark-shared` 的身份和授权流程，为该应用授予消息搜索、消息只读、个人与群聊历史及会话只读所需 scope；需要可续期时检查 `offline_access` 与登录结果中的 refresh-token 状态。不得复制其他应用的 token，也不要把密钥或登录结果写入仓库。配置技能或提示词后，可运行 `hermes --profile coworker sessions refresh-prompts --json`，让既有会话在下次对话时重建提示；运行中 Gateway 的生效状态仍需检查。
+
+检查授权结果时，应核对实际生效的 scope，而不是只看发起登录时申请的范围。真实私聊测试中，部分文本转发在接收事件中表现为普通文本，读取到的转发副本也未包含来源会话字段；需要通过原文检索或向用户确认来源。旧会话中的既有话题和回答仍可能影响模型，即使检索提示已生效也应验证实际结果。
+
+需要控制回复风格时，可在 profile 的 `SOUL.md` 中直接写明语言、场景和语气，并保留按需使用的写作技能；这不会增加独立的二次改写调用，也不保证模型每次都完全遵循。
+
 ## 启停与操作台
 
 ```bash
