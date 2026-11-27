@@ -22,7 +22,7 @@ uv sync --locked
 cp -n config.example.yaml config.yaml
 ```
 
-以上飞书 CLI 版本的命令参数已用本项目测试环境的 help 核对；真实飞书授权和服务端行为仍需要在你的租户中验证。新开终端后需重新设置上面的 `PATH`，或把对应可执行文件的绝对路径填入 `config.yaml` 的 `lark_cli.path`。
+以上飞书 CLI 命令参数已按项目测试环境的 help 核对；授权和服务端行为需在实际租户中验证。新开终端后重新设置 `PATH`，或将可执行文件的绝对路径填入 `config.yaml` 的 `lark_cli.path`。
 
 下面以 Codex CLI 为一条完整的后端准备路径；也可以按自己的环境选择 Hermes 或 Claude Code。Codex 的 [OpenAI 官方文档](https://developers.openai.com/cookbook/examples/codex/using_goals_in_codex)提供 npm 安装方式。首次登录时按 CLI 提示完成授权：
 
@@ -112,7 +112,11 @@ uv run --locked python -m feishu_shadow_agent policy import-config --config conf
 uv run --locked python -m feishu_shadow_agent doctor --config config.yaml --mode dry-run
 ```
 
-所有 critical 项应为 `OK`；失败时先按 `doctor` 的缺失 scope、CLI 路径或策略初始化提示修复。`owner.open_id` 必须与授权用户的 `openId` 一致，身份无法核实或不一致时 daemon 不会启动，doctor 也不会发送真实测试通知。运行中的身份按现有健康检查周期复核（默认 300 秒）；身份变更可能直到下一次检查才被发现，已发出的请求无法撤回。健康检查失败或缓存到期时交互卡片暂不接受新操作，修复并恢复后可重新点击；健康有效时已经接收并排队的操作属于进行中，即使之后健康状态变差也可能完成审批和卡片更新。若生产库已经初始化，首次打开预演环境会先复制生产的当前策略；它不会复制消息、任务或待发送动作。之后两套策略独立，需要时显式运行：
+所有 critical 项应为 `OK`；失败时按 `doctor` 的 scope、CLI 路径或策略初始化提示修复。`owner.open_id` 必须与授权用户的 `openId` 一致；身份无法核实或不一致时，daemon 不会启动，doctor 也不会发送真实测试通知。
+
+运行中的身份按健康检查周期复核，默认每 300 秒一次；身份变更可能到下次检查才被发现，已发出的请求无法撤回。健康检查失败或缓存到期时，交互卡片暂停接收新操作，恢复后可重新点击。健康有效时已接收并排队的操作属于进行中，即使之后健康状态变差，也可能完成审批和卡片更新。
+
+若生产库已初始化，首次打开预演环境会复制当前策略，但不复制消息、任务或待发送动作。此后两套策略独立，需要时显式同步：
 
 ```bash
 uv run --locked python -m feishu_shadow_agent policy sync-production --config config.yaml --mode dry-run

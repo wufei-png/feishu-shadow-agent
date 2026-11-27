@@ -12,7 +12,7 @@ Feishu Shadow Agent 是运行在本机的飞书个人助手。它支持影子助
 | Codex 直连 AI 同事 | 项目接收机器人事件并发布回复；Codex App Server 管理群、话题、私聊会话及原生子 Agent。 | `coworker run --runtime codex` | [Codex 直连](docs/operations/codex-native-coworker.md) |
 | Hermes Gateway AI 同事 | Hermes 的 `coworker` profile 管理飞书连接、会话、回复和原生子 Agent。 | `coworker run --runtime hermes` | [Hermes Gateway](docs/operations/hermes-coworker.md) |
 
-项目还保留 `daemon` 启动的[兼容 AI 同事路径](docs/operations/single-group-ai-coworker.md)，支持模型直发或项目代发。它与 Codex 直连使用不同的运行路径；同一项目 daemon 一次只运行影子助手或一种 AI 同事路径。
+项目还提供由 `daemon` 启动的[兼容 AI 同事路径](docs/operations/single-group-ai-coworker.md)，支持模型直发或项目代发。每个项目 daemon 启动时选择影子助手或一种 AI 同事路径。
 
 影子助手和 Codex 直连使用项目的 SQLite、策略及本地 Operator Console。Hermes Gateway 使用自己的 profile、配置和数据，项目启动入口不加载项目 SQLite 或 `config.yaml`；可选的[群聊伙伴集成](docs/operations/hermes-coworker.md#群聊伙伴)由 Hermes 适配器读取项目中的伙伴名单。同一飞书应用的多个长连接会分流事件；切换接收方前先停止原连接。
 

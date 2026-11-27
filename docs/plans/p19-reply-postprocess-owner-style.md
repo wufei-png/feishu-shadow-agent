@@ -94,7 +94,7 @@ reply_postprocess:
       min_samples: 20
   humanizer_zh:
     enabled: false
-    skill_path: /Users/wufei2/.agents/skills/humanizer-zh/SKILL.md
+    skill_path: /path/to/skills/humanizer-zh/SKILL.md
 ```
 
 Config semantics:
@@ -281,7 +281,7 @@ Suggested payload metadata:
     "original_reply": "...",
     "final_reply": "...",
     "owner_style_profile_path": "data/owner_style.zh.md",
-    "humanizer_skill_path": "/Users/wufei2/.agents/skills/humanizer-zh/SKILL.md"
+    "humanizer_skill_path": "/path/to/skills/humanizer-zh/SKILL.md"
   }
 }
 ```

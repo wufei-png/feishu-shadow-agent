@@ -31,9 +31,9 @@ coworker:
   shared_memory_path: /path/to/coworker-workspace/coworker-memory.md
 ```
 
-首次测试可使用新建的 SQLite 文件。示例选择 `gpt-6-luna`；将 `agent_backend.codex.model` 设为 `null` 可沿用 Codex 自身默认模型。子 Agent 使用 Codex 原生模型配置。更新已有策略时，导入命令须加 `--replace`。旧会话继续使用原工作目录，群记忆路径由策略中的 `coworker.shared_memory_path` 决定。
+首次测试可使用新建的 SQLite 文件。示例选择 `gpt-6-luna`；将 `agent_backend.codex.model` 设为 `null` 可沿用 Codex 默认模型，子 Agent 使用 Codex 原生模型配置。更新已有策略时，导入命令须加 `--replace`；群记忆路径由策略中的 `coworker.shared_memory_path` 决定。
 
-`agent_backend.working_dir` 也用于项目内其他 Agent 调用，并非 Codex coworker 专用；Hermes 原生 Gateway 使用其 profile 自己的工作目录。选择非仓库目录可以避免加载无关仓库的 `AGENTS.md`，用户级指引仍可能生效。改动只影响之后新建的会话，已保存的会话继续使用原工作目录。
+`agent_backend.working_dir` 同时用于项目内其他 Agent 调用；Hermes 原生 Gateway 使用其 profile 的工作目录。选择非仓库目录可避免加载无关仓库的 `AGENTS.md`，用户级指引仍可能生效。改动只影响新建会话，已保存的会话继续使用原工作目录。
 
 安装依赖并导入生产策略：
 
@@ -60,7 +60,7 @@ uv run --locked python -m feishu_shadow_agent coworker status --config config.ya
 
 dry-run 对 Codex 使用只读、禁网络的 sandbox，关闭 shell、MCP、应用和多 Agent 等工具，并核查 MCP 工具列表；只恢复由此隔离方式创建的 dry-run 会话。
 
-生产会话沿用 Codex 的原生 sandbox、网络、MCP、应用和工具配置。本群话题和历史还可通过项目提供的 `read_feishu_topic`、`read_feishu_group_history` 只读工具访问，返回内容须属于当前授权群。查询其他资料可按需使用已授权的原生工具。这些只读工具在新建直连线程时注册；旧 UUID 如果没有这些工具，保留会话时不能按需调用。项目登记自己发布的回复和回执；原生业务工具的副作用受 Codex 自身权限和配置约束。
+生产会话沿用 Codex 的原生 sandbox、网络、MCP、应用和工具配置。项目提供 `read_feishu_topic`、`read_feishu_group_history` 只读工具，返回内容限于当前授权群；其他资料可使用已授权的原生工具。这些工具在新建直连线程时注册，旧 UUID 若未注册则无法调用。项目登记自己发布的回复和回执；原生业务工具的副作用受 Codex 自身权限和配置约束。
 
 可在本地 `config.yaml` 的 `agent_backend.codex.skills` 配置技能名称。生产新会话首轮使用 Codex 的技能索引，把配置中已启用的技能用途和路径放在本轮规则与正文之间，供模型按需读取。
 

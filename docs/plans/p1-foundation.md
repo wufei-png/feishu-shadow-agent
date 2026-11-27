@@ -118,7 +118,7 @@ python -m feishu_shadow_agent doctor --config config.yaml
 python -m feishu_shadow_agent daemon --dry-run --config config.yaml
 ```
 - 最后一条为人工验收：看到 startup health 结果和 `daemon_tick_noop` 日志后手动 `Ctrl-C`。
-- 当前本机基线已确认：`/Users/wufei2/.nvm/versions/node/v24.15.0/bin/lark-cli`，版本 `1.0.56`；实现仍以 live `doctor` 检查为准，不硬编码小版本。
+- 当时测试的 `lark-cli` 版本为 `1.0.56`，安装在 Node.js `v24.15.0` 对应的目录下；实现仍以 live `doctor` 检查为准，不硬编码小版本。
 
 ## Risks And Defaults
 - `lark-cli` flag 会漂移：command builder 测试固定当前 help surface，doctor 运行时记录 path/version，并把不兼容输出为 critical 诊断。

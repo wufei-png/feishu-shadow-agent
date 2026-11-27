@@ -39,7 +39,7 @@ P10 是一个小文档修正计划。目标是清理旧计划文档中仍暗示 
 ## Suggested Prompt
 
 ```text
-在 /Users/wufei2/github.com/wufei-png/feishu-shadow-agent 中只做文档修正，不改代码。
+在本项目中只做文档修正，不改代码。
 
 目标：修正旧计划文档里与当前状态模型冲突的表述。当前已确认语义是：
 - tasks.status 不再包含 waiting_approval

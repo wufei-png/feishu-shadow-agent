@@ -23,7 +23,7 @@
 
 - [当前架构边界](architecture/current-boundaries.md)描述现有实现的职责和扩展边界；具体运行参数以代码及各模式手册为准。
 - `adr/` 记录架构决策及其修订；旧决策的适用范围见文首说明。
-- `specs/` 包含 MVP 基线和 Operator Console 设计。文档标记为 draft 或历史基线时，不能作为当前实现的唯一依据。
+- `specs/` 包含 MVP 基线和 Operator Console 设计；draft 和历史基线的实现状态需结合代码及当前架构边界核对。
 - `plans/` 保留分阶段实施方案、待办和验证背景。已完成的阶段计划是历史记录，不作为运行手册。
 - `operations/*acceptance*.md` 和[原生运行时架构审查](operations/native-runtime-architecture-review-2026-11-19.md)记录特定时间的验证与发现；运行状态可能变化。
 - `ai_chats/` 保存早期讨论，供查阅设计背景。
