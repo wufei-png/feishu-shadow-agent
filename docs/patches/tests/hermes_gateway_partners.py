@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from gateway.bot_loop_guard import BotLoopGuard, BotLoopGuardSettings
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.run import GatewayRunner
@@ -34,7 +35,10 @@ def adapter(tmp_path, monkeypatch):
                                 "Build": {
                                     "open_id": "ou_build",
                                     "description": "builds",
-                                }
+                                },
+                                "Build[]": {"open_id": "ou_build_brackets"},
+                                "Build|  release": {"open_id": "ou_build_spaces"},
+                                "@diff": {"open_id": "ou_build_reference"},
                             }
                         },
                     }
@@ -154,6 +158,163 @@ async def test_real_adapter_appends_prompt_and_marks_only_partner_turns(adapter)
     assert (
         adapter._dispatch_inbound_event.await_args.args[0].channel_prompt == "existing"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("feishu_name", [None, "Different Feishu name"])
+@pytest.mark.parametrize(
+    ("open_id", "alias"),
+    [
+        ("ou_build", "Build"),
+        ("ou_build_brackets", "Build[]"),
+        ("ou_build_spaces", "Build|  release"),
+        ("ou_build_reference", "@diff"),
+    ],
+)
+async def test_partner_turn_uses_configured_identity_when_feishu_name_differs(
+    adapter, feishu_name, open_id, alias
+):
+    adapter._extract_message_content = AsyncMock(
+        return_value=("done", MessageType.TEXT, [], [], [], [])
+    )
+    adapter._fetch_message_text = AsyncMock(return_value=None)
+    adapter.get_chat_info = AsyncMock(return_value={"name": "Test", "type": "group"})
+    adapter._resolve_sender_profile = AsyncMock(
+        return_value={
+            "user_id": "u_build",
+            "user_name": feishu_name,
+            "user_id_alt": None,
+        }
+    )
+    adapter._dispatch_inbound_event = AsyncMock()
+
+    await adapter._process_inbound_message(
+        data=None,
+        message=_message(),
+        sender_id=_sender(open_id).sender_id,
+        chat_type="group",
+        message_id="om_one",
+        is_bot=True,
+    )
+
+    event = adapter._dispatch_inbound_event.await_args.args[0]
+    assert event.source.user_id == open_id
+    assert event.source.user_name == feishu_name
+    assert event.text == "done"
+    runner = object.__new__(GatewayRunner)
+    runner.config = SimpleNamespace(
+        group_sessions_per_user=False, thread_sessions_per_user=False
+    )
+    runner._delivery_adapter_for = lambda _source: adapter
+    runner._consume_pending_native_image_paths = Mock()
+    runner._expand_inbound_context_references = AsyncMock(return_value="expanded")
+    partner_input = await runner._prepare_inbound_message_text(
+        event=event, source=event.source, history=[], session_key="key"
+    )
+    assert partner_input.startswith(
+        f"[伙伴消息：{json.dumps(alias, ensure_ascii=False)}]\n"
+    )
+    runner._expand_inbound_context_references.assert_not_awaited()
+
+    reference = MessageEvent(
+        text="please check @diff", source=event.source, allow_gateway_control=False
+    )
+    reference_input = await runner._prepare_inbound_message_text(
+        event=reference, source=reference.source, history=[], session_key="key"
+    )
+    assert (
+        reference_input
+        == f"[伙伴消息：{json.dumps(alias, ensure_ascii=False)}]\nexpanded"
+    )
+    runner._expand_inbound_context_references.assert_awaited_once()
+    assert (
+        "伙伴消息" not in runner._expand_inbound_context_references.await_args.args[-1]
+    )
+
+    internal = MessageEvent(
+        text="plugin notification",
+        source=event.source,
+        internal=True,
+        allow_gateway_control=False,
+    )
+    internal_input = await runner._prepare_inbound_message_text(
+        event=internal, source=internal.source, history=[], session_key="key"
+    )
+    assert not internal_input.startswith("[伙伴消息：")
+    adapter._resolve_sender_profile = AsyncMock(
+        return_value={
+            "user_id": "u_human",
+            "user_name": f"伙伴：{alias}",
+            "user_id_alt": None,
+        }
+    )
+    await adapter._process_inbound_message(
+        data=None,
+        message=_message(),
+        sender_id=_sender("ou_human", "user").sender_id,
+        chat_type="group",
+        message_id="om_human",
+        is_bot=False,
+    )
+    human = adapter._dispatch_inbound_event.await_args.args[0]
+    human_input = await runner._prepare_inbound_message_text(
+        event=human, source=human.source, history=[], session_key="key"
+    )
+    assert human.source.user_name == f"伙伴：{alias}"
+    assert not human_input.startswith("[伙伴消息：")
+    assert human_input != partner_input
+
+
+def test_partner_chains_are_scoped_by_topic_but_rate_limit_stays_per_group(adapter):
+    guard = BotLoopGuard(settings=BotLoopGuardSettings)
+    runner = object.__new__(GatewayRunner)
+    runner._delivery_adapter_for = lambda _source: adapter
+    runner._adapter_profile_for_source = lambda _source: "coworker"
+    runner._under_authorization_profile = lambda _source, check: check()
+    runner._bot_loop_guard_instance = lambda: guard
+
+    def event(
+        thread_id,
+        *,
+        chat_id="oc_one",
+        user_id="ou_build",
+        is_bot=True,
+        text="done",
+        platform=Platform.FEISHU,
+    ):
+        source = SessionSource(
+            platform=platform,
+            chat_id=chat_id,
+            chat_type="group",
+            thread_id=thread_id,
+            user_id=user_id,
+            is_bot=is_bot,
+        )
+        return MessageEvent(source=source, text=text)
+
+    topic_a, topic_b = event("omt_a"), event("omt_b")
+    assert runner._admit_bot_chain(topic_a)
+    assert runner._admit_bot_chain(topic_b)
+    assert not runner._admit_bot_chain(topic_a)
+    runner._note_bot_reply(topic_a.source)
+    assert not runner._admit_bot_chain(event("omt_a", text="another result"))
+    assert runner._admit_bot_chain(event("omt_b", text="another result"))
+    assert runner._admit_bot_chain(event("omt_a", user_id="ou_human", is_bot=False))
+    assert runner._admit_bot_chain(topic_a)
+    assert not runner._admit_bot_chain(topic_b)
+    for index in range(4):
+        assert runner._admit_bot_chain(event("omt_c", text=f"result {index}"))
+    assert not runner._admit_bot_chain(event("omt_c", text="result 4"))
+
+    # Groups without a partner roster retain the native group-scoped chain.
+    assert runner._admit_bot_chain(event("omt_a", chat_id="oc_other"))
+    assert not runner._admit_bot_chain(event("omt_b", chat_id="oc_other"))
+    assert runner._admit_bot_chain(event("thread_a", platform=Platform.TELEGRAM))
+    assert not runner._admit_bot_chain(event("thread_b", platform=Platform.TELEGRAM))
+
+    for index in range(20):
+        assert runner._admit_bot_message((topic_a if index % 2 else topic_b).source)
+    assert not runner._admit_bot_message(topic_a.source)
 
 
 def test_partner_authorization_does_not_require_enabling_all_bots(adapter):

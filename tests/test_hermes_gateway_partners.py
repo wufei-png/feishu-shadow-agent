@@ -84,6 +84,11 @@ def test_partner_identity_is_scoped_to_the_current_group(partner_config: Path) -
     assert not partners.accepts("oc_one", "ou_design")
     assert not partners.accepts("oc_two", "ou_build")
     assert not partners.accepts("oc_unknown", "ou_build")
+    assert partners.name_for("oc_one", "ou_build") == "构建伙伴"
+    assert partners.name_for("oc_two", "ou_design") == "设计伙伴"
+    assert partners.name_for("oc_one", "ou_design") is None
+    assert partners.name_for("oc_two", "ou_build") is None
+    assert partners.name_for("oc_unknown", "ou_build") is None
 
 
 def test_send_uses_group_topic_and_hermes_transport(partner_config: Path) -> None:

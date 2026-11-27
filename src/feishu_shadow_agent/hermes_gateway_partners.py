@@ -114,11 +114,21 @@ class GatewayPartners:
     def group(self, chat_id: str) -> HermesGatewayGroupConfig | None:
         return self.groups.get(chat_id)
 
-    def accepts(self, chat_id: str, open_id: str) -> bool:
+    def name_for(self, chat_id: str, open_id: str) -> str | None:
         group = self.group(chat_id)
-        return bool(
-            group and any(p.open_id == open_id for p in group.partners.values())
+        if group is None:
+            return None
+        return next(
+            (
+                name
+                for name, partner in group.partners.items()
+                if partner.open_id == open_id
+            ),
+            None,
         )
+
+    def accepts(self, chat_id: str, open_id: str) -> bool:
+        return self.name_for(chat_id, open_id) is not None
 
     def append_prompt(
         self,

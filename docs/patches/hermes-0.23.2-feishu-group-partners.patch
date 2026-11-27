@@ -1,5 +1,5 @@
 diff --git a/gateway/authz_mixin.py b/gateway/authz_mixin.py
-index d1bdea4..26c28fa 100644
+index d1bdea4..beb0b75 100644
 --- a/gateway/authz_mixin.py
 +++ b/gateway/authz_mixin.py
 @@ -762,2 +762,7 @@ class GatewayAuthorizationMixin:
@@ -10,6 +10,29 @@ index d1bdea4..26c28fa 100644
 +            if partners and partners.accepts(source.chat_id or "", source.user_id or ""):
 +                return True
          # Bots admitted by the platform's ``allow_bots_env`` (scoped env → the routed adapter's YAML
+@@ -815,2 +820,12 @@
+
++    def _bot_loop_guard_chain_conversation(self, source: SessionSource) -> tuple:
++        conversation = self._bot_loop_guard_conversation(source)
++        if source.platform == Platform.FEISHU and source.thread_id:
++            adapter = self._delivery_adapter_for(source)
++            partners = getattr(adapter, "_shadow_partners", None)
++            group = partners.group(source.chat_id or "") if partners else None
++            if group and group.partners:
++                return (*conversation, str(source.thread_id))
++        return conversation
++
+     def _admit_bot_message(self, source: SessionSource) -> bool:
+@@ -842,3 +857,3 @@
+         allowed, state = self._under_authorization_profile(source, lambda: self._bot_loop_guard_instance().chain_admit(
+-            self._bot_loop_guard_conversation(source), str(source.user_id or ""), str(event.text or ""), is_bot=is_bot))
++            self._bot_loop_guard_chain_conversation(source), str(source.user_id or ""), str(event.text or ""), is_bot=is_bot))
+         if not allowed:
+@@ -852,3 +867,3 @@
+             self._under_authorization_profile(source, lambda: self._bot_loop_guard_instance().note_reply(
+-                self._bot_loop_guard_conversation(source), str(source.user_id or "")))
++                self._bot_loop_guard_chain_conversation(source), str(source.user_id or "")))
+
 diff --git a/gateway/run_busy.py b/gateway/run_busy.py
 index e7137ea..f640c8d 100644
 --- a/gateway/run_busy.py
@@ -22,7 +45,7 @@ index e7137ea..f640c8d 100644
 +            return True
          if await self._route_plaintext_approval_while_busy(event, session_key):
 diff --git a/gateway/run_inbound.py b/gateway/run_inbound.py
-index 4bd5f80..1abc072 100644
+index 4bd5f80..0cb5a38 100644
 --- a/gateway/run_inbound.py
 +++ b/gateway/run_inbound.py
 @@ -822,2 +822,5 @@ class GatewayInboundMixin(
@@ -38,6 +61,17 @@ index 4bd5f80..1abc072 100644
 +            self._queue_or_replace_pending_event(_quick_key, event)
 +            return None
          from gateway.run import _AGENT_PENDING_SENTINEL
+@@ -1803,2 +1810,10 @@ class GatewayInboundMixin(
+             return None
++        # Keep partner aliases out of @ reference expansion.
++        if (source.platform == Platform.FEISHU and source.is_bot and not event.internal
++                and not event.allow_gateway_control):
++            adapter = self._delivery_adapter_for(source)
++            partners = getattr(adapter, "_shadow_partners", None)
++            partner_name = partners.name_for(source.chat_id or "", source.user_id or "") if partners else None
++            if partner_name is not None:
++                message_text = f"[伙伴消息：{json.dumps(partner_name, ensure_ascii=False)}]\n{message_text}"
+         # After expansion: the quoted reply is someone else's text and stays literal — an
 diff --git a/plugins/platforms/feishu/adapter.py b/plugins/platforms/feishu/adapter.py
 index 4781b37..265522b 100644
 --- a/plugins/platforms/feishu/adapter.py
